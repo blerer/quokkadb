@@ -3,6 +3,7 @@ use snap::write::FrameEncoder;
 use snap::read::FrameDecoder;
 use std::io::{ErrorKind, Read, Write};
 use std::io::{Error};
+use std::sync::Arc;
 
 /// Enumeration representing supported compressor types.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -41,11 +42,11 @@ impl TryFrom<u8> for CompressorType {
 }
 
 impl CompressorType {
-    pub(crate) fn new_compressor(&self) -> Box<dyn Compressor> {
+    pub(crate) fn new_compressor(&self) -> Arc<dyn Compressor> {
         match self {
-            CompressorType::Noop => Box::new(NoopCompressor),
-            CompressorType::Snappy => Box::new(SnappyCompressor),
-            CompressorType::LZ4 => Box::new(Lz4Compressor),
+            CompressorType::Noop => Arc::new(NoopCompressor),
+            CompressorType::Snappy => Arc::new(SnappyCompressor),
+            CompressorType::LZ4 => Arc::new(Lz4Compressor),
         }
     }
 }

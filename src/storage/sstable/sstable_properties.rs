@@ -2,7 +2,7 @@ use std::io::{Error, ErrorKind};
 use std::time::SystemTime;
 use bson::{from_slice, to_vec};
 use serde::{Deserialize, Serialize};
-use crate::storage::compound_key::CompoundKey;
+use crate::storage::internal_key::{extract_sequence_number, extract_user_key};
 
 const BSON_MIN_KEY: &[u8] = &[0x00]; // Represent BSON MinKey with the smallest possible binary
 const BSON_MAX_KEY: &[u8] = &[0xFF]; // Represent BSON MaxKey with the largest possible binary
@@ -29,7 +29,7 @@ pub struct SSTableProperties {
     pub creation_time: SystemTime,
 
     /// The version of the SSTable format, used for compatibility.
-    pub sstable_version: String,
+    pub sstable_version: u8,
 
     /// The type of compression used for the SSTable, represented as an 8-bit integer.
     pub compression_type: u8,
@@ -96,7 +96,7 @@ impl SSTableProperties {
 
 pub struct SSTablePropertiesBuilder {
     creation_time: SystemTime,
-    sstable_version: String,
+    sstable_version: u8,
     compression_type: u8,
     min_key: Vec<u8>,
     max_key: Vec<u8>,
@@ -112,7 +112,7 @@ pub struct SSTablePropertiesBuilder {
 
 impl SSTablePropertiesBuilder {
     /// Creates a new `SSTablePropertiesBuilder` with default values.
-    pub fn new(sstable_version: String, compression_type: u8) -> Self {
+    pub fn new(sstable_version: u8, compression_type: u8) -> Self {
         Self {
             creation_time: SystemTime::now(),
             sstable_version,
@@ -131,20 +131,21 @@ impl SSTablePropertiesBuilder {
     }
 
     /// Updates the entry properties with the provided key, key size, and value size.
-    pub fn with_entry(&mut self, key: &CompoundKey, key_size: usize, value_size: usize) -> &mut Self {
+    pub fn with_entry(&mut self, key: &[u8], value_size: usize) -> &mut Self {
         self.num_entries += 1;
-        self.raw_key_size += key_size;
+        self.raw_key_size += key.len();
         self.raw_value_size += value_size;
 
-        if key.user_key < self.min_key {
-            self.min_key = key.user_key.clone();
+        let user_key = extract_user_key(key);
+        if user_key < &self.min_key {
+            self.min_key = user_key.to_vec();
         }
 
-        if key.user_key > self.max_key {
-            self.max_key = key.user_key.clone();
+        if user_key > &self.max_key {
+            self.max_key = user_key.to_vec();
         }
 
-        let sequence = key.extract_sequence_number();
+        let sequence = extract_sequence_number(key);
         self.min_sequence = self.min_sequence.min(sequence);
         self.max_sequence = self.max_sequence.max(sequence);
 
@@ -192,29 +193,31 @@ impl SSTablePropertiesBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::compound_key::CompoundKey;
+    use crate::storage::internal_key::encode_internal_key;
+    use crate::storage::operation::OperationType;
 
     #[test]
     fn test_update_entry_properties_with_builder() {
-        let key1 = CompoundKey::new(vec![10, 20, 30], 1, crate::storage::operation::OperationType::Put);
-        let key2 = CompoundKey::new(vec![5, 15, 25], 5, crate::storage::operation::OperationType::Put);
-        let key3 = CompoundKey::new(vec![50, 60, 70], 3, crate::storage::operation::OperationType::Put);
+        let collection = 1;
+        let key1 = encode_internal_key(collection, 0, &vec![10, 20, 30], 1, OperationType::Put);
+        let key2 = encode_internal_key(collection, 0, &vec![5, 15, 25, 35], 5, OperationType::Put);
+        let key3 = encode_internal_key(collection, 0, &vec![50, 60, 70, 80, 90], 3, OperationType::Put);
 
-        let mut builder = SSTablePropertiesBuilder::new("1.0".to_string(), 0);
+        let mut builder = SSTablePropertiesBuilder::new(1, 0);
 
-        builder.with_entry(&key1, 10, 50)
-               .with_entry(&key2, 15, 40)
-               .with_entry(&key3, 12, 25);
+        builder.with_entry(&key1, 50)
+               .with_entry(&key2, 40)
+               .with_entry(&key3, 25);
 
         let sstable_properties = builder.build();
 
         // Validate the properties
-        assert_eq!(sstable_properties.min_key, vec![5, 15, 25], "Min key should be [5, 15, 25]");
-        assert_eq!(sstable_properties.max_key, vec![50, 60, 70], "Max key should be [50, 60, 70]");
+        assert_eq!(sstable_properties.min_key, vec![5, 15, 25, 35], "Min key should be [5, 15, 25, 35]");
+        assert_eq!(sstable_properties.max_key, vec![50, 60, 70, 80, 90], "Max key should be [50, 60, 70, 80, 90]");
         assert_eq!(sstable_properties.min_sequence, 1, "Min sequence should be 1");
         assert_eq!(sstable_properties.max_sequence, 5, "Max sequence should be 5");
         assert_eq!(sstable_properties.num_entries, 3, "Number of entries should be 3");
-        assert_eq!(sstable_properties.raw_key_size, 37, "Raw key size should be 37 (10 + 15 + 12)");
+        assert_eq!(sstable_properties.raw_key_size, 60, "Raw key size should be 60 (19 + 20 + 21)");
         assert_eq!(sstable_properties.raw_value_size, 115, "Raw value size should be 115 (50 + 40 + 25)");
     }
 
@@ -225,7 +228,7 @@ mod tests {
             raw_key_size: 1000,
             raw_value_size: 4000,
             data_size: 2000,
-            ..SSTablePropertiesBuilder::new("1.0".to_string(), 0).build()
+            ..SSTablePropertiesBuilder::new(1, 0).build()
         };
 
         let ratio = properties.compression_ratio();
@@ -238,7 +241,7 @@ mod tests {
             raw_key_size: 1000,
             raw_value_size: 1000,
             data_size: 2000,
-            ..SSTablePropertiesBuilder::new("1.0".to_string(), 0).build()
+            ..SSTablePropertiesBuilder::new(1, 0).build()
         };
 
         let ratio = properties.compression_ratio();

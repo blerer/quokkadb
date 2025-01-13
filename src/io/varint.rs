@@ -1,5 +1,3 @@
-use std::io::{Error, ErrorKind};
-
 /// # Variable-Length Integer Serialization
 ///
 /// This module implements variable-length integer (varint) serialization and deserialization for `u64` values.
@@ -38,15 +36,15 @@ use std::io::{Error, ErrorKind};
 /// - Utility functions such as `compute_u64_vint_size` help calculate the number of bytes required for a given value.
 ///
 
-pub fn write_u64(x: u64, output: &mut Vec<u8>) -> Result<(), Error> {
+pub fn write_u64(x: u64, output: &mut Vec<u8>) {
     let size = compute_u64_vint_size(x);
     if size == 1 {
         output.push(x as u8);
     } else if size < 9 {
         // Create a buffer with the given size
-        let mut encoding_space = vec![0u8; size as usize];
+        let mut encoding_space = vec![0u8; size];
         let mut value = x; // Make the value mutable for bitwise operations
-        let extra_bytes = size - 1;
+        let extra_bytes = (size - 1) as u8;
 
         // Fill the buffer from the most significant byte to the least significant
         for i in (0..=extra_bytes as usize).rev() {
@@ -55,44 +53,47 @@ pub fn write_u64(x: u64, output: &mut Vec<u8>) -> Result<(), Error> {
         }
         // Encode the number of extra bytes into the first byte
         encoding_space[0] |= encode_extra_bytes_to_read(extra_bytes);
-        output.extend(encoding_space);
+        output.append(&mut encoding_space);
 
     } else if size == 9 {
         output.push(0xFF);
         output.extend_from_slice(&x.to_be_bytes());
     } else {
-        return Err(Error::new(ErrorKind::Other, "Invalid vint size"))
+        panic!("Invalid vint size {}", size);
     }
-    Ok(())
 }
 
-pub fn write_i64(x: i64, output: &mut Vec<u8>) -> Result<(), Error> {
+pub fn write_u32(x: u32, output: &mut Vec<u8>) {
+    write_u64(x as u64, output);
+}
+
+pub fn write_i64(x: i64, output: &mut Vec<u8>) {
     write_u64(encode_zigzag_64(x), output)
 }
 
-pub fn read_u64(input: &[u8]) -> Result<u64, Error> {
-    if input.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "Input is empty"));
-    }
-
-    let first_byte = input[0];
-
-    let size = number_of_extra_bytes_to_read(&first_byte);
-    if input.len() < size as usize {
-        return Err(Error::new(ErrorKind::Other, "Input too short for the specified size"));
-    }
-    let mask = first_byte_value_mask(size) as u64;
-
-    let mut retval = first_byte as u64 & mask;
-    for i in 1..=size as usize {
-        retval <<= 8;
-        retval |= input[i] as u64;
-    }
-    Ok(retval)
+pub fn read_u32(input: &[u8], offset: usize) -> (u32, usize) {
+    let (number, size) = read_u64(input, offset);
+    (number as u32, size)
 }
 
-pub fn read_i64(input: &[u8]) -> Result<i64, Error> {
-    read_u64(input).map(|u| decode_zigzag_64(u))
+pub fn read_u64(input: &[u8], offset: usize) -> (u64, usize) {
+    let first_byte = input[offset];
+    let size = number_of_extra_bytes_to_read(&first_byte);
+
+    let mut retval = (first_byte & first_byte_value_mask(size)) as u64;
+
+    let offset = offset + 1;
+    let limit = offset + size as usize;
+    for &byte in input[offset .. limit].iter() {
+        retval = (retval << 8) | byte as u64;
+    }
+
+    (retval, limit)
+}
+
+pub fn read_i64(input: &[u8], offset: usize) -> (i64, usize) {
+    let (value, new_offset) = read_u64(input, offset);
+    (decode_zigzag_64(value), new_offset)
 }
 
 /// Decode a ZigZag-encoded 64-bit value.  ZigZag encodes signed integers
@@ -114,10 +115,14 @@ fn number_of_extra_bytes_to_read(first_byte: &u8) -> u8 {
     first_byte.leading_ones() as u8
 }
 
-fn compute_u64_vint_size(x: u64) -> u8 {
+pub fn compute_u32_vint_size(x: u32) -> usize {
+    compute_u64_vint_size(x as u64)
+}
+
+pub fn compute_u64_vint_size(x: u64) -> usize {
     let magnitude = (x | 1).leading_zeros();
     // the formula below is hand-picked to match the original 9 - ((magnitude - 1) / 7)
-    ((639 - magnitude * 9) >> 6) as u8
+    ((639 - magnitude * 9) >> 6) as usize
 }
 
 // & this with the first byte to give the value part for a given extraBytesToRead encoded in the byte
@@ -179,7 +184,7 @@ mod tests {
     #[test]
     fn test_write_and_read_u64() {
 
-        let mut output = Vec::new();
+        let mut buffer = Vec::new();
 
         let test_values = vec![
             0u64,
@@ -193,29 +198,23 @@ mod tests {
 
 
         for &value in &test_values {
-            output.clear();
+            buffer.clear();
 
             // Test write_u64
-            write_u64(value, &mut output).expect("write_u64 failed");
-
-            println!("-> {:?}", output);
+            write_u64(value, &mut buffer);
+            let len = buffer.len();
 
             // Test read_u64
-            let decoded = read_u64(&output).expect("read_u64 failed");
-
-            let binary = format!("{:b}", value);
-            println!("Binary representation: {}", binary);
-
-            let binary2 = format!("{:b}", decoded);
-            println!("Binary representation: {}", binary2);
+            let (decoded, offset) = read_u64(&buffer, 0);
 
             assert_eq!(value, decoded, "Value mismatch for {value}");
+            assert_eq!(len, offset, "Offset mismatch for {value}");
         }
     }
 
     #[test]
     fn test_write_and_read_i64() {
-        let mut output = Vec::new();
+        let mut buffer = Vec::new();
 
         let test_values = vec![
             0i64,
@@ -233,17 +232,17 @@ mod tests {
         ];
 
         for &value in &test_values {
-            output.clear();
+            buffer.clear();
 
             // Test write_u64
-            write_i64(value, &mut output).expect("write_i64 failed");
-
-            println!("-> {:?}", encode_zigzag_64(value));
+            write_i64(value, &mut buffer);
+            let len = buffer.len();
 
             // Test read_u64
-            let decoded = read_i64(&output).expect("read_i64 failed");
+            let (decoded, offset) = read_i64(&mut buffer, 0);
 
             assert_eq!(value, decoded, "Value mismatch for {value}");
+            assert_eq!(len, offset, "Offset mismatch for {value}");
         }
     }
 
@@ -268,15 +267,5 @@ mod tests {
         for &value in &test_values {
             assert_eq!(value, decode_zigzag_64(encode_zigzag_64(value)), "Value mismatch for {value}");
         }
-    }
-
-    #[test]
-    fn test_invalid_vint_size() {
-        let mut output = Vec::new();
-        assert!(write_u64(u64::MAX, &mut output).is_ok());
-        assert!(read_u64(&[]).is_err()); // Empty input
-
-        let invalid_input = vec![0xFF, 0x00, 0x00, 0x00];
-        assert!(read_u64(&invalid_input).is_err()); // Truncated input
     }
 }

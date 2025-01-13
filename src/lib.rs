@@ -1,12 +1,16 @@
+extern crate core;
+
 pub mod error;
 mod options;
-mod util;
-mod storage;
 mod statistics;
+mod query;
+pub mod storage;
+pub mod util;
+pub mod collection;
+pub mod io;
 
 use std::path::Path;
 use serde::Serialize;
-use bson::oid::ObjectId;
 use crate::error::Error;
 
 pub struct QuokkaDB {

@@ -1,21 +1,34 @@
 use std::f64::consts::LN_2;
+use std::io::Error;
+use crate::io::byte_reader::ByteReader;
 use crate::util::murmur_hash64::murmur_hash64a;
+use crate::io::varint;
 
 /// A Bloom Filter is a probabilistic data structure that efficiently tests for the existence of an element.
 /// It may yield false positives but guarantees no false negatives. This implementation uses MurmurHash3 for hashing.
 ///
+/// The implementation supports a writable (mutable) mode used during SSTable construction
+/// and a read-only mode used on SSTable reads. The read-only mode use zero-copy when data is
+/// loaded from an SST block.
+///
 /// # Parameters
-/// - `bit_array`: The underlying storage for the filter's bits, implemented as a `Vec<u8>`.
+/// - `bit_array`: The underlying storage for the filter's bits.
 /// - `size`: Total number of bits in the filter.
 /// - `hash_count`: Number of hash functions used for each item.
-#[derive(Default)]
-pub struct BloomFilter {
-    bit_array: Vec<u8>,
-    size: usize,
-    hash_count: usize,
+pub enum BloomFilter<'a> {
+    Writable {
+        bit_array: Vec<u8>,  // Used during MemTable flush
+        size: usize,
+        hash_count: usize,
+    },
+    ReadOnly {
+        bit_array: &'a [u8],  // Read directly from SST block (zero-copy)
+        size: usize,
+        hash_count: usize,
+    },
 }
 
-impl BloomFilter {
+impl<'a> BloomFilter<'a> {
     /// Creates a new BloomFilter with dynamically calculated size and hash functions.
     ///
     /// # Arguments
@@ -45,24 +58,29 @@ impl BloomFilter {
         let size = -((expected_items as f64) * false_positive_rate.ln() / ln2_squared).ceil() as usize;
         let hash_count = ((size as f64 / expected_items as f64) * LN_2).ceil() as usize;
         let byte_size = size >> 3;
-        Self {
+        BloomFilter::Writable {
             bit_array: vec![0; byte_size],
             size,
             hash_count,
         }
     }
 
-    /// Adds an item to the Bloom Filter.
+    /// Adds an item to the Bloom filter (only in `Writable` mode).
     ///
     /// # Arguments
     /// - `item`: A reference to a `Vec<u8>` representing the item to be added.
     ///
     /// The item is hashed using double hashing to determine the bits to set.
     pub fn add(&mut self, item: &[u8]) {
-        let (hash1, hash2) = self.double_hash(item);
-        for i in 0..self.hash_count {
-            let index = (hash1.wrapping_add(i as u64 * hash2) % self.size as u64) as usize;
-            self.set_bit(index);
+        if let BloomFilter::Writable { bit_array, size, hash_count } = self {
+            let (hash1, hash2) = Self::double_hash(item);
+            let normalized_hash2 = hash2 % *size as u64;
+            for i in 0..*hash_count {
+                let index = (hash1.wrapping_add(i as u64 * normalized_hash2) % *size as u64) as usize;
+                Self::set_bit(bit_array, index);
+            }
+        } else {
+            panic!("Cannot modify a read-only BloomFilter");
         }
     }
 
@@ -74,10 +92,12 @@ impl BloomFilter {
     /// # Returns
     /// - `true` if the item is possibly in the filter (with a false positive probability).
     /// - `false` if the item is definitely not in the filter.
-    pub fn contains(&self, item: &Vec<u8>) -> bool {
-        let (hash1, hash2) = self.double_hash(item);
-        for i in 0..self.hash_count {
-            let index = (hash1.wrapping_add(i as u64 * hash2) % self.size as u64) as usize;
+    pub fn contains(&self, item: &[u8]) -> bool {
+        let (hash1, hash2) = Self::double_hash(item);
+        let normalized_hash2 = hash2 % self.size() as u64;
+
+        for i in 0..self.hash_count() {
+            let index = (hash1.wrapping_add(i as u64 * normalized_hash2) % self.size() as u64) as usize;
             if !self.get_bit(index) {
                 return false;
             }
@@ -92,20 +112,17 @@ impl BloomFilter {
     ///
     /// # Returns
     /// A tuple `(hash1, hash2)` where both are `u64` values.
-    fn double_hash(&self, item: &[u8]) -> (u64, u64) {
+    fn double_hash(item: &[u8]) -> (u64, u64) {
         let hash1 = murmur_hash64a(item, 0);
-        let hash2 = murmur_hash64a(item, hash1);
+        let hash2 = murmur_hash64a(item, hash1) | 1; // Ensure hash2 is odd
         (hash1, hash2)
     }
 
-    /// Sets a bit in the bit array at the specified index.
-    ///
-    /// # Arguments
-    /// - `index`: The bit index to set.
-    fn set_bit(&mut self, index: usize) {
+   /// Helper function to set a bit in the bit array.
+    fn set_bit(bit_array: &mut [u8], index: usize) {
         let byte_index = index >> 3;
         let bit_index = index & 7;
-        self.bit_array[byte_index] |= 1 << bit_index;
+        bit_array[byte_index] |= 1 << bit_index;
     }
 
     /// Gets the value of a bit in the bit array at the specified index.
@@ -117,12 +134,85 @@ impl BloomFilter {
     /// - `true` if the bit is set.
     /// - `false` if the bit is not set.
     fn get_bit(&self, index: usize) -> bool {
+        let (bit_array, _size) = match self {
+            BloomFilter::Writable { bit_array, size, .. } => (bit_array.as_slice(), *size),
+            BloomFilter::ReadOnly { bit_array, size, .. } => (*bit_array, *size),
+        };
+
         let byte_index = index >> 3;
         let bit_index = index & 7;
-        (self.bit_array[byte_index] & (1 << bit_index)) != 0
+        (bit_array[byte_index] & (1 << bit_index)) != 0
     }
 
-    pub fn to_vec(self) -> Vec<u8> {
-        self.bit_array
+    /// Returns the filter size.
+    fn size(&self) -> usize {
+        match self {
+            BloomFilter::Writable { size, .. } => *size,
+            BloomFilter::ReadOnly { size, .. } => *size,
+        }
+    }
+
+    /// Returns the number of hash functions used.
+    fn hash_count(&self) -> usize {
+        match self {
+            BloomFilter::Writable { hash_count, .. } => *hash_count,
+            BloomFilter::ReadOnly { hash_count, .. } => *hash_count,
+        }
+    }
+
+    /// Converts the Bloom filter to an SSTable block format (serializing).
+    pub fn to_block(&self) -> Vec<u8> {
+        match self {
+            BloomFilter::Writable { bit_array, size, hash_count } => {
+                let mut buffer = Vec::new();
+                varint::write_u64(*hash_count as u64, &mut buffer);
+                varint::write_u64(*size as u64, &mut buffer);
+                buffer.extend_from_slice(bit_array);
+                buffer
+            }
+            _ => panic!("Cannot serialize a read-only BloomFilter"),
+        }
+    }
+
+    /// Loads a Bloom filter from an SSTable block (zero-copy).
+    pub fn from_block(block: &'a [u8]) -> Result<Self, Error> {
+        let reader = ByteReader::new(block);
+        let hash_count = reader.read_varint_u64()? as usize;
+        let size = reader.read_varint_u64()? as usize;
+        let bit_array = &block[reader.position()..]; // The remaining block is the bit array
+
+        Ok(BloomFilter::ReadOnly {
+            bit_array,
+            size,
+            hash_count,
+        })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bloom_filter() {
+        let mut bloom = BloomFilter::new(1000, 0.01);
+        bloom.add(b"key1");
+        bloom.add(b"key2");
+
+        assert!(bloom.contains(b"key1"));
+        assert!(bloom.contains(b"key2"));
+        assert!(!bloom.contains(b"unknown"));
+
+        // Convert to SST block format
+        let block = bloom.to_block();
+
+        // Load as a read-only filter from SST block
+        let read_only_bloom = BloomFilter::from_block(&block).unwrap();
+
+        assert!(read_only_bloom.contains(b"key1"));
+        assert!(read_only_bloom.contains(b"key2"));
+        assert!(!read_only_bloom.contains(b"unknown"));
+    }
+}
+
+

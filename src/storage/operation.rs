@@ -1,3 +1,8 @@
+use std::io::{Error, ErrorKind};
+use std::sync::Arc;
+use crate::io::byte_reader::ByteReader;
+use crate::io::varint;
+use crate::storage::internal_key::encode_internal_key;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum OperationType {
@@ -11,13 +16,15 @@ pub enum OperationType {
     MaxKey,
 }
 
+/// At the storage level, for a given key and sequence DELETE operation override PUT operation.
+/// This logic is enforced by the byte order where DELETE as a lower byte representation that PUT.
 impl From<OperationType> for u8 {
     fn from(item: OperationType) -> Self {
         match item {
-            OperationType::MinKey => 0,
-            OperationType::Put => 1,
-            OperationType::Delete=> 2,
-            OperationType::MaxKey => 255,
+            OperationType::MinKey => u8::MAX,
+            OperationType::Put => 0x30,
+            OperationType::Delete=> 0x10,
+            OperationType::MaxKey => 0x00,
         }
     }
 }
@@ -27,40 +34,135 @@ impl TryFrom<u8> for OperationType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(OperationType::MinKey),
-            1 => Ok(OperationType::Put),
-            2 => Ok(OperationType::Delete),
-            255 => Ok(OperationType::MaxKey),
+            u8::MAX => Ok(OperationType::MinKey),
+            0x30 => Ok(OperationType::Put),
+            0x10 => Ok(OperationType::Delete),
+            0x00 => Ok(OperationType::MaxKey),
             _ => Err("Invalid value for OperationType"),
         }
     }
 }
 #[derive(Debug, PartialEq)]
 pub struct Operation {
-
+    /// The type of operation
     operation_type: OperationType,
-    key: Vec<u8>,
-    value: Vec<u8>,
+    /// The collection ID
+    collection: u32,
+    /// The index ID
+    index: u32,
+    /// The BSON key formatted in a byte comparable way.
+    user_key: Arc<[u8]>,
+    /// The bytes representing the BSON document
+    value: Arc<[u8]>,
 }
 
 impl Operation {
-    pub fn new_put(key: Vec<u8>, value: Vec<u8>) -> Operation {
+    pub fn new_put(collection: u32, index: u32, user_key: Vec<u8>, value: Vec<u8>) -> Operation {
         Operation {
             operation_type: OperationType::Put,
-            key,
-            value,
+            collection,
+            index,
+            user_key: Arc::from(user_key),
+            value: Arc::from(value),
         }
     }
 
-    pub fn new_delete(key: Vec<u8>) -> Operation {
+    pub fn new_delete(collection: u32, index: u32, user_key: Vec<u8>) -> Operation {
         Operation {
             operation_type: OperationType::Delete,
-            key,
-            value: vec![],
+            collection,
+            index,
+            user_key: Arc::from(user_key),
+            value: Arc::from(vec![]),
         }
     }
 
-    pub fn deconstruct(self) -> (OperationType, Vec<u8>, Vec<u8>) {
-        (self.operation_type, self.key, self.value)
+    pub fn compound_key(&self, sequence: u64) -> Vec<u8> {
+        encode_internal_key(self.collection, self.index, &self.user_key, sequence, self.operation_type)
+    }
+    pub fn operation_type(&self) -> OperationType {
+        self.operation_type.clone()
+    }
+
+    pub fn value(&self) -> Arc<[u8]> {
+        self.value.clone()
+    }
+
+    pub fn wal_record_size(&self) -> usize {
+        1 + varint::compute_u32_vint_size(self.collection)
+            + varint::compute_u32_vint_size(self.index)
+            + varint::compute_u64_vint_size(self.user_key.len() as u64)
+            + self.user_key.len()
+            + varint::compute_u64_vint_size(self.value.len() as u64)
+            + self.value.len()
+    }
+
+    pub fn append_wal_record(&self, vec:&mut Vec<u8>) {
+        vec.push(u8::from(self.operation_type));
+        varint::write_u32(self.collection, vec);
+        varint::write_u32(self.index, vec);
+        varint::write_u64(self.user_key.len() as u64, vec);
+        vec.extend_from_slice(&self.user_key);
+        varint::write_u64(self.value.len() as u64, vec);
+        vec.extend_from_slice(&self.value);
+    }
+
+    pub fn from_wal_record(reader: &ByteReader) -> std::io::Result<Operation> {
+        let op_byte = reader.read_u8()?;
+        let operation_type = OperationType::try_from(op_byte)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid operation type"))?;
+
+        let collection = reader.read_varint_u32()?;
+        let index = reader.read_varint_u32()?;
+
+        let key_len = reader.read_varint_u64()? as usize;
+        let user_key = reader.read_fixed_slice(key_len)?;
+
+        let value_len = reader.read_varint_u64()? as usize;
+        let value = reader.read_fixed_slice(value_len)?;
+
+        Ok(Operation {
+            operation_type,
+            collection,
+            index,
+            user_key: Arc::from(user_key),
+            value: Arc::from(value),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::byte_reader::ByteReader;
+
+    #[test]
+    fn test_operation_wal_round_trip_put() {
+        let original = Operation::new_put(42, 7, b"key123".to_vec(), b"value456".to_vec());
+        let mut buf = Vec::new();
+        original.append_wal_record(&mut buf);
+
+        let computed_size = Operation::wal_record_size(&original);
+        assert_eq!(computed_size, buf.len());
+
+        let reader = ByteReader::new(&buf);
+        let decoded = Operation::from_wal_record(&reader).expect("Deserialization failed");
+
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_operation_wal_round_trip_delete() {
+        let original = Operation::new_delete(99, 3, b"delete_me".to_vec());
+        let mut buf = Vec::new();
+        original.append_wal_record(&mut buf);
+
+        let computed_size = Operation::wal_record_size(&original);
+        assert_eq!(computed_size, buf.len());
+
+        let reader = ByteReader::new(&buf);
+        let decoded = Operation::from_wal_record(&reader).expect("Deserialization failed");
+
+        assert_eq!(original, decoded);
     }
 }
