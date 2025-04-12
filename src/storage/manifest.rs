@@ -136,7 +136,7 @@ impl Manifest {
                 }
                 _ => {
                     if let Some(t) = tree {
-                        tree = Some(t.apply(edit));
+                        tree = Some(t.apply(&edit));
                     }
                 }
             }
@@ -211,7 +211,7 @@ mod tests {
 
         for edit in edits {
             manifest.append_edit(&edit).unwrap();
-            expected = expected.apply(edit);
+            expected = expected.apply(&edit);
         }
         manifest.sync().unwrap();
         drop(manifest);

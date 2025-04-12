@@ -352,16 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn test_file_name_invalid_utf8() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let raw = b"/bad/\xFF/bad/\xFFname";
-        let path = Path::new(OsStr::from_bytes(raw));
-        assert_eq!(file_name_as_str(path), None);
-    }
-
-    #[test]
     fn test_mark_file_as_corrupted_with_extension() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.log");

@@ -57,7 +57,7 @@ impl FileDescriptorCache {
             let shared_file = self.get_or_open(path)?;
 
             // Try getting a write lock (since seek modifies state)
-            let file_guard = shared_file.try_write();
+            let file_guard = shared_file.file.try_write();
 
             if let Ok(mut file) = file_guard {
                 // FD is free → Use cached FD

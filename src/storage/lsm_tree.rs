@@ -495,7 +495,7 @@ impl LsmTree {
             }
             LsmTreeEdit::DropCollection { name } => {
                 let mut collections = self.collections.as_ref().clone();
-                collections.remove(&name);
+                collections.remove(&name.clone());
                 LsmTree {
                     current_log_number: self.current_log_number,
                     oldest_log_number: self.oldest_log_number,
