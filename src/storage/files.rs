@@ -37,6 +37,10 @@ impl DbFile {
         DbFile { file_type: FileType::Manifest, id }
     }
 
+    pub fn new_sst(id: u64) -> DbFile {
+        DbFile { file_type: FileType::SST, id }
+    }
+
     pub fn filename(&self) -> String {
         match self.file_type {
             FileType::Manifest => format!("MANIFEST-{:06}", self.id),

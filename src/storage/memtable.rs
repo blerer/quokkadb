@@ -1,8 +1,9 @@
 use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::ops::Bound::Unbounded;
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_skiplist::SkipMap;
 use crate::io::fd_cache::FileDescriptorCache;
 use crate::options::options::Options;
@@ -10,25 +11,25 @@ use crate::storage::operation::OperationType;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::interval::Interval;
 use crate::statistics::CollectionStatistics;
+use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
-use crate::storage::sstable::block_cache::BlockCache;
-use crate::storage::sstable::sstable::SSTable;
+use crate::storage::lsm_tree::SSTableMetadata;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 
 pub struct Memtable {
     skiplist: SkipMap<Arc<[u8]>, Arc<[u8]>>, // Binary values
     size: AtomicUsize,                       // Current size of the memtable
     stats: Arc<CollectionStatistics>,
-    log_number: AtomicU32, // The ID of the greatest log file the writes came from
+    pub log_number: u64, // The number of the write-ahead log file associated to this memtable
 }
 
 impl Memtable {
-    pub fn new() -> Self {
+    pub fn new(log_number: u64) -> Self {
         Memtable {
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
             stats: CollectionStatistics::new(),
-            log_number: AtomicU32::new(0),
+            log_number,
         }
     }
 
@@ -118,19 +119,26 @@ impl Memtable {
         self.size.load(Ordering::Relaxed)
     }
 
-    pub fn flush(&self, fd_cache: Arc<FileDescriptorCache>, block_cache: Arc<BlockCache>, file_path: &str, options: Options) -> Result<()> {
-        self.write_sstable(fd_cache.clone(), file_path, options)?;
-        SSTable::open(fd_cache, block_cache, file_path)?;
-        Ok(())
+    pub fn flush(&self,
+                 fd_cache: Arc<FileDescriptorCache>,
+                 directory: &Path,
+                 db_file: &DbFile,
+                 options: &Options
+    ) -> Result<SSTableMetadata> {
+        self.write_sstable(fd_cache.clone(), directory, db_file, options)
     }
 
-    fn write_sstable(&self, fd_cache: Arc<FileDescriptorCache>, file_path: &str, options: Options) -> Result<()> {
-        let mut writer = SSTableWriter::new(fd_cache, file_path, options, self.skiplist.len())?;
+    fn write_sstable(&self,
+                     fd_cache: Arc<FileDescriptorCache>,
+                     directory: &Path,
+                     db_file: &DbFile,
+                     options: &Options
+    ) -> Result<SSTableMetadata> {
+        let mut writer = SSTableWriter::new(fd_cache, directory, db_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
         }
-        writer.finish()?;
-        Ok(())
+        writer.finish()
     }
 }
 
@@ -175,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_write_put_operations() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
@@ -197,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_write_put_and_delete_operations() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -220,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_write_put_and_delete_operations_in_different_batches() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -245,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_read_with_snapshot() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         let collection: u32 = 32;
         // Insert multiple versions of the same key
@@ -271,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_read_non_existent_key() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
         let collection = 32;
         // Read a key that was never inserted
         assert_eq!(memtable.read(collection, b"non_existent_key", MAX_SEQUENCE_NUMBER), None);
@@ -282,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_no_matching_keys() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         let collection: u32 = 32;
         let batch = write_batch(vec![
@@ -300,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_different_ranges() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![
@@ -359,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_mixed_operations() {
-        let memtable = Memtable::new();
+        let memtable = Memtable::new(2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![

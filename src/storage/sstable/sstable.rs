@@ -2,6 +2,7 @@ use ErrorKind::InvalidData;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::{Result, Error, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::storage::sstable::BlockHandle;
 use crate::storage::operation::OperationType;
@@ -18,7 +19,7 @@ use crate::storage::sstable::block_cache::BlockCache;
 use crate::util::bloom_filter::BloomFilter;
 
 pub struct SSTable {
-    file_path: String,
+    file_path: PathBuf,
     block_cache: Arc<BlockCache>,
     compressor: Arc<dyn Compressor>,
     checksum_strategy: Arc<dyn ChecksumStrategy>,
@@ -30,7 +31,7 @@ pub struct SSTable {
 impl SSTable {
 
 
-    pub fn open(fd_cache: Arc<FileDescriptorCache>, block_cache: Arc<BlockCache>, file_path: &str) -> Result<SSTable> {
+    pub fn open(fd_cache: Arc<FileDescriptorCache>, block_cache: Arc<BlockCache>, file_path: &Path) -> Result<SSTable> {
 
         // The footer is stored in the last 48 bytes at the end of the file.
         let file_size = fd_cache.read_length(&file_path)?;
@@ -70,7 +71,7 @@ impl SSTable {
 
         let properties = Self::read_properties(&fd_cache, &compressor, &checksum_strategy, &file_path, &properties_handle)?;
 
-        Ok(SSTable{file_path: file_path.to_string(), block_cache, compressor, checksum_strategy, properties, index_handle, filter_handle,})
+        Ok(SSTable{file_path: file_path.to_path_buf(), block_cache, compressor, checksum_strategy, properties, index_handle, filter_handle,})
     }
 
     fn read_block_handle(reader: &mut ByteReader) -> Result<BlockHandle> {
@@ -83,7 +84,7 @@ impl SSTable {
         fd_cache: &Arc<FileDescriptorCache>,
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
-        file_path: &str,
+        file_path: &Path,
         handle: &BlockHandle
     ) -> Result<HashMap<String, BlockHandle>> {
 
@@ -137,7 +138,7 @@ impl SSTable {
         fd_cache: &Arc<FileDescriptorCache>,
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
-        file_path: &str,
+        file_path: &Path,
         handle: &BlockHandle
     ) -> Result<SSTableProperties> {
 
@@ -155,7 +156,7 @@ impl SSTable {
         fd_cache: &Arc<FileDescriptorCache>,
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
-        file_path: &str,
+        file_path: &Path,
         handle: &BlockHandle
     ) -> Result<Vec<u8>> {
 

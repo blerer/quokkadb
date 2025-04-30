@@ -19,29 +19,30 @@ pub struct FileDescriptorCache {
 
 impl FileDescriptorCache {
     /// Create a new FD cache with a given max size
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: u32) -> Self {
+        assert!(capacity > 0);
         Self {
             cache: Cache::new(capacity as u64),
         }
     }
 
     /// Get or open an FD, using the cache if possible
-    pub fn get_or_open(&self, path: &str) -> io::Result<SharedFile> {
+    pub fn get_or_open(&self, path: &Path) -> io::Result<SharedFile> {
         // Try getting an FD from the cache
-        if let Some(file) = self.cache.get(&path.to_string()) {
+        if let Some(file) = self.cache.get(&path.to_string_lossy().into_owned()) {
             return Ok(file);
         }
 
         // Open a new FD and cache it
         let file = File::open(Path::new(path))?;
         let shared_file = SharedFile{ file: Arc::new(RwLock::new(file))};
-        self.cache.insert(path.to_string(), shared_file.clone());
+        self.cache.insert(path.to_string_lossy().into_owned(), shared_file.clone());
 
         Ok(shared_file)
     }
 
     /// Read a block of data from a cached FD (Opens a new FD if locked on Windows)
-    pub fn read_block(&self, path: &str, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+    pub fn read_block(&self, path: &Path, offset: u64, size: usize) -> io::Result<Vec<u8>> {
         let mut buffer = vec![0; size];
 
         #[cfg(unix)]
@@ -74,7 +75,7 @@ impl FileDescriptorCache {
         Ok(buffer)
     }
 
-    pub fn read_length(&self, path: &str) -> io::Result<u64> {
+    pub fn read_length(&self, path: &Path) -> io::Result<u64> {
         let shared_file = self.get_or_open(path)?;
         let file = shared_file.file.read().unwrap();
         Ok(file.metadata()?.len())

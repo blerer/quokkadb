@@ -37,7 +37,7 @@ pub struct DatabaseOptions {
 
     /// The maximum number of file descriptors kept in the field descriptor cache.
     /// A negative number means not limit.
-    max_open_files: Option<i32>,
+    max_open_files: Option<u32>,
 
     /// The block cache size.
     block_cache_size: Option<StorageQuantity>,
@@ -54,7 +54,7 @@ impl DatabaseOptions {
         self.file_write_buffer_size.unwrap_or(StorageQuantity::new(2, StorageUnit::Mebibytes))
     }
 
-    pub fn max_open_files(&self) -> i32 {
+    pub fn max_open_files(&self) -> u32 {
         self.max_open_files.unwrap_or(200)
     }
 

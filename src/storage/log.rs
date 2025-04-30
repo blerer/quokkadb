@@ -1,7 +1,7 @@
 use std::{fmt, io, mem, result};
 use std::fs::{File, OpenOptions};
 use std::io::{Result, ErrorKind, Read, Write, Error};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crc32fast::Hasher;
 use crate::io::buffer::Buffer;
@@ -22,19 +22,20 @@ pub struct Log {
 
 impl Log {
 
-    pub fn new(path: PathBuf, file: DbFile, file_creator: Arc<dyn LogFileCreator>) -> Result<Log> {
+    pub fn new(path: &Path, file: DbFile, file_creator: Arc<dyn LogFileCreator>) -> Result<Log> {
 
-        let current_file = file_creator.new_log(path.clone(), file)?;
+        let directory = path.to_path_buf();
+        let current_file = file_creator.new_log(directory.clone(), file)?;
 
         Ok(Log {
-            directory: path.clone(),
+            directory,
             file_creator,
             current_file,
             buffer: Buffer::with_capacity(BUFFER_SIZE_IN_BYTES),
         })
     }
 
-    pub fn load_from(file_path: PathBuf, file_creator: Arc<dyn LogFileCreator>) -> Result<Log> {
+    pub fn load_from(file_path: &Path, file_creator: Arc<dyn LogFileCreator>) -> Result<Log> {
 
         let file = DbFile::new(&file_path).ok_or(Error::new(ErrorKind::InvalidData, "Unknown file type"))?;
         let db_path = file_path.parent().ok_or(Error::new(ErrorKind::InvalidData, "Cannot retrieve the database directory"))?
@@ -177,7 +178,7 @@ impl Log {
     }
 }
 
-pub trait LogFileCreator {
+pub trait LogFileCreator: Send + Sync  {
 
     fn new_log(&self, directory_path: PathBuf, db_file: DbFile) -> Result<LogFile> {
 
@@ -227,19 +228,19 @@ pub struct LogFile {
 
 impl LogFile {
 
-    fn load_from(path: PathBuf, id: u64) -> Result<LogFile> {
+    fn load_from(path: &Path, id: u64) -> Result<LogFile> {
 
         let file = OpenOptions::new()
             .write(true)
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
-            .open(path.clone())?;
+            .open(path)?;
 
         let file_size = file.metadata()?.len();
 
         Ok(LogFile{
             id,
-            path,
+            path: path.to_path_buf(),
             file,
             pending_bytes: 0,
             file_size,
@@ -447,10 +448,10 @@ mod tests {
     fn test_drop() {
         let dir = tempdir().unwrap();
 
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(1), file_creator).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(1), file_creator).unwrap();
 
         let data = &vec![1; 250];
         log.append(data).unwrap();
@@ -476,10 +477,10 @@ mod tests {
     #[test]
     fn test_log_rotation() {
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(6), file_creator.clone()).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(6), file_creator.clone()).unwrap();
 
         log.append(&vec![1; 250]).unwrap();
         assert_eq!(log.rotate(DbFile::new_write_ahead_log(7)).unwrap(), (path.join("000007.log"), path.join("000006.log")));
@@ -504,10 +505,10 @@ mod tests {
     #[test]
     fn test_log_replay() {
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(9), file_creator.clone()).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(9), file_creator.clone()).unwrap();
 
         assert_eq!(log.append(&vec![1; 250]).unwrap(), 262);
         assert_eq!(log.append(&vec![2; 360]).unwrap(), 372);
@@ -544,10 +545,10 @@ mod tests {
     fn test_replay_stop_checksum_mismatch() {
 
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(10), file_creator.clone()).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(10), file_creator.clone()).unwrap();
 
         log.append(&vec![1; 250]).unwrap();
         log.sync().unwrap();
@@ -588,10 +589,10 @@ mod tests {
     #[test]
     fn test_replay_stop_checksum_mismatch_after_padding() {
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(11), file_creator.clone()).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(11), file_creator.clone()).unwrap();
 
         let mut record_offset = 4096;
 
@@ -675,11 +676,11 @@ mod tests {
 
         // Setup
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
+        let path = dir.path();
         let file_creator = Arc::new(MockLogFileCreator);
 
         // Create the original Log
-        let mut log = Log::new(path.clone(), DbFile::new_write_ahead_log(42), file_creator.clone()).unwrap();
+        let mut log = Log::new(path, DbFile::new_write_ahead_log(42), file_creator.clone()).unwrap();
         log.append(b"some test data").unwrap();
         log.sync().unwrap();
 
@@ -688,7 +689,7 @@ mod tests {
         let original_id = log.current_file.id;
 
         // Now reload it
-        let reloaded_log = Log::load_from(original_path.clone(), file_creator.clone()).unwrap();
+        let reloaded_log = Log::load_from(&original_path, file_creator.clone()).unwrap();
 
         // Validate
         assert_eq!(reloaded_log.current_file.id, original_id);

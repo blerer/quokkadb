@@ -22,7 +22,7 @@ pub struct WriteAheadLog {
 
 impl WriteAheadLog {
 
-    pub fn new(path: PathBuf, options: &DatabaseOptions, id: u64) -> Result<Self> {
+    pub fn new(path: &Path, options: &DatabaseOptions, id: u64) -> Result<Self> {
 
         let log = Log::new(path, DbFile::new_write_ahead_log(id), Arc::new(WriteAheadLogFileCreator{}))?;
 
@@ -34,7 +34,7 @@ impl WriteAheadLog {
     }
     pub fn load_from(file_path: PathBuf, options: &DatabaseOptions) -> Result<Self> {
 
-        let log = Log::load_from(file_path, Arc::new(WriteAheadLogFileCreator{}))?;
+        let log = Log::load_from(&file_path, Arc::new(WriteAheadLogFileCreator{}))?;
 
         Ok(WriteAheadLog {
             log,
@@ -134,7 +134,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(path.clone(), &options, 1).unwrap();
+        let mut wal = WriteAheadLog::new(&path, &options, 1).unwrap();
 
         let batches = vec![
             (10, WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())])),
@@ -177,7 +177,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(path.clone(), &options, 2).unwrap();
+        let mut wal = WriteAheadLog::new(&path, &options, 2).unwrap();
 
         wal.append(10, &WriteBatch::new(vec![Operation::new_put(1, 1, b"x".to_vec(), b"9".to_vec())]))
             .unwrap();

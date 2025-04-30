@@ -1,54 +1,68 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use arc_swap::ArcSwap;
 use tracing::{error, warn};
 use crate::io::{mark_file_as_corrupted, truncate_file};
+use crate::io::fd_cache::FileDescriptorCache;
 use crate::options::options::Options;
+use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
 use crate::storage::files::{DbFile, FileType};
+use crate::storage::flush_scheduler::{FlushScheduler, FlushTask};
 use crate::storage::log::LogReplayError;
 use crate::storage::lsm_tree::{LsmTree, LsmTreeEdit};
 use crate::storage::manifest::Manifest;
+use crate::storage::memtable::Memtable;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::WriteBatch;
 
 struct StorageEngine {
-    error_mode: AtomicBool,
-    options: Options,
-    db_lock: Mutex<()>,
+    fd_cache: Arc<FileDescriptorCache>,
+    db_dir: PathBuf,
+    options: Arc<Options>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
-    manifest: Arc<Manifest>,
+    manifest: Mutex<Manifest>,
     write_ahead_log: Mutex<WriteAheadLog>,
     lsm_tree: ArcSwap<LsmTree>,
     next_file_number: AtomicU64,      // The counter used to create the file ids
     next_seq_number: AtomicU64, // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
+    flush_scheduler: FlushScheduler,
+    async_callback: OnceLock<Arc<AsyncCallback<Result<LsmTreeEdit>>>>,
+    error_mode: AtomicBool,
 }
 
 impl StorageEngine {
-    pub fn new(path: &PathBuf, options: Options) -> Result<Self> {
+    pub fn new(db_dir: &Path, options: Arc<Options>) -> Result<Arc<Self>> {
+
+        let fd_cache = Arc::new(FileDescriptorCache::new(options.database_options().max_open_files()));
 
         // Retrieve the latest manifest path.
-        let manifest_path = Manifest::read_current_file(path)?;
+        let manifest_path = Manifest::read_current_file(db_dir)?;
 
         // If the manifest exists we need to recreate the lsm tree and replay the wal records.
-        // Otherwise, it is the first start that we start this database and need to create a
+        // Otherwise, it is the first time that we start this database and need to create a
         // new manifest and wal.
         if let Some(manifest_path) = manifest_path {
+
             let mut lsm_tree = Manifest::rebuild_lsm_tree(&manifest_path)?;
             let mut last_seq_nbr = lsm_tree.last_sequence_number;
 
-            let scan_results = scan_db_directory(path, lsm_tree.oldest_log_number)?;
+            let scan_results = scan_db_directory(db_dir, lsm_tree.oldest_log_number)?;
 
             let mut wal_files_iter = scan_results.wal_files.iter().peekable();
 
             let mut reusable_wal = None;
-            let write_buffer_size = options.database_options().file_write_buffer_size().to_bytes();
 
-            while let Some((_id, wal_path)) = wal_files_iter.next() {
+            while let Some((log_number, wal_path)) = wal_files_iter.next() {
+
+                // We need to re-associate write-ahead log files and memtables
+                if log_number != &lsm_tree.memtable.log_number {
+                    lsm_tree = lsm_tree.apply(&LsmTreeEdit::WalRotation { log_number: *log_number })
+                }
 
                 let rs = WriteAheadLog::replay(wal_path, lsm_tree.last_sequence_number);
                 let is_last_wal_file = wal_files_iter.peek().is_none();
@@ -76,9 +90,6 @@ impl StorageEngine {
                                     assert_eq!(last_seq_nbr, seq + 1);
                                     lsm_tree.memtable.write(seq, &batch);
                                     last_seq_nbr = seq;
-                                    if lsm_tree.memtable.size() >= write_buffer_size {
-                                        lsm_tree = lsm_tree.apply(&LsmTreeEdit::ScheduleMemtableForFlush());
-                                    }
                                     if is_last_wal_file {
                                         reusable_wal = Some(wal_path)
                                     }
@@ -133,58 +144,61 @@ impl StorageEngine {
             let wal = if let Some(wal_path) = reusable_wal {
                 WriteAheadLog::load_from(wal_path.clone(), options.database_options())?
             } else {
-                let wal_file_id = next_file_number.fetch_add(1, Ordering::Relaxed);
-                let wal = WriteAheadLog::new(path.clone(), options.database_options(), wal_file_id)?;
-                let edit = LsmTreeEdit::WalRotation { log_id: wal_file_id };
+                let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+                let wal = WriteAheadLog::new(db_dir.clone(), options.database_options(), log_number)?;
+                let edit = LsmTreeEdit::WalRotation { log_number };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
                 wal
             };
 
-            Ok(StorageEngine {
-                error_mode: AtomicBool::new(false),
+            let flush_scheduler = FlushScheduler::new(db_dir.clone(), options.clone(), fd_cache.clone());
+
+            Ok(Arc::new(StorageEngine {
+                fd_cache,
+                db_dir: db_dir.to_path_buf(),
                 options,
-                db_lock: Mutex::new(()),
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
-                manifest: Arc::new(manifest),
+                manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
                 lsm_tree: ArcSwap::new(Arc::new(lsm_tree)),
                 next_file_number,
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
-            })
+                flush_scheduler,
+                async_callback: OnceLock::new(),
+                error_mode: AtomicBool::new(false),
+            }))
         } else {
             let next_file_number = AtomicU64::new(1);
             let manifest_file_id = next_file_number.fetch_add(1, Ordering::Relaxed);
             let wal_file_id = next_file_number.fetch_add(1, Ordering::Relaxed);
-            let lsm_tree = LsmTree::new(wal_file_id, next_file_number.load(Ordering::Relaxed));
-            let snapshot = LsmTreeEdit::Snapshot(lsm_tree);
-            let manifest = Manifest::new(path.clone(), options.database_options(), manifest_file_id, &snapshot)?;
-            let wal = WriteAheadLog::new(path.clone(), options.database_options(), wal_file_id)?;
+            let lsm_tree = Arc::new(LsmTree::new(wal_file_id, next_file_number.load(Ordering::Relaxed)));
+            let snapshot = LsmTreeEdit::Snapshot(lsm_tree.clone());
+            let manifest = Manifest::new(db_dir, options.database_options(), manifest_file_id, &snapshot)?;
+            let wal = WriteAheadLog::new(db_dir.clone(), options.database_options(), wal_file_id)?;
+            let flush_scheduler = FlushScheduler::new(db_dir.clone(), options.clone(), fd_cache.clone());
 
-            // Avoid to clone the LsmTree by getting it back from the snapshot (a bit ugly, I agree)
-            let lsm_tree = match snapshot {
-                LsmTreeEdit::Snapshot(lsm_tree) => lsm_tree,
-                _ => unreachable!(),
-            };
-
-            Ok(StorageEngine {
-                error_mode: AtomicBool::new(false),
+            Ok(Arc::new(StorageEngine {
+                fd_cache,
+                db_dir: db_dir.to_path_buf(),
                 options,
-                db_lock: Mutex::new(()),
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
-                manifest: Arc::new(manifest),
+                manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
-                lsm_tree: ArcSwap::new(Arc::new(lsm_tree)),
+                lsm_tree: ArcSwap::new(lsm_tree),
                 next_file_number,
                 next_seq_number: AtomicU64::new(0),
                 last_visible_seq: AtomicU64::new(0),
-            })
+                flush_scheduler,
+                async_callback: OnceLock::new(),
+                error_mode: AtomicBool::new(false),
+            }))
         }
     }
 
 
-    pub fn write(&self, batch: WriteBatch) -> Result<()> {
+    pub fn write(self: Arc<Self>, batch: WriteBatch) -> Result<()> {
         if self.error_mode.load(Ordering::Relaxed) {
             return Err(Error::new(ErrorKind::Other, "The database is in error mode dues to a previous write error"));
         }
@@ -212,7 +226,11 @@ impl StorageEngine {
             .map_or(false, |front| std::ptr::eq(front, writer))
     }
 
-    fn perform_writes(&self) {
+    fn perform_writes(self: Arc<Self>) {
+
+        // Only a single leader should reach that point at a given time as queue locking logic will
+        // block other writers until the leader as empty the queue.
+        self.perform_wal_and_memtable_rotation_if_needed();
 
         // We lock the queue to retrieve the pending writes. It prevents new incoming writes,
         // avoiding the issue of an infinite loop with the drain.
@@ -241,8 +259,9 @@ impl StorageEngine {
 
         let with_sequence = res.unwrap();
 
-        // Acquire the DB lock protecting the memtable
-        let db_lock = self.db_lock.lock();
+        // We use the manifest lock when accessing the memtable to prevent a race with
+        // a wal/memtable rotation and avoid races on writes between leaders.
+        let memtable_write_lock = self.manifest.lock();
 
         drop(wal);
 
@@ -257,9 +276,7 @@ impl StorageEngine {
             if compare.is_err() {}
         }
 
-        self.schedule_memtable_flush_if_needed(lsm_tree);
-
-        drop(db_lock);
+        drop(memtable_write_lock);
 
         for (writer, result) in with_results {
             writer.done(result);
@@ -284,17 +301,130 @@ impl StorageEngine {
         Ok(with_sequence)
     }
 
-    fn schedule_memtable_flush_if_needed(&self, lsm_tree: Arc<LsmTree>) {
+    pub fn flush(self: &Arc<Self>) -> Result<()> {
+        let engine = self.clone();
+        let callback = Arc::new(BlockingCallback::new(move | result | {
+            engine.update_lsm_tree_sstables(result)
+        }));
+
+        self.perform_wal_and_memtable_rotation(&callback.clone())?;
+        callback.await_blocking()
+    }
+
+    fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) {
         let write_buffer_size = self.options.database_options().file_write_buffer_size().to_bytes();
-        if lsm_tree.memtable.size() >= write_buffer_size {
-            let new_tree = lsm_tree.apply(&LsmTreeEdit::ScheduleMemtableForFlush());
-            self.lsm_tree.store(Arc::new(new_tree));
-            // start flushing thread if needed
+        let memtable_size = self.lsm_tree.load().memtable.size();
+        if memtable_size >= write_buffer_size {
+
+            match self.perform_wal_and_memtable_rotation(self.get_async_callback()) {
+                Err(error) => {
+                    error!("An error occurred during wal and memtable rotation: {}", error);
+                }
+                Ok(_) => (),
+            }
         }
+    }
+
+    fn get_async_callback(self: &Arc<Self>) -> &Arc<AsyncCallback<Result<LsmTreeEdit>>> {
+        self.async_callback.get_or_init(|| {
+            let engine = self.clone();
+            Arc::new(AsyncCallback::new(move |result| {
+                engine.update_lsm_tree_sstables(result)
+            }))
+        })
+    }
+
+    fn perform_wal_and_memtable_rotation<C>(
+        self: &Arc<Self>,
+        callback: &Arc<C>,
+    ) -> Result<()>
+    where
+        C: Callback<Result<LsmTreeEdit>> + 'static,
+    {
+       // Rotate the write-ahead log file and the memtable
+       // (through applying a WalRotation edit to the LSM tree and replacing it atomically)
+       let mut wal = self.write_ahead_log.lock().unwrap();
+
+        // We want to perform the changes within the manifest lock to avoid concurrent updates to
+        // the LSM tree. The order into which locks are acquired is important to avoid deadlocks
+        // with the writes. The wal lock must always be acquired before the manifest one.
+        let mut manifest = self.manifest.lock().unwrap();
+        let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
+        wal.rotate(new_log_number)?;
+
+        drop(wal); // let release the write-ahead log as it is not needed
+
+        let edit = LsmTreeEdit::WalRotation { log_number: new_log_number };
+        let lsm_tree = self.append_edit(&mut manifest, &edit)?;
+        let memtable = lsm_tree.imm_memtables.back().unwrap().clone(); // We just pushed this memtable to the back, within the manifest lock, therefore we can safely retrieve it.
+
+        self.schedule_flush(memtable, callback)
+    }
+
+    fn schedule_flush<C>(self: &Arc<Self>,
+                      memtable: Arc<Memtable>,
+                      callback: &Arc<C>
+    ) -> Result<()>
+    where
+        C: Callback<Result<LsmTreeEdit>> + 'static,
+    {
+
+        let sst_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
+
+        let flush_task = FlushTask { db_file: DbFile::new_sst(sst_number), memtable, callback: Some(callback.clone()) };
+        self.flush_scheduler.enqueue(flush_task)
+    }
+
+
+    fn update_lsm_tree_sstables(self: &Arc<Self>, edit: Result<LsmTreeEdit>) -> Result<()> {
+
+        match edit {
+            Ok(edit) => {
+                // We want to perform the changes within the manifest lock to avoid concurrent updates to
+                // the LSM tree
+                let mut manifest = self.manifest.lock().unwrap();
+                self.append_edit(&mut manifest, &edit)?;
+
+                match edit {
+                    LsmTreeEdit::Flush { log_number, sst : _sst} => {
+                        // Delete write-ahead log files for persisted data
+                    },
+                    _ => {}
+                }
+                Ok(())
+            }
+            Err(error) => Err(error)
+        }
+
+
+    }
+
+    fn append_edit(self: &Arc<Self>,
+                   manifest:&mut MutexGuard<Manifest>,
+                   edit: &LsmTreeEdit
+    ) -> Result<(Arc<LsmTree>)> {
+
+        let lsm_tree = self.lsm_tree.load();
+
+        manifest.append_edit(&edit)?;
+        let new_tree = Arc::new(lsm_tree.apply(&edit));
+        self.lsm_tree.store(new_tree.clone());
+
+        if manifest.should_rotate() {
+            let new_manifest_id = self.next_file_number.fetch_add(1, Ordering::Relaxed);
+            manifest.rotate(new_manifest_id, &LsmTreeEdit::Snapshot(new_tree.clone()))?;
+        }
+        Ok(new_tree)
     }
 
     fn handle_write_error(&self, error: &Error, writers: &Vec<Arc<Writer>>) {
         todo!()
+    }
+}
+
+impl Callback<Result<LsmTreeEdit>> for AsyncCallback<Result<LsmTreeEdit>> {
+    fn call(&self, value: Result<LsmTreeEdit>) {
+        self.call(value);
     }
 }
 

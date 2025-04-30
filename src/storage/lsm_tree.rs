@@ -237,7 +237,7 @@ impl SnapshotElement for Level {
 
 #[derive(Default, PartialEq, Eq, Hash, Debug)]
 pub struct SSTableMetadata {
-    number: u32,
+    number: u64,
     level: u32,
     min_key: Vec<u8>,
     max_key: Vec<u8>,
@@ -246,8 +246,8 @@ pub struct SSTableMetadata {
 }
 
 impl SSTableMetadata {
-    pub(crate) fn new(
-        number: u32,
+    pub fn new(
+        number: u64,
         level: u32,
         min_key: &[u8],
         max_key: &[u8],
@@ -269,7 +269,7 @@ impl SnapshotElement for SSTableMetadata {
 
     fn read_from(reader: &ByteReader) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
-            number: reader.read_varint_u32()?,
+            number: reader.read_varint_u64()?,
             level: reader.read_varint_u32()?,
             min_key: reader.read_length_prefixed_slice()?.to_vec(),
             max_key: reader.read_length_prefixed_slice()?.to_vec(),
@@ -279,7 +279,7 @@ impl SnapshotElement for SSTableMetadata {
     }
 
     fn write_to(&self, writer:&mut ByteWriter) {
-        writer.write_varint_u32(self.number)
+        writer.write_varint_u64(self.number)
             .write_varint_u32(self.level)
             .write_length_prefixed_slice(&self.min_key)
             .write_length_prefixed_slice(&self.max_key)
@@ -371,20 +371,21 @@ impl SnapshotElement for CollectionMetadata {
     }
 }
 
+/// Represents the state of the Log Structured Merged Tree and the associated write-ahead log files.
 pub struct LsmTree {
-    /// The id of the current wal file
+    /// The number of the current write-ahead log file
     pub current_log_number: u64,
-    /// The id of the oldest wal file still containing some non persisted data
+    /// The number of the oldest write-ahead log file still containing some non persisted data
     pub oldest_log_number: u64,
     /// The next file number
     pub next_file_number: u64,
-    /// The last sequence number
+    /// The last sequence number persisted on disk
     pub last_sequence_number: u64,
     /// The collections metadata
     pub collections: Arc<BTreeMap<String, Arc<CollectionMetadata>>>,
     /// The current memtable
     pub memtable: Arc<Memtable>,
-    /// The memtables pending flush
+    /// The memtables pending flush (also called immutable memtables).
     pub imm_memtables: Arc<VecDeque<Arc<Memtable>>>,
     /// The SSTables per levels
     pub sst_levels: Arc<Levels>,
@@ -422,7 +423,7 @@ impl LsmTree {
             next_file_number,
             last_sequence_number: 0,
             collections: Arc::new(BTreeMap::new()),
-            memtable: Arc::new(Memtable::new()),
+            memtable: Arc::new(Memtable::new(current_log_number)),
             imm_memtables: Arc::new(VecDeque::with_capacity(0)),
             sst_levels: Default::default(),
         }
@@ -449,28 +450,43 @@ impl LsmTree {
 
     pub fn apply(&self, edit: &LsmTreeEdit) -> Self {
         match edit {
-            LsmTreeEdit::ScheduleMemtableForFlush() => {
+            LsmTreeEdit::WalRotation { log_number} => {
+                // The log was rotated because the memtable was considered as full. The memtable
+                // should be considered as immutable and placed in the queue waiting for being
+                // flushed to disk. A new memtable should be created and associated to the new log.
                 let mut imm_memtables = shallow_copy(&self.imm_memtables);
                 imm_memtables.push_back(self.memtable.clone());
+
+                // As the increase of the next_file_number, the rotation and the edit are applied
+                // together under the manifest lock, we are guaranty that the next_file_number will
+                // be log_number + 1 unless we are in replay in which case the next_file_number
+                // might already be bigger.
+                let next_file_number = self.next_file_number.max(log_number + 1);
                 LsmTree {
-                    current_log_number: self.current_log_number,
+                    current_log_number: *log_number,
                     oldest_log_number: self.oldest_log_number,
                     last_sequence_number: self.last_sequence_number,
-                    next_file_number: self.next_file_number,
+                    next_file_number,
                     collections: self.collections.clone(),
-                    memtable: Arc::new(Memtable::new()),
+                    memtable: Arc::new(Memtable::new(*log_number)),
                     imm_memtables: Arc::new(imm_memtables),
                     sst_levels: self.sst_levels.clone()
                 }
             }
-            LsmTreeEdit::Flush { log_id, sst} => {
+            LsmTreeEdit::Flush { log_number, sst} => {
                 let mut imm_memtables = shallow_copy(&self.imm_memtables);
-                imm_memtables.pop_front();
+                let flushed = imm_memtables.pop_front();
+                assert_eq!(log_number, &flushed.unwrap().log_number); // Sanity check that the flushed table is the expected one
                 let last_sequence_number = sst.max_sequence_number;
                 let sst_levels = Arc::new(self.sst_levels.add(sst.clone()));
+                let oldest_log_number = if let Some(oldest_memtable) = imm_memtables.front() {
+                    oldest_memtable.log_number
+                } else {
+                    self.current_log_number
+                };
                 LsmTree {
                     current_log_number: self.current_log_number,
-                    oldest_log_number: *log_id,
+                    oldest_log_number,
                     last_sequence_number,
                     next_file_number: self.next_file_number,
                     collections: self.collections.clone(),
@@ -519,24 +535,16 @@ impl LsmTree {
                     sst_levels: self.sst_levels.clone(),
                 }
             }
-            LsmTreeEdit::ManifestRotation { manifest_id } => {
+            LsmTreeEdit::ManifestRotation { manifest_number: manifest_id } => {
+                // As the increase of the next_file_number, the rotation and the edit are applied
+                // together under the manifest lock, we are guaranty that the next_file_number will
+                // be manifest_id + 1
+                let next_file_number = manifest_id + 1;
                 LsmTree {
                     current_log_number: self.current_log_number,
                     oldest_log_number: self.oldest_log_number,
                     last_sequence_number: self.last_sequence_number,
-                    next_file_number: manifest_id + 1,
-                    collections: self.collections.clone(),
-                    memtable: self.memtable.clone(),
-                    imm_memtables: self.imm_memtables.clone(),
-                    sst_levels: self.sst_levels.clone(),
-                }
-            }
-            LsmTreeEdit::WalRotation { log_id} => {
-                LsmTree {
-                    current_log_number: *log_id,
-                    oldest_log_number: self.oldest_log_number,
-                    last_sequence_number: self.last_sequence_number,
-                    next_file_number: log_id + 1,
+                    next_file_number,
                     collections: self.collections.clone(),
                     memtable: self.memtable.clone(),
                     imm_memtables: self.imm_memtables.clone(),
@@ -555,7 +563,10 @@ impl SnapshotElement for LsmTree {
         let next_file_number = reader.read_varint_u64()?;
         let last_sequence_number = reader.read_varint_u64()?;
         let collections = Self::read_collections_from(reader)?;
-        let memtable = Arc::new(Memtable::new());
+        // An LsmTree is deserialized, upon replay, from the manifest before replaying the
+        // write-ahead log files, therefore the first memtable should be associated to the oldest
+        // log file.
+        let memtable = Arc::new(Memtable::new(oldest_log_number));
         let imm_memtables = Arc::new(VecDeque::new());
         let sst_levels = Arc::new(Levels::read_from(reader)?);
 
@@ -607,13 +618,12 @@ where
 
 #[derive(Debug, PartialEq)]
 pub enum LsmTreeEdit {
-    Snapshot(LsmTree),
+    Snapshot(Arc<LsmTree>),
     CreateCollection { name: String, id: u32 },
     DropCollection { name: String },
-    WalRotation { log_id:  u64 },
-    ManifestRotation {  manifest_id: u64 },
-    Flush { log_id: u64, sst: Arc<SSTableMetadata>},
-    ScheduleMemtableForFlush(),
+    WalRotation { log_number:  u64 },
+    ManifestRotation {  manifest_number: u64 },
+    Flush { log_number: u64, sst: Arc<SSTableMetadata>},
     FilesDetectedOnRestart { next_file_number: u64 },
 }
 
@@ -634,24 +644,21 @@ impl LsmTreeEdit {
                 writer.write_u8(2)
                     .write_str(&name);
             }
-            LsmTreeEdit::WalRotation { log_id} => {
+            LsmTreeEdit::WalRotation { log_number } => {
                 writer.write_u8(3)
-                    .write_varint_u64(*log_id);
+                    .write_varint_u64(*log_number);
             }
-            LsmTreeEdit::ManifestRotation {  manifest_id } => {
+            LsmTreeEdit::ManifestRotation { manifest_number: manifest_id } => {
                 writer.write_u8(4)
                     .write_varint_u64(*manifest_id);
             }
-            LsmTreeEdit::Flush { log_id, sst} => {
+            LsmTreeEdit::Flush { log_number: log_id, sst} => {
                 writer.write_u8(5)
                     .write_varint_u64(*log_id);
                 sst.write_to(&mut writer);
             }
-            LsmTreeEdit::ScheduleMemtableForFlush() => {
-                writer.write_u8(6);
-            }
             LsmTreeEdit::FilesDetectedOnRestart { next_file_number} => {
-                writer.write_u8(7)
+                writer.write_u8(6)
                     .write_varint_u64(*next_file_number);
             }
         }
@@ -663,7 +670,7 @@ impl LsmTreeEdit {
         let edit = reader.read_u8()?;
         match edit {
             0 => {
-                Ok(LsmTreeEdit::Snapshot(LsmTree::read_from(&reader)?))
+                Ok(LsmTreeEdit::Snapshot(Arc::new(LsmTree::read_from(&reader)?)))
             },
             1 => {
                 let name = reader.read_str()?.to_string();
@@ -676,21 +683,18 @@ impl LsmTreeEdit {
             }
             3 => {
                 let log_id = reader.read_varint_u64()?;
-                Ok(LsmTreeEdit::WalRotation { log_id })
+                Ok(LsmTreeEdit::WalRotation { log_number: log_id })
             }
             4 => {
                 let manifest_id = reader.read_varint_u64()?;
-                Ok(LsmTreeEdit::ManifestRotation { manifest_id })
+                Ok(LsmTreeEdit::ManifestRotation { manifest_number: manifest_id })
             }
             5 => {
                 let log_id = reader.read_varint_u64()?;
                 let sst = Arc::new(SSTableMetadata::read_from(&reader)?);
-                Ok(LsmTreeEdit::Flush { log_id, sst })
+                Ok(LsmTreeEdit::Flush { log_number: log_id, sst })
             }
             6 => {
-                Ok(LsmTreeEdit::ScheduleMemtableForFlush {})
-            }
-            7 => {
                 let next_file_number = reader.read_varint_u64()?;
                 Ok(LsmTreeEdit::FilesDetectedOnRestart { next_file_number })
             }
@@ -914,14 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn test_schedule_memtable_flush_serialization() {
-        check_edit_serialization_roundtrip(LsmTreeEdit::ScheduleMemtableForFlush());
-    }
-
-    #[test]
     fn test_wal_and_manifest_rotation_serialization() {
-        check_edit_serialization_roundtrip(LsmTreeEdit::WalRotation { log_id: 123 });
-        check_edit_serialization_roundtrip(LsmTreeEdit::ManifestRotation { manifest_id: 456 });
+        check_edit_serialization_roundtrip(LsmTreeEdit::WalRotation { log_number: 123 });
+        check_edit_serialization_roundtrip(LsmTreeEdit::ManifestRotation { manifest_number: 456 });
     }
 
     #[test]
@@ -936,7 +935,7 @@ mod tests {
     () {
         let sst = create_sstable(1, 0, 1, 250, 100, 200);
         let edit = LsmTreeEdit::Flush {
-            log_id: 10,
+            log_number: 10,
             sst: sst.clone(),
         };
 
@@ -945,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_serialization() {
-        let edit = LsmTreeEdit::Snapshot(create_lsm_tree());
+        let edit = LsmTreeEdit::Snapshot(Arc::new(create_lsm_tree()));
         check_edit_serialization_roundtrip(edit);
     }
 
@@ -966,39 +965,14 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_schedule_and_flush_memtable() {
-        let tree = LsmTree::new(1, 2);
-        assert_eq!(tree.imm_memtables.len(), 0);
-
-        let tree = tree.apply(&LsmTreeEdit::ScheduleMemtableForFlush());
-        assert_eq!(tree.imm_memtables.len(), 1);
-
-        let sst = Arc::new(SSTableMetadata::new(
-            7, 0, b"a", b"z", 100, 200,
-        ));
-        let tree = tree.apply(&LsmTreeEdit::Flush {
-            log_id: 5,
-            sst: sst.clone(),
-        });
-
-        assert_eq!(tree.oldest_log_number, 5);
-        assert_eq!(tree.last_sequence_number, 200);
-        assert_eq!(tree.imm_memtables.len(), 0);
-        assert!(tree.sst_levels.levels[0]
-            .as_ref()
-            .find(b"b", 200)
-            .contains(&sst));
-    }
-
-    #[test]
     fn test_apply_wal_and_manifest_rotation() {
         let tree = LsmTree::new(1, 2);
 
-        let tree = tree.apply(&LsmTreeEdit::WalRotation { log_id: 99 });
+        let tree = tree.apply(&LsmTreeEdit::WalRotation { log_number: 99 });
         assert_eq!(tree.current_log_number, 99);
         assert_eq!(tree.next_file_number, 100);
 
-        let tree = tree.apply(&LsmTreeEdit::ManifestRotation { manifest_id: 150 });
+        let tree = tree.apply(&LsmTreeEdit::ManifestRotation { manifest_number: 150 });
         assert_eq!(tree.next_file_number, 151);
     }
 
@@ -1100,7 +1074,7 @@ mod tests {
     }
 
     fn create_sstable(
-        number: u32,
+        number: u64,
         level: u32,
         min_key: i32,
         max_key: i32,

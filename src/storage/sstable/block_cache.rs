@@ -1,6 +1,7 @@
 use moka::sync::Cache;
 use std::sync::Arc;
 use std::io::Error;
+use std::path::Path;
 use tracing::{debug, error, info};
 use crate::io::checksum::ChecksumStrategy;
 use crate::options::options::DatabaseOptions;
@@ -37,23 +38,22 @@ impl BlockCache {
     pub fn get(&self,
                compressor: &Arc<dyn Compressor>,
                checksum_strategy: &Arc<dyn ChecksumStrategy>,
-               file_path: &str,
+               file_path: &Path,
                block_handle: &BlockHandle
     ) -> Result<Arc<Vec<u8>>, Error> {
 
-        let key = (file_path.to_string(), block_handle.offset);
+        let key = (file_path.to_string_lossy().into_owned(), block_handle.offset);
 
         // Fetch or insert the block in a thread-safe manner
         let block = self.cache.get_with(key.clone(), || {
-            let path = file_path.to_string();
-
-            debug!("Loading block from {} at offset {}", file_path, block_handle.offset);
+            let path = file_path.to_string_lossy();
+            debug!("Loading block from {} at offset {}", path, block_handle.offset);
 
             // Read, decompress, and validate the block
-            let uncompressed_block = self.read_and_decompress(compressor, checksum_strategy, &path, block_handle);
+            let uncompressed_block = self.read_and_decompress(compressor, checksum_strategy, file_path, block_handle);
 
             if let Err(e) = uncompressed_block {
-                error!("Error loading block from {} at offset {}: {}", file_path, block_handle.offset, e);
+                error!("Error loading block from {} at offset {}: {}", path, block_handle.offset, e);
                 return Err(Arc::new(e))
             }
 
@@ -66,7 +66,7 @@ impl BlockCache {
     fn read_and_decompress(&self,
                            compressor: &Arc<dyn Compressor>,
                            checksum_strategy: &Arc<dyn ChecksumStrategy>,
-                           path: &String,
+                           path: &Path,
                            block_handle: &BlockHandle
     ) -> Result<Vec<u8>, Error> {
 

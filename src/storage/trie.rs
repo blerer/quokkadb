@@ -50,17 +50,17 @@ impl Trie {
 
         let guard = &epoch::pin();
 
-        let old = self.root.load(Ordering::Acquire, guard);
+        let old = self.root.load(Ordering::Relaxed, guard);
 
         if old.is_null() {
             // Try to install a new node
             let new = Owned::new(Self::new_leaf(key, value));
-            self.root.store(new, Ordering::Release);
+            self.root.store(new, Ordering::Relaxed);
 
         } else {
             // Node already exists, follow it
             if let Some(new_node) = Self::insert_internal(old, key, value, guard) {
-                self.root.store(new_node, Ordering::Release);
+                self.root.store(new_node, Ordering::Relaxed);
             }
         }
     }
@@ -95,10 +95,10 @@ impl Trie {
                     Ok(i) => {
                         // Update existing child
                         let atomic = &transitions[i].1;
-                        let shared = atomic.load(Ordering::Acquire, guard);
+                        let shared = atomic.load(Ordering::Relaxed, guard);
 
                         if let Some(new_node) = Self::insert_internal(shared, &key[1..], value, guard) {
-                            atomic.store(new_node, Ordering::Release);
+                            atomic.store(new_node, Ordering::Relaxed);
                         }
                         None
                     }
@@ -131,9 +131,9 @@ impl Trie {
 
                 if common == path.len() {
 
-                    let shared = child.load(Ordering::Acquire, guard);
+                    let shared = child.load(Ordering::Relaxed, guard);
                     if let Some(new_node) = Self::insert_internal(shared, &key[common..], value, guard) {
-                        child.store(new_node, Ordering::Release);
+                        child.store(new_node, Ordering::Relaxed);
                     }
                     None
 
@@ -183,21 +183,21 @@ impl Trie {
             }
             Node::Prefix { content: _ , child } => {
 
-                let shared = child.load(Ordering::Acquire, guard);
+                let shared = child.load(Ordering::Relaxed, guard);
                 if let Some(new_node) = Self::insert_internal(shared, key, value, guard) {
-                    child.store(new_node, Ordering::Release);
+                    child.store(new_node, Ordering::Relaxed);
                 }
                 None
              }
             Node::Split { children } => {
                 let idx = key[0] as usize;
                 let atomic = &children[idx];
-                let shared = atomic.load(Ordering::Acquire, guard);
+                let shared = atomic.load(Ordering::Relaxed, guard);
                 if shared.is_null() {
-                    atomic.store(Owned::new(Self::new_leaf(&key[1..], value)), Ordering::Release);
+                    atomic.store(Owned::new(Self::new_leaf(&key[1..], value)), Ordering::Relaxed);
                 } else {
                     if let Some(new_node) = Self::insert_internal(shared, &key[1..], value, guard) {
-                        atomic.store(new_node, Ordering::Release);
+                        atomic.store(new_node, Ordering::Relaxed);
                     }
                 }
                 None

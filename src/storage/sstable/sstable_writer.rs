@@ -1,4 +1,5 @@
 use std::io::{Write, BufWriter, Result};
+use std::path::Path;
 use std::sync::Arc;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::Compressor;
@@ -7,8 +8,10 @@ use crate::util::bloom_filter::BloomFilter;
 use crate::options::options::Options;
 use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
 use crate::storage::sstable::{BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION, SSTABLE_FOOTER_LENGTH};
-use crate::storage::sstable::sstable_properties::SSTablePropertiesBuilder;
+use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTablePropertiesBuilder};
 use crate::io::varint;
+use crate::storage::files::DbFile;
+use crate::storage::lsm_tree::SSTableMetadata;
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///
@@ -24,6 +27,7 @@ use crate::io::varint;
 ///
 /// This builder provides methods to add data, construct the necessary metadata, and finalize the SSTable.
 pub struct SSTableWriter<'a> {
+    id: u64,
     data_block_builder: BlockBuilder<Vec<u8>, DataEntryWriter>,
     index_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
     metaindex_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
@@ -46,8 +50,17 @@ impl<'a> SSTableWriter<'a> {
     ///
     /// # Returns
     /// A new instance of `SSTableWriter` configured with the provided options.
-    pub fn new(fd_cache:Arc<FileDescriptorCache>, file_path: &str, options: Options, expected_keys: usize) -> Result<Self> {
-        let file = fd_cache.get_or_open(file_path)?;
+    pub fn new(
+        fd_cache:Arc<FileDescriptorCache>,
+        directory: &Path,
+        db_file: &DbFile,
+        options: &Options,
+        expected_keys: usize
+    ) -> Result<Self> {
+
+        let id = db_file.id;
+        let file_path = directory.join(db_file.filename());
+        let file = fd_cache.get_or_open(&file_path)?;
 
         let sstable_options = options.sstable_options();
         let restart_interval = sstable_options.restart_interval();
@@ -62,6 +75,7 @@ impl<'a> SSTableWriter<'a> {
         let file_write_buffer_size = database_options.file_write_buffer_size();
 
         Ok(Self {
+            id,
             data_block_builder,
             index_block_builder,
             metaindex_block_builder,
@@ -101,20 +115,30 @@ impl<'a> SSTableWriter<'a> {
     ///
     /// This method writes the remaining data block (if any), constructs the index and metaindex
     /// blocks, and writes the footer to complete the SSTable.
-    pub fn finish(&mut self) -> Result<()> {
+    pub fn finish(&mut self) -> Result<SSTableMetadata> {
         if !self.data_block_builder.is_empty() {
             self.flush_data_block()?;
         }
 
+        let properties = self.properties_builder.build();
+
         let index_handle = self.write_index_block()?;
         let bloom_filter_handle = self.write_bloom_filter()?;
-        let properties_handle = self.write_properties()?;
+        let properties_handle = self.write_properties(&properties)?;
 
         self.add_to_metaindex("filter.quokkadb.BloomFilter", bloom_filter_handle)?;
         self.add_to_metaindex("properties", properties_handle)?;
 
         let metaindex_handle = self.write_metaindex_block()?;
-        self.write_footer(index_handle, metaindex_handle)
+        self.write_footer(index_handle, metaindex_handle)?;
+        Ok(SSTableMetadata::new(
+            self.id,
+            0,
+            &properties.min_key,
+            &properties.max_key,
+            properties.min_sequence,
+            properties.max_sequence
+        ))
     }
 
     /// Flushes the current data block to the output file.
@@ -161,8 +185,8 @@ impl<'a> SSTableWriter<'a> {
     }
 
     /// Writes the SSTable properties to the SSTable.
-    fn write_properties(&mut self) -> Result<BlockHandle> {
-        let data = self.properties_builder.build().to_vec()?;
+    fn write_properties(&mut self, properties: &SSTableProperties) -> Result<BlockHandle> {
+        let data = properties.to_vec()?;
         self.finalize_and_write_block(data)
     }
 
