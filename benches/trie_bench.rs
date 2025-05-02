@@ -10,6 +10,8 @@ use crossbeam_skiplist::SkipMap;
 
 use quokkadb::storage::trie::Trie;
 
+use pprof::ProfilerGuard;
+
 
 /// Generate `n` realistic internal database keys.
 pub fn generate_realistic_keys(n: usize) -> Vec<Vec<u8>> {
@@ -38,7 +40,9 @@ pub fn generate_realistic_keys(n: usize) -> Vec<Vec<u8>> {
 }
 
 fn bench_insert_trie(c: &mut Criterion) {
-    println!("Running insert_trie benchmark!");
+
+    let guard = pprof::ProfilerGuard::new(100).unwrap();
+
     let keys = generate_realistic_keys(10_000);
     c.bench_function("insert_trie", |b| {
         b.iter(|| {
@@ -48,6 +52,11 @@ fn bench_insert_trie(c: &mut Criterion) {
             }
         });
     });
+
+    if let Ok(report) = guard.report().build() {
+        let file = std::fs::File::create("flamegraph.svg").unwrap();
+        report.flamegraph(file).unwrap();
+    }
 }
 
 fn bench_insert_skipmap(c: &mut Criterion) {
