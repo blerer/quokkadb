@@ -44,6 +44,7 @@ fn bench_insert_trie(c: &mut Criterion) {
     let guard = pprof::ProfilerGuard::new(100).unwrap();
 
     let keys = generate_realistic_keys(10_000);
+
     c.bench_function("insert_trie", |b| {
         b.iter(|| {
             let trie = Trie::new();

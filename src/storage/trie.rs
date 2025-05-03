@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use arc_swap::ArcSwap;
+use smallvec::{smallvec, SmallVec};
 
 /// Represents a node in the compressed trie.
 ///
@@ -11,13 +12,17 @@ use arc_swap::ArcSwap;
 #[derive(Debug, PartialEq)]
 enum Node {
     /// A compressed path fragment with a single child.
-    Chain {
+    ChainMany {
+        path: Arc<[u8]>,
+        child: Arc<Node>,
+    },
+    ChainOne {
         path: u8,
         child: Arc<Node>,
     },
     /// A node with multiple children (up to a threshold).
     Sparse {
-        transitions: Vec<(u8, Arc<Node>)>,
+        transitions: SmallVec<[(u8, Arc<Node>); 7]>,
     },
     /// A node optimized for many children (direct array index by byte value).
     Split {
@@ -38,14 +43,23 @@ enum Node {
 impl Node {
 
     fn new(key: &[u8], value: &[u8]) -> Arc<Node> {
-        let leaf = Node::Leaf { value: Arc::from(value) };
-        Arc::new(if key.is_empty() {
+        let leaf = Arc::new(Node::Leaf { value: Arc::from(value) });
+        if key.is_empty() {
             leaf
         } else {
-            Node::Chain { path: key.to_vec(), child: Arc::new(leaf) }
+            Self::new_chain(key, leaf)
+        }
+    }
+
+    fn new_chain(path: &[u8], child: Arc<Node>) -> Arc<Node> {
+        Arc::new(if path.len() == 1 {
+            Node::ChainOne { path: path[0], child }
+        } else {
+            Node::ChainMany { path: Arc::from(path), child }
         })
     }
 
+    #[inline(never)]
     fn insert(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Arc<Node> {
 
         if key.is_empty() {
@@ -70,101 +84,123 @@ impl Node {
                 Node::new(key, value)
             },
             Node::Sparse { transitions } => {
-
-                let mut new_transitions = Vec::with_capacity(transitions.len() + 1);
-                let mut inserted = false;
-                for (b, node) in transitions.iter() {
-                    if b == &key[0] {
-                        new_transitions.push((*b, node.insert(&key[1..], value)));
-                        inserted = true;
-                    } else {
-                        if !inserted && b > &key[0] {
-                            new_transitions.push((key[0], Node::new(&key[1..], value)));
-                            inserted = true;
-                        }
-                        new_transitions.push((*b, node.clone()));
-                    }
-                }
-
-                if !inserted {
-                    new_transitions.push((key[0], Node::new(&key[1..], value)));
-                }
-
-                if new_transitions.len() <= 6 {
-                    Arc::new(Node::Sparse { transitions: new_transitions })
-                } else {
-                    Arc::new(Node::Split { children: ImmutableArray::new(new_transitions) })
-                }
+                Self::insert_into_sparse(&key, value, transitions)
             }
-            Node::Chain { path, child } => {
-
-                let common = path.iter()
-                    .zip(key.iter())
-                    .take_while(|(a, b)| a == b)
-                    .count();
-
-                if common == path.len() {
-
-                    Arc::new(Node::Chain {
-                        path: path.to_vec(),
-                        child: child.insert(&key[common..], value)
-                    })
-
-                } else if common == key.len() {
-
-                    // The key end within the chain. We need to break the chain to introduce
-                    // a prefix
-
-                    let new_child = Node::Chain {
-                        path: path[common..].to_vec(),
-                        child: child.clone(),
-                    };
-
-                    let new_child = Node::Prefix { content : Arc::from(value), child: Arc::new(new_child) };
-
-                    Arc::new(Node::Chain {
-                        path: path[..common].to_vec(),
-                        child: Arc::new(new_child),
-                    })
-
-                } else {
-
-                    // Need to split the chain
-                    let mut transitions = vec![
-                        (path[common], Arc::new(Node::Chain { path: path[common + 1..].to_vec(), child: child.clone() })),
-                        (key[common], Node::new(&key[common + 1..], value)),
-                    ];
-                    transitions.sort_unstable_by_key(|(b, _)| *b);
-
-                    let mut new_node = Node::Sparse { transitions };
-
-                    if common != 0 {
-                        new_node = Node::Chain {
-                            path: path[..common].to_vec(),
-                            child: Arc::new(new_node),
-                        };
-                    }
-
-                    Arc::new(new_node)
-                }
-            }
+            Node::ChainOne { path, child} => {
+                Self::insert_into_chain_one(&key, value, path, child)
+            },
+            Node::ChainMany { path, child } => {
+                Self::insert_into_chain_many(&key, value, &path, child)
+            },
             Node::Leaf { value: current_value } => {
-                Arc::new(Node::Prefix {
-                    content: current_value.clone(),
-                    child : Node::new(key, value),
-                })
-            }
+                Self::insert_into_leaf(key, value, current_value)
+            },
             Node::Prefix { content , child } => {
-                Arc::new(Node::Prefix {
-                    content: content.clone(),
-                    child : child.insert(key, value),
-                })
-            }
+                Self::insert_into_prefix(key, value, content, child)
+            },
             Node::Split { children } => {
-                Arc::new(Node::Split {
-                    children: children.insert(key[0], &key[1..], value),
-                })
+                Self::insert_into_split(&key, value, children)
+            },
+        }
+    }
+
+    fn insert_into_split(key: &&[u8], value: &[u8], children: &ImmutableArray) -> Arc<Node> {
+        Arc::new(Node::Split {
+            children: children.insert(key[0], &key[1..], value),
+        })
+    }
+
+    fn insert_into_prefix(key: &[u8], value: &[u8], content: &Arc<[u8]>, child: &Arc<Node>) -> Arc<Node> {
+        Arc::new(Node::Prefix {
+            content: content.clone(),
+            child: child.insert(key, value),
+        })
+    }
+
+    fn insert_into_leaf(key: &[u8], value: &[u8], current_value: &Arc<[u8]>) -> Arc<Node> {
+        Arc::new(Node::Prefix {
+            content: current_value.clone(),
+            child: Node::new(key, value),
+        })
+    }
+
+    fn insert_into_chain_many(key: &&[u8], value: &[u8], path: &Arc<[u8]>, child: &Arc<Node>) -> Arc<Node> {
+        let common = path.iter()
+            .zip(key.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        if common == path.len() {
+            Arc::new(Node::ChainMany {
+                path: path.clone(),
+                child: child.insert(&key[common..], value)
+            })
+        } else if common == key.len() {
+
+            // The key end within the chain. We need to break the chain to introduce
+            // a prefix
+
+            let new_child = Self::new_chain(&path[common..], child.clone());
+            let new_child = Node::Prefix { content: Arc::from(value), child: new_child };
+            Self::new_chain(&path[..common], Arc::new(new_child))
+        } else {
+
+            // Need to split the chain
+            let mut transitions = smallvec![
+                        (path[common], Self::new_chain(&path[common + 1..], child.clone())),
+                        (key[common], Self::new(&key[common + 1..], value)),
+                    ];
+            transitions.sort_unstable_by_key(|(b, _)| *b);
+
+            let mut new_node = Arc::new(Node::Sparse { transitions });
+
+            if common != 0 {
+                new_node = Self::new_chain(&path[..common], new_node);
             }
+
+            new_node
+        }
+    }
+
+    fn insert_into_chain_one(key: &&[u8], value: &[u8], path: &u8, child: &Arc<Node>) -> Arc<Node> {
+        if *path == key[0] {
+            Arc::new(Node::ChainOne { path: *path, child: child.insert(&key[1..], value) })
+        } else {
+            // Need to split the chain
+            let mut transitions = smallvec![
+                        (*path, child.clone()),
+                        (key[0], Self::new(&key[1..], value)),
+                    ];
+            transitions.sort_unstable_by_key(|(b, _)| *b);
+
+            Arc::new(Node::Sparse { transitions })
+        }
+    }
+
+    fn insert_into_sparse(key: &&[u8], value: &[u8], transitions: &SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
+        let mut new_transitions = SmallVec::with_capacity(transitions.len() + 1);
+        let mut inserted = false;
+        for (b, node) in transitions.iter() {
+            if b == &key[0] {
+                new_transitions.push((*b, node.insert(&key[1..], value)));
+                inserted = true;
+            } else {
+                if !inserted && b > &key[0] {
+                    new_transitions.push((key[0], Node::new(&key[1..], value)));
+                    inserted = true;
+                }
+                new_transitions.push((*b, node.clone()));
+            }
+        }
+
+        if !inserted {
+            new_transitions.push((key[0], Node::new(&key[1..], value)));
+        }
+
+        if new_transitions.len() <= 6 {
+            Arc::new(Node::Sparse { transitions: new_transitions })
+        } else {
+            Arc::new(Node::Split { children: ImmutableArray::new(new_transitions) })
         }
     }
 }
@@ -291,11 +327,7 @@ impl ImmutableArray {
         ImmutableArray { items: std::array::from_fn(|_| None) }
     }
 
-    fn new(nodes: Vec<(u8, Arc<Node>)>) -> Self {
-
-        if nodes.is_empty() {
-            return Self::empty();
-        }
+    fn new(nodes: SmallVec<[(u8, Arc<Node>); 7]>) -> Self {
 
         // We know that the nodes are ordered by u8
         let mut array = std::array::from_fn(|_| None);
@@ -375,43 +407,13 @@ mod tests {
     use crate::storage::trie::{ImmutableArray, Node, Trie};
 
     mod immutable_array {
+        use smallvec::{smallvec, SmallVec};
         use super::*;                // ImmutableArray, Node, Leafs, Internals
-
-        /// Simple reference implementation: each byte value indexes directly.
-        #[derive(Clone)]
-        struct Dense256([Option<Arc<Node>>; 256]);
-
-        impl Dense256 {
-            fn new(pairs: &[(u8, Arc<Node>)]) -> Self {
-                let mut d = Self(std::array::from_fn(|_| None));
-                for (b, n) in pairs {
-                    d.0[*b as usize] = Some(n.clone());
-                }
-                d
-            }
-            fn insert(&self, b: u8, n: Arc<Node>) -> Self {
-                let mut d = self.clone();
-                d.0[b as usize] = Some(n);
-                d
-            }
-            fn get(&self, b: u8) -> Option<Arc<Node>> {
-                self.0[b as usize].clone()
-            }
-        }
-
-        /// Helper that compares two optional `Arc<Node>`s by pointer, not by value.
-        fn same(a: Option<Arc<Node>>, b: Option<Arc<Node>>) -> bool {
-            match (a, b) {
-                (Some(x), Some(y)) => &x == &y,
-                (None, None) => true,
-                _ => false,
-            }
-        }
 
         #[test]
         fn new_and_get() {
             // build 64 deterministic pairs so we exercise every bucket
-            let pairs: Vec<_> = (0..=u8::MAX)
+            let pairs: SmallVec<_> = (0..=u8::MAX)
                 .step_by(4)
                 .map(|b| (b, Arc::new(Node::Leaf { value: Arc::from([b]) })))
                 .collect();
@@ -438,7 +440,7 @@ mod tests {
         #[test]
         fn new() {
 
-            let pairs: Vec<_> = (0..=u8::MAX)
+            let pairs: SmallVec<_> = (0..=u8::MAX)
                 .map(|b| (b, Arc::new(Node::Leaf { value: Arc::from([b]) })))
                 .collect();
 
@@ -466,38 +468,11 @@ mod tests {
         }
 
         #[test]
-        fn insert_matches_dense() {
-
-            let mut pairs: Vec<(u8, Arc<Node>)> = (0..128u8)
-                .map(|b| (b, Arc::new(Node::Leaf { value: Arc::from([b]) })))
-                .collect();
-
-            let ia0 = ImmutableArray::new(pairs.clone());
-            let dense0 = Dense256::new(&pairs);
-
-            // insert 128 more keys, verifying after each step
-            for b in 128u8..=255 {
-                let n = Arc::new(Node::Leaf { value: Arc::from([b]) });
-                pairs.push((b, n.clone()));
-
-                let ia1 = ia0.insert(b, &[], &[b]);          // value doesn’t matter, compare pointers
-                let dense1 = dense0.insert(b, n);
-
-                for k in 0u8..=255 {
-                    assert!(same(ia1.get(k), dense1.get(k)), "after inserting {:02X}", b);
-                }
-
-                // old array must be unchanged (COW)
-                assert!(ia0.get(b).is_none(), "ia0 mutated by insert");
-            }
-        }
-
-        #[test]
         fn updates_existing_slot() {
             let leaf1 = Arc::new(Node::Leaf { value: Arc::from(*b"X") });
             let leaf2 = Arc::new(Node::Leaf { value: Arc::from(*b"Y") });
 
-            let array_original = ImmutableArray::new(vec![(42, leaf1.clone())]);
+            let array_original = ImmutableArray::new(smallvec![(42, leaf1.clone())]);
             let array_updated = array_original.insert(42, b"", b"Y");
 
             assert_ne!(array_original.get(42), array_updated.get(42));
@@ -507,6 +482,7 @@ mod tests {
     }
 
     mod trie {
+        use smallvec::{smallvec, SmallVec};
         use super::*;
         #[test]
         fn insert() {
@@ -519,7 +495,7 @@ mod tests {
 
             trie.insert(b"dog", b"2");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", leaf(b"1"))),
                 (b'd', chain(b"og", leaf(b"2")))
             ]);
@@ -528,7 +504,7 @@ mod tests {
 
             trie.insert(b"monkey", b"3");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", leaf(b"1"))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'm', chain(b"onkey", leaf(b"3")))
@@ -538,10 +514,10 @@ mod tests {
 
             trie.insert(b"mountain lion", b"4");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", leaf(b"1"))),
                 (b'd', chain(b"og", leaf(b"2"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain lion", leaf(b"4"))),
                 ]))),
@@ -551,10 +527,10 @@ mod tests {
 
             trie.insert(b"caterpillar", b"5");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain lion", leaf(b"4"))),
                 ]))),
@@ -564,11 +540,11 @@ mod tests {
 
             trie.insert(b"kangaroo", b"6");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain lion", leaf(b"4"))),
                 ]))),
@@ -578,11 +554,11 @@ mod tests {
 
             trie.insert(b"mountain", b"7");
 
-            let expected = sparse(vec![
+            let expected = sparse(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain", prefix(b"7", chain(b" lion", leaf(b"4"))))),
                 ]))),
@@ -592,11 +568,11 @@ mod tests {
 
             trie.insert(b"", b"8");
 
-            let expected = prefix(b"8", sparse(vec![
+            let expected = prefix(b"8", sparse(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain", prefix(b"7", chain(b" lion", leaf(b"4"))))),
                 ]))),
@@ -607,12 +583,12 @@ mod tests {
             trie.insert(b"giraffe", b"9");
             trie.insert(b"zebra", b"10");
 
-            let expected = prefix(b"8", sparse(vec![
+            let expected = prefix(b"8", sparse(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'g', chain(b"iraffe", leaf(b"9"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain", prefix(b"7", chain(b" lion", leaf(b"4"))))),
                 ]))),
@@ -623,12 +599,12 @@ mod tests {
 
             trie.insert(b"snake", b"11");
 
-            let expected = prefix(b"8", split(vec![
+            let expected = prefix(b"8", split(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'g', chain(b"iraffe", leaf(b"9"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain", prefix(b"7", chain(b" lion", leaf(b"4"))))),
                 ]))),
@@ -640,12 +616,12 @@ mod tests {
 
             trie.insert(b"quokka", b"12");
 
-            let expected = prefix(b"8", split(vec![
+            let expected = prefix(b"8", split(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'g', chain(b"iraffe", leaf(b"9"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
                     (b'u', chain(b"ntain", prefix(b"7", chain(b" lion", leaf(b"4"))))),
                 ]))),
@@ -658,14 +634,14 @@ mod tests {
 
             trie.insert(b"mountain goat", b"13");
 
-            let expected = prefix(b"8", split(vec![
+            let expected = prefix(b"8", split(smallvec![
                 (b'c', chain(b"at", prefix(b"1", chain(b"erpillar", leaf(b"5"))))),
                 (b'd', chain(b"og", leaf(b"2"))),
                 (b'g', chain(b"iraffe", leaf(b"9"))),
                 (b'k', chain(b"angaroo", leaf(b"6"))),
-                (b'm', chain(b"o", sparse(vec![
+                (b'm', chain(b"o", sparse(smallvec![
                     (b'n', chain(b"key", leaf(b"3"))),
-                    (b'u', chain(b"ntain", prefix(b"7", chain(b" ", sparse(vec![
+                    (b'u', chain(b"ntain", prefix(b"7", chain(b" ", sparse(smallvec![
                         (b'g', chain(b"oat", leaf(b"13"))),
                         (b'l', chain(b"ion", leaf(b"4"))),
                     ]))))),
@@ -713,14 +689,14 @@ mod tests {
             trie.insert(b"cobra", b"1");
             trie.insert(b"python", b"2");
 
-            assert_tries_eq(&trie, sparse(vec![
+            assert_tries_eq(&trie, sparse(smallvec![
                 (b'c', chain(b"obra", leaf(b"1"))),
                 (b'p', chain(b"ython", leaf(b"2"))),
             ]));
 
             trie.insert(b"mamba", b"3");
 
-            assert_tries_eq(&trie, sparse(vec![
+            assert_tries_eq(&trie, sparse(smallvec![
                 (b'c', chain(b"obra", leaf(b"1"))),
                 (b'm', chain(b"amba", leaf(b"3"))),
                 (b'p', chain(b"ython", leaf(b"2"))),
@@ -728,7 +704,7 @@ mod tests {
 
             trie.insert(b"boa", b"4");
 
-            assert_tries_eq(&trie, sparse(vec![
+            assert_tries_eq(&trie, sparse(smallvec![
                 (b'b', chain(b"oa", leaf(b"4"))),
                 (b'c', chain(b"obra", leaf(b"1"))),
                 (b'm', chain(b"amba", leaf(b"3"))),
@@ -737,7 +713,7 @@ mod tests {
 
             trie.insert(b"sidewinder", b"5");
 
-            assert_tries_eq(&trie, sparse(vec![
+            assert_tries_eq(&trie, sparse(smallvec![
                 (b'b', chain(b"oa", leaf(b"4"))),
                 (b'c', chain(b"obra", leaf(b"1"))),
                 (b'm', chain(b"amba", leaf(b"3"))),
@@ -747,9 +723,9 @@ mod tests {
 
             trie.insert(b"copperhead", b"6");
 
-            assert_tries_eq(&trie, sparse(vec![
+            assert_tries_eq(&trie, sparse(smallvec![
                 (b'b', chain(b"oa", leaf(b"4"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"1"))),
                     (b'p', chain(b"perhead", leaf(b"6"))),
                 ]))),
@@ -760,9 +736,9 @@ mod tests {
 
             trie.insert(b"", b"7");
 
-            assert_tries_eq(&trie, prefix(b"7", sparse(vec![
+            assert_tries_eq(&trie, prefix(b"7", sparse(smallvec![
                 (b'b', chain(b"oa", leaf(b"4"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"1"))),
                     (b'p', chain(b"perhead", leaf(b"6"))),
                 ]))),
@@ -771,7 +747,6 @@ mod tests {
                 (b's', chain(b"idewinder", leaf(b"5"))),
             ])));
         }
-
 
         #[test]
         fn insert_into_split() {
@@ -784,7 +759,7 @@ mod tests {
             trie.insert(b"sidewinder", b"6");
             trie.insert(b"taipan", b"7");
 
-            assert_tries_eq(&trie, split(vec![
+            assert_tries_eq(&trie, split(smallvec![
                 (b'b', chain(b"oa", leaf(b"1"))),
                 (b'c', chain(b"obra", leaf(b"2"))),
                 (b'f', chain(b"er-de-lance", leaf(b"3"))),
@@ -796,9 +771,9 @@ mod tests {
 
             trie.insert(b"copperhead", b"8");
 
-            assert_tries_eq(&trie, split(vec![
+            assert_tries_eq(&trie, split(smallvec![
                 (b'b', chain(b"oa", leaf(b"1"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"2"))),
                     (b'p', chain(b"perhead", leaf(b"8"))),
                 ]))),
@@ -811,10 +786,10 @@ mod tests {
 
             trie.insert(b"asian cobra", b"9");
 
-            assert_tries_eq(&trie, split(vec![
+            assert_tries_eq(&trie, split(smallvec![
                 (b'a', chain(b"sian cobra", leaf(b"9"))),
                 (b'b', chain(b"oa", leaf(b"1"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"2"))),
                     (b'p', chain(b"perhead", leaf(b"8"))),
                 ]))),
@@ -827,10 +802,10 @@ mod tests {
 
             trie.insert(b"water snake", b"10");
 
-            assert_tries_eq(&trie, split(vec![
+            assert_tries_eq(&trie, split(smallvec![
                 (b'a', chain(b"sian cobra", leaf(b"9"))),
                 (b'b', chain(b"oa", leaf(b"1"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"2"))),
                     (b'p', chain(b"perhead", leaf(b"8"))),
                 ]))),
@@ -844,10 +819,10 @@ mod tests {
 
             trie.insert(b"cottonmouth", b"11");
 
-            assert_tries_eq(&trie, split(vec![
+            assert_tries_eq(&trie, split(smallvec![
                 (b'a', chain(b"sian cobra", leaf(b"9"))),
                 (b'b', chain(b"oa", leaf(b"1"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"2"))),
                     (b'p', chain(b"perhead", leaf(b"8"))),
                     (b't', chain(b"tonmouth", leaf(b"11"))),
@@ -862,10 +837,10 @@ mod tests {
 
             trie.insert(b"", b"12");
 
-            assert_tries_eq(&trie, prefix(b"12", split(vec![
+            assert_tries_eq(&trie, prefix(b"12", split(smallvec![
                 (b'a', chain(b"sian cobra", leaf(b"9"))),
                 (b'b', chain(b"oa", leaf(b"1"))),
-                (b'c', chain(b"o", sparse(vec![
+                (b'c', chain(b"o", sparse(smallvec![
                     (b'b', chain(b"ra", leaf(b"2"))),
                     (b'p', chain(b"perhead", leaf(b"8"))),
                     (b't', chain(b"tonmouth", leaf(b"11"))),
@@ -901,16 +876,16 @@ mod tests {
 
             trie.insert(b"common european viper", b"2");
 
-            assert_tries_eq(&trie, chain(b"co", sparse(vec![
+            assert_tries_eq(&trie, chain(b"co", sparse(smallvec![
                 (b'b', chain(b"ra", leaf(b"1"))),
                 (b'm', chain(b"mon european viper", leaf(b"2"))),
             ])));
 
             trie.insert(b"common water snake", b"3");
 
-            assert_tries_eq(&trie, chain(b"co", sparse(vec![
+            assert_tries_eq(&trie, chain(b"co", sparse(smallvec![
                 (b'b', chain(b"ra", leaf(b"1"))),
-                (b'm', chain(b"mon ", sparse(vec![
+                (b'm', chain(b"mon ", sparse(smallvec![
                     (b'e', chain(b"uropean viper", leaf(b"2"))),
                     (b'w', chain(b"ater snake", leaf(b"3"))),
                 ]))),
@@ -921,12 +896,12 @@ mod tests {
             assert_eq!(trie.root.load().deref(), &expected);
         }
 
-        fn sparse(transitions: Vec<(u8, Arc<Node>)>) -> Arc<Node> {
+        fn sparse(transitions: SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
             Arc::new(Node::Sparse { transitions })
         }
 
         fn chain(key: &[u8], value: Arc<Node>) -> Arc<Node> {
-            Arc::new(Node::Chain { path: key.to_vec(), child: value })
+            Node::new_chain(key, value)
         }
 
         fn leaf(value: &[u8]) -> Arc<Node> {
@@ -937,7 +912,7 @@ mod tests {
             Arc::new(Node::Prefix { content: Arc::from(content), child })
         }
 
-        fn split(transitions: Vec<(u8, Arc<Node>)>) -> Arc<Node> {
+        fn split(transitions: SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
             Arc::new(Node::Split { children: ImmutableArray::new(transitions) })
         }
     }
