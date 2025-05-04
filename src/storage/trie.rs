@@ -9,16 +9,16 @@ use smallvec::{smallvec, SmallVec};
 /// - `Split`: A node with many children (indexed directly by byte).
 /// - `Leaf`: A terminal node holding a value.
 /// - `Prefix`: A node that has both a value and continues with children.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Node {
     /// A compressed path fragment with a single child.
     ChainMany {
         path: Arc<[u8]>,
-        child: Arc<Node>,
+        child: Box<Node>,
     },
     ChainOne {
         path: u8,
-        child: Arc<Node>,
+        child: Box<Node>,
     },
     /// A node with multiple children (up to a threshold).
     Sparse {
@@ -35,15 +35,15 @@ enum Node {
     /// A node that stores a value and continues with children.
     Prefix {
         content: Arc<[u8]>,
-        child: Arc<Node>,
+        child: Box<Node>,
     },
     Empty,
 }
 
 impl Node {
 
-    fn new(key: &[u8], value: &[u8]) -> Arc<Node> {
-        let leaf = Arc::new(Node::Leaf { value: Arc::from(value) });
+    fn new(key: &[u8], value: &[u8]) -> Node {
+        let leaf = Node::Leaf { value: Arc::from(value) };
         if key.is_empty() {
             leaf
         } else {
@@ -51,35 +51,35 @@ impl Node {
         }
     }
 
-    fn new_chain(path: &[u8], child: Arc<Node>) -> Arc<Node> {
-        Arc::new(if path.len() == 1 {
-            Node::ChainOne { path: path[0], child }
+    fn new_chain(path: &[u8], child: Node) -> Node {
+        if path.len() == 1 {
+            Node::ChainOne { path: path[0], child: Box::new(child) }
         } else {
-            Node::ChainMany { path: Arc::from(path), child }
-        })
+            Node::ChainMany { path: Arc::from(path), child: Box::new(child) }
+        }
     }
 
     #[inline(never)]
-    fn insert(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Arc<Node> {
+    fn insert(&self, key: &[u8], value: &[u8]) -> Node {
 
         if key.is_empty() {
-            return match self.as_ref() {
+            return match self {
                 Node::Prefix { content: _, child } => {
-                    Arc::new(Node::Prefix {
+                    Node::Prefix {
                         content: Arc::from(value),
                         child: child.clone(),
-                    })
+                    }
                 },
                 Node::Leaf { value: _ } | Node::Empty => {
-                    Arc::new(Node::Leaf { value: Arc::from(value) })
+                    Node::Leaf { value: Arc::from(value) }
                 },
                 _ => {
-                    Arc::new(Node::Prefix { content: Arc::from(value), child: self.clone() })
+                    Node::Prefix { content: Arc::from(value), child: Box::new(self.clone()) }
                 }
             }
         }
 
-        match self.as_ref() {
+        match self {
             Node::Empty => {
                 Node::new(key, value)
             },
@@ -104,55 +104,54 @@ impl Node {
         }
     }
 
-    fn insert_into_split(key: &&[u8], value: &[u8], children: &ImmutableArray) -> Arc<Node> {
-        Arc::new(Node::Split {
+    fn insert_into_split(key: &&[u8], value: &[u8], children: &ImmutableArray) -> Node {
+        Node::Split {
             children: children.insert(key[0], &key[1..], value),
-        })
+        }
     }
 
-    fn insert_into_prefix(key: &[u8], value: &[u8], content: &Arc<[u8]>, child: &Arc<Node>) -> Arc<Node> {
-        Arc::new(Node::Prefix {
+    fn insert_into_prefix(key: &[u8], value: &[u8], content: &Arc<[u8]>, child: &Node) -> Node {
+        Node::Prefix {
             content: content.clone(),
-            child: child.insert(key, value),
-        })
+            child: Box::new(child.insert(key, value)),
+        }
     }
 
-    fn insert_into_leaf(key: &[u8], value: &[u8], current_value: &Arc<[u8]>) -> Arc<Node> {
-        Arc::new(Node::Prefix {
+    fn insert_into_leaf(key: &[u8], value: &[u8], current_value: &Arc<[u8]>) -> Node {
+        Node::Prefix {
             content: current_value.clone(),
-            child: Node::new(key, value),
-        })
+            child: Box::new(Node::new(key, value)),
+        }
     }
 
-    fn insert_into_chain_many(key: &&[u8], value: &[u8], path: &Arc<[u8]>, child: &Arc<Node>) -> Arc<Node> {
+    fn insert_into_chain_many(key: &&[u8], value: &[u8], path: &Arc<[u8]>, child: &Node) -> Node {
         let common = path.iter()
             .zip(key.iter())
             .take_while(|(a, b)| a == b)
             .count();
 
         if common == path.len() {
-            Arc::new(Node::ChainMany {
+            Node::ChainMany {
                 path: path.clone(),
-                child: child.insert(&key[common..], value)
-            })
+                child: Box::new(child.insert(&key[common..], value))
+            }
         } else if common == key.len() {
 
             // The key end within the chain. We need to break the chain to introduce
             // a prefix
-
             let new_child = Self::new_chain(&path[common..], child.clone());
-            let new_child = Node::Prefix { content: Arc::from(value), child: new_child };
-            Self::new_chain(&path[..common], Arc::new(new_child))
+            let new_child = Node::Prefix { content: Arc::from(value), child: Box::new(new_child) };
+            Self::new_chain(&path[..common], new_child)
         } else {
 
             // Need to split the chain
             let mut transitions = smallvec![
-                        (path[common], Self::new_chain(&path[common + 1..], child.clone())),
-                        (key[common], Self::new(&key[common + 1..], value)),
+                        (path[common], Arc::new(Self::new_chain(&path[common + 1..], child.clone()))),
+                        (key[common], Arc::new(Self::new(&key[common + 1..], value)))
                     ];
             transitions.sort_unstable_by_key(|(b, _)| *b);
 
-            let mut new_node = Arc::new(Node::Sparse { transitions });
+            let mut new_node = Node::Sparse { transitions };
 
             if common != 0 {
                 new_node = Self::new_chain(&path[..common], new_node);
@@ -162,31 +161,31 @@ impl Node {
         }
     }
 
-    fn insert_into_chain_one(key: &&[u8], value: &[u8], path: &u8, child: &Arc<Node>) -> Arc<Node> {
+    fn insert_into_chain_one(key: &&[u8], value: &[u8], path: &u8, child: &Node) -> Node {
         if *path == key[0] {
-            Arc::new(Node::ChainOne { path: *path, child: child.insert(&key[1..], value) })
+            Node::ChainOne { path: *path, child: Box::new(child.insert(&key[1..], value)) }
         } else {
             // Need to split the chain
             let mut transitions = smallvec![
-                        (*path, child.clone()),
-                        (key[0], Self::new(&key[1..], value)),
+                        (*path, Arc::new(child.clone())),
+                        (key[0], Arc::new(Self::new(&key[1..], value))),
                     ];
             transitions.sort_unstable_by_key(|(b, _)| *b);
 
-            Arc::new(Node::Sparse { transitions })
+            Node::Sparse { transitions }
         }
     }
 
-    fn insert_into_sparse(key: &&[u8], value: &[u8], transitions: &SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
+    fn insert_into_sparse(key: &&[u8], value: &[u8], transitions: &SmallVec<[(u8, Arc<Node>); 7]>) -> Node {
         let mut new_transitions = SmallVec::with_capacity(transitions.len() + 1);
         let mut inserted = false;
         for (b, node) in transitions.iter() {
             if b == &key[0] {
-                new_transitions.push((*b, node.insert(&key[1..], value)));
+                new_transitions.push((*b, Arc::new(node.insert(&key[1..], value))));
                 inserted = true;
             } else {
                 if !inserted && b > &key[0] {
-                    new_transitions.push((key[0], Node::new(&key[1..], value)));
+                    new_transitions.push((key[0], Arc::new(Node::new(&key[1..], value))));
                     inserted = true;
                 }
                 new_transitions.push((*b, node.clone()));
@@ -194,13 +193,13 @@ impl Node {
         }
 
         if !inserted {
-            new_transitions.push((key[0], Node::new(&key[1..], value)));
+            new_transitions.push((key[0], Arc::new(Node::new(&key[1..], value))));
         }
 
         if new_transitions.len() <= 6 {
-            Arc::new(Node::Sparse { transitions: new_transitions })
+            Node::Sparse { transitions: new_transitions }
         } else {
-            Arc::new(Node::Split { children: ImmutableArray::new(new_transitions) })
+            Node::Split { children: ImmutableArray::new(new_transitions) }
         }
     }
 }
@@ -221,7 +220,7 @@ impl Trie {
 
         let old = self.root.load();
 
-        self.root.store(old.insert(key, value));
+        self.root.store(Arc::new(old.insert(key, value)));
     }
 }
 
@@ -237,7 +236,7 @@ impl Leafs {
 
     fn new(byte: u8, key: &[u8], value: &[u8]) -> Arc<Self> {
         let mut items = std::array::from_fn(|_| None);
-        items[Self::idx(&byte)] = Some(Node::new(key, value));
+        items[Self::idx(&byte)] = Some(Arc::new(Node::new(key, value)));
         Arc::new(Leafs { items })
     }
     fn insert(self: &Arc<Self>, byte: u8, key: &[u8], value: &[u8]) -> Arc<Self> {
@@ -249,7 +248,7 @@ impl Leafs {
         } else {
             Node::new(key, value)
         };
-        new_items[idx] = Some(new_item);
+        new_items[idx] = Some(Arc::new(new_item));
         Arc::new(Leafs { items: new_items })
     }
 
@@ -316,7 +315,7 @@ impl InternalNodes {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ImmutableArray {
     items: [Option<Arc<InternalNodes>>; 4]
 }
@@ -892,28 +891,30 @@ mod tests {
             ])));
         }
 
-        fn assert_tries_eq(trie: &Trie, expected: Arc<Node>) {
-            assert_eq!(trie.root.load().deref(), &expected);
+        fn assert_tries_eq(trie: &Trie, expected: Node) {
+            assert_eq!(trie.root.load().deref(), &Arc::new(expected));
         }
 
-        fn sparse(transitions: SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
-            Arc::new(Node::Sparse { transitions })
+        fn sparse(transitions: SmallVec<[(u8, Node); 7]>) -> Node {
+            let transitions = transitions.into_iter().map(|(k, v)| (k, Arc::new(v))).collect::<SmallVec<_>>();
+            Node::Sparse { transitions }
         }
 
-        fn chain(key: &[u8], value: Arc<Node>) -> Arc<Node> {
+        fn chain(key: &[u8], value: Node) -> Node {
             Node::new_chain(key, value)
         }
 
-        fn leaf(value: &[u8]) -> Arc<Node> {
-            Arc::new(Node::Leaf { value: Arc::from(value) })
+        fn leaf(value: &[u8]) -> Node {
+            Node::Leaf { value: Arc::from(value) }
         }
 
-        fn prefix(content: &[u8], child: Arc<Node>) -> Arc<Node> {
-            Arc::new(Node::Prefix { content: Arc::from(content), child })
+        fn prefix(content: &[u8], child: Node) -> Node {
+            Node::Prefix { content: Arc::from(content), child: Box::new(child) }
         }
 
-        fn split(transitions: SmallVec<[(u8, Arc<Node>); 7]>) -> Arc<Node> {
-            Arc::new(Node::Split { children: ImmutableArray::new(transitions) })
+        fn split(transitions: SmallVec<[(u8, Node); 7]>) -> Node {
+            let transitions = transitions.into_iter().map(|(k, v)| (k, Arc::new(v))).collect::<SmallVec<_>>();
+            Node::Split { children: ImmutableArray::new(transitions) }
         }
     }
 }
