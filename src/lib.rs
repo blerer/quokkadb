@@ -10,7 +10,6 @@ pub mod collection;
 pub mod io;
 
 use std::path::Path;
-use serde::Serialize;
 use crate::error::Error;
 
 pub struct QuokkaDB {

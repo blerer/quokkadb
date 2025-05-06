@@ -1,4 +1,4 @@
-use std::{fmt, io, mem, result};
+use std::{fmt, mem, result};
 use std::fs::{File, OpenOptions};
 use std::io::{Result, ErrorKind, Read, Write, Error};
 use std::path::{Path, PathBuf};

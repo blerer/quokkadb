@@ -1,5 +1,4 @@
 use std::io::{Error, ErrorKind};
-use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::varint;
 use crate::storage::internal_key::encode_internal_key;
@@ -51,9 +50,9 @@ pub struct Operation {
     /// The index ID
     index: u32,
     /// The BSON key formatted in a byte comparable way.
-    user_key: Arc<[u8]>,
+    user_key: Vec<u8>,
     /// The bytes representing the BSON document
-    value: Arc<[u8]>,
+    value: Vec<u8>,
 }
 
 impl Operation {
@@ -62,8 +61,8 @@ impl Operation {
             operation_type: OperationType::Put,
             collection,
             index,
-            user_key: Arc::from(user_key),
-            value: Arc::from(value),
+            user_key,
+            value,
         }
     }
 
@@ -72,8 +71,8 @@ impl Operation {
             operation_type: OperationType::Delete,
             collection,
             index,
-            user_key: Arc::from(user_key),
-            value: Arc::from(vec![]),
+            user_key,
+            value: Vec::with_capacity(0),
         }
     }
 
@@ -84,8 +83,8 @@ impl Operation {
         self.operation_type.clone()
     }
 
-    pub fn value(&self) -> Arc<[u8]> {
-        self.value.clone()
+    pub fn value(&self) -> &[u8] {
+        &self.value
     }
 
     pub fn wal_record_size(&self) -> usize {
@@ -125,8 +124,8 @@ impl Operation {
             operation_type,
             collection,
             index,
-            user_key: Arc::from(user_key),
-            value: Arc::from(value),
+            user_key: user_key.to_vec(),
+            value: value.to_vec(),
         })
     }
 }

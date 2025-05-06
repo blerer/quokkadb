@@ -145,14 +145,14 @@ impl StorageEngine {
                 WriteAheadLog::load_from(wal_path.clone(), options.database_options())?
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
-                let wal = WriteAheadLog::new(db_dir.clone(), options.database_options(), log_number)?;
+                let wal = WriteAheadLog::new(db_dir, options.database_options(), log_number)?;
                 let edit = LsmTreeEdit::WalRotation { log_number };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
                 wal
             };
 
-            let flush_scheduler = FlushScheduler::new(db_dir.clone(), options.clone(), fd_cache.clone());
+            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), fd_cache.clone());
 
             Ok(Arc::new(StorageEngine {
                 fd_cache,
@@ -176,8 +176,8 @@ impl StorageEngine {
             let lsm_tree = Arc::new(LsmTree::new(wal_file_id, next_file_number.load(Ordering::Relaxed)));
             let snapshot = LsmTreeEdit::Snapshot(lsm_tree.clone());
             let manifest = Manifest::new(db_dir, options.database_options(), manifest_file_id, &snapshot)?;
-            let wal = WriteAheadLog::new(db_dir.clone(), options.database_options(), wal_file_id)?;
-            let flush_scheduler = FlushScheduler::new(db_dir.clone(), options.clone(), fd_cache.clone());
+            let wal = WriteAheadLog::new(db_dir, options.database_options(), wal_file_id)?;
+            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), fd_cache.clone());
 
             Ok(Arc::new(StorageEngine {
                 fd_cache,
@@ -402,7 +402,7 @@ impl StorageEngine {
     fn append_edit(self: &Arc<Self>,
                    manifest:&mut MutexGuard<Manifest>,
                    edit: &LsmTreeEdit
-    ) -> Result<(Arc<LsmTree>)> {
+    ) -> Result<Arc<LsmTree>> {
 
         let lsm_tree = self.lsm_tree.load();
 

@@ -1,4 +1,4 @@
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;

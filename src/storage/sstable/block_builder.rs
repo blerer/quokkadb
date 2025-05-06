@@ -28,7 +28,7 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
         Self {
             data: Vec::new(),
             entry_writer,
-            restarts: vec![0], // First restart point is at offset 0.
+            restarts: Vec::new(),
             prev_key: Vec::new(),
             prev_value: None,
             restart_interval,
@@ -71,10 +71,12 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
     /// Finalize the block by adding restart points and returning the firs_key and the full block.
     ///  This method will
     pub fn finish(&mut self) -> Result<(Option<Vec<u8>>, Vec<u8>)> {
+
         // Append restart points.
         for &restart in &self.restarts {
             self.data.extend(&restart.to_le_bytes());
         }
+
         self.data.extend(&(self.restarts.len() as u32).to_le_bytes());
 
         // Take the block and the first_key resetting the builder to start a new block.
@@ -125,9 +127,9 @@ pub trait EntryWriter<T> {
 /// Writes key-value entries for data blocks.
 ///
 /// # Data block entry Format
-/// +--------------------------+------------------------------+------------+-------+
-/// | Shared key prefix length | Non-shared key suffix length | Key Suffix | Value |
-/// +--------------------------+------------------------------+-- ---------+-------+
+/// +--------------------------+------------------------------+------------+-----------------+-------+
+/// | Shared key prefix length | Non-shared key suffix length | Key Suffix | Value type (u8) | Value |
+/// +--------------------------+------------------------------+-- ---------+-----------------+-------+
 pub struct DataEntryWriter;
 
 impl EntryWriter<Vec<u8>> for DataEntryWriter {
@@ -146,15 +148,17 @@ impl EntryWriter<Vec<u8>> for DataEntryWriter {
         varint::write_u64(shared as u64, data);
         varint::write_u64(non_shared as u64, data);
 
-        // No need to store the value length as the value is a BSON document which starts with its length:
-        // +-------------------------+--------------   -+-------------------+
-        // | Document length (int32) | Element list ... | unsigned byte (0) |
-        // +-------------------------+--------------   -+-- ----------------+
-        //
-
         // Add non-shared key and value to the block.
         data.extend(&key[shared..]);
-        data.extend(value);
+
+        if value.len() > 0 {
+            // No need to store the value length as the value is a BSON document which starts with its length:
+            // +-------------------------+--------------   -+-------------------+
+            // | Document length (int32) | Element list ... | unsigned byte (0) |
+            // +-------------------------+--------------   -+-- ----------------+
+            //
+            data.extend(value);
+        }
     }
 }
 

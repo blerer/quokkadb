@@ -28,7 +28,7 @@ pub fn encode_internal_key(
     let mut key = Vec::with_capacity(4 + 4 + user_key.len() + 8);
 
     // Appends the record key (collection + index + user key)
-    append_record_key(&mut key, &collection, &index, user_key);
+    append_record_key(&mut key, collection, index, user_key);
 
     // Encode inverted sequence number in big-endian format (7 bytes)
     key.extend_from_slice(&(inverted_seq.to_be_bytes()[1..]));
@@ -40,7 +40,7 @@ pub fn encode_internal_key(
     key
 }
 
-fn append_record_key(key: &mut Vec<u8>, collection: &u32, index: &u32, user_key: &[u8]) {
+fn append_record_key(key: &mut Vec<u8>, collection: u32, index: u32, user_key: &[u8]) {
     // Append collection (big-endian)
     key.extend_from_slice(&collection.to_be_bytes());
 
@@ -57,7 +57,7 @@ pub fn encode_record_key(
     user_key: &[u8]) -> Vec<u8> {
 
     let mut key = Vec::with_capacity(4 + 4 + user_key.len());
-    append_record_key(&mut key, &collection, &index, user_key);
+    append_record_key(&mut key, collection, index, user_key);
     key
 }
 
@@ -71,7 +71,13 @@ pub fn extract_index(internal_key: &[u8]) -> u32 {
     internal_key.read_u32_be(4)
 }
 
-/// Extracts the user key from a compound key.
+/// Extracts the record key from an internal key.
+pub fn extract_record_key(internal_key: &[u8]) -> &[u8] {
+    assert!(internal_key.len() >= 16, "Invalid internal key length");
+    &internal_key[..internal_key.len() - 8]
+}
+
+/// Extracts the user key from an internal key.
 pub fn extract_user_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 16, "Invalid internal key length");
     &internal_key[8..internal_key.len() - 8]
@@ -109,6 +115,7 @@ mod tests {
         let user_key =  Bson::ObjectId(ObjectId::new()).try_into_key().unwrap();
         let seq = 42;
         let op_type = OperationType::Put;
+        let record_key = encode_record_key(collection, index, &user_key);
 
         let encoded = encode_internal_key(collection, index, &user_key, seq, op_type);
 
@@ -117,6 +124,7 @@ mod tests {
         assert_eq!(extract_user_key(&encoded), user_key);
         assert_eq!(extract_sequence_number(&encoded), seq);
         assert_eq!(extract_operation_type(&encoded), op_type);
+        assert_eq!(extract_record_key(&encoded), record_key);
     }
 
     #[test]

@@ -44,6 +44,10 @@ impl<'a> ByteReader<'a> {
         Ok(value)
     }
 
+    pub fn peek_i32_le(&self) -> Result<i32> {
+        Ok(self.buffer.read_i32_le(self.position.get()))
+    }
+
     pub fn read_i32_le(&self) -> Result<i32> {
         let pos = self.position.get();
         let value = self.buffer.read_i32_le(pos);
