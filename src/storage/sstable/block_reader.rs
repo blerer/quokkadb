@@ -8,9 +8,8 @@ use crate::storage::sstable::BlockHandle;
 
 /// A reader for SSTable blocks that supports restart-based prefix compression.
 /// It can use different entry readers depending on block type (e.g., index or data).
-struct BlockReader<'a, W: EntryReader> {
+pub struct BlockReader<'a, W: EntryReader> {
     nbr_of_restarts: usize,
-    restart_interval: usize,
     restarts: &'a [u8],
     data: ByteReader<'a>,
     reader: W,
@@ -19,16 +18,15 @@ struct BlockReader<'a, W: EntryReader> {
 impl <'a, W: EntryReader> BlockReader<'a, W> {
 
     /// Constructs a new `BlockReader` from a block of bytes and a reader.
-    fn new(restart_interval: usize, block: &'a [u8], reader: W) -> Result<Self> {
+    pub fn new(block: &'a [u8], reader: W) -> Result<Self> {
         let len = block.len();
         let nbr_of_restarts_offset = len - 4;
         let nbr_of_restarts = block.read_u32_le(nbr_of_restarts_offset) as usize;
-        println!("nbr_of_restarts {}", nbr_of_restarts);
         let restarts_offset = nbr_of_restarts_offset - (nbr_of_restarts * 4);
 
         let data = ByteReader::new(&block[..restarts_offset]);
         let restarts = &block[restarts_offset..nbr_of_restarts_offset];
-        Ok(BlockReader { nbr_of_restarts, restart_interval, restarts, data, reader })
+        Ok(BlockReader { nbr_of_restarts, restarts, data, reader })
     }
 
     /// Reads the restart key at the given restart index.
@@ -38,7 +36,6 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
         Ok(self.data.read_length_prefixed_slice()?)
     }
 
-
     /// Reads the byte offset of a restart entry by index.
     fn read_key_offset(&self, index: usize) -> Result<usize> {
         Ok(self.restarts.read_u32_le(index << 2) as usize)
@@ -47,14 +44,15 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
     /// Searches for a key in the block using restart-based binary + linear scan.
     pub fn search(&self, key: &[u8]) -> Result<Option<(Vec<u8>, W::Output)>> {
 
-        let restart_key_offset = self.binary_search_restarts(key)?;
+        let restart_key_idx = self.binary_search_restarts(key)?;
 
-        if let Some(offset) = restart_key_offset {
-            self.linear_search(key, &self.data, offset, self.restart_interval)
+        if let Some(restart_key_idx) = restart_key_idx {
+            self.linear_search(key, &self.data, restart_key_idx)
         } else {
             Ok(None)
         }
     }
+
     /// Performs a binary search on restart points to find a candidate start offset.
     fn binary_search_restarts(&self, key: &[u8]) -> Result<Option<usize>> {
         let mut mid = 0;
@@ -70,7 +68,7 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
                     if mid == 0 {
                         // If the key has the same user key it is a match otherwise there is no match.
                         return if extract_user_key(mid_key) == extract_user_key(key) {
-                            Ok(Some(self.read_key_offset(mid)?))
+                            Ok(Some(mid))
                         } else {
                             Ok(None)
                         }
@@ -83,18 +81,19 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
                 }
             }
         }
-        Ok(Some(self.read_key_offset(mid - 1)?))
+        Ok(Some(mid - 1))
     }
 
     /// Performs a linear scan from a restart offset to locate the matching entry.
     fn linear_search(&self,
                      key: &[u8],
                      data: &ByteReader,
-                     restart_offset: usize,
-                     restart_interval: usize
+                     restart_idx: usize,
     ) -> Result<Option<(Vec<u8>, W::Output)>> {
 
-        let mut count = 0;
+        let restart_offset = self.read_key_offset(restart_idx)?;
+        let mut next_restart_offset = self.next_restart_offset(restart_idx)?;
+
         data.seek(restart_offset)?;
 
         let record_key = extract_record_key(&key);
@@ -121,15 +120,24 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
             };
 
             prev_key = new_key;
-            count = count + 1;
-            if count == restart_interval {
-                count = 0;
+            if Some(data.position()) == next_restart_offset {
                 prev_value = None;
+                next_restart_offset = self.next_restart_offset(restart_idx)?;
+
             } else {
                 prev_value = Some(output);
             }
+
         }
         Ok(None)
+    }
+
+    fn next_restart_offset(&self, restart_idx: usize) -> Result<Option<usize>> {
+        Ok(if restart_idx + 1 < self.nbr_of_restarts {
+            Some(self.read_key_offset(restart_idx + 1)?)
+        } else {
+            None
+        })
     }
 }
 
@@ -209,45 +217,40 @@ mod tests {
         builder.add(&internal_key(7, 10, OperationType::Put), BlockHandle::new(319, 60)).unwrap();
 
         let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(3, &block_data, IndexEntryReader).unwrap();
-
-        let restart_offset_0 = Some(block.read_key_offset(0).unwrap());
-        let restart_offset_1 = Some(block.read_key_offset(1).unwrap());
-        let restart_offset_2 = Some(block.read_key_offset(2).unwrap());
-        let restart_offset_3 = Some(block.read_key_offset(3).unwrap());
+        let block = BlockReader::new(&block_data, IndexEntryReader).unwrap();
 
 
         assert_eq!(None, block.binary_search_restarts(&internal_key(0, 1, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(1, 1, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(2, 2, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(3, 3, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(4, 4, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, 9, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, 8, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, 7, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(5, 6, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(5, 5, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(6, 11, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(7, 11, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_3, block.binary_search_restarts(&internal_key(7, 10, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_3, block.binary_search_restarts(&internal_key(8, 12, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(1, 1, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(2, 2, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(3, 3, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(4, 4, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, 9, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, 8, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, 7, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(5, 6, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(5, 5, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(6, 11, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(7, 11, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&internal_key(7, 10, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&internal_key(8, 12, OperationType::MaxKey)).unwrap());
 
 
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(1, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(2, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(3, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_0, block.binary_search_restarts(&internal_key(4, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_1, block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(6, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(7, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(7, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
-        assert_eq!(restart_offset_3, block.binary_search_restarts(&internal_key(8, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(1, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(2, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(3, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&internal_key(4, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&internal_key(5, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(6, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(7, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(7, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&internal_key(8, MAX_SEQUENCE_NUMBER, OperationType::MaxKey)).unwrap());
 
-        assert_eq!(restart_offset_2, block.binary_search_restarts(&internal_key(5, 2, OperationType::MaxKey)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&internal_key(5, 2, OperationType::MaxKey)).unwrap());
     }
 
     #[test]
@@ -301,7 +304,7 @@ mod tests {
         builder.add(&key_7_10, value_7_10).unwrap();
 
         let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(3, &block_data, IndexEntryReader).unwrap();
+        let block = BlockReader::new(&block_data, IndexEntryReader).unwrap();
 
         assert_eq!(None, block.search(&internal_key(0, 1, OperationType::MaxKey)).unwrap());
         assert_eq!(Some((key_1_1.clone(), value_1_1)), block.search(&internal_key(1, 1, OperationType::MaxKey)).unwrap());
@@ -375,7 +378,7 @@ mod tests {
         builder.add(&key_7_10, value_7_10.clone()).unwrap();
 
         let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(3, &block_data, DataEntryReader).unwrap();
+        let block = BlockReader::new(&block_data, DataEntryReader).unwrap();
 
         assert_eq!(None, block.search(&internal_key(0, 1, OperationType::MaxKey)).unwrap());
         assert_eq!(Some((key_1_1.clone(), value_1_1.clone())), block.search(&internal_key(1, 1, OperationType::MaxKey)).unwrap());

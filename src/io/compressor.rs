@@ -52,7 +52,7 @@ impl CompressorType {
 }
 
 /// Trait defining the behavior of a compressor.
-pub trait Compressor {
+pub trait Compressor: Send + Sync {
     /// Returns the type of compressor being used.
     fn compressor_type(&self) -> CompressorType;
 

@@ -5,15 +5,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_skiplist::SkipMap;
-use crate::io::fd_cache::FileDescriptorCache;
 use crate::options::options::Options;
 use crate::storage::operation::OperationType;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::interval::Interval;
 use crate::statistics::CollectionStatistics;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_record_key, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
+use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
 use crate::storage::lsm_tree::SSTableMetadata;
+use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 
 pub struct Memtable {
@@ -120,21 +120,24 @@ impl Memtable {
     }
 
     pub fn flush(&self,
-                 fd_cache: Arc<FileDescriptorCache>,
+                 sst_cache: Arc<SSTableCache>,
                  directory: &Path,
-                 db_file: &DbFile,
+                 sst_file: &DbFile,
                  options: &Options
     ) -> Result<SSTableMetadata> {
-        self.write_sstable(fd_cache.clone(), directory, db_file, options)
+        let sst = self.write_sstable(directory, sst_file, options)?;
+        // load the new sst in the cache to validate that everything when well and made it available
+        // straight a way when the memtable is dropped
+        sst_cache.get(&directory.join(sst_file.filename()))?;
+        Ok(sst)
     }
 
     fn write_sstable(&self,
-                     fd_cache: Arc<FileDescriptorCache>,
                      directory: &Path,
                      db_file: &DbFile,
                      options: &Options
     ) -> Result<SSTableMetadata> {
-        let mut writer = SSTableWriter::new(fd_cache, directory, db_file, options, self.skiplist.len())?;
+        let mut writer = SSTableWriter::new(directory, db_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
         }

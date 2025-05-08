@@ -160,13 +160,13 @@ impl SSTablePropertiesBuilder {
 
     /// Updates the size of the index block.
     pub fn with_index_block(&mut self, block_size: usize) -> &mut Self {
-        self.index_size += block_size;
+        self.index_size = block_size;
         self
     }
 
     /// Updates the size of the filter block.
     pub fn with_filter_block(&mut self, block_size: usize) -> &mut Self {
-        self.filter_size += block_size;
+        self.filter_size = block_size;
         self
     }
 

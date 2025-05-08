@@ -41,7 +41,7 @@ impl Manifest {
         let log = Log::new(&db_dir, file, Arc::new(ManifestFileCreator{}))?;
         Ok(Manifest {
             log,
-            db_dir: db_dir,
+            db_dir,
             rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
         })
     }

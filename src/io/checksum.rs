@@ -1,7 +1,7 @@
 use std::io::{Error, ErrorKind, Result};
 use crc32fast::Hasher;
 
-pub trait ChecksumStrategy {
+pub trait ChecksumStrategy: Send + Sync {
 
     fn checksum_size(&self) -> usize;
 

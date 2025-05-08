@@ -6,12 +6,12 @@ use std::{
 use std::path::Path;
 use tracing::error;
 use std::io::{Error, ErrorKind, Result};
-use crate::io::fd_cache::FileDescriptorCache;
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
 use crate::storage::memtable::Memtable;
 use crate::storage::files::DbFile;
 use crate::storage::lsm_tree::LsmTreeEdit;
+use crate::storage::sstable::sstable_cache::SSTableCache;
 
 pub struct FlushTask {
     pub db_file: DbFile,
@@ -25,7 +25,7 @@ pub struct FlushScheduler {
 }
 
 impl FlushScheduler {
-    pub fn new(db_dir: &Path, options: Arc<Options>, fd_cache: Arc<FileDescriptorCache>) -> Self {
+    pub fn new(db_dir: &Path, options: Arc<Options>, sst_cache: Arc<SSTableCache>) -> Self {
         let (sender, receiver): (SyncSender<FlushTask>, Receiver<FlushTask>) = sync_channel(32);
         let db_dir = db_dir.to_path_buf();
         let thread = {
@@ -33,8 +33,8 @@ impl FlushScheduler {
             thread::spawn(move || {
                 while let Ok(task) = receiver.recv() {
                     let FlushTask { db_file, memtable, callback } = task;
-                    let fd_cache = fd_cache.clone();
-                    let result = memtable.flush(fd_cache, &db_dir, &db_file, &options);
+                    let sst_cache = sst_cache.clone();
+                    let result = memtable.flush(sst_cache, &db_dir, &db_file, &options);
 
                     match result {
                         Ok(sst) => {

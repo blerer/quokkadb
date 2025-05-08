@@ -1,7 +1,6 @@
 pub mod byte_reader;
 pub mod checksum;
 pub mod compressor;
-pub mod fd_cache;
 pub mod byte_writer;
 pub mod varint;
 pub mod buffer;

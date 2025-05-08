@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use arc_swap::ArcSwap;
 use tracing::{error, warn};
 use crate::io::{mark_file_as_corrupted, truncate_file};
-use crate::io::fd_cache::FileDescriptorCache;
 use crate::options::options::Options;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
 use crate::storage::files::{DbFile, FileType};
@@ -16,20 +15,22 @@ use crate::storage::log::LogReplayError;
 use crate::storage::lsm_tree::{LsmTree, LsmTreeEdit};
 use crate::storage::manifest::Manifest;
 use crate::storage::memtable::Memtable;
+use crate::storage::sstable::sstable_cache::SSTableCache;
+use crate::storage::sstable::sstable_reader::SSTableReader;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::WriteBatch;
 
 struct StorageEngine {
-    fd_cache: Arc<FileDescriptorCache>,
     db_dir: PathBuf,
     options: Arc<Options>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
     manifest: Mutex<Manifest>,
     write_ahead_log: Mutex<WriteAheadLog>,
     lsm_tree: ArcSwap<LsmTree>,
-    next_file_number: AtomicU64,      // The counter used to create the file ids
+    next_file_number: AtomicU64, // The counter used to create the file ids
     next_seq_number: AtomicU64, // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
+    sst_cache: Arc<SSTableCache>,
     flush_scheduler: FlushScheduler,
     async_callback: OnceLock<Arc<AsyncCallback<Result<LsmTreeEdit>>>>,
     error_mode: AtomicBool,
@@ -38,7 +39,7 @@ struct StorageEngine {
 impl StorageEngine {
     pub fn new(db_dir: &Path, options: Arc<Options>) -> Result<Arc<Self>> {
 
-        let fd_cache = Arc::new(FileDescriptorCache::new(options.database_options().max_open_files()));
+        let sst_cache = Arc::new(SSTableCache::new(options.database_options()));
 
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
@@ -152,10 +153,9 @@ impl StorageEngine {
                 wal
             };
 
-            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), fd_cache.clone());
+            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), sst_cache.clone());
 
             Ok(Arc::new(StorageEngine {
-                fd_cache,
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
@@ -165,6 +165,7 @@ impl StorageEngine {
                 next_file_number,
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
+                sst_cache,
                 flush_scheduler,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
@@ -177,10 +178,9 @@ impl StorageEngine {
             let snapshot = LsmTreeEdit::Snapshot(lsm_tree.clone());
             let manifest = Manifest::new(db_dir, options.database_options(), manifest_file_id, &snapshot)?;
             let wal = WriteAheadLog::new(db_dir, options.database_options(), wal_file_id)?;
-            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), fd_cache.clone());
+            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), sst_cache.clone());
 
             Ok(Arc::new(StorageEngine {
-                fd_cache,
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
@@ -190,13 +190,13 @@ impl StorageEngine {
                 next_file_number,
                 next_seq_number: AtomicU64::new(0),
                 last_visible_seq: AtomicU64::new(0),
+                sst_cache,
                 flush_scheduler,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
             }))
         }
     }
-
 
     pub fn write(self: Arc<Self>, batch: WriteBatch) -> Result<()> {
         if self.error_mode.load(Ordering::Relaxed) {

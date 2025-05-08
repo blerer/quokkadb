@@ -1,9 +1,9 @@
+use std::fs::File;
 use std::io::{Write, BufWriter, Result};
 use std::path::Path;
 use std::sync::Arc;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::Compressor;
-use crate::io::fd_cache::{FileDescriptorCache, SharedFile};
 use crate::util::bloom_filter::BloomFilter;
 use crate::options::options::Options;
 use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
@@ -32,7 +32,7 @@ pub struct SSTableWriter<'a> {
     index_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
     metaindex_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
     bloom_filter: BloomFilter<'a>,
-    output: BufWriter<SharedFile>,
+    output: BufWriter<File>,
     block_size: usize,
     current_block_offset: usize, // Tracks the file offset of the current block.
     properties_builder: SSTablePropertiesBuilder,
@@ -44,23 +44,23 @@ impl<'a> SSTableWriter<'a> {
     /// Creates a new SSTableWriter instance.
     ///
     /// # Arguments
-    /// - `file_path`: The file path for the SSTable.
+    /// - `directory`: The database directory.
+    /// - `sst_file`: The SSTable file to write too
     /// - `options`: Configuration options for the SSTable and compression.
     /// - `expected_keys`: Estimated number of keys for configuring the Bloom filter.
     ///
     /// # Returns
     /// A new instance of `SSTableWriter` configured with the provided options.
     pub fn new(
-        fd_cache:Arc<FileDescriptorCache>,
         directory: &Path,
-        db_file: &DbFile,
+        sst_file: &DbFile,
         options: &Options,
         expected_keys: usize
     ) -> Result<Self> {
 
-        let id = db_file.id;
-        let file_path = directory.join(db_file.filename());
-        let file = fd_cache.get_or_open(&file_path)?;
+        let id = sst_file.id;
+        let file_path = directory.join(sst_file.filename());
+        let file = File::open(&file_path)?;
 
         let sstable_options = options.sstable_options();
         let restart_interval = sstable_options.restart_interval();
@@ -164,6 +164,7 @@ impl<'a> SSTableWriter<'a> {
     /// The index block maps key ranges to their corresponding data blocks.
     fn write_index_block(&mut self) -> Result<BlockHandle> {
         let (_, data) = self.index_block_builder.finish()?;
+        self.properties_builder.with_index_block(data.len());
         self.finalize_and_write_block(data)
     }
 
@@ -181,6 +182,7 @@ impl<'a> SSTableWriter<'a> {
     /// during key lookups by quickly ruling out non-existent keys.
     fn write_bloom_filter(&mut self) -> Result<BlockHandle> {
         let data = self.bloom_filter.to_block();
+        self.properties_builder.with_filter_block(data.len());
         self.finalize_and_write_block(data)
     }
 

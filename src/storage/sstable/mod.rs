@@ -5,6 +5,7 @@ mod sstable_properties;
 pub mod sstable_reader;
 pub mod block_cache;
 mod block_reader;
+pub mod sstable_cache;
 
 /// The SSTable files magic number
 pub const MAGIC_NUMBER: &u64 = &0x88e241b785f4cff7u64;
