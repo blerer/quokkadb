@@ -2,7 +2,7 @@ extern crate core;
 
 pub mod error;
 mod options;
-mod statistics;
+pub mod statistics;
 mod query;
 pub mod storage;
 pub mod util;

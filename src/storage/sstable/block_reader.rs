@@ -91,6 +91,7 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
                      restart_idx: usize,
     ) -> Result<Option<(Vec<u8>, W::Output)>> {
 
+        let mut restart_idx = restart_idx;
         let restart_offset = self.read_key_offset(restart_idx)?;
         let mut next_restart_offset = self.next_restart_offset(restart_idx)?;
 
@@ -121,9 +122,9 @@ impl <'a, W: EntryReader> BlockReader<'a, W> {
 
             prev_key = new_key;
             if Some(data.position()) == next_restart_offset {
+                restart_idx += 1;
                 prev_value = None;
                 next_restart_offset = self.next_restart_offset(restart_idx)?;
-
             } else {
                 prev_value = Some(output);
             }

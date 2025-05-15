@@ -11,7 +11,7 @@ use crate::storage::sstable::{BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION
 use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTablePropertiesBuilder};
 use crate::io::varint;
 use crate::storage::files::DbFile;
-use crate::storage::lsm_tree::SSTableMetadata;
+use crate::storage::lsm_version::SSTableMetadata;
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///
@@ -58,30 +58,29 @@ impl<'a> SSTableWriter<'a> {
         expected_keys: usize
     ) -> Result<Self> {
 
-        let id = sst_file.id;
+        let id = sst_file.number;
         let file_path = directory.join(sst_file.filename());
         let file = File::open(&file_path)?;
 
-        let sstable_options = options.sstable_options();
-        let restart_interval = sstable_options.restart_interval();
+        let sstable_options = &options.sst;
+        let restart_interval = sstable_options.restart_interval;
 
-        let compressor_type = sstable_options.compressor_type();
+        let compressor_type = sstable_options.compressor_type;
         let compressor = compressor_type.new_compressor();
         let data_block_builder = BlockBuilder::new(restart_interval, DataEntryWriter);
         let index_block_builder = BlockBuilder::new(restart_interval, IndexEntryWriter);
         let metaindex_block_builder = BlockBuilder::new(restart_interval, IndexEntryWriter);
 
-        let database_options = options.database_options();
-        let file_write_buffer_size = database_options.file_write_buffer_size();
+        let file_write_buffer_size = options.db.file_write_buffer_size;
 
         Ok(Self {
             id,
             data_block_builder,
             index_block_builder,
             metaindex_block_builder,
-            bloom_filter: BloomFilter::new(expected_keys, sstable_options.bloom_filter_false_positive()),
+            bloom_filter: BloomFilter::new(expected_keys, sstable_options.bloom_filter_false_positive),
             output: BufWriter::with_capacity(file_write_buffer_size.to_bytes(), file),
-            block_size: sstable_options.block_size().to_bytes(),
+            block_size: sstable_options.block_size.to_bytes(),
             current_block_offset: 0,
             properties_builder: SSTablePropertiesBuilder::new(SSTABLE_CURRENT_VERSION, u8::from(compressor_type)),
             compressor,

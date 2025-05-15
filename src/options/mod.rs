@@ -1,2 +1,2 @@
 pub mod options;
-mod storage_quantity;
+pub mod storage_quantity;

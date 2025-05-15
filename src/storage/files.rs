@@ -11,7 +11,7 @@ pub enum FileType {
 #[derive(Debug)]
 pub struct DbFile {
     pub file_type: FileType,
-    pub id: u64,
+    pub number: u64,
 }
 
 impl DbFile {
@@ -19,33 +19,33 @@ impl DbFile {
         let filename = file_name_as_str(path)?;
 
         if let Some(num_str) = filename.strip_prefix("MANIFEST-") {
-            Some(DbFile { file_type: FileType::Manifest, id: num_str.parse().ok()? })
+            Some(DbFile { file_type: FileType::Manifest, number: num_str.parse().ok()? })
         } else if let Some(num_str) = filename.strip_suffix(".log") {
-            Some(DbFile { file_type: FileType::WriteAheadLog, id: num_str.parse().ok()? })
+            Some(DbFile { file_type: FileType::WriteAheadLog, number: num_str.parse().ok()? })
         } else if let Some(num_str) = filename.strip_suffix(".sst") {
-            Some(DbFile { file_type: FileType::SST, id: num_str.parse().ok()? })
+            Some(DbFile { file_type: FileType::SST, number: num_str.parse().ok()? })
         } else {
             None
         }
     }
 
-    pub fn new_write_ahead_log(id: u64) -> DbFile {
-        DbFile { file_type: FileType::WriteAheadLog, id }
+    pub fn new_write_ahead_log(number: u64) -> DbFile {
+        DbFile { file_type: FileType::WriteAheadLog, number }
     }
 
-    pub fn new_manifest(id: u64) -> DbFile {
-        DbFile { file_type: FileType::Manifest, id }
+    pub fn new_manifest(number: u64) -> DbFile {
+        DbFile { file_type: FileType::Manifest, number }
     }
 
-    pub fn new_sst(id: u64) -> DbFile {
-        DbFile { file_type: FileType::SST, id }
+    pub fn new_sst(number: u64) -> DbFile {
+        DbFile { file_type: FileType::SST, number }
     }
 
     pub fn filename(&self) -> String {
         match self.file_type {
-            FileType::Manifest => format!("MANIFEST-{:06}", self.id),
-            FileType::WriteAheadLog => format!("{:06}.log", self.id),
-            FileType::SST => format!("{:06}.sst", self.id),
+            FileType::Manifest => format!("MANIFEST-{:06}", self.number),
+            FileType::WriteAheadLog => format!("{:06}.log", self.number),
+            FileType::SST => format!("{:06}.sst", self.number),
         }
     }
 }
@@ -60,7 +60,7 @@ mod tests {
         let path = Path::new("MANIFEST-000123");
         let db_file = DbFile::new(path).expect("should parse");
         assert_eq!(db_file.file_type, FileType::Manifest);
-        assert_eq!(db_file.id, 123);
+        assert_eq!(db_file.number, 123);
         assert_eq!(db_file.filename(), "MANIFEST-000123");
     }
 
@@ -69,7 +69,7 @@ mod tests {
         let path = Path::new("000045.log");
         let db_file = DbFile::new(path).expect("should parse");
         assert_eq!(db_file.file_type, FileType::WriteAheadLog);
-        assert_eq!(db_file.id, 45);
+        assert_eq!(db_file.number, 45);
         assert_eq!(db_file.filename(), "000045.log");
     }
 
@@ -78,7 +78,7 @@ mod tests {
         let path = Path::new("000888.sst");
         let db_file = DbFile::new(path).expect("should parse");
         assert_eq!(db_file.file_type, FileType::SST);
-        assert_eq!(db_file.id, 888);
+        assert_eq!(db_file.number, 888);
         assert_eq!(db_file.filename(), "000888.sst");
     }
 

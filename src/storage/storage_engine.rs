@@ -1,19 +1,23 @@
 use std::collections::VecDeque;
 use std::fs;
+use std::fs::remove_file;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use arc_swap::ArcSwap;
 use tracing::{error, warn};
-use crate::io::{mark_file_as_corrupted, truncate_file};
+use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::options::options::Options;
+use crate::statistics::ServerStatistics;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_scheduler::{FlushScheduler, FlushTask};
 use crate::storage::log::LogReplayError;
-use crate::storage::lsm_tree::{LsmTree, LsmTreeEdit};
+use crate::storage::lsm_tree::LsmTree;
+use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::manifest::Manifest;
+use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
@@ -23,6 +27,7 @@ use crate::storage::write_batch::WriteBatch;
 struct StorageEngine {
     db_dir: PathBuf,
     options: Arc<Options>,
+    stats: Arc<ServerStatistics>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
     manifest: Mutex<Manifest>,
     write_ahead_log: Mutex<WriteAheadLog>,
@@ -32,14 +37,15 @@ struct StorageEngine {
     last_visible_seq: AtomicU64,
     sst_cache: Arc<SSTableCache>,
     flush_scheduler: FlushScheduler,
-    async_callback: OnceLock<Arc<AsyncCallback<Result<LsmTreeEdit>>>>,
+    async_callback: OnceLock<Arc<AsyncCallback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
 }
 
 impl StorageEngine {
     pub fn new(db_dir: &Path, options: Arc<Options>) -> Result<Arc<Self>> {
 
-        let sst_cache = Arc::new(SSTableCache::new(options.database_options()));
+        let stats = ServerStatistics::new();
+        let sst_cache = Arc::new(SSTableCache::new(&options.db));
 
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
@@ -49,23 +55,29 @@ impl StorageEngine {
         // new manifest and wal.
         if let Some(manifest_path) = manifest_path {
 
-            let mut lsm_tree = Manifest::rebuild_lsm_tree(&manifest_path)?;
-            let mut last_seq_nbr = lsm_tree.last_sequence_number;
+            let manifest_state = Manifest::rebuild_manifest_state(&manifest_path)?;
+            let mut last_seq_nbr = manifest_state.lsm.last_sequence_number;
 
-            let scan_results = scan_db_directory(db_dir, lsm_tree.oldest_log_number)?;
+            let scan_results = scan_db_directory(db_dir, manifest_state.lsm.oldest_log_number)?;
 
             let mut wal_files_iter = scan_results.wal_files.iter().peekable();
 
             let mut reusable_wal = None;
 
+            let next_file_number = manifest_state.lsm.next_file_number;
+
+            let mut lsm_tree = LsmTree::from(manifest_state, stats.clone());
+
+            let mut rotated_log_files = VecDeque::new();
+
             while let Some((log_number, wal_path)) = wal_files_iter.next() {
 
                 // We need to re-associate write-ahead log files and memtables
                 if log_number != &lsm_tree.memtable.log_number {
-                    lsm_tree = lsm_tree.apply(&LsmTreeEdit::WalRotation { log_number: *log_number })
+                    lsm_tree = lsm_tree.apply(&ManifestEdit::WalRotation { log_number: *log_number })
                 }
 
-                let rs = WriteAheadLog::replay(wal_path, lsm_tree.last_sequence_number);
+                let rs = WriteAheadLog::replay(wal_path);
                 let is_last_wal_file = wal_files_iter.peek().is_none();
 
                 match rs {
@@ -93,6 +105,8 @@ impl StorageEngine {
                                     last_seq_nbr = seq;
                                     if is_last_wal_file {
                                         reusable_wal = Some(wal_path)
+                                    } else {
+                                        rotated_log_files.push_back((*log_number, wal_path.clone()));
                                     }
                                 }
                             }
@@ -126,28 +140,28 @@ impl StorageEngine {
                 }
             }
 
-            let mut manifest = Manifest::load_from(manifest_path, options.database_options())?;
+            let mut manifest = Manifest::load_from(manifest_path, &options.db, stats.clone())?;
 
             // If a file with a higher number that the next_file number has been detected we need to update
             // the Lsm tree in-memory and on-disk (MANIFEST file)
-            let next_file_number = AtomicU64::new(if lsm_tree.next_file_number < scan_results.next_file_number {
-                let edit = LsmTreeEdit::FilesDetectedOnRestart { next_file_number: scan_results.next_file_number };
-                lsm_tree.apply(&edit);
+            let next_file_number = AtomicU64::new(if next_file_number < scan_results.next_file_number {
+                let edit = ManifestEdit::FilesDetectedOnRestart { next_file_number: scan_results.next_file_number };
                 manifest.append_edit(&edit)?;
+                lsm_tree.apply(&edit);
                 scan_results.next_file_number
             } else {
-                lsm_tree.next_file_number
+                next_file_number
             });
 
             // If the last wal file can be reused, either because it was fine or because it has been
             // corrected by truncation, we will reuse it. If not, it should have been marked as corrupted,
             // and we need to create a new one and update the Lsm tree.
             let wal = if let Some(wal_path) = reusable_wal {
-                WriteAheadLog::load_from(wal_path.clone(), options.database_options())?
+                WriteAheadLog::load_from(&options.db, stats.clone(), &wal_path, rotated_log_files)?
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
-                let wal = WriteAheadLog::new(db_dir, options.database_options(), log_number)?;
-                let edit = LsmTreeEdit::WalRotation { log_number };
+                let wal = WriteAheadLog::new_after_corruption(&options.db, stats.clone(), db_dir, log_number, rotated_log_files)?;
+                let edit = ManifestEdit::WalRotation { log_number };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
                 wal
@@ -158,6 +172,7 @@ impl StorageEngine {
             Ok(Arc::new(StorageEngine {
                 db_dir: db_dir.to_path_buf(),
                 options,
+                stats,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
@@ -170,19 +185,21 @@ impl StorageEngine {
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
             }))
+
         } else {
             let next_file_number = AtomicU64::new(1);
-            let manifest_file_id = next_file_number.fetch_add(1, Ordering::Relaxed);
-            let wal_file_id = next_file_number.fetch_add(1, Ordering::Relaxed);
-            let lsm_tree = Arc::new(LsmTree::new(wal_file_id, next_file_number.load(Ordering::Relaxed)));
-            let snapshot = LsmTreeEdit::Snapshot(lsm_tree.clone());
-            let manifest = Manifest::new(db_dir, options.database_options(), manifest_file_id, &snapshot)?;
-            let wal = WriteAheadLog::new(db_dir, options.database_options(), wal_file_id)?;
+            let manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+            let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+            let lsm_tree = Arc::new(LsmTree::new(log_number, next_file_number.load(Ordering::Relaxed), stats.clone()));
+            let snapshot = ManifestEdit::Snapshot(lsm_tree.manifest.clone());
+            let manifest = Manifest::new(db_dir, &options.db, manifest_number, &snapshot, stats.clone())?;
+            let wal = WriteAheadLog::new(&options.db, stats.clone(), db_dir, log_number)?;
             let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), sst_cache.clone());
 
             Ok(Arc::new(StorageEngine {
                 db_dir: db_dir.to_path_buf(),
                 options,
+                stats,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
@@ -312,7 +329,7 @@ impl StorageEngine {
     }
 
     fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) {
-        let write_buffer_size = self.options.database_options().file_write_buffer_size().to_bytes();
+        let write_buffer_size = self.options.db.file_write_buffer_size.to_bytes();
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
 
@@ -325,7 +342,7 @@ impl StorageEngine {
         }
     }
 
-    fn get_async_callback(self: &Arc<Self>) -> &Arc<AsyncCallback<Result<LsmTreeEdit>>> {
+    fn get_async_callback(self: &Arc<Self>) -> &Arc<AsyncCallback<Result<SSTableOperation>>> {
         self.async_callback.get_or_init(|| {
             let engine = self.clone();
             Arc::new(AsyncCallback::new(move |result| {
@@ -339,7 +356,7 @@ impl StorageEngine {
         callback: &Arc<C>,
     ) -> Result<()>
     where
-        C: Callback<Result<LsmTreeEdit>> + 'static,
+        C: Callback<Result<SSTableOperation>> + 'static,
     {
        // Rotate the write-ahead log file and the memtable
        // (through applying a WalRotation edit to the LSM tree and replacing it atomically)
@@ -354,10 +371,15 @@ impl StorageEngine {
 
         drop(wal); // let release the write-ahead log as it is not needed
 
-        let edit = LsmTreeEdit::WalRotation { log_number: new_log_number };
-        let lsm_tree = self.append_edit(&mut manifest, &edit)?;
-        let memtable = lsm_tree.imm_memtables.back().unwrap().clone(); // We just pushed this memtable to the back, within the manifest lock, therefore we can safely retrieve it.
+        let edit = ManifestEdit::WalRotation { log_number: new_log_number };
+        let lsm_tree = self.append_edit(&self.lsm_tree.load().clone(), &mut manifest, &edit)?;
 
+        drop(manifest); // We do not need the manifest lock to schedule the flush.
+
+        // We just pushed the memtable to the back of the immutable queue,
+        // and any followed up update to the lsm tree would not modify our version of the tree,
+        // therefore we can safely retrieve the back memtable.
+        let memtable = lsm_tree.imm_memtables.back().unwrap().clone();
         self.schedule_flush(memtable, callback)
     }
 
@@ -366,7 +388,7 @@ impl StorageEngine {
                       callback: &Arc<C>
     ) -> Result<()>
     where
-        C: Callback<Result<LsmTreeEdit>> + 'static,
+        C: Callback<Result<SSTableOperation>> + 'static,
     {
 
         let sst_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
@@ -376,43 +398,62 @@ impl StorageEngine {
     }
 
 
-    fn update_lsm_tree_sstables(self: &Arc<Self>, edit: Result<LsmTreeEdit>) -> Result<()> {
+    fn update_lsm_tree_sstables(self: &Arc<Self>, operation: Result<SSTableOperation>) -> Result<()> {
 
-        match edit {
-            Ok(edit) => {
-                // We want to perform the changes within the manifest lock to avoid concurrent updates to
-                // the LSM tree
-                let mut manifest = self.manifest.lock().unwrap();
-                self.append_edit(&mut manifest, &edit)?;
+        match operation {
+            Ok(operation) => {
+                match operation {
+                    SSTableOperation::Flush { log_number, flushed } => {
 
-                match edit {
-                    LsmTreeEdit::Flush { log_number, sst : _sst} => {
-                        // Delete write-ahead log files for persisted data
-                    },
-                    _ => {}
+                        // We want to perform the changes within the manifest lock to avoid concurrent updates to
+                        // the LSM tree
+                        let mut manifest = self.manifest.lock().unwrap();
+
+                        let lsm_tree = self.lsm_tree.load();
+                        let oldest_log_number = lsm_tree.next_log_number_after(log_number);
+
+                        let edit = ManifestEdit::Flush { oldest_log_number, sst: flushed };
+                        let _lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
+
+                        drop(manifest); // we do not the manifest lock for deleting obsolete log files
+
+                        self.delete_obsolete_log_files(oldest_log_number)?;
+                    }
+                    SSTableOperation::Compaction { added, removed} => {
+
+                    }
                 }
                 Ok(())
             }
             Err(error) => Err(error)
         }
+    }
 
+    fn delete_obsolete_log_files(self: &Arc<Self>, oldest_log_number: u64) -> Result<()> {
 
+        let obsolete_log_files = self.write_ahead_log.lock().unwrap().drain_obsolete_logs(oldest_log_number)?;
+
+        for obsolete in obsolete_log_files {
+            remove_file(obsolete)?;
+        }
+        sync_dir(&self.db_dir)?;
+        Ok(())
     }
 
     fn append_edit(self: &Arc<Self>,
+                   lsm_tree: &LsmTree,
                    manifest:&mut MutexGuard<Manifest>,
-                   edit: &LsmTreeEdit
+                   edit: &ManifestEdit
     ) -> Result<Arc<LsmTree>> {
 
-        let lsm_tree = self.lsm_tree.load();
-
         manifest.append_edit(&edit)?;
-        let new_tree = Arc::new(lsm_tree.apply(&edit));
-        self.lsm_tree.store(new_tree.clone());
+        let mut new_tree = Arc::new(lsm_tree.apply(&edit));
 
         if manifest.should_rotate() {
-            let new_manifest_id = self.next_file_number.fetch_add(1, Ordering::Relaxed);
-            manifest.rotate(new_manifest_id, &LsmTreeEdit::Snapshot(new_tree.clone()))?;
+            let new_manifest_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
+            manifest.rotate(new_manifest_number, &ManifestEdit::Snapshot(new_tree.manifest.clone()))?;
+            let edit = ManifestEdit::ManifestRotation { manifest_number: new_manifest_number };
+            new_tree = Arc::new(lsm_tree.apply(&edit));
         }
         Ok(new_tree)
     }
@@ -422,8 +463,8 @@ impl StorageEngine {
     }
 }
 
-impl Callback<Result<LsmTreeEdit>> for AsyncCallback<Result<LsmTreeEdit>> {
-    fn call(&self, value: Result<LsmTreeEdit>) {
+impl Callback<Result<SSTableOperation>> for AsyncCallback<Result<SSTableOperation>> {
+    fn call(&self, value: Result<SSTableOperation>) {
         self.call(value);
     }
 }
@@ -473,10 +514,10 @@ pub fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupSc
         let path = entry.path();
 
         if let Some(db_file) = DbFile::new(&path) {
-            max_file_num = max_file_num.max(db_file.id);
+            max_file_num = max_file_num.max(db_file.number);
 
-            if db_file.file_type == FileType::WriteAheadLog && db_file.id >= oldest_log_number {
-                wal_files.push((db_file.id, path.clone()));
+            if db_file.file_type == FileType::WriteAheadLog && db_file.number >= oldest_log_number {
+                wal_files.push((db_file.number, path.clone()));
             }
         }
     }
@@ -533,6 +574,11 @@ impl Writer {
             None => None,
         }
     }
+}
+
+pub enum SSTableOperation {
+    Flush { log_number: u64, flushed: Arc<SSTableMetadata> },
+    Compaction { added: Vec<Arc<SSTableMetadata>>, removed: Vec<Arc<SSTableMetadata>> },
 }
 
 #[cfg(test)]

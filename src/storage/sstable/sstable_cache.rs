@@ -15,7 +15,7 @@ impl SSTableCache {
 
     /// Create a new SSTableCache
     pub fn new(options: &DatabaseOptions) -> Self {
-        let cache_size = options.max_open_files() as u64;
+        let cache_size = options.max_open_files as u64;
         let cache = Cache::new(cache_size);
         info!("SSTableReaderCache initialized with a capacity of {} files", cache_size);
 

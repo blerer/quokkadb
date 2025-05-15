@@ -15,8 +15,8 @@ pub struct BlockCache {
 
 impl BlockCache {
     /// Create a new Block Cache
-    fn new(options: DatabaseOptions) -> Self {
-        let cache_size = options.block_cache_size().to_bytes() as u64;
+    fn new(options: &DatabaseOptions) -> Self {
+        let cache_size = options.block_cache_size.to_bytes() as u64;
         let cache = Cache::builder()
             .max_capacity(cache_size)
             .weigher(|_, block: &Result<Arc<Vec<u8>>, Arc<Error>>| {

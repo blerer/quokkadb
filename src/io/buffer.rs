@@ -124,6 +124,10 @@ impl Buffer {
         self.write_index = reader.read(&mut self.data)?;
         Ok(())
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.write_index == 0
+    }
 }
 
 #[cfg(test)]

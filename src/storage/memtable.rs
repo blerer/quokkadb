@@ -9,26 +9,26 @@ use crate::options::options::Options;
 use crate::storage::operation::OperationType;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::interval::Interval;
-use crate::statistics::CollectionStatistics;
+use crate::statistics::ServerStatistics;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
-use crate::storage::lsm_tree::SSTableMetadata;
+use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 
 pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
-    size: AtomicUsize,                       // Current size of the memtable
-    stats: Arc<CollectionStatistics>,
+    size: AtomicUsize, // Current size of the memtable
+    pub stats: Arc<ServerStatistics>,
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
 }
 
 impl Memtable {
-    pub fn new(log_number: u64) -> Self {
+    pub fn new(log_number: u64, stats: Arc<ServerStatistics>) -> Self {
         Memtable {
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
-            stats: CollectionStatistics::new(),
+            stats,
             log_number,
         }
     }
@@ -49,7 +49,19 @@ impl Memtable {
             self.size.fetch_add(key_size + value_size, Ordering::Relaxed);
 
             // Update stats
-            self.stats.add_memtable_operation(operation.operation_type());
+            self.update_operation_counters(operation.operation_type());
+        }
+    }
+
+    /// Update the memtable operation counters.
+    ///
+    /// # Arguments
+    /// - `operation`: The type of the operation that has been performed
+    pub fn update_operation_counters(&self, operation: OperationType) {
+        match operation {
+            OperationType::Put => { self.stats.memtable_total_inserts.inc(1); }
+            OperationType::Delete => {self.stats.memtable_total_deletes.inc(1); }
+            _ => panic!("Unexpected operation type {:?}", operation),
         }
     }
 
@@ -68,14 +80,17 @@ impl Memtable {
             let compound_key = entry.key();
 
             if extract_operation_type(compound_key) == OperationType::Put {
-                self.stats.increment_mem_table_hit();
+                let self1 = &self.stats;
+                self1.memtable_hit.inc(1);
                 return Some(entry.value().clone()) // Found a valid PUT
             } else {
-                self.stats.increment_mem_table_miss();
+                let self1 = &self.stats;
+                self1.memtable_miss.inc(1);
                 return None  // Deleted, stop searching
             }
         }
-        self.stats.increment_mem_table_miss();
+        let self1 = &self.stats;
+        self1.memtable_miss.inc(1);
         None // No valid entry found
     }
 
@@ -186,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_write_put_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
@@ -200,15 +215,15 @@ mod tests {
 
         // Verify statistics
         let stats = memtable.stats.clone();
-        assert_eq!(stats.get_memtable_total_inserts(), 2);
-        assert_eq!(stats.get_memtable_total_deletes(), 0);
-        assert_eq!(stats.get_mem_table_miss(), 0);
-        assert_eq!(stats.get_mem_table_hit(), 2);
+        assert_eq!(stats.memtable_total_inserts.get(), 2);
+        assert_eq!(stats.memtable_total_deletes.get(), 0);
+        assert_eq!(stats.memtable_miss.get(), 0);
+        assert_eq!(stats.memtable_hit.get(), 2);
     }
 
     #[test]
     fn test_write_put_and_delete_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -223,15 +238,15 @@ mod tests {
 
         // Verify statistics
         let stats = memtable.stats.clone();
-        assert_eq!(stats.get_memtable_total_inserts(), 1);
-        assert_eq!(stats.get_memtable_total_deletes(), 1);
-        assert_eq!(stats.get_mem_table_miss(), 2);
-        assert_eq!(stats.get_mem_table_hit(), 0);
+        assert_eq!(stats.memtable_total_inserts.get(), 1);
+        assert_eq!(stats.memtable_total_deletes.get(), 1);
+        assert_eq!(stats.memtable_miss.get(), 2);
+        assert_eq!(stats.memtable_hit.get(), 0);
     }
 
     #[test]
     fn test_write_put_and_delete_operations_in_different_batches() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -248,15 +263,15 @@ mod tests {
 
         // Verify statistics
         let stats = memtable.stats.clone();
-        assert_eq!(stats.get_memtable_total_inserts(), 1);
-        assert_eq!(stats.get_memtable_total_deletes(), 1);
-        assert_eq!(stats.get_mem_table_miss(), 1);
-        assert_eq!(stats.get_mem_table_hit(), 0);
+        assert_eq!(stats.memtable_total_inserts.get(), 1);
+        assert_eq!(stats.memtable_total_deletes.get(), 1);
+        assert_eq!(stats.memtable_miss.get(), 1);
+        assert_eq!(stats.memtable_hit.get(), 0);
     }
 
     #[test]
     fn test_read_with_snapshot() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         let collection: u32 = 32;
         // Insert multiple versions of the same key
@@ -274,26 +289,26 @@ mod tests {
 
         // Verify statistics
         let stats = memtable.stats.clone();
-        assert_eq!(stats.get_memtable_total_inserts(), 2);
-        assert_eq!(stats.get_memtable_total_deletes(), 0);
-        assert_eq!(stats.get_mem_table_miss(), 1);
-        assert_eq!(stats.get_mem_table_hit(), 3);
+        assert_eq!(stats.memtable_total_inserts.get(), 2);
+        assert_eq!(stats.memtable_total_deletes.get(), 0);
+        assert_eq!(stats.memtable_miss.get(), 1);
+        assert_eq!(stats.memtable_hit.get(), 3);
     }
 
     #[test]
     fn test_read_non_existent_key() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
         let collection = 32;
         // Read a key that was never inserted
         assert_eq!(memtable.read(collection, b"non_existent_key", MAX_SEQUENCE_NUMBER), None);
         let stats = memtable.stats.clone();
-        assert_eq!(stats.get_mem_table_miss(), 1);
-        assert_eq!(stats.get_mem_table_hit(), 0);
+        assert_eq!(stats.memtable_miss.get(), 1);
+        assert_eq!(stats.memtable_hit.get(), 0);
     }
 
     #[test]
     fn test_range_scan_with_no_matching_keys() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         let collection: u32 = 32;
         let batch = write_batch(vec![
@@ -311,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_different_ranges() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![
@@ -370,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_mixed_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, ServerStatistics::new());
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![

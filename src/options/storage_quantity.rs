@@ -1,3 +1,5 @@
+use std::fmt;
+
 /// Represents different storage units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageUnit {
@@ -99,5 +101,58 @@ impl StorageQuantity {
             StorageUnit::Gibibytes => bytes / (1024 * 1024 * 1024),
         };
         StorageQuantity::new(target_value, target_unit)
+    }
+}
+
+impl fmt::Display for StorageQuantity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let unit_str = match self.unit {
+            StorageUnit::Bytes => "B",
+            StorageUnit::Kibibytes => "KiB",
+            StorageUnit::Mebibytes => "MiB",
+            StorageUnit::Gibibytes => "GiB",
+        };
+        write!(f, "{} {}", self.value, unit_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_bytes() {
+        assert_eq!(StorageQuantity::new(1, StorageUnit::Bytes).to_bytes(), 1);
+        assert_eq!(StorageQuantity::new(1, StorageUnit::Kibibytes).to_bytes(), 1024);
+        assert_eq!(StorageQuantity::new(1, StorageUnit::Mebibytes).to_bytes(), 1024 * 1024);
+        assert_eq!(StorageQuantity::new(1, StorageUnit::Gibibytes).to_bytes(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_convert_to_same_unit() {
+        let sq = StorageQuantity::new(42, StorageUnit::Mebibytes);
+        assert_eq!(sq.convert_to(StorageUnit::Mebibytes), sq);
+    }
+
+    #[test]
+    fn test_convert_to_lower_unit() {
+        let sq = StorageQuantity::new(1, StorageUnit::Mebibytes);
+        let converted = sq.convert_to(StorageUnit::Kibibytes);
+        assert_eq!(converted, StorageQuantity::new(1024, StorageUnit::Kibibytes));
+    }
+
+    #[test]
+    fn test_convert_to_higher_unit_truncation() {
+        let sq = StorageQuantity::new(1536, StorageUnit::Kibibytes); // = 1.5 MiB
+        let converted = sq.convert_to(StorageUnit::Mebibytes);
+        assert_eq!(converted, StorageQuantity::new(1, StorageUnit::Mebibytes)); // truncates
+    }
+
+    #[test]
+    fn test_display_formatting() {
+        assert_eq!(format!("{}", StorageQuantity::new(42, StorageUnit::Bytes)), "42 B");
+        assert_eq!(format!("{}", StorageQuantity::new(1, StorageUnit::Kibibytes)), "1 KiB");
+        assert_eq!(format!("{}", StorageQuantity::new(5, StorageUnit::Mebibytes)), "5 MiB");
+        assert_eq!(format!("{}", StorageQuantity::new(2, StorageUnit::Gibibytes)), "2 GiB");
     }
 }

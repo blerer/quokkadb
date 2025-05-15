@@ -10,13 +10,13 @@ use crate::options::options::Options;
 use crate::storage::callback::Callback;
 use crate::storage::memtable::Memtable;
 use crate::storage::files::DbFile;
-use crate::storage::lsm_tree::LsmTreeEdit;
 use crate::storage::sstable::sstable_cache::SSTableCache;
+use crate::storage::storage_engine::SSTableOperation;
 
 pub struct FlushTask {
     pub db_file: DbFile,
     pub memtable: Arc<Memtable>,
-    pub callback: Option<Arc<dyn Callback<Result<LsmTreeEdit>>>>,
+    pub callback: Option<Arc<dyn Callback<Result<SSTableOperation>>>>,
 }
 
 pub struct FlushScheduler {
@@ -38,9 +38,9 @@ impl FlushScheduler {
 
                     match result {
                         Ok(sst) => {
-                            let edit = LsmTreeEdit::Flush { log_number: memtable.log_number, sst: Arc::new(sst)};
+                            let operation = SSTableOperation::Flush { log_number: memtable.log_number, flushed: Arc::new(sst)};
                             if let Some(callback) = callback {
-                                let _ = callback.call(Ok(edit));
+                                let _ = callback.call(Ok(operation));
                             }
                         }
                         Err(e) => {
