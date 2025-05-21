@@ -2,12 +2,12 @@ extern crate core;
 
 pub mod error;
 mod options;
-pub mod statistics;
 mod query;
 pub mod storage;
 pub mod util;
 pub mod collection;
 pub mod io;
+pub mod obs;
 
 use std::path::Path;
 use crate::error::Error;

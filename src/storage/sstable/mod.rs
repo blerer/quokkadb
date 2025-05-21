@@ -1,3 +1,4 @@
+use std::fmt;
 
 pub mod block_builder;
 pub mod sstable_writer;
@@ -30,6 +31,12 @@ pub struct BlockHandle {
 impl BlockHandle {
     pub fn new(offset: u64, size: u64) -> Self {
         Self { offset, size }
+    }
+}
+
+impl fmt::Display for BlockHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BlockHandle {{ offset: {}, size: {} }}", self.offset, self.size)
     }
 }
 

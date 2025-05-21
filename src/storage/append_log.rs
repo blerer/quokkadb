@@ -12,7 +12,7 @@ use crate::storage::files::DbFile;
 /// aligning with disk block sizes.
 pub const BUFFER_SIZE_IN_BYTES: usize = 4096;
 
-pub struct Log<F: LogFileCreator> {
+pub struct AppendLog<F: LogFileCreator> {
 
     directory: PathBuf, // The path to the log directory
     file_creator: Arc<F>,
@@ -21,14 +21,14 @@ pub struct Log<F: LogFileCreator> {
     observer: Arc<F::Observer>,
 }
 
-impl<F: LogFileCreator> Log<F> {
+impl<F: LogFileCreator> AppendLog<F> {
 
     pub fn new(directory: &Path, file: DbFile, file_creator: Arc<F>, observer: Arc<F::Observer>) -> Result<Self> {
 
         let directory = directory.to_path_buf();
         let current_file = file_creator.new_log(directory.clone(), file, observer.clone())?;
 
-        Ok(Log {
+        Ok(AppendLog {
             directory,
             file_creator,
             current_file,
@@ -45,7 +45,7 @@ impl<F: LogFileCreator> Log<F> {
 
         let current_file = LogFile::load_from(file_path, file.number, observer.clone())?;
 
-        Ok(Log {
+        Ok(AppendLog {
             directory: db_path,
             file_creator,
             current_file,
@@ -63,6 +63,10 @@ impl<F: LogFileCreator> Log<F> {
     /// Returns the path to the current log file.
     pub fn filename(&self) -> Option<String> {
         file_name_as_str(&self.current_file.path).map(|s| s.to_string())
+    }
+
+    pub fn file_path(&self) -> &PathBuf {
+        &self.current_file.path
     }
 
     pub fn rotate(&mut self, new_log: DbFile) -> Result<(PathBuf, PathBuf)> {
@@ -192,7 +196,7 @@ impl<F: LogFileCreator> Log<F> {
 }
 
 
-impl <F:LogFileCreator> Drop for Log<F> {
+impl <F:LogFileCreator> Drop for AppendLog<F> {
     fn drop(&mut self) {
         // If the buffer has not been flushed to disk (which is the normal path in case of a rotation),
         // it means that it is a shutdown and that we need to ensure that buffer data is flushed to disk.
@@ -528,7 +532,7 @@ mod tests {
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(1), file_creator, MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(1), file_creator, MockLogObserver::new()).unwrap();
 
         let data = &vec![1; 250];
         log.append(data).unwrap();
@@ -541,7 +545,7 @@ mod tests {
         let metadata = std::fs::metadata(log_file_path.clone()).unwrap();
         assert_eq!(metadata.len(), 2 * BUFFER_SIZE_IN_BYTES as u64); // 2 blocks should have been written (header + data)
 
-        let (header, entries) = Log::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -558,7 +562,7 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(6), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(6), file_creator.clone(), observer.clone()).unwrap();
 
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0u64);
@@ -613,7 +617,7 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(9), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(9), file_creator.clone(), observer.clone()).unwrap();
 
         assert_eq!(log.append(&vec![1; 250]).unwrap(), 262);
         assert_eq!(log.append(&vec![2; 360]).unwrap(), 372);
@@ -636,7 +640,7 @@ mod tests {
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), len);
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
 
-        let (header, entries) = Log::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -661,7 +665,7 @@ mod tests {
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(10), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(10), file_creator.clone(), MockLogObserver::new()).unwrap();
 
         log.append(&vec![1; 250]).unwrap();
         log.sync().unwrap();
@@ -681,7 +685,7 @@ mod tests {
 
         // Replay
         assert!(log_file_path.exists());
-        let (header, mut entries) = Log::<MockLogFileCreator>::read_log_file(log_file_path.clone(), "HEADER".len()).unwrap();
+        let (header, mut entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path.clone(), "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -705,7 +709,7 @@ mod tests {
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(11), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(11), file_creator.clone(), MockLogObserver::new()).unwrap();
 
         let mut record_offset = 4096;
 
@@ -734,7 +738,7 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let (header, mut entries) = Log::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, mut entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -775,7 +779,7 @@ mod tests {
 
         // Replay
         assert!(log_file_path.exists());
-        let rs = Log::<MockLogFileCreator>::read_log_file(log_file_path, 64);
+        let rs = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, 64);
         match rs {
             Err(LogReplayError::Corruption { record_offset: offset, reason : _ }) => {
                 assert_eq!(0, offset);
@@ -793,7 +797,7 @@ mod tests {
         let file_creator = Arc::new(MockLogFileCreator);
 
         // Create the original Log
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(42), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(42), file_creator.clone(), MockLogObserver::new()).unwrap();
         log.append(b"some test data").unwrap();
         log.sync().unwrap();
 
@@ -803,7 +807,7 @@ mod tests {
 
         // Now reload it
         let observer = MockLogObserver::new();
-        let reloaded_log = Log::load_from(&original_path, file_creator.clone(), observer.clone()).unwrap();
+        let reloaded_log = AppendLog::load_from(&original_path, file_creator.clone(), observer.clone()).unwrap();
 
         // Validate
         assert_eq!(reloaded_log.current_file.number, original_id);
@@ -825,7 +829,7 @@ mod tests {
         let log_path = path.join("000020.log");
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(20), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(20), file_creator.clone(), MockLogObserver::new()).unwrap();
         log.append(&vec![1; 250]).unwrap();
         log.sync().unwrap();
 
@@ -835,7 +839,7 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let (_header, entries) = Log::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
+        let (_header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
         let results: Vec<_> = entries.collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_ref().unwrap().len(), 250);
@@ -848,7 +852,7 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
 
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
@@ -871,7 +875,7 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
 
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
@@ -906,7 +910,7 @@ mod tests {
         let file_creator = Arc::new(FailingLogFileCreator);
         let observer = MockLogObserver::new();
 
-        let res = Log::new(path, DbFile::new_write_ahead_log(22), file_creator.clone(), observer.clone());
+        let res = AppendLog::new(path, DbFile::new_write_ahead_log(22), file_creator.clone(), observer.clone());
         assert!(res.is_err());
     }
 
@@ -917,10 +921,10 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = Log::new(path, DbFile::new_write_ahead_log(23), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(23), file_creator.clone(), observer.clone()).unwrap();
 
         let data = vec![1; 500];
-        let written = log.append(&data).unwrap();
+        let _written = log.append(&data).unwrap();
         log.sync().unwrap();
 
         let actual_file = std::fs::metadata(log.current_file.path.clone()).unwrap().len();

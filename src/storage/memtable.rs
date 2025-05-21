@@ -9,26 +9,26 @@ use crate::options::options::Options;
 use crate::storage::operation::OperationType;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::interval::Interval;
-use crate::statistics::ServerStatistics;
+use crate::obs::metrics::{Counter, HitRatioGauge, MetricRegistry};
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
 use crate::storage::lsm_version::SSTableMetadata;
-use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 
 pub struct Memtable {
+    metrics: Arc<MemtableMetrics>,
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
     size: AtomicUsize, // Current size of the memtable
-    pub stats: Arc<ServerStatistics>,
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
 }
 
 impl Memtable {
-    pub fn new(log_number: u64, stats: Arc<ServerStatistics>) -> Self {
+    pub fn new(metrics: Arc<MemtableMetrics>, log_number: u64) -> Self {
+
         Memtable {
+            metrics,
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
-            stats,
             log_number,
         }
     }
@@ -59,8 +59,8 @@ impl Memtable {
     /// - `operation`: The type of the operation that has been performed
     pub fn update_operation_counters(&self, operation: OperationType) {
         match operation {
-            OperationType::Put => { self.stats.memtable_total_inserts.inc(1); }
-            OperationType::Delete => {self.stats.memtable_total_deletes.inc(1); }
+            OperationType::Put => { self.metrics.total_inserts.inc(); }
+            OperationType::Delete => {self.metrics.total_deletes.inc(); }
             _ => panic!("Unexpected operation type {:?}", operation),
         }
     }
@@ -79,18 +79,15 @@ impl Memtable {
         while let Some(entry) = iter.next() {
             let compound_key = entry.key();
 
-            if extract_operation_type(compound_key) == OperationType::Put {
-                let self1 = &self.stats;
-                self1.memtable_hit.inc(1);
-                return Some(entry.value().clone()) // Found a valid PUT
+            return if extract_operation_type(compound_key) == OperationType::Put {
+                self.metrics.hits.inc();
+                Some(entry.value().clone()) // Found a valid PUT
             } else {
-                let self1 = &self.stats;
-                self1.memtable_miss.inc(1);
-                return None  // Deleted, stop searching
+                self.metrics.misses.inc();
+                None  // Deleted, stop searching
             }
         }
-        let self1 = &self.stats;
-        self1.memtable_miss.inc(1);
+        self.metrics.misses.inc();
         None // No valid entry found
     }
 
@@ -135,28 +132,60 @@ impl Memtable {
     }
 
     pub fn flush(&self,
-                 sst_cache: Arc<SSTableCache>,
                  directory: &Path,
                  sst_file: &DbFile,
                  options: &Options
     ) -> Result<SSTableMetadata> {
-        let sst = self.write_sstable(directory, sst_file, options)?;
-        // load the new sst in the cache to validate that everything when well and made it available
-        // straight a way when the memtable is dropped
-        sst_cache.get(&directory.join(sst_file.filename()))?;
-        Ok(sst)
-    }
-
-    fn write_sstable(&self,
-                     directory: &Path,
-                     db_file: &DbFile,
-                     options: &Options
-    ) -> Result<SSTableMetadata> {
-        let mut writer = SSTableWriter::new(directory, db_file, options, self.skiplist.len())?;
+        let mut writer = SSTableWriter::new(directory, sst_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
         }
         writer.finish()
+    }
+
+    pub fn metrics(&self) -> Arc<MemtableMetrics> {
+        self.metrics.clone()
+    }
+}
+
+/// The Memtable exposed metrics
+pub struct MemtableMetrics {
+    /// Tracks the number of Memtable hits (reads satisfied by the MemTable).
+    hits: Arc<Counter>,
+
+    /// Tracks the number of Memtable misses (reads not found in the MemTable).
+    misses: Arc<Counter>,
+
+    /// Tracks the total number of inserts (PUT operations) into the MemTable.
+    total_inserts: Arc<Counter>,
+
+    /// Tracks the total number of delete operations applied to the MemTable.
+    total_deletes: Arc<Counter>,
+
+    /// The ratio of MemTable hits to the total number of lookups (hits + misses)
+    hit_ratio: Arc<HitRatioGauge>,
+}
+
+impl MemtableMetrics {
+    pub fn new() -> Arc<Self> {
+        let memtable_hit = Counter::new();
+        let memtable_miss = Counter::new();
+
+        Arc::new(Self {
+            hits: memtable_hit.clone(),
+            misses: memtable_miss.clone(),
+            total_inserts: Counter::new(),
+            total_deletes: Counter::new(),
+            hit_ratio: HitRatioGauge::new(memtable_hit, memtable_miss),
+        })
+    }
+
+    pub fn register_to(&self, metric_registry: &mut MetricRegistry) {
+        metric_registry.register_counter("memtable_hit", &self.hits)
+            .register_counter("memtable_miss", &self.misses)
+            .register_counter("memtable_total_inserts", &self.total_inserts)
+            .register_counter("memtable_total_deletes", &self.total_deletes)
+            .register_hit_ratio_gauge("memtable_hit_ratio", &self.hit_ratio);
     }
 }
 
@@ -201,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_write_put_operations() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
@@ -213,17 +242,17 @@ mod tests {
         assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value1")));
         assert_eq!(memtable.read(collection, b"key2", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value2")));
 
-        // Verify statistics
-        let stats = memtable.stats.clone();
-        assert_eq!(stats.memtable_total_inserts.get(), 2);
-        assert_eq!(stats.memtable_total_deletes.get(), 0);
-        assert_eq!(stats.memtable_miss.get(), 0);
-        assert_eq!(stats.memtable_hit.get(), 2);
+        // Verify metrics
+        let metrics = memtable.metrics.clone();
+        assert_eq!(metrics.total_inserts.get(), 2);
+        assert_eq!(metrics.total_deletes.get(), 0);
+        assert_eq!(metrics.misses.get(), 0);
+        assert_eq!(metrics.hits.get(), 2);
     }
 
     #[test]
     fn test_write_put_and_delete_operations() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -237,16 +266,16 @@ mod tests {
         assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), None);
 
         // Verify statistics
-        let stats = memtable.stats.clone();
-        assert_eq!(stats.memtable_total_inserts.get(), 1);
-        assert_eq!(stats.memtable_total_deletes.get(), 1);
-        assert_eq!(stats.memtable_miss.get(), 2);
-        assert_eq!(stats.memtable_hit.get(), 0);
+        let stats = memtable.metrics.clone();
+        assert_eq!(stats.total_inserts.get(), 1);
+        assert_eq!(stats.total_deletes.get(), 1);
+        assert_eq!(stats.misses.get(), 2);
+        assert_eq!(stats.hits.get(), 0);
     }
 
     #[test]
     fn test_write_put_and_delete_operations_in_different_batches() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -262,16 +291,16 @@ mod tests {
         assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), None);
 
         // Verify statistics
-        let stats = memtable.stats.clone();
-        assert_eq!(stats.memtable_total_inserts.get(), 1);
-        assert_eq!(stats.memtable_total_deletes.get(), 1);
-        assert_eq!(stats.memtable_miss.get(), 1);
-        assert_eq!(stats.memtable_hit.get(), 0);
+        let stats = memtable.metrics.clone();
+        assert_eq!(stats.total_inserts.get(), 1);
+        assert_eq!(stats.total_deletes.get(), 1);
+        assert_eq!(stats.misses.get(), 1);
+        assert_eq!(stats.hits.get(), 0);
     }
 
     #[test]
     fn test_read_with_snapshot() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         // Insert multiple versions of the same key
@@ -288,27 +317,27 @@ mod tests {
         assert_eq!(memtable.read(collection,b"key1", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value1_v2")));   // Latest
 
         // Verify statistics
-        let stats = memtable.stats.clone();
-        assert_eq!(stats.memtable_total_inserts.get(), 2);
-        assert_eq!(stats.memtable_total_deletes.get(), 0);
-        assert_eq!(stats.memtable_miss.get(), 1);
-        assert_eq!(stats.memtable_hit.get(), 3);
+        let stats = memtable.metrics.clone();
+        assert_eq!(stats.total_inserts.get(), 2);
+        assert_eq!(stats.total_deletes.get(), 0);
+        assert_eq!(stats.misses.get(), 1);
+        assert_eq!(stats.hits.get(), 3);
     }
 
     #[test]
     fn test_read_non_existent_key() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
         let collection = 32;
         // Read a key that was never inserted
         assert_eq!(memtable.read(collection, b"non_existent_key", MAX_SEQUENCE_NUMBER), None);
-        let stats = memtable.stats.clone();
-        assert_eq!(stats.memtable_miss.get(), 1);
-        assert_eq!(stats.memtable_hit.get(), 0);
+        let stats = memtable.metrics.clone();
+        assert_eq!(stats.misses.get(), 1);
+        assert_eq!(stats.hits.get(), 0);
     }
 
     #[test]
     fn test_range_scan_with_no_matching_keys() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch = write_batch(vec![
@@ -326,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_different_ranges() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![
@@ -385,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_mixed_operations() {
-        let memtable = Memtable::new(2, ServerStatistics::new());
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![

@@ -3,12 +3,14 @@ use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
+use std::time::Instant;
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
+use crate::obs::logger::LoggerAndTracer;
 use crate::options::options::DatabaseOptions;
-use crate::statistics::ServerStatistics;
+use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
 use crate::storage::files::DbFile;
-use crate::storage::log::{Log, LogFileCreator, LogObserver, LogReplayError};
+use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::write_batch::WriteBatch;
 
 /// The current version of the write-ahead log format.
@@ -17,57 +19,75 @@ const WAL_VERSION: u32 = 1;
 const MAGIC_NUMBER: u32 = 0x51756F6B; //"Quok" in ASCII hex
 
 pub struct WriteAheadLog {
-    /// The underlying log file manager
-    log: Log<WalFileCreator>,
-    /// The n
+    /// The logger
+    logger: Arc<dyn LoggerAndTracer>,
+    /// The wal metrics
+    metrics: Metrics,
+    /// Number of bytes that has to be written before the wal will issue a fsync
     wal_bytes_per_sync: usize,
+    /// The underlying append only log file manager
+    append_log: AppendLog<WalFileCreator>,
     /// The bytes not synced to disk yet
     pending_bytes: usize,
     /// The wal files that have been rotated but are still active
     rotated_log_files: VecDeque<(u64, PathBuf)>,
-    /// The server statistics
-    stats: Arc<ServerStatistics>
 }
 
 impl WriteAheadLog {
 
-    pub fn new(options: &DatabaseOptions, stats: Arc<ServerStatistics>, directory: &Path, number: u64) -> Result<Self> {
+    pub fn new(
+        logger: Arc<dyn LoggerAndTracer>,
+        metric_registry: &mut MetricRegistry,
+        options: &DatabaseOptions,
+        directory: &Path,
+        number: u64
+    ) -> Result<Self> {
 
-        let log = Log::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(stats.clone()))?;
-        Self::new_internal(options, stats, log, VecDeque::new())
+        let metrics = Metrics::new();
+        let append_log = AppendLog::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        metrics.register_to(metric_registry);
+        Self::new_internal(logger, metrics, options, append_log, VecDeque::new())
     }
 
     pub fn load_from(
+        logger: Arc<dyn LoggerAndTracer>,
+        metric_registry: &mut MetricRegistry,
         options: &DatabaseOptions,
-        stats: Arc<ServerStatistics>,
         file_path: &Path,
         rotated_log_files: VecDeque<(u64, PathBuf)>
     ) -> Result<Self> {
 
-        let log = Log::load_from(&file_path, Arc::new(WalFileCreator {}), WalObserver::new(stats.clone()))?;
-        Self::new_internal(options, stats, log, rotated_log_files)
+        let metrics = Metrics::new();
+        let append_log = AppendLog::load_from(&file_path, Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        metrics.register_to(metric_registry);
+        Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
     }
 
     pub fn new_after_corruption(
+        logger: Arc<dyn LoggerAndTracer>,
+        metric_registry: &mut MetricRegistry,
         options: &DatabaseOptions,
-        stats: Arc<ServerStatistics>,
         directory: &Path,
         number: u64,
         rotated_log_files: VecDeque<(u64, PathBuf)>
     ) -> Result<Self> {
 
-        let log = Log::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(stats.clone()))?;
-        Self::new_internal(options, stats, log, rotated_log_files)
+        let metrics = Metrics::new();
+        let append_log = AppendLog::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        metrics.register_to(metric_registry);
+        Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
     }
 
     fn new_internal(
+        logger: Arc<dyn LoggerAndTracer>,
+        metrics: Metrics,
         options: &DatabaseOptions,
-        stats: Arc<ServerStatistics>,
-        log: Log<WalFileCreator>,
+        append_log: AppendLog<WalFileCreator>,
         rotated_log_files: VecDeque<(u64, PathBuf)>
     ) -> Result<Self> {
+
         let amount = 1 + rotated_log_files.len() as u64;
-        stats.wal_files.inc(amount);
+        metrics.files.inc_by(amount);
 
         // We need to add rotated files to the total log size
         let mut rotated_files_size = 0;
@@ -75,34 +95,45 @@ impl WriteAheadLog {
             rotated_files_size += Self::file_size(&rotated_log_file.1)?;
         }
 
-        stats.wal_total_bytes.inc(rotated_files_size);
+        metrics.total_bytes.inc_by(rotated_files_size);
+
+        logger.info(format_args!("WAL initialized at path: {:?}", append_log.file_path()));
 
         Ok(WriteAheadLog {
-            log,
+            logger,
+            metrics,
+            append_log,
             wal_bytes_per_sync: options.wal_bytes_per_sync.to_bytes(),
             pending_bytes: 0,
             rotated_log_files,
-            stats,
         })
     }
 
     pub fn append(&mut self, seq: u64, batch: &WriteBatch) -> Result<()> {
 
+        self.logger.event(format_args!("event: wal append start, batch_size={}", batch.len()));
+
         let record = batch.to_wal_record(seq);
-        let bytes = self.log.append(&record)?;
+        let bytes = self.append_log.append(&record)?;
         self.pending_bytes += bytes;
 
         self.sync_if_needed()?;
+
+        self.logger.event(format_args!("event: wal append done, bytes={}", bytes));
 
         Ok(())
     }
 
     pub fn rotate(&mut self, new_log_number: u64) -> Result<()> {
-        let (_new_path, old_path) = self.log.rotate(DbFile::new_write_ahead_log(new_log_number))?;
-        self.pending_bytes = 0;
 
-        let self1 = &self.stats;
-        self1.wal_files.inc(1);
+        let wal_file = DbFile::new_write_ahead_log(new_log_number);
+        self.logger.event(format_args!("event: wal rotation start"));
+        self.logger.info(format_args!("Rotating WAL file from {} to {}", self.append_log.filename().unwrap(), wal_file.filename()));
+        let (new_path, old_path) = self.append_log.rotate(wal_file)?;
+        self.pending_bytes = 0;
+        self.metrics.files.inc();
+
+        self.logger.event(format_args!("event: wal rotation done, new_path={:?}", new_path));
 
         let number = DbFile::new(&old_path).unwrap().number;
         self.rotated_log_files.push_back((number, old_path));
@@ -115,17 +146,15 @@ impl WriteAheadLog {
         while let Some(active_log) = self.rotated_log_files.front() {
             if  active_log.0 < oldest_unflushed_log_number {
                 let path = self.rotated_log_files.pop_front().unwrap().1;
-                let self1 = &self.stats;
                 let bytes = Self::file_size(&path)?;
-                self1.wal_total_bytes.dec(bytes);
+                self.metrics.total_bytes.dec_by(bytes);
                 obsoletes.push(path);
             } else {
                 break;
             }
         }
-        let self1 = &self.stats;
         let amount = obsoletes.len() as u64;
-        self1.wal_files.dec(amount);
+        self.metrics.files.dec_by(amount);
         Ok(obsoletes)
     }
 
@@ -135,13 +164,17 @@ impl WriteAheadLog {
 
     fn sync_if_needed(&mut self) -> Result<()> {
         if self.pending_bytes >= self.wal_bytes_per_sync {
+            self.logger.debug(format_args!("WAL sync condition met, syncing..."));
             self.sync()?;
         }
         Ok(())
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        self.log.sync()?;
+        let start = Instant::now();
+        self.append_log.sync()?;
+        let duration = start.elapsed();
+        self.logger.event(format_args!("event: wal sync, duration={}µs, path={:?}", duration.as_micros(), self.append_log.file_path()));
         self.pending_bytes = 0;
         Ok(())
     }
@@ -152,7 +185,7 @@ impl WriteAheadLog {
 
         const HEADER_SIZE: usize = 4 + 4 + 8; // MAGIC (u32) + VERSION (u32) + ID (u64)
 
-        let (header, iter) = Log::<WalFileCreator>::read_log_file(wal_file.to_path_buf(), HEADER_SIZE)?;
+        let (header, iter) = AppendLog::<WalFileCreator>::read_log_file(wal_file.to_path_buf(), HEADER_SIZE)?;
         let reader = ByteReader::new(&header);
 
         let magic = reader.read_u32_be()?;
@@ -194,40 +227,80 @@ impl LogFileCreator for WalFileCreator {
 }
 
 struct WalObserver {
-    stats: Arc<ServerStatistics>,
+    metrics: Metrics,
 }
 
 impl WalObserver {
-    fn new(stats: Arc<ServerStatistics>) -> Arc<Self> {
-        Arc::new(Self { stats })
+    fn new(metrics: Metrics) -> Arc<Self> {
+        Arc::new(Self { metrics })
     }
 }
 
 impl LogObserver for WalObserver {
     fn on_load(&self, bytes: u64) {
-        self.stats.wal_total_bytes.inc(bytes);
+        self.metrics.total_bytes.inc_by(bytes);
     }
 
     fn on_buffered(&self, bytes: u64) {
-        self.stats.wal_bytes_buffered.inc(bytes);
+        self.metrics.bytes_buffered.inc_by(bytes);
     }
 
     fn on_bytes_written(&self, bytes: u64) {
-        self.stats.wal_bytes_written.inc(bytes);
-        self.stats.wal_bytes_buffered.dec(bytes);
+        self.metrics.bytes_written.inc_by(bytes);
+        self.metrics.bytes_buffered.dec_by(bytes);
     }
 
     fn on_sync(&self, bytes: u64) {
-        self.stats.wal_syncs.inc(1);
-        self.stats.wal_total_bytes.inc(bytes);
+        self.metrics.syncs.inc();
+        self.metrics.total_bytes.inc_by(bytes);
     }
 }
 
+#[derive(Clone)]
+struct Metrics {
+    /// Number of WAL files currently present
+    pub files: Arc<AtomicGauge>,
+
+    /// Total size (in bytes) of all WAL files
+    pub total_bytes: Arc<AtomicGauge>,
+
+    /// Number of times the WAL has been explicitly synced to disk
+    pub syncs: Arc<Counter>,
+
+    /// Number of bytes currently buffered by the wal
+    pub bytes_buffered: Arc<AtomicGauge>,
+
+    /// The total number of bytes successfully written to the WAL file(s)
+    /// This number refers to bytes written to the file descriptor (i.e., the OS buffer), not
+    /// necessarily flushed to disk.
+    pub bytes_written: Arc<Counter>,
+}
+
+impl Metrics {
+    fn new() -> Metrics {
+        Self {
+            files: AtomicGauge::new(),
+            total_bytes: AtomicGauge::new(),
+            syncs: Counter::new(),
+            bytes_buffered: AtomicGauge::new(),
+            bytes_written: Counter::new(),
+        }
+    }
+
+    fn register_to(&self, metric_registry: &mut MetricRegistry) {
+        metric_registry.register_atomic_gauge("wal_files", &self.files)
+            .register_atomic_gauge("wal_total_bytes", &self.total_bytes)
+            .register_counter("wal_syncs", &self.syncs)
+            .register_atomic_gauge("wal_bytes_buffered", &self.bytes_buffered)
+            .register_counter("wal_bytes_written", &self.bytes_written);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use crate::obs::logger;
     use crate::options::options::DatabaseOptions;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
@@ -237,9 +310,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
-        let stats = ServerStatistics::new();
-
-        let mut wal = WriteAheadLog::new(&options, stats, &path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
         let batches = vec![
             (10, WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())])),
@@ -259,11 +330,11 @@ mod tests {
         let len = wal_file.metadata().unwrap().len();
 
         // metric check:
-        assert_eq!(wal.stats.wal_syncs.get(), 2);
-        assert_eq!(wal.stats.wal_bytes_buffered.get(), 0);
-        assert_eq!(wal.stats.wal_bytes_written.get(), len);
-        assert_eq!(wal.stats.wal_total_bytes.get(), len);
-        assert_eq!(wal.stats.wal_files.get(), 1);
+        assert_eq!(wal.metrics.syncs.get(), 2);
+        assert_eq!(wal.metrics.bytes_buffered.get(), 0);
+        assert_eq!(wal.metrics.bytes_written.get(), len);
+        assert_eq!(wal.metrics.total_bytes.get(), len);
+        assert_eq!(wal.metrics.files.get(), 1);
 
         let replayed: Vec<_> = WriteAheadLog::replay(&wal_file)
             .unwrap()
@@ -296,9 +367,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
-        let stats = ServerStatistics::new();
 
-        let mut wal = WriteAheadLog::new(&options, stats, &path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
         // Append and rotate to log 2
         wal.append(1, &WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]))
@@ -329,8 +399,7 @@ mod tests {
             assert_eq!(batch.operations()[0], Operation::new_put(1, 1, expected_key.to_vec(), expected_val.to_vec()));
         }
 
-        let self1 = &wal.stats;
-        assert_eq!(self1.wal_files.get(), 3);
+        assert_eq!(wal.metrics.files.get(), 3);
 
         // Obsolete logs: 1 and 2 (since current is 3)
         let obsolete = wal.drain_obsolete_logs(3).unwrap();
@@ -343,10 +412,8 @@ mod tests {
         assert!(empty.is_empty());
 
         // metric check:
-        let self1 = &wal.stats;
-        assert_eq!(self1.wal_files.get(), 1); // only one active log left
-        let self2 = &wal.stats;
-        assert!(self2.wal_total_bytes.get() > 0);
+        assert_eq!(wal.metrics.files.get(), 1); // only one active log left
+        assert!(wal.metrics.total_bytes.get() > 0);
     }
 
     #[test]
@@ -355,9 +422,8 @@ mod tests {
         let path = dir.path();
         let mut options = DatabaseOptions::default();
         options.wal_bytes_per_sync = StorageQuantity::new(1, StorageUnit::Bytes); // force sync after any write
-        let stats = ServerStatistics::new();
 
-        let mut wal = WriteAheadLog::new(&options, stats, path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 1).unwrap();
 
         let mut batch = Vec::new();
         for i in 0..5 {
@@ -370,7 +436,7 @@ mod tests {
         assert_eq!(wal.pending_bytes, 0);
 
         // metric check:
-        assert_eq!(wal.stats.wal_syncs.get(), 2); // Header + triggered sync
+        assert_eq!(wal.metrics.syncs.get(), 2); // Header + triggered sync
     }
 
     #[test]
@@ -378,19 +444,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let options = DatabaseOptions::default();
-        let stats = ServerStatistics::new();
 
-        let mut wal = WriteAheadLog::new(&options, stats, path, 7).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 7).unwrap();
         for i in 0..3 {
             wal.append(100 + i as u64, &WriteBatch::new(vec![new_operation(i)])).unwrap();
         }
         wal.rotate(8).unwrap();
 
         // metrics check
-        assert_eq!(wal.stats.wal_files.get(), 2); // one rotated, one active
-        assert_eq!(wal.stats.wal_syncs.get(), 3);
-        assert_eq!(wal.stats.wal_bytes_buffered.get(), 0);
-        assert_eq!(wal.stats.wal_bytes_written.get(), wal.stats.wal_total_bytes.get());
+        assert_eq!(wal.metrics.files.get(), 2); // one rotated, one active
+        assert_eq!(wal.metrics.syncs.get(), 3);
+        assert_eq!(wal.metrics.bytes_buffered.get(), 0);
+        assert_eq!(wal.metrics.bytes_written.get(), wal.metrics.total_bytes.get());
 
         let log_file = path.join("000007.log");
         let replayed: Vec<_> = WriteAheadLog::replay(&log_file).unwrap()
@@ -408,9 +473,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let options = DatabaseOptions::default();
-        let stats = ServerStatistics::new();
 
-        let mut wal = WriteAheadLog::new(&options, stats, path, 11).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 11).unwrap();
         wal.rotate(12).unwrap();
 
         let log_file = path.join("000011.log");
@@ -420,10 +484,8 @@ mod tests {
         assert!(replayed.is_empty());
 
         // metric check:
-        let self1 = &wal.stats;
-        assert!(self1.wal_bytes_written.get() > 0);
-        let self1 = &wal.stats;
-        assert_eq!(self1.wal_files.get(), 2); // one rotated, one active
+        assert!(wal.metrics.bytes_written.get() > 0);
+        assert_eq!(wal.metrics.files.get(), 2); // one rotated, one active
     }
 
     #[test]
@@ -434,9 +496,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let options = DatabaseOptions::default();
-        let stats = ServerStatistics::new();
 
-        let mut wal = WriteAheadLog::new(&options, stats, path, 13).unwrap();
+        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 13).unwrap();
         wal.append(1, &WriteBatch::new(vec![
             Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())
         ])).unwrap();
@@ -453,8 +514,7 @@ mod tests {
         assert!(result.is_err(), "Expected replay to fail due to corruption");
 
         // metric check:
-        let self1 = &wal.stats;
-        assert_eq!(self1.wal_files.get(), 2); // old + new
+        assert_eq!(wal.metrics.files.get(), 2); // old + new
     }
 
     fn new_operation(i: u8) -> Operation {

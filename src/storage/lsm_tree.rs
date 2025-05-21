@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use crate::statistics::ServerStatistics;
+use crate::obs::metrics::MetricRegistry;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
-use crate::storage::memtable::Memtable;
+use crate::storage::memtable::{Memtable, MemtableMetrics};
 
 pub struct LsmTree {
     pub manifest: Arc<ManifestState>,
@@ -11,19 +11,23 @@ pub struct LsmTree {
 }
 
 impl LsmTree {
-    pub fn new(current_log_number: u64, next_file_number: u64, stats: Arc<ServerStatistics>) -> Self {
+    pub fn new(metric_registry: &mut MetricRegistry, current_log_number: u64, next_file_number: u64) -> Self {
+        let memtable_metrics = MemtableMetrics::new();
+        memtable_metrics.register_to(metric_registry);
         LsmTree {
             manifest: Arc::new(ManifestState::new(current_log_number, next_file_number)),
-            memtable: Arc::new(Memtable::new(current_log_number, stats)),
+            memtable: Arc::new(Memtable::new(memtable_metrics, current_log_number)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
 
-    pub fn from(manifest_state: ManifestState, stats: Arc<ServerStatistics>) -> Self {
+    pub fn from(metric_registry: &mut MetricRegistry, manifest_state: ManifestState) -> Self {
+        let memtable_metrics = MemtableMetrics::new();
+        memtable_metrics.register_to(metric_registry);
         let oldest_log_number = manifest_state.lsm.oldest_log_number;
         LsmTree {
             manifest: Arc::new(manifest_state),
-            memtable: Arc::new(Memtable::new(oldest_log_number, stats)),
+            memtable: Arc::new(Memtable::new(memtable_metrics, oldest_log_number)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
@@ -38,11 +42,11 @@ impl LsmTree {
                 let mut imm_memtables: VecDeque<Arc<Memtable>> = self.imm_memtables.iter().cloned().collect();
                 imm_memtables.push_back(self.memtable.clone());
 
-                let stats = self.memtable.stats.clone();
+                let metrics = self.memtable.metrics();
 
                 LsmTree {
                     manifest: Arc::new(self.manifest.apply(edit)),
-                    memtable: Arc::new(Memtable::new(*log_number, stats)),
+                    memtable: Arc::new(Memtable::new(metrics, *log_number)),
                     imm_memtables: Arc::new(imm_memtables),
                 }
             },

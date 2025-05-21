@@ -6,28 +6,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use arc_swap::ArcSwap;
-use tracing::{error, warn};
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
+use crate::obs::logger::LoggerAndTracer;
+use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
-use crate::statistics::ServerStatistics;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
 use crate::storage::files::{DbFile, FileType};
-use crate::storage::flush_scheduler::{FlushScheduler, FlushTask};
-use crate::storage::log::LogReplayError;
+use crate::storage::flush_manager::{FlushManager, FlushTask};
+use crate::storage::append_log::LogReplayError;
 use crate::storage::lsm_tree::LsmTree;
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::manifest::Manifest;
-use crate::storage::manifest_state::{ManifestEdit, ManifestState};
+use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
-use crate::storage::sstable::sstable_reader::SSTableReader;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::WriteBatch;
 
 struct StorageEngine {
+    logger: Arc<dyn LoggerAndTracer>,
     db_dir: PathBuf,
     options: Arc<Options>,
-    stats: Arc<ServerStatistics>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
     manifest: Mutex<Manifest>,
     write_ahead_log: Mutex<WriteAheadLog>,
@@ -36,16 +35,15 @@ struct StorageEngine {
     next_seq_number: AtomicU64, // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
     sst_cache: Arc<SSTableCache>,
-    flush_scheduler: FlushScheduler,
+    flush_scheduler: FlushManager,
     async_callback: OnceLock<Arc<AsyncCallback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
 }
 
 impl StorageEngine {
-    pub fn new(db_dir: &Path, options: Arc<Options>) -> Result<Arc<Self>> {
+    pub fn new(logger: Arc<dyn LoggerAndTracer>, metric_registry: &mut MetricRegistry, options: Arc<Options>, db_dir: &Path) -> Result<Arc<Self>> {
 
-        let stats = ServerStatistics::new();
-        let sst_cache = Arc::new(SSTableCache::new(&options.db));
+        let sst_cache = Arc::new(SSTableCache::new(logger.clone(), metric_registry, &options.db));
 
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
@@ -66,7 +64,7 @@ impl StorageEngine {
 
             let next_file_number = manifest_state.lsm.next_file_number;
 
-            let mut lsm_tree = LsmTree::from(manifest_state, stats.clone());
+            let mut lsm_tree = LsmTree::from(metric_registry, manifest_state);
 
             let mut rotated_log_files = VecDeque::new();
 
@@ -89,8 +87,8 @@ impl StorageEngine {
                                         match e {
                                             LogReplayError::Io(e) => return Err(e.into()),
                                             LogReplayError::Corruption { record_offset, reason } => {
-                                                warn!("Corruption detected in the {} file for record at offset {}. Truncating the file at this offset. Cause: {}",
-                                                    wal_path.to_string_lossy(), record_offset, reason);
+                                                logger.warn(format_args!("Corruption detected in the {} file for record at offset {}. Truncating the file at this offset. Cause: {}",
+                                                    wal_path.to_string_lossy(), record_offset, reason));
                                                 truncate_file(wal_path, record_offset)?;
                                                 reusable_wal = Some(wal_path);
                                             }
@@ -121,26 +119,26 @@ impl StorageEngine {
                         if is_last_wal_file {
                             match e {
                                 LogReplayError::Io(e) => {
-                                    error!("{}", e);
+                                    logger.error(format_args!("{}", e));
                                     return Err(e.into())
                                 },
                                 LogReplayError::Corruption { record_offset: _, reason } => {
-                                    mark_file_as_corrupted(wal_path)?;
-                                    error!("Corruption detected in the {} file header. \
+                                    mark_file_as_corrupted(logger.clone(), wal_path)?;
+                                    logger.error(format_args!("Corruption detected in the {} file header. \
                                     Making the file has corrupted and starting from a new one. {}",
-                                        wal_path.to_string_lossy(), reason);
+                                        wal_path.to_string_lossy(), reason));
                                 }
                             }
 
                         } else {
-                            error!("{}", e);
+                            logger.error(format_args!("{}", e));
                             return Err(e.into())
                         }
                     }
                 }
             }
 
-            let mut manifest = Manifest::load_from(manifest_path, &options.db, stats.clone())?;
+            let mut manifest = Manifest::load_from(logger.clone(), metric_registry, &options.db, manifest_path)?;
 
             // If a file with a higher number that the next_file number has been detected we need to update
             // the Lsm tree in-memory and on-disk (MANIFEST file)
@@ -157,22 +155,22 @@ impl StorageEngine {
             // corrected by truncation, we will reuse it. If not, it should have been marked as corrupted,
             // and we need to create a new one and update the Lsm tree.
             let wal = if let Some(wal_path) = reusable_wal {
-                WriteAheadLog::load_from(&options.db, stats.clone(), &wal_path, rotated_log_files)?
+                WriteAheadLog::load_from(logger.clone(), metric_registry, &options.db, &wal_path, rotated_log_files)?
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
-                let wal = WriteAheadLog::new_after_corruption(&options.db, stats.clone(), db_dir, log_number, rotated_log_files)?;
+                let wal = WriteAheadLog::new_after_corruption(logger.clone(), metric_registry, &options.db, db_dir, log_number, rotated_log_files)?;
                 let edit = ManifestEdit::WalRotation { log_number };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
                 wal
             };
 
-            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), sst_cache.clone());
+            let flush_scheduler = FlushManager::new(logger.clone(), metric_registry, options.clone(), db_dir, sst_cache.clone());
 
             Ok(Arc::new(StorageEngine {
+                logger,
                 db_dir: db_dir.to_path_buf(),
                 options,
-                stats,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
@@ -190,16 +188,16 @@ impl StorageEngine {
             let next_file_number = AtomicU64::new(1);
             let manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
-            let lsm_tree = Arc::new(LsmTree::new(log_number, next_file_number.load(Ordering::Relaxed), stats.clone()));
+            let lsm_tree = Arc::new(LsmTree::new(metric_registry, log_number, next_file_number.load(Ordering::Relaxed)));
             let snapshot = ManifestEdit::Snapshot(lsm_tree.manifest.clone());
-            let manifest = Manifest::new(db_dir, &options.db, manifest_number, &snapshot, stats.clone())?;
-            let wal = WriteAheadLog::new(&options.db, stats.clone(), db_dir, log_number)?;
-            let flush_scheduler = FlushScheduler::new(db_dir, options.clone(), sst_cache.clone());
+            let manifest = Manifest::new(logger.clone(), metric_registry, &options.db, db_dir, manifest_number, &snapshot)?;
+            let wal = WriteAheadLog::new(logger.clone(), metric_registry, &options.db, db_dir, log_number)?;
+            let flush_scheduler = FlushManager::new(logger.clone(), metric_registry, options.clone(), db_dir, sst_cache.clone());
 
             Ok(Arc::new(StorageEngine {
+                logger,
                 db_dir: db_dir.to_path_buf(),
                 options,
-                stats,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
@@ -335,7 +333,7 @@ impl StorageEngine {
 
             match self.perform_wal_and_memtable_rotation(self.get_async_callback()) {
                 Err(error) => {
-                    error!("An error occurred during wal and memtable rotation: {}", error);
+                    self.logger.error(format_args!("An error occurred during wal and memtable rotation: {}", error));
                 }
                 Ok(_) => (),
             }
@@ -345,7 +343,7 @@ impl StorageEngine {
     fn get_async_callback(self: &Arc<Self>) -> &Arc<AsyncCallback<Result<SSTableOperation>>> {
         self.async_callback.get_or_init(|| {
             let engine = self.clone();
-            Arc::new(AsyncCallback::new(move |result| {
+            Arc::new(AsyncCallback::new(self.logger.clone(), move |result| {
                 engine.update_lsm_tree_sstables(result)
             }))
         })
@@ -393,7 +391,7 @@ impl StorageEngine {
 
         let sst_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
 
-        let flush_task = FlushTask { db_file: DbFile::new_sst(sst_number), memtable, callback: Some(callback.clone()) };
+        let flush_task = FlushTask { sst_file: DbFile::new_sst(sst_number), memtable, callback: Some(callback.clone()) };
         self.flush_scheduler.enqueue(flush_task)
     }
 

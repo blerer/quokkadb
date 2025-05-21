@@ -200,6 +200,37 @@ impl ManifestEdit {
     }
 }
 
+use std::fmt;
+
+impl fmt::Display for ManifestEdit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ManifestEdit::Snapshot(state) =>
+                write!(f, "Snapshot({:?})", state),
+            ManifestEdit::CreateCollection { name, id } =>
+                write!(f, "CreateCollection {{ name: {}, id: {} }}", name, id),
+            ManifestEdit::DropCollection { name } =>
+                write!(f, "DropCollection {{ name: {} }}", name),
+            ManifestEdit::WalRotation { log_number } =>
+                write!(f, "WalRotation {{ log_number: {} }}", log_number),
+            ManifestEdit::ManifestRotation { manifest_number } =>
+                write!(f, "ManifestRotation {{ manifest_number: {} }}", manifest_number),
+            ManifestEdit::Flush { oldest_log_number, sst } =>
+                write!(
+                    f,
+                    "Flush {{ oldest_log_number: {}, sst: {:?} }}",
+                    oldest_log_number, sst
+                ),
+            ManifestEdit::FilesDetectedOnRestart { next_file_number } =>
+                write!(
+                    f,
+                    "FilesDetectedOnRestart {{ next_file_number: {} }}",
+                    next_file_number
+                ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

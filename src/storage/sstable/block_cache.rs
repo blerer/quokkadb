@@ -1,21 +1,23 @@
 use moka::sync::Cache;
 use std::sync::Arc;
 use std::io::Error;
-use tracing::{debug, error, info};
+use std::time::Instant;
 use crate::io::checksum::ChecksumStrategy;
 use crate::options::options::DatabaseOptions;
 use crate::storage::sstable::BlockHandle;
 use crate::io::compressor::Compressor;
+use crate::obs::logger::LoggerAndTracer;
 use crate::storage::sstable::sstable_reader::SharedFile;
 
 /// Block Cache (LRU, retrieves blocks using the shared file provided as a get parameter)
 pub struct BlockCache {
+    logger: Arc<dyn LoggerAndTracer>,
     cache: Cache<(String, u64), Result<Arc<Vec<u8>>, Arc<Error>>>, // Key = (file_path, block_handle)
 }
 
 impl BlockCache {
     /// Create a new Block Cache
-    fn new(options: &DatabaseOptions) -> Self {
+    fn new(logger: Arc<dyn LoggerAndTracer>, options: &DatabaseOptions) -> Self {
         let cache_size = options.block_cache_size.to_bytes() as u64;
         let cache = Cache::builder()
             .max_capacity(cache_size)
@@ -27,9 +29,9 @@ impl BlockCache {
             })
             .build();
 
-        info!("BlockCache initialized with {} bytes", cache_size);
+        logger.info(format_args!("BlockCache initialized with {} bytes", cache_size));
 
-        Self { cache }
+        Self { logger, cache }
     }
 
     /// Retrieve the specified block, loading it from disk if necessary
@@ -45,17 +47,22 @@ impl BlockCache {
         // Fetch or insert the block in a thread-safe manner
         let block = self.cache.get_with(key.clone(), || {
             let path = file.path.to_string_lossy();
-            debug!("Loading block from {} at offset {}", path, block_handle.offset);
+            let start = Instant::now();
+            self.logger.event(format_args!("event: loading and decompressing sstable block start, path={}, handle={}", path, block_handle));
 
             // Read, decompress, and validate the block
             let uncompressed_block = self.read_and_decompress(compressor, checksum_strategy, file, block_handle);
 
             if let Err(e) = uncompressed_block {
-                error!("Error loading block from {} at offset {}: {}", path, block_handle.offset, e);
+                self.logger.error(format_args!("Error loading block from {} at offset {}: {}", path, block_handle.offset, e));
                 return Err(Arc::new(e))
             }
 
-            Ok(Arc::new(uncompressed_block?))
+            let uncompressed_block = uncompressed_block?;
+            let duration = start.elapsed();
+            self.logger.event(format_args!("event: loading and decompressing stable block end, size={}, duration={}ms", uncompressed_block.len(), duration.as_millis()));
+
+            Ok(Arc::new(uncompressed_block))
         });
 
         block.map_err(|arc_err| Error::new(arc_err.kind(), arc_err.to_string()))  // Clone so each thread gets its own Result<Arc<Vec<u8>>>

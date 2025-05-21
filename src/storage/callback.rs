@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread;
 use std::thread::JoinHandle;
-use tracing::error;
+use crate::obs::logger::LoggerAndTracer;
 
 pub trait Callback<T>: Sync + Send {
     fn call(&self, value: T);
@@ -15,7 +15,7 @@ pub struct AsyncCallback<T> {
 }
 
 impl<T: Send + Sync> AsyncCallback<T> {
-    pub fn new<F>(f: F) -> Self
+    pub fn new<F>(logger:Arc<dyn LoggerAndTracer>, f: F) -> Self
     where
     F: Fn(T) -> Result<()> + Send + 'static,
     T: Send + Sync + 'static,
@@ -28,7 +28,7 @@ impl<T: Send + Sync> AsyncCallback<T> {
                 while let Ok(result) = receiver.recv() {
                     let result = f(result);
                     if let Err(err) = result {
-                        error!("AsyncCallback function returned an error: {}", err);
+                        logger.error(format_args!("AsyncCallback function returned an error: {}", err));
                     }
                 }
             })

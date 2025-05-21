@@ -62,6 +62,10 @@ impl WriteBatch {
             precomputed_wal_record: None,
         })
     }
+
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
 }
 
 impl PartialEq for WriteBatch {

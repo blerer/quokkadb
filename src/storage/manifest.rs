@@ -5,67 +5,102 @@ use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::sync::Arc;
 use crate::io::{file_name_as_str, sync_dir};
 use crate::io::byte_reader::ByteReader;
+use crate::obs::logger::LoggerAndTracer;
 use crate::options::options::DatabaseOptions;
-use crate::statistics::ServerStatistics;
+use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
 use crate::storage::files::DbFile;
-use crate::storage::log::{Log, LogFileCreator, LogObserver};
+use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 
 const MANIFEST_MAGIC_NUMBER: u32 = 0x516D616E; // "Qman" in ASCII
 
 pub struct Manifest {
-    log: Log<ManifestFileCreator>,
+    /// The logger
+    logger: Arc<dyn LoggerAndTracer>,
+    /// The manifest metrics
+    metrics: Metrics,
+    /// The database directory
     db_dir: PathBuf,
-    rotation_threshold: u64, // When reached, trigger rotation
-    /// The server statistics
-    stats: Arc<ServerStatistics>
+    /// The size of the manifest file triggering a rotation.
+    rotation_threshold: u64,
+    /// The underlying append only log file manager
+    append_log: AppendLog<ManifestFileCreator>,
+
 }
 
 impl Manifest {
-    pub fn new(db_dir: &Path, options: &DatabaseOptions, manifest_id: u64, snapshot: &ManifestEdit, stats: Arc<ServerStatistics>) -> Result<Self> {
+    pub fn new(
+        logger: Arc<dyn LoggerAndTracer>,
+        metric_registry: &mut MetricRegistry,
+        options: &DatabaseOptions,
+        db_dir: &Path,
+        manifest_id: u64,
+        snapshot: &ManifestEdit
+    ) -> Result<Self> {
+
         debug_assert!(matches!(snapshot, ManifestEdit::Snapshot(_)));
-        let log = Log::new(db_dir, DbFile::new_manifest(manifest_id), ManifestFileCreator::new(), ManifestObserver::new(stats.clone()))?;
-        let log_filename = log.filename().ok_or_else(|| Error::new(ErrorKind::NotFound, "Could not retrieve the Manifest filename"))?;
+        let metrics = Metrics::new();
+        let append_log = AppendLog::new(db_dir, DbFile::new_manifest(manifest_id), ManifestFileCreator::new(), ManifestObserver::new(metrics.clone()))?;
+        metrics.register_to(metric_registry);
+
+        let log_filename = append_log.filename().ok_or_else(|| Error::new(ErrorKind::NotFound, "Could not retrieve the Manifest filename"))?;
         let mut manifest = Manifest {
-            log,
+            logger,
+            metrics,
             db_dir: db_dir.to_path_buf(),
             rotation_threshold: options.max_manifest_file_size.to_bytes() as u64,
-            stats
+            append_log,
         };
         manifest.append_edit(&snapshot)?;
         Self::update_current_file(db_dir, &log_filename)?;
+        manifest.logger.info(format_args!("Manifest initialized at path: {:?}", manifest.append_log.file_path()));
         Ok(manifest)
     }
 
-    pub fn load_from(manifest_path: PathBuf, options: &DatabaseOptions, stats: Arc<ServerStatistics>) -> Result<Self> {
+    pub fn load_from(logger: Arc<dyn LoggerAndTracer>,
+                     metric_registry: &mut MetricRegistry,
+                     options: &DatabaseOptions,
+                     manifest_path: PathBuf
+    ) -> Result<Self> {
+
         let db_dir = manifest_path.parent().ok_or(Error::new(ErrorKind::NotFound, "Invalid manifest path"))?
                                                     .to_path_buf();
 
-        let log = Log::load_from(&manifest_path, ManifestFileCreator::new(), ManifestObserver::new(stats.clone()))?;
+        let metrics = Metrics::new();
+        let append_log = AppendLog::load_from(&manifest_path, ManifestFileCreator::new(), ManifestObserver::new(metrics.clone()))?;
+        metrics.register_to(metric_registry);
+
+        logger.info(format_args!("Manifest loaded from: {:?}", append_log.file_path()));
         Ok(Manifest {
-            log,
+            logger,
+            metrics,
             db_dir,
             rotation_threshold: options.max_manifest_file_size.to_bytes() as u64,
-            stats
+            append_log,
         })
     }
 
     // Append a version edit to the manifest.
     pub fn append_edit(&mut self, edit: &ManifestEdit) -> Result<()> {
-        self.log.append(&edit.to_vec())?;
-        self.log.sync()?;
-        self.stats.manifest_writes.inc(1);
+
+        self.logger.event(format_args!("event: manifest apply start, edits={}", edit));
+
+        self.append_log.append(&edit.to_vec())?;
+        self.append_log.sync()?;
+        self.metrics.manifest_writes.inc();
+
+        self.logger.event(format_args!("event: manifest apply done"));
         Ok(())
     }
 
     pub fn should_rotate(&self) -> bool {
-        self.log.log_file_size() > self.rotation_threshold
+        self.append_log.log_file_size() > self.rotation_threshold
     }
 
     // Rotation logic: flush current file, create new manifest, and update CURRENT pointer.
     pub fn rotate(&mut self, new_manifest_number: u64, snapshot: &ManifestEdit) -> Result<()> {
 
-        let (new_file, old_file) = self.log.rotate(DbFile::new_manifest(new_manifest_number))?;
+        let (new_file, old_file) = self.append_log.rotate(DbFile::new_manifest(new_manifest_number))?;
         self.append_edit(snapshot)?;
 
         // Update the CURRENT pointer file to point to the new manifest.
@@ -73,9 +108,10 @@ impl Manifest {
         // on restart and will have to be removed manually.
         Self::update_current_file(&self.db_dir, file_name_as_str(&new_file).unwrap())?;
 
+        self.logger.event(format_args!("event: manifest rotated, new_file={:?}", new_file));
 
-        self.stats.manifest_size.dec(old_file.metadata()?.len());
-        self.stats.manifest_rewrite.inc(1);
+        self.metrics.manifest_size.dec_by(old_file.metadata()?.len());
+        self.metrics.manifest_rewrite.inc();
 
         // If we reached that point we can safely delete the old manifest.
         remove_file(old_file)?;
@@ -86,7 +122,7 @@ impl Manifest {
     }
 
     fn sync(&mut self) -> Result<()> {
-        self.log.sync()?;
+        self.append_log.sync()?;
         Ok(())
     }
 
@@ -125,7 +161,7 @@ impl Manifest {
     pub fn rebuild_manifest_state(manifest_path: &Path) -> Result<ManifestState> {
         const HEADER_SIZE: usize = 4 + 4 + 8; // MAGIC (u32) + VERSION (u32) + ID (u64)
 
-        let (header, iter) = Log::<ManifestFileCreator>::read_log_file(manifest_path.to_path_buf(), HEADER_SIZE)?;
+        let (header, iter) = AppendLog::<ManifestFileCreator>::read_log_file(manifest_path.to_path_buf(), HEADER_SIZE)?;
         let reader = ByteReader::new(&header);
 
         let magic = reader.read_u32_be()?;
@@ -181,18 +217,18 @@ impl LogFileCreator for ManifestFileCreator {
 }
 
 struct ManifestObserver {
-    stats: Arc<ServerStatistics>,
+    metrics: Metrics,
 }
 
 impl ManifestObserver {
-    fn new(stats: Arc<ServerStatistics>) -> Arc<Self> {
-        Arc::new(Self { stats })
+    fn new(metrics: Metrics) -> Arc<Self> {
+        Arc::new(Self { metrics })
     }
 }
 
 impl LogObserver for ManifestObserver {
     fn on_load(&self, bytes: u64) {
-        self.stats.manifest_size.inc(bytes);
+        self.metrics.manifest_size.inc_by(bytes);
     }
 
     fn on_buffered(&self, _bytes: u64) {
@@ -200,11 +236,44 @@ impl LogObserver for ManifestObserver {
     }
 
     fn on_bytes_written(&self, bytes: u64) {
-        self.stats.manifest_bytes_written.inc(bytes);
+        self.metrics.manifest_bytes_written.inc_by(bytes);
     }
 
     fn on_sync(&self, bytes: u64) {
-        self.stats.manifest_size.inc(bytes);
+        self.metrics.manifest_size.inc_by(bytes);
+    }
+}
+
+#[derive(Clone)]
+struct Metrics {
+    /// The number of time the Manifest has been rewritten
+    pub manifest_rewrite: Arc<Counter>,
+
+    /// The number of edit written to the manifest (including the snapshot)
+    pub manifest_writes: Arc<Counter>,
+
+    /// The number of bytes written to the manifest
+    pub manifest_bytes_written: Arc<Counter>,
+
+    /// The current manifest size
+    pub manifest_size: Arc<AtomicGauge>,
+}
+
+impl Metrics {
+    fn new() -> Metrics {
+        Self {
+            manifest_rewrite: Counter::new(),
+            manifest_writes: Counter::new(),
+            manifest_size: AtomicGauge::new(),
+            manifest_bytes_written: Counter::new(),
+        }
+    }
+
+    fn register_to(&self, metric_registry: &mut MetricRegistry) {
+        metric_registry.register_counter("manifest_rewrite", &self.manifest_rewrite)
+            .register_counter("manifest_writes", &self.manifest_writes)
+            .register_atomic_gauge("manifest_size", &self.manifest_size)
+            .register_counter("manifest_bytes_written", &self.manifest_bytes_written);
     }
 }
 
@@ -214,9 +283,10 @@ mod tests {
     use tempfile::tempdir;
     use std::sync::Arc;
     use bson::Bson;
+    use crate::obs::logger;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::internal_key::encode_record_key;
-    use crate::storage::log::BUFFER_SIZE_IN_BYTES;
+    use crate::storage::append_log::BUFFER_SIZE_IN_BYTES;
     use crate::storage::lsm_version::SSTableMetadata;
     use crate::util::bson_utils::BsonKey;
 
@@ -224,9 +294,15 @@ mod tests {
     fn test_rebuild_lsm_tree_from_valid_manifest() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let stats = ServerStatistics::new();
         let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1)));
-        let mut manifest = Manifest::new(path, &DatabaseOptions::default(), 1, &snapshot, stats).unwrap();
+        let mut manifest = Manifest::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &DatabaseOptions::default(),
+            path,
+            1,
+            &snapshot
+        ).unwrap();
 
         let mut expected = match snapshot {
             ManifestEdit::Snapshot(snapshot) => Arc::try_unwrap(snapshot).unwrap(),
@@ -273,30 +349,33 @@ mod tests {
     #[test]
     fn test_manifest_new_and_append_edit() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("MANIFEST");
-
-        let dir = tempdir().unwrap();
         let path = dir.path();
-        let stats = ServerStatistics::new();
         let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1)));
 
-        let mut manifest = Manifest::new(path, &DatabaseOptions::default(), 1, &snapshot, stats).unwrap();
+        let mut manifest = Manifest::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &DatabaseOptions::default(),
+            path,
+            1,
+            &snapshot
+        ).unwrap();
 
         let current_path = path.join("CURRENT");
         assert!(current_path.exists());
         assert_eq!(Manifest::read_current_file(&path).unwrap(), Some(path.join("MANIFEST-000001")));
 
-        assert_eq!(manifest.stats.manifest_writes.get(), 1);
-        let len = manifest.log.log_file_size();
-        assert_eq!(manifest.stats.manifest_size.get(), len);
-        assert_eq!(manifest.stats.manifest_bytes_written.get(), len);
+        assert_eq!(manifest.metrics.manifest_writes.get(), 1);
+        let len = manifest.append_log.log_file_size();
+        assert_eq!(manifest.metrics.manifest_size.get(), len);
+        assert_eq!(manifest.metrics.manifest_bytes_written.get(), len);
 
         manifest.append_edit(&ManifestEdit::CreateCollection { id: 1, name: "my_coll".to_string() }).unwrap();
 
-        assert_eq!(manifest.stats.manifest_writes.get(), 2);
-        let len = manifest.log.log_file_size();
-        assert_eq!(manifest.stats.manifest_size.get(), len);
-        assert_eq!(manifest.stats.manifest_bytes_written.get(), len);
+        assert_eq!(manifest.metrics.manifest_writes.get(), 2);
+        let len = manifest.append_log.log_file_size();
+        assert_eq!(manifest.metrics.manifest_size.get(), len);
+        assert_eq!(manifest.metrics.manifest_bytes_written.get(), len);
     }
 
     #[test]
@@ -307,12 +386,18 @@ mod tests {
         let current_path = path.join("CURRENT");
         assert!(!current_path.exists());
 
-        let stats = ServerStatistics::new();
         let snapshot = Arc::new(ManifestState::new(1, 1));
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
         let options = DatabaseOptions::default().with_max_manifest_file_size(StorageQuantity::new(4120, StorageUnit::Bytes));
-        let mut manifest = Manifest::new(path, &options, 1, &snapshot_edit, stats).unwrap();
+        let mut manifest = Manifest::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            1,
+            &snapshot_edit
+        ).unwrap();
 
         assert!(current_path.exists());
         assert_eq!(Manifest::read_current_file(&path).unwrap(), Some(path.join("MANIFEST-000001")));
@@ -324,11 +409,11 @@ mod tests {
 
         assert_eq!(manifest.should_rotate(), true);
 
-        assert_eq!(manifest.stats.manifest_writes.get(), 2);
-        let len = manifest.log.log_file_size();
+        assert_eq!(manifest.metrics.manifest_writes.get(), 2);
+        let len = manifest.append_log.log_file_size();
 
-        assert_eq!(manifest.stats.manifest_size.get(), len);
-        assert_eq!(manifest.stats.manifest_bytes_written.get(), len);
+        assert_eq!(manifest.metrics.manifest_size.get(), len);
+        assert_eq!(manifest.metrics.manifest_bytes_written.get(), len);
 
         let snapshot = Arc::new(snapshot.apply(&edit));
 
@@ -343,12 +428,12 @@ mod tests {
         let old_manifest = path.join("MANIFEST-000001");
         assert!(!old_manifest.exists());
 
-        assert_eq!(manifest.stats.manifest_writes.get(), 3);
+        assert_eq!(manifest.metrics.manifest_writes.get(), 3);
 
-        let len = manifest.log.log_file_size();
+        let len = manifest.append_log.log_file_size();
         let byte_written = len + (2 * BUFFER_SIZE_IN_BYTES as u64); // current file + old file (header, edit + padding)
-        assert_eq!(manifest.stats.manifest_size.get(), len);
-        assert_eq!(manifest.stats.manifest_bytes_written.get(), byte_written);
+        assert_eq!(manifest.metrics.manifest_size.get(), len);
+        assert_eq!(manifest.metrics.manifest_bytes_written.get(), byte_written);
     }
 
     #[test]
@@ -360,7 +445,14 @@ mod tests {
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
         let options = DatabaseOptions::default();
-        let mut manifest = Manifest::new(path, &options, 1, &snapshot_edit, ServerStatistics::new()).unwrap();
+        let mut manifest = Manifest::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            1,
+            &snapshot_edit
+        ).unwrap();
 
         let edit = ManifestEdit::CreateCollection { id: 1, name: "my_coll".to_string() };
         manifest.append_edit(&edit).unwrap();
@@ -369,11 +461,16 @@ mod tests {
         let manifest_path = path.join("MANIFEST-000001");
         let len = manifest_path.metadata().unwrap().len();
 
-        let manifest = Manifest::load_from(manifest_path, &options, ServerStatistics::new()).unwrap();
+        let manifest = Manifest::load_from(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            manifest_path
+        ).unwrap();
 
-        assert_eq!(manifest.stats.manifest_writes.get(), 0);
-        assert_eq!(manifest.stats.manifest_size.get(), len);
-        assert_eq!(manifest.stats.manifest_bytes_written.get(), 0);
+        assert_eq!(manifest.metrics.manifest_writes.get(), 0);
+        assert_eq!(manifest.metrics.manifest_size.get(), len);
+        assert_eq!(manifest.metrics.manifest_bytes_written.get(), 0);
     }
 
     fn record_key(collection: u32, id: i32) -> Vec<u8> {
