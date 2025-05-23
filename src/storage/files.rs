@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::io::file_name_as_str;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -19,26 +19,44 @@ impl DbFile {
         let filename = file_name_as_str(path)?;
 
         if let Some(num_str) = filename.strip_prefix("MANIFEST-") {
-            Some(DbFile { file_type: FileType::Manifest, number: num_str.parse().ok()? })
+            Some(DbFile {
+                file_type: FileType::Manifest,
+                number: num_str.parse().ok()?,
+            })
         } else if let Some(num_str) = filename.strip_suffix(".log") {
-            Some(DbFile { file_type: FileType::WriteAheadLog, number: num_str.parse().ok()? })
+            Some(DbFile {
+                file_type: FileType::WriteAheadLog,
+                number: num_str.parse().ok()?,
+            })
         } else if let Some(num_str) = filename.strip_suffix(".sst") {
-            Some(DbFile { file_type: FileType::SST, number: num_str.parse().ok()? })
+            Some(DbFile {
+                file_type: FileType::SST,
+                number: num_str.parse().ok()?,
+            })
         } else {
             None
         }
     }
 
     pub fn new_write_ahead_log(number: u64) -> DbFile {
-        DbFile { file_type: FileType::WriteAheadLog, number }
+        DbFile {
+            file_type: FileType::WriteAheadLog,
+            number,
+        }
     }
 
     pub fn new_manifest(number: u64) -> DbFile {
-        DbFile { file_type: FileType::Manifest, number }
+        DbFile {
+            file_type: FileType::Manifest,
+            number,
+        }
     }
 
     pub fn new_sst(number: u64) -> DbFile {
-        DbFile { file_type: FileType::SST, number }
+        DbFile {
+            file_type: FileType::SST,
+            number,
+        }
     }
 
     pub fn filename(&self) -> String {

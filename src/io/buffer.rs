@@ -55,9 +55,16 @@ impl Buffer {
     /// # Panics
     /// Panics if the slice does not fit within the remaining writable space.
     pub fn write_slice(&mut self, slice: &[u8]) -> &mut Self {
-        assert!(slice.len() <= self.writable_bytes(), "Buffer overflow in write_slice");
+        assert!(
+            slice.len() <= self.writable_bytes(),
+            "Buffer overflow in write_slice"
+        );
         unsafe {
-            ptr::copy_nonoverlapping(slice.as_ptr(), self.data.as_mut_ptr().add(self.write_index), slice.len());
+            ptr::copy_nonoverlapping(
+                slice.as_ptr(),
+                self.data.as_mut_ptr().add(self.write_index),
+                slice.len(),
+            );
         }
         self.write_index += slice.len();
         self
@@ -79,7 +86,10 @@ impl Buffer {
     /// # Panics
     /// Panics if there aren't enough bytes remaining.
     pub fn read_slice(&mut self, len: usize) -> &[u8] {
-        assert!(len <= self.readable_bytes(), "Buffer underflow in read_slice");
+        assert!(
+            len <= self.readable_bytes(),
+            "Buffer underflow in read_slice"
+        );
         let slice = &self.data[self.read_index..self.read_index + len];
         self.read_index += len;
         slice
@@ -119,7 +129,7 @@ impl Buffer {
         self
     }
 
-    pub fn fill(&mut self, reader:&mut File) -> std::io::Result<()> {
+    pub fn fill(&mut self, reader: &mut File) -> std::io::Result<()> {
         self.read_index = 0;
         self.write_index = reader.read(&mut self.data)?;
         Ok(())

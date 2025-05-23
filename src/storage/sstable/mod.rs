@@ -1,12 +1,12 @@
 use std::fmt;
 
 pub mod block_builder;
-pub mod sstable_writer;
-mod sstable_properties;
-pub mod sstable_reader;
 pub mod block_cache;
 mod block_reader;
 pub mod sstable_cache;
+mod sstable_properties;
+pub mod sstable_reader;
+pub mod sstable_writer;
 
 /// The SSTable files magic number
 pub const MAGIC_NUMBER: &u64 = &0x88e241b785f4cff7u64;
@@ -24,8 +24,8 @@ pub const SSTABLE_FOOTER_LENGTH: u64 = 48;
 /// +-----------------+---------------+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct BlockHandle {
-    pub offset: u64,  // Byte offset of the block in the file.
-    pub size: u64,    // Size of the block in bytes.
+    pub offset: u64, // Byte offset of the block in the file.
+    pub size: u64,   // Size of the block in bytes.
 }
 
 impl BlockHandle {
@@ -36,7 +36,10 @@ impl BlockHandle {
 
 impl fmt::Display for BlockHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlockHandle {{ offset: {}, size: {} }}", self.offset, self.size)
+        write!(
+            f,
+            "BlockHandle {{ offset: {}, size: {} }}",
+            self.offset, self.size
+        )
     }
 }
-

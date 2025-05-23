@@ -1,6 +1,6 @@
+use crate::query::logical::logical_plan::LogicalPlan;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::query::logical::logical_plan::LogicalPlan;
 
 pub struct Optimizer {
     normalization_rules: Vec<Arc<dyn NormalisationRule>>,
@@ -8,7 +8,9 @@ pub struct Optimizer {
 
 impl Optimizer {
     pub fn new(normalization_rules: Vec<Arc<dyn NormalisationRule>>) -> Self {
-        Self { normalization_rules }
+        Self {
+            normalization_rules,
+        }
     }
 
     pub fn optimize(&self, plan: LogicalPlan) -> LogicalPlan {

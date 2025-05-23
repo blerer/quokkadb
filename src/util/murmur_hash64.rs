@@ -12,7 +12,6 @@
 /// 3. Handles any remaining bytes at the end of the input.
 /// 4. Finalizes the hash value with additional mixing to ensure good distribution.
 
-
 /// Computes the 64-bit MurmurHash for the given input data.
 ///
 /// # Parameters
@@ -83,12 +82,23 @@ mod tests {
             b"",
         ];
         let results: [u64; 17] = [
-            0x4987cb15118a83d9, 0x28e2a79e3f0394d9, 0x8f4600d786fc5c05,
-            0xa09b27fea4b54af3, 0x25f34447525bfd1e, 0x32fad4c21379c7bf,
-            0x4b30b99a9d931921, 0x4e5dab004f936cdb, 0x06825c27bc96cf40,
-            0xff4bf2f8a4823905, 0x7f7e950c064e6367, 0x821ade90caaa5889,
-            0x6d28c915d791686a, 0x9c32649372163ba2, 0xd66ae956c14d5212,
-            0x38ed30ee5161200f, 0x9bfae0a4e613fc3c,
+            0x4987cb15118a83d9,
+            0x28e2a79e3f0394d9,
+            0x8f4600d786fc5c05,
+            0xa09b27fea4b54af3,
+            0x25f34447525bfd1e,
+            0x32fad4c21379c7bf,
+            0x4b30b99a9d931921,
+            0x4e5dab004f936cdb,
+            0x06825c27bc96cf40,
+            0xff4bf2f8a4823905,
+            0x7f7e950c064e6367,
+            0x821ade90caaa5889,
+            0x6d28c915d791686a,
+            0x9c32649372163ba2,
+            0xd66ae956c14d5212,
+            0x38ed30ee5161200f,
+            0x9bfae0a4e613fc3c,
         ];
 
         for (i, &data) in input.iter().enumerate() {
@@ -96,12 +106,23 @@ mod tests {
         }
 
         let results: [u64; 17] = [
-            0x0822b1481a92e97b, 0xf8a9223fef0822dd, 0x4b49e56affae3a89,
-            0xc970296e32e1d1c1, 0xe2f9f88789f1b08f, 0x2b0459d9b4c10c61,
-            0x377e97ea9197ee89, 0xd2ccad460751e0e7, 0xff162ca8d6da8c47,
-            0xf12e051405769857, 0xdabba41293d5b035, 0xacf326b0bb690d0e,
-            0x0617f431bc1a8e04, 0x15b81f28d576e1b2, 0x28c1fe59e4f8e5ba,
-            0x694dd315c9354ca9, 0xa97052a8f088ae6c
+            0x0822b1481a92e97b,
+            0xf8a9223fef0822dd,
+            0x4b49e56affae3a89,
+            0xc970296e32e1d1c1,
+            0xe2f9f88789f1b08f,
+            0x2b0459d9b4c10c61,
+            0x377e97ea9197ee89,
+            0xd2ccad460751e0e7,
+            0xff162ca8d6da8c47,
+            0xf12e051405769857,
+            0xdabba41293d5b035,
+            0xacf326b0bb690d0e,
+            0x0617f431bc1a8e04,
+            0x15b81f28d576e1b2,
+            0x28c1fe59e4f8e5ba,
+            0x694dd315c9354ca9,
+            0xa97052a8f088ae6c,
         ];
 
         for (i, &data) in input.iter().enumerate() {

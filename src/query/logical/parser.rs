@@ -1,8 +1,10 @@
-use std::rc::Rc;
-use bson::{Bson, Document};
-use crate::Error;
-use crate::query::logical::{BsonType, BsonValue, Expr, PathComponent, ComparisonOperator::*, ComparisonOperator};
 use crate::query::logical::logical_plan::{Projection, SortField, SortOrder};
+use crate::query::logical::{
+    BsonType, BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
+};
+use crate::Error;
+use bson::{Bson, Document};
+use std::rc::Rc;
 
 /// Parses a BSON `Document` representing a query filter into an `Expr`.
 pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
@@ -20,14 +22,19 @@ pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
                     let parsed_condition = parse_conditions(sub_doc)?;
                     conditions.push(Rc::new(Expr::Not(parsed_condition)));
                 } else {
-                    return Err(Error::InvalidArgument("Invalid format for $not; must be a document".to_string()));
+                    return Err(Error::InvalidArgument(
+                        "Invalid format for $not; must be a document".to_string(),
+                    ));
                 }
             }
             _ => {
                 // Handle fields (regular or wildcard)
                 let field = parse_field(key)?;
                 if matches!(field, Expr::PositionalField(_)) {
-                    return Err(Error::InvalidArgument(format!("Positional fields are not supported in condition: {}", key)))
+                    return Err(Error::InvalidArgument(format!(
+                        "Positional fields are not supported in condition: {}",
+                        key
+                    )));
                 }
                 conditions.push(parse_field_conditions(field, value)?);
             }
@@ -43,7 +50,10 @@ pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
 }
 
 fn parse_field_conditions(field: Expr, value: &Bson) -> Result<Rc<Expr>, Error> {
-    Ok(Rc::new(Expr::FieldFilters { field: Rc::new(field), filters: parse_predicates(value)? }))
+    Ok(Rc::new(Expr::FieldFilters {
+        field: Rc::new(field),
+        filters: parse_predicates(value)?,
+    }))
 }
 
 /// Parses logical operators ($and, $or) into an `Expr`.
@@ -54,7 +64,10 @@ fn parse_logical_operator(operator: &str, value: &Bson) -> Result<Expr, Error> {
             if let Bson::Document(sub_doc) = bson {
                 parsed_conditions.push(parse_conditions(sub_doc)?);
             } else {
-                return Err(Error::InvalidArgument(format!("Invalid format for {}; must be an array of documents", operator)));
+                return Err(Error::InvalidArgument(format!(
+                    "Invalid format for {}; must be an array of documents",
+                    operator
+                )));
             }
         }
 
@@ -62,10 +75,16 @@ fn parse_logical_operator(operator: &str, value: &Bson) -> Result<Expr, Error> {
             "$and" => Ok(Expr::And(parsed_conditions)),
             "$or" => Ok(Expr::Or(parsed_conditions)),
             "$nor" => Ok(Expr::Nor(parsed_conditions)),
-            _ => Err(Error::InvalidArgument(format!("Unknown logical operator: {}", operator))),
+            _ => Err(Error::InvalidArgument(format!(
+                "Unknown logical operator: {}",
+                operator
+            ))),
         }
     } else {
-        Err(Error::InvalidArgument(format!("Invalid format for {}; must be an array", operator)))
+        Err(Error::InvalidArgument(format!(
+            "Invalid format for {}; must be an array",
+            operator
+        )))
     }
 }
 
@@ -88,44 +107,60 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                     if let Bson::Boolean(exists) = value {
                         predicates.push(Rc::new(Expr::Exists(*exists)));
                     } else {
-                        return Err(Error::InvalidArgument("$exists must be a boolean".to_string()))
+                        return Err(Error::InvalidArgument(
+                            "$exists must be a boolean".to_string(),
+                        ));
                     }
-                },
+                }
                 "$type" => {
                     if let Some(bson_type) = parse_bson_type(value) {
-                        predicates.push(Rc::new(Expr::Type{bson_type, negated: false}))
+                        predicates.push(Rc::new(Expr::Type {
+                            bson_type,
+                            negated: false,
+                        }))
                     } else {
-                        return Err(Error::InvalidArgument("$type must be a valid BSON type".to_string()))
+                        return Err(Error::InvalidArgument(
+                            "$type must be a valid BSON type".to_string(),
+                        ));
                     }
-                },
+                }
                 "$size" => {
                     if let Bson::Int32(size) = value {
-                        predicates.push(Rc::new(Expr::Size{ size: *size as usize, negated: false}))
+                        predicates.push(Rc::new(Expr::Size {
+                            size: *size as usize,
+                            negated: false,
+                        }))
                     } else {
-                        return Err(Error::InvalidArgument("$size must be an integer".to_string()))
+                        return Err(Error::InvalidArgument(
+                            "$size must be an integer".to_string(),
+                        ));
                     }
-                },
+                }
                 "$all" => {
                     if let Bson::Array(values) = value {
-                        predicates.push(Rc::new(Expr::All(values.iter().map(|bson| BsonValue(bson.clone())).collect())))
+                        predicates.push(Rc::new(Expr::All(
+                            values.iter().map(|bson| BsonValue(bson.clone())).collect(),
+                        )))
                     } else {
-                        return Err(Error::InvalidArgument("$all must be an array".to_string()))
+                        return Err(Error::InvalidArgument("$all must be an array".to_string()));
                     }
-                },
+                }
                 "$elemMatch" => {
-                    if let Bson::Document(_)= value {
+                    if let Bson::Document(_) = value {
                         let sub_condition = parse_predicates(value)?;
                         predicates.push(Rc::new(Expr::ElemMatch(sub_condition)))
                     } else {
-                        return Err(Error::InvalidArgument("$elemMatch must be a document".to_string()))
+                        return Err(Error::InvalidArgument(
+                            "$elemMatch must be a document".to_string(),
+                        ));
                     }
-                },
+                }
                 _ => return Err(Error::InvalidArgument(format!("Unknown operator: {}", key))),
             }
         }
     } else {
         // Implicit equality for direct field values
-        predicates.push(new_predicate(Eq,  value));
+        predicates.push(new_predicate(Eq, value));
     }
     Ok(predicates)
 }
@@ -133,7 +168,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
 fn new_predicate(operator: ComparisonOperator, value: &Bson) -> Rc<Expr> {
     Rc::new(Expr::Comparison {
         operator,
-        value: Rc::new(Expr::Literal(BsonValue(value.clone())))
+        value: Rc::new(Expr::Literal(BsonValue(value.clone()))),
     })
 }
 
@@ -181,20 +216,32 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
             }
             Bson::Int32(0) | Bson::Int64(0) => {
                 let field = parse_field(key)?;
-                if matches!(field, Expr::PositionalField(_))  {
-                    return Err(Error::InvalidArgument(format!("Positional fields cannot be excluded: {}", key)))
+                if matches!(field, Expr::PositionalField(_)) {
+                    return Err(Error::InvalidArgument(format!(
+                        "Positional fields cannot be excluded: {}",
+                        key
+                    )));
                 }
                 exclude_fields.push(Rc::new(field));
             }
-            _ => return Err(Error::InvalidArgument(format!("Invalid projection value for field '{}'", key))),
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "Invalid projection value for field '{}'",
+                    key
+                )))
+            }
         }
     }
 
     match (!include_fields.is_empty(), !exclude_fields.is_empty()) {
         (true, false) => Ok(Projection::Include(include_fields)),
         (false, true) => Ok(Projection::Exclude(exclude_fields)),
-        (true, true) => Err(Error::InvalidArgument("Cannot mix inclusion and exclusion projections".to_string())),
-        (false, false) => Err(Error::InvalidArgument("Projection document cannot be empty".to_string())),
+        (true, true) => Err(Error::InvalidArgument(
+            "Cannot mix inclusion and exclusion projections".to_string(),
+        )),
+        (false, false) => Err(Error::InvalidArgument(
+            "Projection document cannot be empty".to_string(),
+        )),
     }
 }
 
@@ -209,9 +256,7 @@ fn parse_field(s: &String) -> Result<Expr, Error> {
 }
 
 fn parse_field_path(path: &str) -> Result<Vec<PathComponent>, Error> {
-    path.split('.')
-        .map(|c| parse_path_component(c))
-        .collect()
+    path.split('.').map(|c| parse_path_component(c)).collect()
 }
 
 fn parse_path_component(component: &str) -> Result<PathComponent, Error> {
@@ -230,14 +275,29 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
         let order = match value.as_i32() {
             Some(1) => SortOrder::Ascending,
             Some(-1) => SortOrder::Descending,
-            _ => return Err(Error::InvalidArgument(format!("Invalid sort order for field '{}'", key))),
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "Invalid sort order for field '{}'",
+                    key
+                )))
+            }
         };
 
         let field = parse_field(key)?;
 
         match field {
-            Expr::PositionalField(_) => return Err(Error::InvalidArgument(format!("Positional fields cannot used for sorting: {}", key))),
-            Expr::WildcardField(_) => return Err(Error::InvalidArgument(format!("Wildcard fields cannot used for sorting: {}", key))),
+            Expr::PositionalField(_) => {
+                return Err(Error::InvalidArgument(format!(
+                    "Positional fields cannot used for sorting: {}",
+                    key
+                )))
+            }
+            Expr::WildcardField(_) => {
+                return Err(Error::InvalidArgument(format!(
+                    "Wildcard fields cannot used for sorting: {}",
+                    key
+                )))
+            }
             _ => (), // Valid case,
         }
 
@@ -254,23 +314,34 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
 fn validate_field_name(field_name: &str) -> Result<(), Error> {
     // Check for empty field name
     if field_name.is_empty() {
-        return Err(Error::InvalidArgument("Field name cannot be empty.".to_string()));
+        return Err(Error::InvalidArgument(
+            "Field name cannot be empty.".to_string(),
+        ));
     }
 
     // Check for reserved characters
     if field_name.contains('.') {
-        return Err(Error::InvalidArgument("Field name cannot contain '.'. Nested paths should use dot-separated keys.".to_string()));
+        return Err(Error::InvalidArgument(
+            "Field name cannot contain '.'. Nested paths should use dot-separated keys."
+                .to_string(),
+        ));
     }
     if field_name.starts_with('$') {
-        return Err(Error::InvalidArgument("Field name cannot start with '$'. This is reserved for operators.".to_string()));
+        return Err(Error::InvalidArgument(
+            "Field name cannot start with '$'. This is reserved for operators.".to_string(),
+        ));
     }
     if field_name.contains('\0') {
-        return Err(Error::InvalidArgument("Field name cannot contain null characters ('\\0').".to_string()));
+        return Err(Error::InvalidArgument(
+            "Field name cannot contain null characters ('\\0').".to_string(),
+        ));
     }
 
     // Check for length
     if field_name.len() > 255 {
-        return Err(Error::InvalidArgument("Field name cannot exceed 255 characters.".to_string()));
+        return Err(Error::InvalidArgument(
+            "Field name cannot exceed 255 characters.".to_string(),
+        ));
     }
 
     // If all checks pass
@@ -280,8 +351,8 @@ fn validate_field_name(field_name: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bson::{doc, Bson};
     use crate::query::logical::expr_fn::*;
+    use bson::{doc, Bson};
 
     #[test]
     fn test_parse_bson_type_numeric() {
@@ -294,10 +365,20 @@ mod tests {
 
     #[test]
     fn test_parse_bson_type_alias() {
-        assert_eq!(parse_bson_type(&Bson::String("double".to_string())), Some(BsonType::Double));
-        assert_eq!(parse_bson_type(&Bson::String("string".to_string())), Some(BsonType::String));
-        assert_eq!(parse_bson_type(&Bson::String("bool".to_string())), Some(BsonType::Boolean));
-        assert_eq!(parse_bson_type(&Bson::String("unknown".to_string())), None); // Invalid alias
+        assert_eq!(
+            parse_bson_type(&Bson::String("double".to_string())),
+            Some(BsonType::Double)
+        );
+        assert_eq!(
+            parse_bson_type(&Bson::String("string".to_string())),
+            Some(BsonType::String)
+        );
+        assert_eq!(
+            parse_bson_type(&Bson::String("bool".to_string())),
+            Some(BsonType::Boolean)
+        );
+        assert_eq!(parse_bson_type(&Bson::String("unknown".to_string())), None);
+        // Invalid alias
     }
 
     #[test]
@@ -336,9 +417,7 @@ mod tests {
     fn test_parse_conditions_with_elem_match() {
         let doc = doc! { "nestedArray": { "$elemMatch": { "$gt": 22, "$lt": 30 } } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["nestedArray"]),
-                                     [elem_match([gt(22),
-                                                                       lt(30)])]);
+        let expected = field_filters(field(["nestedArray"]), [elem_match([gt(22), lt(30)])]);
         assert_eq!(expected, parsed);
     }
 
@@ -357,7 +436,8 @@ mod tests {
         let expected = and([
             field_filters(field(["age"]), [gte(18)]),
             field_filters(field(["status"]), [eq("active")]),
-            field_filters(field(["tags"]), [all(["tag1", "tag2"])])]);
+            field_filters(field(["tags"]), [all(["tag1", "tag2"])]),
+        ]);
 
         assert_eq!(expected, parsed.unwrap());
     }
@@ -376,13 +456,13 @@ mod tests {
 
         let parsed = parse_conditions(&filter);
         assert!(parsed.is_ok());
-        let expected =
-            and([
-                or([field_filters(field(["field1"]), [gte(10)]),
-                             field_filters(field(["field2"]), [eq("value")])
-                ]),
-                field_filters(field(["field3"]), [lt(20)])
-            ]);
+        let expected = and([
+            or([
+                field_filters(field(["field1"]), [gte(10)]),
+                field_filters(field(["field2"]), [eq("value")]),
+            ]),
+            field_filters(field(["field3"]), [lt(20)]),
+        ]);
         assert_eq!(expected, parsed.unwrap());
     }
 
@@ -403,14 +483,13 @@ mod tests {
         let parsed = parse_conditions(&filter);
         assert!(parsed.is_ok());
 
-        let expected =
-            not(
-                and([field_filters(field(["field1"]), [ne(5)]),
-                               or([field_filters(field(["field2"]), [within(vec![1, 2, 3])]),
-                                             field_filters(field(["field3"]), [exists(true)])
-                               ])
-                ])
-            );
+        let expected = not(and([
+            field_filters(field(["field1"]), [ne(5)]),
+            or([
+                field_filters(field(["field2"]), [within(vec![1, 2, 3])]),
+                field_filters(field(["field3"]), [exists(true)]),
+            ]),
+        ]));
 
         assert_eq!(expected, parsed.unwrap());
     }
@@ -429,13 +508,13 @@ mod tests {
 
         let parsed = parse_conditions(&filter);
 
-        let expected =
-            nor([
-                or([field_filters(field(["field1"]), [lte(15)]),
-                    field_filters(field(["field2"]), [has_type(BsonType::String, false)])
-                ]),
-                field_filters(field(["field3"]), [size(3, false)]),
-            ]);
+        let expected = nor([
+            or([
+                field_filters(field(["field1"]), [lte(15)]),
+                field_filters(field(["field2"]), [has_type(BsonType::String, false)]),
+            ]),
+            field_filters(field(["field3"]), [size(3, false)]),
+        ]);
 
         assert_eq!(expected, parsed.unwrap());
     }
@@ -457,15 +536,16 @@ mod tests {
 
         let parsed = parse_conditions(&filter);
 
-        let expected =
-            and([
-                nor([field_filters(field(["field1"]), [gt(50)]),
-                    field_filters(field(["field2"]), [eq("test")])
-                ]),
-                or([field_filters(field(["field3"]), [lt(20)]),
-                    not(field_filters(field(["field4"]), [exists(false)]))
-                ]),
-            ]);
+        let expected = and([
+            nor([
+                field_filters(field(["field1"]), [gt(50)]),
+                field_filters(field(["field2"]), [eq("test")]),
+            ]),
+            or([
+                field_filters(field(["field3"]), [lt(20)]),
+                not(field_filters(field(["field4"]), [exists(false)])),
+            ]),
+        ]);
 
         assert_eq!(expected, parsed.unwrap());
     }
@@ -475,7 +555,10 @@ mod tests {
         let filter = doc! { "age": { "$invalidOp": 18 } };
         let parsed = parse_conditions(&filter);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Unknown operator: $invalidOp");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Unknown operator: $invalidOp"
+        );
     }
 
     #[test]
@@ -483,7 +566,10 @@ mod tests {
         let filter = doc! {"$and": ["not a document"]};
         let parsed = parse_conditions(&filter);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Invalid format for $and; must be an array of documents");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Invalid format for $and; must be an array of documents"
+        );
     }
 
     #[test]
@@ -491,7 +577,10 @@ mod tests {
         let projection = doc! {"name": 1, "age": 1};
         let parsed = parse_projection(&projection);
         assert!(parsed.is_ok());
-        assert_eq!(parsed.unwrap(), Projection::Include(vec![field(["name"]), field(["age"]),]));
+        assert_eq!(
+            parsed.unwrap(),
+            Projection::Include(vec![field(["name"]), field(["age"]),])
+        );
     }
 
     #[test]
@@ -499,7 +588,10 @@ mod tests {
         let projection = doc! {"name.*": 1, "age": 1};
         let parsed = parse_projection(&projection);
         assert!(parsed.is_ok());
-        assert_eq!(parsed.unwrap(), Projection::Include(vec![wildcard_field(["name"]), field(["age"]),]));
+        assert_eq!(
+            parsed.unwrap(),
+            Projection::Include(vec![wildcard_field(["name"]), field(["age"]),])
+        );
     }
 
     #[test]
@@ -507,7 +599,10 @@ mod tests {
         let projection = doc! {"password": 0, "secret": 0};
         let parsed = parse_projection(&projection);
         assert!(parsed.is_ok());
-        assert_eq!(parsed.unwrap(), Projection::Exclude(vec![field(["password"]), field(["secret"]),]));
+        assert_eq!(
+            parsed.unwrap(),
+            Projection::Exclude(vec![field(["password"]), field(["secret"]),])
+        );
     }
 
     #[test]
@@ -515,7 +610,10 @@ mod tests {
         let projection = doc! {"name": 1, "password": 0};
         let parsed = parse_projection(&projection);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Cannot mix inclusion and exclusion projections");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Cannot mix inclusion and exclusion projections"
+        );
     }
 
     #[test]
@@ -524,7 +622,10 @@ mod tests {
 
         let parsed = parse_projection(&projection);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Invalid projection value for field 'name'");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Invalid projection value for field 'name'"
+        );
     }
 
     #[test]
@@ -554,7 +655,10 @@ mod tests {
 
         let parsed = parse_sort(&sort);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Invalid sort order for field 'name'");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Invalid sort order for field 'name'"
+        );
     }
 
     #[test]
@@ -563,7 +667,10 @@ mod tests {
 
         let parsed = parse_sort(&sort);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Wildcard fields cannot used for sorting: name.*");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Wildcard fields cannot used for sorting: name.*"
+        );
     }
 
     #[test]
@@ -572,6 +679,9 @@ mod tests {
 
         let parsed = parse_sort(&sort);
         assert!(parsed.is_err());
-        assert_eq!(parsed.unwrap_err().to_string(), "Positional fields cannot used for sorting: name.$");
+        assert_eq!(
+            parsed.unwrap_err().to_string(),
+            "Positional fields cannot used for sorting: name.$"
+        );
     }
 }

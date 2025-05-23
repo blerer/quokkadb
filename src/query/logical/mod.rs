@@ -1,19 +1,19 @@
+use crate::query::tree_node::TreeNode;
+use bson::Bson;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use bson::Bson;
-use crate::query::tree_node::TreeNode;
 
+pub(crate) mod expr_fn;
 pub mod logical_plan;
 pub(crate) mod parser;
-pub(crate) mod expr_fn;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Expr {
     /// Field reference
     Field(Vec<PathComponent>),
     /// Wildcard field reference (e.g., "field.*")
-    WildcardField (Vec<PathComponent>),
+    WildcardField(Vec<PathComponent>),
     ///  Positional projection in queries (e.g. "array.$")
     PositionalField(Vec<PathComponent>),
     /// Literal values
@@ -21,12 +21,12 @@ pub enum Expr {
     /// Multiple filters on the same field (e.g., `{ "price": { "$ne": 1.99, "$exists": true } }`)
     FieldFilters {
         field: Rc<Expr>,
-        filters: Vec<Rc<Expr>>,  // List of filters on the same field
+        filters: Vec<Rc<Expr>>, // List of filters on the same field
     },
     /// A single comparison (e.g., `$gt: 5`, `$eq: "Alice"`)
     Comparison {
         operator: ComparisonOperator, // `$eq`, `$ne`, `$gt`, `$lt`, etc.
-        value: Rc<Expr>,     // The literal value
+        value: Rc<Expr>,              // The literal value
     },
     And(Vec<Rc<Expr>>),
     Or(Vec<Rc<Expr>>),
@@ -37,10 +37,10 @@ pub enum Expr {
     /// Type check
     Type {
         bson_type: BsonType,
-        negated: bool   // If the expression has been negated (e.g. $not: { $type : "string" })
+        negated: bool, // If the expression has been negated (e.g. $not: { $type : "string" })
     },
     // Array-specific operations
-    Size{
+    Size {
         size: usize,
         negated: bool,
     },
@@ -58,12 +58,16 @@ impl TreeNode for Expr {
     /// Return references to the children of the current node
     fn children(&self) -> Vec<Rc<Self::Child>> {
         match self {
-            Expr::FieldFilters { field, filters: predicates, .. } => {
+            Expr::FieldFilters {
+                field,
+                filters: predicates,
+                ..
+            } => {
                 let mut children = Vec::with_capacity(predicates.len() + 1);
                 children.push(field.clone());
                 children.extend(predicates.into_iter().cloned());
                 children
-            },
+            }
             Expr::Comparison { value, .. } => vec![value.clone()],
             Expr::And(elements) => elements.iter().cloned().collect(),
             Expr::Or(elements) => elements.iter().cloned().collect(),
@@ -76,13 +80,19 @@ impl TreeNode for Expr {
 
     fn with_new_children(self: Rc<Self>, children: Vec<Rc<Self::Child>>) -> Rc<Self> {
         match self.as_ref() {
-            Expr::FieldFilters {..} => {
+            Expr::FieldFilters { .. } => {
                 let mut iter = children.into_iter();
                 let field = iter.next().unwrap();
                 let predicates = iter.collect();
-                Rc::new(Expr::FieldFilters { field, filters: predicates })
+                Rc::new(Expr::FieldFilters {
+                    field,
+                    filters: predicates,
+                })
             }
-            Expr::Comparison { operator, .. } => Rc::new(Expr::Comparison {operator: operator.clone(), value: Self::get_first(children)}),
+            Expr::Comparison { operator, .. } => Rc::new(Expr::Comparison {
+                operator: operator.clone(),
+                value: Self::get_first(children),
+            }),
             Expr::And(_) => Rc::new(Expr::And(children)),
             Expr::Or(_) => Rc::new(Expr::Or(children)),
             Expr::Not(_) => Rc::new(Expr::Not(Self::get_first(children))),
@@ -101,51 +111,60 @@ impl Expr {
     pub fn negate(&self) -> Rc<Expr> {
         match self {
             Expr::Not(expr) => expr.clone(),
-            Expr::Nor(exprs) => {
-                Rc::new(Expr::Or(exprs.iter().cloned().collect()))
-            },
-            Expr::And(exprs) => {
-                Rc::new(Expr::Or(exprs.iter().map(|e| e.negate()).collect()))
-            },
-            Expr::Or(exprs) => {
-                Rc::new(Expr::And(exprs.iter().map(|e| e.negate()).collect()))
-            },
-            Expr::FieldFilters {field, filters: predicates } => {
-
+            Expr::Nor(exprs) => Rc::new(Expr::Or(exprs.iter().cloned().collect())),
+            Expr::And(exprs) => Rc::new(Expr::Or(exprs.iter().map(|e| e.negate()).collect())),
+            Expr::Or(exprs) => Rc::new(Expr::And(exprs.iter().map(|e| e.negate()).collect())),
+            Expr::FieldFilters {
+                field,
+                filters: predicates,
+            } => {
                 if predicates.len() == 1 {
                     return Rc::new(Expr::FieldFilters {
                         field: field.clone(),
                         filters: predicates.iter().map(|e| e.negate()).collect(),
-                    })
+                    });
                 }
 
                 // If there are multiple expression we need to apply De Morgan's Laws
                 // not(x and y) simplifies to not(x) or not(y)
-                let field_predicates =
-                    predicates.iter()
-                              .map(|e| Rc::new(Expr::FieldFilters { field: field.clone(), filters: vec![e.negate()]}))
-                              .collect();
+                let field_predicates = predicates
+                    .iter()
+                    .map(|e| {
+                        Rc::new(Expr::FieldFilters {
+                            field: field.clone(),
+                            filters: vec![e.negate()],
+                        })
+                    })
+                    .collect();
 
                 Rc::new(Expr::FieldFilters {
                     field: field.clone(),
                     filters: vec![Rc::new(Expr::Or(field_predicates))],
                 })
             }
-            Expr::Comparison { operator, value } => {
-                Rc::new(Expr::Comparison {
-                    operator: operator.negate(),
-                    value: value.clone(),
-                })
-            }
+            Expr::Comparison { operator, value } => Rc::new(Expr::Comparison {
+                operator: operator.negate(),
+                value: value.clone(),
+            }),
             Expr::Exists(bool) => Rc::new(Expr::Exists(!*bool)),
             Expr::All(values) => {
-                let value = BsonValue(Bson::Array(values.iter()
-                                                        .map(|v| v.to_bson())
-                                                        .collect()));
-                Rc::new(Expr::Comparison {operator: ComparisonOperator::Nin, value: Rc::new(Expr::Literal(value))})
-            },
-            Expr::Type{ bson_type, negated: not } => Rc::new(Expr::Type{bson_type: *bson_type, negated: !*not}),
-            Expr::Size{ size, negated} => Rc::new(Expr::Size{ size: *size, negated: !*negated }),
+                let value = BsonValue(Bson::Array(values.iter().map(|v| v.to_bson()).collect()));
+                Rc::new(Expr::Comparison {
+                    operator: ComparisonOperator::Nin,
+                    value: Rc::new(Expr::Literal(value)),
+                })
+            }
+            Expr::Type {
+                bson_type,
+                negated: not,
+            } => Rc::new(Expr::Type {
+                bson_type: *bson_type,
+                negated: !*not,
+            }),
+            Expr::Size { size, negated } => Rc::new(Expr::Size {
+                size: *size,
+                negated: !*negated,
+            }),
             Expr::AlwaysTrue => Rc::new(Expr::AlwaysFalse),
             Expr::AlwaysFalse => Rc::new(Expr::AlwaysTrue),
             _ => Rc::new(self.clone()),
@@ -155,18 +174,17 @@ impl Expr {
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub enum ComparisonOperator {
-    Eq,    // `$eq`
-    Ne,    // `$ne`
-    Gt,    // `$gt`
-    Gte,   // `$gte`
-    Lt,    // `$lt`
-    Lte,   // `$lte`
-    In,    // `$in`
-    Nin,   // `$nin`
+    Eq,  // `$eq`
+    Ne,  // `$ne`
+    Gt,  // `$gt`
+    Gte, // `$gte`
+    Lt,  // `$lt`
+    Lte, // `$lte`
+    In,  // `$in`
+    Nin, // `$nin`
 }
 
 impl ComparisonOperator {
-
     fn negate(&self) -> ComparisonOperator {
         match self {
             ComparisonOperator::Eq => ComparisonOperator::Ne,
@@ -220,8 +238,8 @@ pub enum BsonType {
 /// Represents a component in a field path
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum PathComponent {
-    FieldName(String),    // A named field (e.g., "field" in "document.field")
-    ArrayElement(usize),  // An array index (e.g., "0" in "array.0")
+    FieldName(String),   // A named field (e.g., "field" in "document.field")
+    ArrayElement(usize), // An array index (e.g., "0" in "array.0")
 }
 
 impl From<&str> for PathComponent {
@@ -271,11 +289,17 @@ impl PartialEq for BsonValue {
             }
 
             // Compare arrays element-wise
-            (Bson::Array(a), Bson::Array(b)) => a.len() == b.len() &&
-                a.iter().zip(b).all(|(x, y)| BsonValue(x.clone()) == BsonValue(y.clone())),
+            (Bson::Array(a), Bson::Array(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|(x, y)| BsonValue(x.clone()) == BsonValue(y.clone()))
+            }
 
             // Compare regex patterns and options
-            (Bson::RegularExpression(a), Bson::RegularExpression(b)) => a.pattern == b.pattern && a.options == b.options,
+            (Bson::RegularExpression(a), Bson::RegularExpression(b)) => {
+                a.pattern == b.pattern && a.options == b.options
+            }
 
             // Default strict equality for other types
             _ => self.0 == other.0, // Default case
@@ -291,8 +315,13 @@ impl Hash for BsonValue {
             // Normalize NaN to a fixed value
             Bson::Int32(x) => x.hash(state),
             Bson::Int64(x) => x.hash(state),
-            Bson::Double(x) =>
-                if x.is_nan() { 0x7FF8_0000_0000_0000u64.hash(state) } else { x.to_bits().hash(state)}, // Normalize floating point hashing
+            Bson::Double(x) => {
+                if x.is_nan() {
+                    0x7FF8_0000_0000_0000u64.hash(state)
+                } else {
+                    x.to_bits().hash(state)
+                }
+            } // Normalize floating point hashing
             Bson::String(s) => s.hash(state),
             Bson::Boolean(b) => b.hash(state),
 
@@ -348,7 +377,7 @@ impl From<bool> for BsonValue {
 
 impl<T> From<Vec<T>> for BsonValue
 where
-    T: Into<Bson>,  // Ensure each element can be converted into `Bson`
+    T: Into<Bson>, // Ensure each element can be converted into `Bson`
 {
     fn from(values: Vec<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
@@ -393,7 +422,11 @@ mod tests {
 
     #[test]
     fn test_nan_comparisons() {
-        assert_eq!(bson_value!(f64::NAN), bson_value!(f64::NAN), "NaN should be equal to NaN");
+        assert_eq!(
+            bson_value!(f64::NAN),
+            bson_value!(f64::NAN),
+            "NaN should be equal to NaN"
+        );
         assert_ne!(bson_value!(5.1_f64), bson_value!(f64::NAN));
     }
 
@@ -426,7 +459,10 @@ mod tests {
         let doc2 = bson_value!({ "b": 2, "a": 1 }); // Different order, should be equal
         let doc3 = bson_value!({ "a": 1, "b": 3 });
 
-        assert_eq!(&doc1, &doc2, "Document equality should be order-independent");
+        assert_eq!(
+            &doc1, &doc2,
+            "Document equality should be order-independent"
+        );
         assert_ne!(&doc1, &doc3);
     }
 

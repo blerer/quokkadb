@@ -1,8 +1,8 @@
-use std::rc::Rc;
-use bson::Document;
 use crate::error::Error;
-use crate::query::logical::parser;
 use crate::query::logical::logical_plan::LogicalPlan;
+use crate::query::logical::parser;
+use bson::Document;
+use std::rc::Rc;
 
 pub struct Collection {
     collection: String,
@@ -10,7 +10,7 @@ pub struct Collection {
 
 impl Collection {
     pub fn new(collection: String) -> Collection {
-        Collection {collection }
+        Collection { collection }
     }
 
     pub fn find(&self, filter: Document) -> Query {
@@ -21,7 +21,7 @@ impl Collection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     collection: String,
-    filter: Document,         // Unified filter representation using Expr
+    filter: Document, // Unified filter representation using Expr
     projection: Option<Document>,
     sort: Option<Document>,
     limit: Option<usize>,
@@ -36,7 +36,8 @@ impl Query {
             projection: None,
             sort: None,
             limit: None,
-            skip: None }
+            skip: None,
+        }
     }
 
     pub fn projection(&mut self, projection: Document) -> &mut Self {
@@ -60,7 +61,6 @@ impl Query {
     }
 
     pub fn execute(&self) -> Result<Vec<Document>> {
-
         let mut plan = LogicalPlan::TableScan {
             collection: self.collection.clone(),
             filter: None,
@@ -75,7 +75,7 @@ impl Query {
             condition: conditions,
         };
 
-        if self.limit.is_some() || self.skip.is_some()  {
+        if self.limit.is_some() || self.skip.is_some() {
             plan = LogicalPlan::Limit {
                 input: Rc::new(plan),
                 limit: self.limit.clone(),

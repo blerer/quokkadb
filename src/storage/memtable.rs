@@ -1,30 +1,32 @@
-use std::io::Result;
-use std::ops::{Bound, RangeBounds};
-use std::ops::Bound::Unbounded;
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use crossbeam_skiplist::SkipMap;
+use crate::obs::metrics::{Counter, HitRatioGauge, MetricRegistry};
 use crate::options::options::Options;
+use crate::storage::files::DbFile;
+use crate::storage::internal_key::{
+    encode_internal_key, encode_record_key, extract_operation_type, extract_sequence_number,
+    extract_user_key, MAX_SEQUENCE_NUMBER,
+};
+use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::operation::OperationType;
+use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::interval::Interval;
-use crate::obs::metrics::{Counter, HitRatioGauge, MetricRegistry};
-use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_sequence_number, extract_user_key, MAX_SEQUENCE_NUMBER};
-use crate::storage::lsm_version::SSTableMetadata;
-use crate::storage::sstable::sstable_writer::SSTableWriter;
+use crossbeam_skiplist::SkipMap;
+use std::io::Result;
+use std::ops::Bound::Unbounded;
+use std::ops::{Bound, RangeBounds};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub struct Memtable {
     metrics: Arc<MemtableMetrics>,
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
-    size: AtomicUsize, // Current size of the memtable
+    size: AtomicUsize,                   // Current size of the memtable
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
 }
 
 impl Memtable {
     pub fn new(metrics: Arc<MemtableMetrics>, log_number: u64) -> Self {
-
         Memtable {
             metrics,
             skiplist: SkipMap::new(),
@@ -35,9 +37,8 @@ impl Memtable {
 
     /// Applies all the WriteBatch operations to the Memtable
     pub fn write(&self, seq: u64, batch: &WriteBatch) {
-
         for operation in batch.operations() {
-            let key = operation.compound_key(seq);
+            let key = operation.internal_key(seq);
             let value = operation.value().to_vec();
             let key_size = key.len();
             let value_size = value.len();
@@ -46,7 +47,8 @@ impl Memtable {
             self.skiplist.insert(key, value);
 
             // Update the size
-            self.size.fetch_add(key_size + value_size, Ordering::Relaxed);
+            self.size
+                .fetch_add(key_size + value_size, Ordering::Relaxed);
 
             // Update stats
             self.update_operation_counters(operation.operation_type());
@@ -59,44 +61,46 @@ impl Memtable {
     /// - `operation`: The type of the operation that has been performed
     pub fn update_operation_counters(&self, operation: OperationType) {
         match operation {
-            OperationType::Put => { self.metrics.total_inserts.inc(); }
-            OperationType::Delete => {self.metrics.total_deletes.inc(); }
+            OperationType::Put => {
+                self.metrics.total_inserts.inc();
+            }
+            OperationType::Delete => {
+                self.metrics.total_deletes.inc();
+            }
             _ => panic!("Unexpected operation type {:?}", operation),
         }
     }
 
     /// Read a collection value by user key and optional snapshot (sequence number)
-    pub fn read(&self, collection: u32, key: &[u8], snapshot: u64) -> Option<Vec<u8>> {
-
+    pub fn read(&self, record_key: &[u8], snapshot: u64) -> Option<(Vec<u8>, Vec<u8>)> {
         // Create the range bounds for the search:
         // We want to retrieve all the entries for the specified key
-        let start_key = encode_internal_key(collection, 0, key, snapshot, OperationType::MaxKey);
-        let end_key = encode_internal_key(collection, 0, key, u64::MIN, OperationType::MinKey);
+        let start_key = encode_internal_key(record_key, snapshot, OperationType::MaxKey);
+        let end_key = encode_internal_key(record_key, u64::MIN, OperationType::MinKey);
 
         // Traverse the skip list
         let mut iter = self.skiplist.range(start_key..=end_key);
 
         while let Some(entry) = iter.next() {
-            let compound_key = entry.key();
+            let internal_key = entry.key();
 
-            return if extract_operation_type(compound_key) == OperationType::Put {
-                self.metrics.hits.inc();
-                Some(entry.value().clone()) // Found a valid PUT
-            } else {
-                self.metrics.misses.inc();
-                None  // Deleted, stop searching
-            }
+            self.metrics.hits.inc();
+            return Some((internal_key.clone(), entry.value().clone()));
         }
         self.metrics.misses.inc();
         None // No valid entry found
     }
 
-
     /// Perform a range scan for keys within the specified range.
     /// Supports both inclusive and exclusive bounds.
     ///
     ///  Note: Hits and misses statistics are not updated by range scans
-    pub fn range_scan<R>(&self, collection: u32, range: &R, snapshot: Option<u64>) -> RangeScanIterator
+    pub fn range_scan<R>(
+        &self,
+        collection: u32,
+        range: &R,
+        snapshot: Option<u64>,
+    ) -> RangeScanIterator
     where
         R: RangeBounds<Vec<u8>>,
     {
@@ -105,14 +109,30 @@ impl Memtable {
 
         // Convert the start and end bounds
         let start = match range.start_bound() {
-            Bound::Included(key) => Bound::Included(encode_internal_key(collection, 0, &key, max_sequence, OperationType::MaxKey)),
-            Bound::Excluded(key) => Bound::Excluded(encode_internal_key(collection, 0, &key, u64::MIN, OperationType::MinKey)),
+            Bound::Included(key) => Bound::Included(encode_internal_key(
+                &encode_record_key(collection, 0, &key),
+                max_sequence,
+                OperationType::MaxKey,
+            )),
+            Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
+                &encode_record_key(collection, 0, &key),
+                u64::MIN,
+                OperationType::MinKey,
+            )),
             Unbounded => Unbounded,
         };
 
         let end = match range.end_bound() {
-            Bound::Included(key) => Bound::Included(encode_internal_key(collection, 0, key, u64::MIN, OperationType::MinKey)),
-            Bound::Excluded(key) => Bound::Excluded(encode_internal_key(collection, 0, key, max_sequence, OperationType::MaxKey)),
+            Bound::Included(key) => Bound::Included(encode_internal_key(
+                &encode_record_key(collection, 0, &key),
+                u64::MIN,
+                OperationType::MinKey,
+            )),
+            Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
+                &encode_record_key(collection, 0, &key),
+                max_sequence,
+                OperationType::MaxKey,
+            )),
             Unbounded => Unbounded,
         };
 
@@ -131,10 +151,11 @@ impl Memtable {
         self.size.load(Ordering::Relaxed)
     }
 
-    pub fn flush(&self,
-                 directory: &Path,
-                 sst_file: &DbFile,
-                 options: &Options
+    pub fn flush(
+        &self,
+        directory: &Path,
+        sst_file: &DbFile,
+        options: &Options,
     ) -> Result<SSTableMetadata> {
         let mut writer = SSTableWriter::new(directory, sst_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
@@ -181,7 +202,8 @@ impl MemtableMetrics {
     }
 
     pub fn register_to(&self, metric_registry: &mut MetricRegistry) {
-        metric_registry.register_counter("memtable_hit", &self.hits)
+        metric_registry
+            .register_counter("memtable_hit", &self.hits)
             .register_counter("memtable_miss", &self.misses)
             .register_counter("memtable_total_inserts", &self.total_inserts)
             .register_counter("memtable_total_deletes", &self.total_deletes)
@@ -205,17 +227,22 @@ impl<'a> Iterator for RangeScanIterator<'a> {
 
         while let Some(entry) = self.iter.next() {
             let compound_key = entry.key();
-            if  self.snapshot != None && extract_sequence_number(compound_key) > self.snapshot.unwrap() {
-                continue
+            if self.snapshot != None
+                && extract_sequence_number(compound_key) > self.snapshot.unwrap()
+            {
+                continue;
             }
             let user_key = Some(extract_user_key(compound_key).to_vec());
             if self.previous == user_key {
-                continue
+                continue;
             }
             self.previous = user_key;
 
             if extract_operation_type(compound_key) == OperationType::Put {
-                return Some((extract_user_key(compound_key).to_vec(), entry.value().clone()));
+                return Some((
+                    extract_user_key(compound_key).to_vec(),
+                    entry.value().clone(),
+                ));
             }
         }
         None
@@ -224,23 +251,47 @@ impl<'a> Iterator for RangeScanIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use bson::doc;
+    use tempfile::tempdir;
+    use super::*;
     use crate::storage::operation::Operation;
     use crate::storage::write_batch::WriteBatch;
-    use super::*;
+    use crate::util::bson_utils::as_key_value;
 
     #[test]
-    fn test_write_put_operations() {
+    fn write_put_operations() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
-        let batch = write_batch(vec![put(collection, b"key1",  b"value1"), put(collection,b"key2", b"value2")]);
+        let batch = write_batch(vec![
+            put(collection, b"key1", b"value1"),
+            put(collection, b"key2", b"value2"),
+        ]);
 
         memtable.write(1, &batch);
 
         // Verify data was inserted
-        assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value1")));
-        assert_eq!(memtable.read(collection, b"key2", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value2")));
+        assert_eq!(
+            memtable.read(
+                &encode_record_key(collection, 0, b"key1"),
+                MAX_SEQUENCE_NUMBER
+            ),
+            Some((
+                put_key(collection, &Vec::from(b"key1"), 1),
+                Vec::from(b"value1")
+            ))
+        );
+        assert_eq!(
+            memtable.read(
+                &encode_record_key(collection, 0, b"key2"),
+                MAX_SEQUENCE_NUMBER
+            ),
+            Some((
+                put_key(collection, &Vec::from(b"key2"), 1),
+                Vec::from(b"value2")
+            ))
+        );
 
         // Verify metrics
         let metrics = memtable.metrics.clone();
@@ -251,19 +302,24 @@ mod tests {
     }
 
     #[test]
-    fn test_write_put_and_delete_operations() {
+    fn write_put_and_delete_operations() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
-        let batch =
-            write_batch(vec![put(collection,b"key1", b"value1"), delete(collection, b"key1")]);
+        let batch = write_batch(vec![
+            put(collection, b"key1", b"value1"),
+            delete(collection, b"key1"),
+        ]);
 
         memtable.write(1, &batch);
 
         // Verify key1 was deleted
-        assert_eq!(memtable.read(collection, b"key1", 2), None);
-        assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), None);
+        assert_eq!(memtable.read(&put_key(collection, b"key1", 1), 2), None);
+        assert_eq!(
+            memtable.read(&delete_key(collection, b"key1", 1), MAX_SEQUENCE_NUMBER),
+            None
+        );
 
         // Verify statistics
         let stats = memtable.metrics.clone();
@@ -274,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_put_and_delete_operations_in_different_batches() {
+    fn write_put_and_delete_operations_in_different_batches() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         // Create a WriteBatch with PUT and DELETE operations
@@ -288,33 +344,58 @@ mod tests {
         memtable.write(2, &batch);
 
         // Verify key1 was deleted
-        assert_eq!(memtable.read(collection, b"key1", MAX_SEQUENCE_NUMBER), None);
+        assert_eq!(
+            memtable.read(
+                &encode_record_key(collection, 0, b"key1"),
+                MAX_SEQUENCE_NUMBER
+            ),
+            Some((delete_key(collection, &Vec::from(b"key1"), 2), vec![]))
+        );
 
         // Verify statistics
         let stats = memtable.metrics.clone();
         assert_eq!(stats.total_inserts.get(), 1);
         assert_eq!(stats.total_deletes.get(), 1);
-        assert_eq!(stats.misses.get(), 1);
-        assert_eq!(stats.hits.get(), 0);
+        assert_eq!(stats.misses.get(), 0);
+        assert_eq!(stats.hits.get(), 1);
     }
 
     #[test]
-    fn test_read_with_snapshot() {
+    fn read_with_snapshot() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         // Insert multiple versions of the same key
-        let batch1 = write_batch(vec![put(collection,b"key1",  b"value1_v1")]);
+        let batch1 = write_batch(vec![put(collection, b"key1", b"value1_v1")]);
         memtable.write(2, &batch1);
 
-        let batch2 = write_batch(vec![put(collection,b"key1",  b"value1_v2")]);
+        let batch2 = write_batch(vec![put(collection, b"key1", b"value1_v2")]);
         memtable.write(3, &batch2);
 
         // Read with snapshots
-        assert_eq!(memtable.read(collection,b"key1", 1), None); // Snapshot 0
-        assert_eq!(memtable.read(collection,b"key1", 2), Some(Vec::from(b"value1_v1"))); // Snapshot 1
-        assert_eq!(memtable.read(collection, b"key1", 3), Some(Vec::from(b"value1_v2"))); // Snapshot 2
-        assert_eq!(memtable.read(collection,b"key1", MAX_SEQUENCE_NUMBER), Some(Vec::from(b"value1_v2")));   // Latest
+        let record_key = encode_record_key(collection, 0, b"key1");
+        assert_eq!(memtable.read(&record_key, 1), None); // Snapshot 0
+        assert_eq!(
+            memtable.read(&record_key, 2),
+            Some((
+                put_key(collection, &Vec::from(b"key1"), 2),
+                Vec::from(b"value1_v1")
+            ))
+        ); // Snapshot 1
+        assert_eq!(
+            memtable.read(&record_key, 3),
+            Some((
+                put_key(collection, &Vec::from(b"key1"), 3),
+                Vec::from(b"value1_v2")
+            ))
+        ); // Snapshot 2
+        assert_eq!(
+            memtable.read(&record_key, MAX_SEQUENCE_NUMBER),
+            Some((
+                put_key(collection, &Vec::from(b"key1"), 3),
+                Vec::from(b"value1_v2")
+            ))
+        ); // Latest
 
         // Verify statistics
         let stats = memtable.metrics.clone();
@@ -325,24 +406,30 @@ mod tests {
     }
 
     #[test]
-    fn test_read_non_existent_key() {
+    fn read_non_existent_key() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
         let collection = 32;
         // Read a key that was never inserted
-        assert_eq!(memtable.read(collection, b"non_existent_key", MAX_SEQUENCE_NUMBER), None);
+        assert_eq!(
+            memtable.read(
+                &encode_record_key(collection, 0, b"non_existent_key"),
+                MAX_SEQUENCE_NUMBER
+            ),
+            None
+        );
         let stats = memtable.metrics.clone();
         assert_eq!(stats.misses.get(), 1);
         assert_eq!(stats.hits.get(), 0);
     }
 
     #[test]
-    fn test_range_scan_with_no_matching_keys() {
+    fn range_scan_with_no_matching_keys() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch = write_batch(vec![
             put(collection, b"key1", b"value1"),
-            put(collection,b"key4", b"value4"),
+            put(collection, b"key4", b"value4"),
         ]);
 
         memtable.write(1, &batch);
@@ -354,24 +441,24 @@ mod tests {
     }
 
     #[test]
-    fn test_range_scan_with_different_ranges() {
+    fn range_scan_with_different_ranges() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![
-            put(collection,b"key1", b"value1_v1"),
-            put(collection,b"key2", b"value2_v1"),
-            put(collection,b"key3", b"value3_v1"),
+            put(collection, b"key1", b"value1_v1"),
+            put(collection, b"key2", b"value2_v1"),
+            put(collection, b"key3", b"value3_v1"),
         ]);
         let batch2 = write_batch(vec![
-            delete(collection,b"key1"),
-            put(collection,b"key2", b"value2_v2"),
-            delete(collection,b"key3"),
+            delete(collection, b"key1"),
+            put(collection, b"key2", b"value2_v2"),
+            delete(collection, b"key3"),
         ]);
         let batch3 = write_batch(vec![
-            put(collection,b"key4", b"value4_v1"),
-            put(collection,b"key5", b"value5_v1"),
-            put(collection,b"key6", b"value6_v1"),
+            put(collection, b"key4", b"value4_v1"),
+            put(collection, b"key5", b"value5_v1"),
+            put(collection, b"key6", b"value6_v1"),
         ]);
 
         memtable.write(1, &batch1);
@@ -381,51 +468,86 @@ mod tests {
         let range = Interval::closed(b"key2".to_vec(), b"key6".to_vec());
         let mut range_iter = memtable.range_scan(collection, &range, None);
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key2"), Vec::from(b"value2_v2"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key4"), Vec::from(b"value4_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key5"), Vec::from(b"value5_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key6"), Vec::from(b"value6_v1"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key2"), Vec::from(b"value2_v2")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key4"), Vec::from(b"value4_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key5"), Vec::from(b"value5_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key6"), Vec::from(b"value6_v1")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let range = Interval::closed_open(b"key2".to_vec(), b"key6".to_vec());
         let mut range_iter = memtable.range_scan(collection, &range, None);
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key2"), Vec::from(b"value2_v2"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key4"), Vec::from(b"value4_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key5"), Vec::from(b"value5_v1"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key2"), Vec::from(b"value2_v2")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key4"), Vec::from(b"value4_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key5"), Vec::from(b"value5_v1")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let range = Interval::open_closed(b"key2".to_vec(), b"key6".to_vec());
         let mut range_iter = memtable.range_scan(collection, &range, None);
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key4"), Vec::from(b"value4_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key5"), Vec::from(b"value5_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key6"), Vec::from(b"value6_v1"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key4"), Vec::from(b"value4_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key5"), Vec::from(b"value5_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key6"), Vec::from(b"value6_v1")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let range = Interval::open(b"key2".to_vec(), b"key6".to_vec());
         let mut range_iter = memtable.range_scan(collection, &range, None);
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key4"), Vec::from(b"value4_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key5"), Vec::from(b"value5_v1"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key4"), Vec::from(b"value4_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key5"), Vec::from(b"value5_v1")))
+        );
         assert_eq!(range_iter.next(), None);
     }
 
-
     #[test]
-    fn test_range_scan_with_mixed_operations() {
+    fn range_scan_with_mixed_operations() {
         let memtable = Memtable::new(MemtableMetrics::new(), 2);
 
         let collection: u32 = 32;
         let batch1 = write_batch(vec![
-            put(collection,b"key1", b"value1_v1"),
+            put(collection, b"key1", b"value1_v1"),
             put(collection, b"key2", b"value2_v1"),
             put(collection, b"key3", b"value3_v1"),
         ]);
         let batch2 = write_batch(vec![
-            delete(collection,b"key1"),
+            delete(collection, b"key1"),
             put(collection, b"key2", b"value2_v2"),
-            delete(collection,b"key3"),
+            delete(collection, b"key3"),
         ]);
 
         memtable.write(1, &batch1);
@@ -435,24 +557,88 @@ mod tests {
         let range = Interval::closed(b"key1".to_vec(), b"key3".to_vec());
         let mut range_iter = memtable.range_scan(collection, &range, None);
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key2"), Vec::from(b"value2_v2"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key2"), Vec::from(b"value2_v2")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let mut range_iter = memtable.range_scan(collection, &range, Some(2));
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key2"), Vec::from(b"value2_v2"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key2"), Vec::from(b"value2_v2")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let mut range_iter = memtable.range_scan(collection, &range, Some(1));
 
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key1"), Vec::from(b"value1_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key2"), Vec::from(b"value2_v1"))));
-        assert_eq!(range_iter.next(), Some((Vec::from(b"key3"), Vec::from(b"value3_v1"))));
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key1"), Vec::from(b"value1_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key2"), Vec::from(b"value2_v1")))
+        );
+        assert_eq!(
+            range_iter.next(),
+            Some((Vec::from(b"key3"), Vec::from(b"value3_v1")))
+        );
         assert_eq!(range_iter.next(), None);
 
         let mut range_iter = memtable.range_scan(collection, &range, Some(0));
 
         assert_eq!(range_iter.next(), None);
+    }
+
+    #[test]
+    fn test_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let memtable = Memtable::new(MemtableMetrics::new(), 2);
+
+        let inserts = vec![
+            as_key_value(&doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" }).unwrap(),
+            as_key_value(&doc! { "id": 2, "name": "Darth Vader", "role": "Sith" }).unwrap(),
+            as_key_value(&doc! { "id": 3, "name": "Leia Organa", "role": "Princess" }).unwrap(),
+            as_key_value(&doc! { "id": 4, "name": "Han Solo", "role": "Smuggler" }).unwrap(),
+        ];
+
+        let mut seq = 15;
+        for (user_key, value) in inserts.iter() {
+            let _ = memtable.write(seq, &write_batch(vec!(put(10, user_key, value))));
+            seq += 1;
+        }
+
+        let sst = memtable.flush(&path, &DbFile::new_sst(3), &Options::lightweight()).unwrap();
+
+        let expected = SSTableMetadata::new(
+            3,
+            0,
+            &encode_record_key(10, 0, &inserts[0].0),
+            &encode_record_key(10, 0, &inserts[3].0),
+            15,
+            18
+        );
+        assert_eq!(sst, expected);
+    }
+
+    fn put_key(collection: u32, key: &[u8], snapshot: u64) -> Vec<u8> {
+        encode_internal_key(
+            &encode_record_key(collection, 0, key),
+            snapshot,
+            OperationType::Put,
+        )
+    }
+
+    fn delete_key(collection: u32, key: &[u8], snapshot: u64) -> Vec<u8> {
+        encode_internal_key(
+            &encode_record_key(collection, 0, key),
+            snapshot,
+            OperationType::Delete,
+        )
     }
 
     fn put(collection: u32, key: &[u8], value: &[u8]) -> Operation {

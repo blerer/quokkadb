@@ -1,7 +1,7 @@
+use crate::io::varint;
+use crate::storage::sstable::BlockHandle;
 use std::io::Result;
 use std::mem;
-use crate::storage::sstable::BlockHandle;
-use crate::io::varint;
 
 /// BlockBuilder builds a block with shared prefix compression and restart points.
 ///
@@ -12,14 +12,14 @@ use crate::io::varint;
 /// | Restart points     | Number of restarts (4 bytes) | CRC32 Checksum (4 bytes) |
 /// +--------------------+------------------------------+--------------------------+
 pub struct BlockBuilder<T, W: EntryWriter<T>> {
-    data: Vec<u8>,                // Stores encoded key-value entries.
-    entry_writer: W,               // Writes entries using shared-prefix encoding.
-    restarts: Vec<u32>,            // Restart point offsets.
-    prev_key: Vec<u8>,             // Previous key for shared prefix encoding.
-    prev_value: Option<T>,         // Previous value for delta encoding.
-    restart_interval: usize,       // Number of entries before a restart point.
-    counter: usize,                // Entry counter since last restart point.
-    first_key: Option<Vec<u8>>,    // First key in the block.
+    data: Vec<u8>,              // Stores encoded key-value entries.
+    entry_writer: W,            // Writes entries using shared-prefix encoding.
+    restarts: Vec<u32>,         // Restart point offsets.
+    prev_key: Vec<u8>,          // Previous key for shared prefix encoding.
+    prev_value: Option<T>,      // Previous value for delta encoding.
+    restart_interval: usize,    // Number of entries before a restart point.
+    counter: usize,             // Entry counter since last restart point.
+    first_key: Option<Vec<u8>>, // First key in the block.
 }
 
 impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
@@ -39,7 +39,6 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
 
     /// Add a key-value pair to the block.
     pub fn add(&mut self, key: &[u8], value: T) -> Result<()> {
-
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
@@ -53,7 +52,8 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
             shared = self.shared_prefix_length(&self.prev_key, key);
         }
 
-        self.entry_writer.write(key, shared, &value, &mut self.prev_value, &mut self.data);
+        self.entry_writer
+            .write(key, shared, &value, &mut self.prev_value, &mut self.data);
 
         // Update state.
         self.prev_key.clear();
@@ -71,13 +71,13 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
     /// Finalize the block by adding restart points and returning the firs_key and the full block.
     ///  This method will
     pub fn finish(&mut self) -> Result<(Option<Vec<u8>>, Vec<u8>)> {
-
         // Append restart points.
         for &restart in &self.restarts {
             self.data.extend(&restart.to_le_bytes());
         }
 
-        self.data.extend(&(self.restarts.len() as u32).to_le_bytes());
+        self.data
+            .extend(&(self.restarts.len() as u32).to_le_bytes());
 
         // Take the block and the first_key resetting the builder to start a new block.
         let block = mem::take(&mut self.data);
@@ -113,15 +113,16 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
     }
 }
 
-
 /// Trait for writing entries into a block with different formats.
 pub trait EntryWriter<T> {
-    fn write(&self,
-             key: &[u8],
-             shared: usize,
-             value: &T,
-             prev_value: &Option<T>,
-             data: &mut Vec<u8>);
+    fn write(
+        &self,
+        key: &[u8],
+        shared: usize,
+        value: &T,
+        prev_value: &Option<T>,
+        data: &mut Vec<u8>,
+    );
 }
 
 /// Writes key-value entries for data blocks.
@@ -141,7 +142,6 @@ impl EntryWriter<Vec<u8>> for DataEntryWriter {
         _: &Option<Vec<u8>>,
         data: &mut Vec<u8>,
     ) {
-
         let non_shared = key.len() - shared;
 
         // Encode shared prefix length, non-shared length, and value length.
@@ -179,7 +179,6 @@ impl EntryWriter<BlockHandle> for IndexEntryWriter {
         prev_value: &Option<BlockHandle>,
         data: &mut Vec<u8>,
     ) {
-
         let non_shared = key.len() - shared;
 
         // Encode shared prefix length and non-shared length.

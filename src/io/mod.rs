@@ -1,16 +1,17 @@
+pub mod buffer;
 pub mod byte_reader;
+pub mod byte_writer;
 pub mod checksum;
 pub mod compressor;
-pub mod byte_writer;
 pub mod varint;
-pub mod buffer;
 
+use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use std::fs::{File, OpenOptions};
 use std::io::Result;
 use std::path::{Path, PathBuf};
-use std::{fs, ptr};
 use std::sync::Arc;
-use crate::obs::logger::LoggerAndTracer;
+use std::{fs, ptr};
+use crate::warn;
 
 /// A trait for reading little-endian integers directly from byte slices
 /// without additional allocations. These methods perform **zero-copy**
@@ -56,37 +57,55 @@ pub trait ZeroCopy {
 impl ZeroCopy for [u8] {
     #[inline(always)]
     fn read_u32_le(&self, offset: usize) -> u32 {
-        assert!(offset + 4 <= self.len(), "Offset out of bounds: cannot read u32");
+        assert!(
+            offset + 4 <= self.len(),
+            "Offset out of bounds: cannot read u32"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const u32) }.to_le()
     }
 
     #[inline(always)]
     fn read_u32_be(&self, offset: usize) -> u32 {
-        assert!(offset + 4 <= self.len(), "Offset out of bounds: cannot read u32");
+        assert!(
+            offset + 4 <= self.len(),
+            "Offset out of bounds: cannot read u32"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const u32) }.to_be()
     }
 
     #[inline(always)]
     fn read_u64_le(&self, offset: usize) -> u64 {
-        assert!(offset + 8 <= self.len(), "Offset out of bounds: cannot read u64");
+        assert!(
+            offset + 8 <= self.len(),
+            "Offset out of bounds: cannot read u64"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const u64) }.to_le()
     }
 
     #[inline(always)]
     fn read_u64_be(&self, offset: usize) -> u64 {
-        assert!(offset + 8 <= self.len(), "Offset out of bounds: cannot read u64");
+        assert!(
+            offset + 8 <= self.len(),
+            "Offset out of bounds: cannot read u64"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const u64) }.to_be()
     }
 
     #[inline(always)]
     fn read_i32_le(&self, offset: usize) -> i32 {
-        assert!(offset + 4 <= self.len(), "Offset out of bounds: cannot read i32");
+        assert!(
+            offset + 4 <= self.len(),
+            "Offset out of bounds: cannot read i32"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const i32) }.to_le()
     }
 
     #[inline(always)]
     fn read_i64_le(&self, offset: usize) -> i64 {
-        assert!(offset + 8 <= self.len(), "Offset out of bounds: cannot read i64");
+        assert!(
+            offset + 8 <= self.len(),
+            "Offset out of bounds: cannot read i64"
+        );
         unsafe { ptr::read_unaligned(self.as_ptr().add(offset) as *const i64) }.to_le()
     }
 }
@@ -188,26 +207,20 @@ pub fn mark_file_as_corrupted(logger: Arc<dyn LoggerAndTracer>, file_path: &Path
         sync_dir(parent)?;
     }
 
-    logger.warn(format_args!(
-        "Marked WAL file as corrupted: {} -> {}",
-        file_path.display(),
-        corrupted_path.display()
-    ));
+    warn!(logger, "Marked WAL file as corrupted: {:?} -> {:?}", file_path, corrupted_path);
 
     Ok(())
 }
 
 fn compute_corrupted_path(file_path: &Path) -> PathBuf {
-    file_path.with_extension(
-        match file_path.extension() {
-            Some(ext) => {
-                let mut ext_str = ext.to_os_string();
-                ext_str.push(".corrupted");
-                ext_str
-            }
-            None => "corrupted".into(),
+    file_path.with_extension(match file_path.extension() {
+        Some(ext) => {
+            let mut ext_str = ext.to_os_string();
+            ext_str.push(".corrupted");
+            ext_str
         }
-    )
+        None => "corrupted".into(),
+    })
 }
 
 /// Truncates a file to the specified size.
@@ -221,25 +234,22 @@ fn compute_corrupted_path(file_path: &Path) -> PathBuf {
 /// # Errors
 /// Returns an `io::Error` if opening, truncating, or syncing the file fails.
 pub fn truncate_file(file_path: &Path, size: u64) -> Result<()> {
-    let file = OpenOptions::new()
-        .write(true)
-        .open(file_path)?;
+    let file = OpenOptions::new().write(true).open(file_path)?;
 
-    file.set_len(size)?;  // Truncate the file
-    file.sync_all()?;     // Ensure metadata and contents are flushed
+    file.set_len(size)?; // Truncate the file
+    file.sync_all()?; // Ensure metadata and contents are flushed
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::io::{file_name_as_str, mark_file_as_corrupted, truncate_file};
+    use crate::obs::logger;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
-    use crate::obs::logger::LoggerAndTracer;
-    use crate::io::{file_name_as_str, mark_file_as_corrupted, truncate_file};
-    use crate::obs::logger;
 
     mod zero_copy {
         use crate::io::ZeroCopy;

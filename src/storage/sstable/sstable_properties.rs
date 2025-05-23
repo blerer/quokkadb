@@ -1,8 +1,8 @@
-use std::io::{Error, ErrorKind};
-use std::time::SystemTime;
+use crate::storage::internal_key::{extract_record_key, extract_sequence_number, extract_user_key};
 use bson::{from_slice, to_vec};
 use serde::{Deserialize, Serialize};
-use crate::storage::internal_key::{extract_sequence_number, extract_user_key};
+use std::io::{Error, ErrorKind};
+use std::time::SystemTime;
 
 const BSON_MIN_KEY: &[u8] = &[0x00]; // Represent BSON MinKey with the smallest possible binary
 const BSON_MAX_KEY: &[u8] = &[0xFF]; // Represent BSON MaxKey with the largest possible binary
@@ -68,7 +68,6 @@ pub struct SSTableProperties {
 }
 
 impl SSTableProperties {
-
     /// Calculates the compression ratio for the SSTable.
     ///
     /// The compression ratio is defined as the ratio of the raw (uncompressed) size
@@ -80,7 +79,10 @@ impl SSTableProperties {
     /// # Returns
     /// - `f64`: The compression ratio.
     pub fn compression_ratio(&self) -> f64 {
-        assert!(self.data_size > 0, "Data size must be greater than zero to calculate compression ratio.");
+        assert!(
+            self.data_size > 0,
+            "Data size must be greater than zero to calculate compression ratio."
+        );
         let uncompressed_size = self.raw_key_size + self.raw_value_size;
         uncompressed_size as f64 / self.data_size as f64
     }
@@ -133,16 +135,16 @@ impl SSTablePropertiesBuilder {
     /// Updates the entry properties with the provided key, key size, and value size.
     pub fn with_entry(&mut self, key: &[u8], value_size: usize) -> &mut Self {
         self.num_entries += 1;
-        self.raw_key_size += key.len();
+        self.raw_key_size += key.len() + 4 + 4 + 8 ; // user_key + collection + index + sequence (with op)
         self.raw_value_size += value_size;
 
-        let user_key = extract_user_key(key);
-        if user_key < &self.min_key {
-            self.min_key = user_key.to_vec();
+        let record_key = extract_record_key(key);
+        if record_key < &self.min_key {
+            self.min_key = record_key.to_vec();
         }
 
-        if user_key > &self.max_key {
-            self.max_key = user_key.to_vec();
+        if record_key > &self.max_key {
+            self.max_key = record_key.to_vec();
         }
 
         let sequence = extract_sequence_number(key);
@@ -193,34 +195,37 @@ impl SSTablePropertiesBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::internal_key::encode_internal_key;
+    use crate::storage::internal_key::{encode_internal_key, encode_record_key};
     use crate::storage::operation::OperationType;
 
     #[test]
     fn test_update_entry_properties_with_builder() {
         let collection = 1;
-        let key1 = encode_internal_key(collection, 0, &vec![10, 20, 30], 1, OperationType::Put);
-        let key2 = encode_internal_key(collection, 0, &vec![5, 15, 25, 35], 5, OperationType::Put);
-        let key3 = encode_internal_key(collection, 0, &vec![50, 60, 70, 80, 90], 3, OperationType::Put);
+        let record_key_1= encode_record_key(collection, 0, &vec![10, 20, 30]);
+        let record_key_2= encode_record_key(collection, 0, &vec![5, 15, 25, 35]);
+        let record_key_3= encode_record_key(collection, 0, &vec![50, 60, 70, 80, 90]);
+        let key1 = encode_internal_key(&record_key_1, 1, OperationType::Put);
+        let key2 = encode_internal_key(&record_key_2, 5, OperationType::Put);
+        let key3 = encode_internal_key(&record_key_3, 3, OperationType::Put);
 
         let mut builder = SSTablePropertiesBuilder::new(1, 0);
 
-        builder.with_entry(&key1, 50)
-               .with_entry(&key2, 40)
-               .with_entry(&key3, 25);
+        builder
+            .with_entry(&key1, 50)
+            .with_entry(&key2, 40)
+            .with_entry(&key3, 25);
 
         let sstable_properties = builder.build();
 
         // Validate the properties
-        assert_eq!(sstable_properties.min_key, vec![5, 15, 25, 35], "Min key should be [5, 15, 25, 35]");
-        assert_eq!(sstable_properties.max_key, vec![50, 60, 70, 80, 90], "Max key should be [50, 60, 70, 80, 90]");
-        assert_eq!(sstable_properties.min_sequence, 1, "Min sequence should be 1");
-        assert_eq!(sstable_properties.max_sequence, 5, "Max sequence should be 5");
-        assert_eq!(sstable_properties.num_entries, 3, "Number of entries should be 3");
-        assert_eq!(sstable_properties.raw_key_size, 60, "Raw key size should be 60 (19 + 20 + 21)");
+        assert_eq!(sstable_properties.min_key, record_key_2);
+        assert_eq!(sstable_properties.max_key, record_key_3);
+        assert_eq!(sstable_properties.min_sequence, 1);
+        assert_eq!(sstable_properties.max_sequence, 5);
+        assert_eq!(sstable_properties.num_entries, 3);
+        assert_eq!(sstable_properties.raw_key_size, 108, "Raw key size should be 108 (35 + 36 + 37)");
         assert_eq!(sstable_properties.raw_value_size, 115, "Raw value size should be 115 (50 + 40 + 25)");
     }
-
 
     #[test]
     fn test_compression_ratio_valid_data() {
@@ -232,7 +237,11 @@ mod tests {
         };
 
         let ratio = properties.compression_ratio();
-        assert!((ratio - 2.5).abs() < f64::EPSILON, "Expected compression ratio to be 2.5, got {}", ratio);
+        assert!(
+            (ratio - 2.5).abs() < f64::EPSILON,
+            "Expected compression ratio to be 2.5, got {}",
+            ratio
+        );
     }
 
     #[test]
@@ -245,6 +254,10 @@ mod tests {
         };
 
         let ratio = properties.compression_ratio();
-        assert!((ratio - 1.0).abs() < f64::EPSILON, "Expected compression ratio to be 1.0, got {}", ratio);
+        assert!(
+            (ratio - 1.0).abs() < f64::EPSILON,
+            "Expected compression ratio to be 1.0, got {}",
+            ratio
+        );
     }
 }

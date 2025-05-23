@@ -1,8 +1,8 @@
 use lz4::block;
-use snap::write::FrameEncoder;
 use snap::read::FrameDecoder;
+use snap::write::FrameEncoder;
+use std::io::Error;
 use std::io::{ErrorKind, Read, Write};
-use std::io::{Error};
 use std::sync::Arc;
 
 /// Enumeration representing supported compressor types.
@@ -67,7 +67,6 @@ pub trait Compressor: Send + Sync {
 pub struct SnappyCompressor;
 
 impl Compressor for SnappyCompressor {
-
     fn compressor_type(&self) -> CompressorType {
         CompressorType::Snappy
     }
@@ -75,7 +74,9 @@ impl Compressor for SnappyCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let mut encoder = FrameEncoder::new(Vec::new());
         encoder.write_all(data)?;
-        encoder.into_inner().map_err(|e| Error::new(ErrorKind::Other, e))
+        encoder
+            .into_inner()
+            .map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -123,7 +124,6 @@ impl Compressor for Lz4Compressor {
 pub struct NoopCompressor;
 
 impl Compressor for NoopCompressor {
-
     fn compressor_type(&self) -> CompressorType {
         CompressorType::Noop
     }
@@ -159,7 +159,9 @@ mod tests {
         let compressed = compressor.compress(data).expect("Compression failed");
         assert_eq!(compressed, data);
 
-        let decompressed = compressor.decompress(&compressed).expect("Decompression failed");
+        let decompressed = compressor
+            .decompress(&compressed)
+            .expect("Decompression failed");
         assert_eq!(decompressed, data);
     }
 
@@ -177,7 +179,9 @@ mod tests {
         }"#;
 
         let compressed = compressor.compress(data).expect("Compression failed");
-        let decompressed = compressor.decompress(&compressed).expect("Decompression failed");
+        let decompressed = compressor
+            .decompress(&compressed)
+            .expect("Decompression failed");
         assert_eq!(decompressed, data);
     }
 
@@ -195,7 +199,9 @@ mod tests {
         }"#;
 
         let compressed = compressor.compress(data).expect("Compression failed");
-        let decompressed = compressor.decompress(&compressed).expect("Decompression failed");
+        let decompressed = compressor
+            .decompress(&compressed)
+            .expect("Decompression failed");
         assert_eq!(decompressed, data);
     }
 }

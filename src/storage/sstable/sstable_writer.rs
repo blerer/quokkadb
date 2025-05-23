@@ -1,17 +1,20 @@
-use std::fs::File;
-use std::io::{Write, BufWriter, Result};
-use std::path::Path;
-use std::sync::Arc;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::Compressor;
-use crate::util::bloom_filter::BloomFilter;
-use crate::options::options::Options;
-use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
-use crate::storage::sstable::{BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION, SSTABLE_FOOTER_LENGTH};
-use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTablePropertiesBuilder};
 use crate::io::varint;
+use crate::options::options::Options;
 use crate::storage::files::DbFile;
 use crate::storage::lsm_version::SSTableMetadata;
+use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
+use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTablePropertiesBuilder};
+use crate::storage::sstable::{
+    BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION, SSTABLE_FOOTER_LENGTH,
+};
+use crate::util::bloom_filter::BloomFilter;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Result, Write};
+use std::path::Path;
+use std::sync::Arc;
+use crate::storage::internal_key::extract_record_key;
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///
@@ -55,12 +58,15 @@ impl<'a> SSTableWriter<'a> {
         directory: &Path,
         sst_file: &DbFile,
         options: &Options,
-        expected_keys: usize
+        expected_keys: usize,
     ) -> Result<Self> {
-
         let id = sst_file.number;
         let file_path = directory.join(sst_file.filename());
-        let file = File::open(&file_path)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .append(true) // Append instead of overwrite
+            .create(true) // Create if it doesn't exist
+            .open(file_path)?;
 
         let sstable_options = &options.sst;
         let restart_interval = sstable_options.restart_interval;
@@ -78,11 +84,17 @@ impl<'a> SSTableWriter<'a> {
             data_block_builder,
             index_block_builder,
             metaindex_block_builder,
-            bloom_filter: BloomFilter::new(expected_keys, sstable_options.bloom_filter_false_positive),
+            bloom_filter: BloomFilter::new(
+                expected_keys,
+                sstable_options.bloom_filter_false_positive,
+            ),
             output: BufWriter::with_capacity(file_write_buffer_size.to_bytes(), file),
             block_size: sstable_options.block_size.to_bytes(),
             current_block_offset: 0,
-            properties_builder: SSTablePropertiesBuilder::new(SSTABLE_CURRENT_VERSION, u8::from(compressor_type)),
+            properties_builder: SSTablePropertiesBuilder::new(
+                SSTABLE_CURRENT_VERSION,
+                u8::from(compressor_type),
+            ),
             compressor,
             checksum_strategy: Arc::new(Crc32ChecksumStrategy),
         })
@@ -94,18 +106,19 @@ impl<'a> SSTableWriter<'a> {
     /// the configured maximum, the block is flushed to disk, and a new block is started.
     ///
     /// # Arguments
-    /// - `key`: The key as a byte slice.
+    /// - `internal_key`: The internal key as a byte slice.
     /// - `value`: The value as a byte slice.
-    pub fn add(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-
-        if self.data_block_builder.estimated_size_in_bytes() + key.len() + value.len() >= self.block_size {
+    pub fn add(&mut self, internal_key: &[u8], value: &[u8]) -> Result<()> {
+        if self.data_block_builder.estimated_size_in_bytes() + internal_key.len() + value.len()
+            >= self.block_size
+        {
             self.flush_data_block()?
         }
 
-        self.properties_builder.with_entry(&key, value.len());
+        self.properties_builder.with_entry(&internal_key, value.len());
 
-        self.data_block_builder.add(&key, value.to_vec())?;
-        self.bloom_filter.add(&key);
+        self.data_block_builder.add(&internal_key, value.to_vec())?;
+        self.bloom_filter.add(&extract_record_key(internal_key));
 
         Ok(())
     }
@@ -122,6 +135,8 @@ impl<'a> SSTableWriter<'a> {
         let properties = self.properties_builder.build();
 
         let index_handle = self.write_index_block()?;
+        println!("Index block handle: {}", index_handle.size);
+
         let bloom_filter_handle = self.write_bloom_filter()?;
         let properties_handle = self.write_properties(&properties)?;
 
@@ -136,7 +151,7 @@ impl<'a> SSTableWriter<'a> {
             &properties.min_key,
             &properties.max_key,
             properties.min_sequence,
-            properties.max_sequence
+            properties.max_sequence,
         ))
     }
 
@@ -149,7 +164,8 @@ impl<'a> SSTableWriter<'a> {
         let handle = self.finalize_and_write_block(block)?;
 
         // Update the properties
-        self.properties_builder.with_data_block(handle.size as usize);
+        self.properties_builder
+            .with_data_block(handle.size as usize);
 
         // Record the first key and its offset in the index block
         if let Some(key) = first_key {
@@ -163,6 +179,7 @@ impl<'a> SSTableWriter<'a> {
     /// The index block maps key ranges to their corresponding data blocks.
     fn write_index_block(&mut self) -> Result<BlockHandle> {
         let (_, data) = self.index_block_builder.finish()?;
+        println!("Index block size: {}", data.len());
         self.properties_builder.with_index_block(data.len());
         self.finalize_and_write_block(data)
     }
@@ -227,11 +244,15 @@ impl<'a> SSTableWriter<'a> {
     /// +--------------------------+-------------------------+--------------------+---------------------------+---------------------+------------------------+
     /// | SSTable version (1 byte) | Meta-Index block handle | Index block handle | Compression type (1 byte) | padding to 40 bytes | Magic number (8 bytes) |
     /// +--------------------------+-------------------------+--------------------+---------------------------+---------------------+------------------------+
-    fn write_footer(&mut self, index_handle: BlockHandle, metaindex_handle: BlockHandle) -> Result<()> {
+    fn write_footer(
+        &mut self,
+        index_handle: BlockHandle,
+        metaindex_handle: BlockHandle,
+    ) -> Result<()> {
         let mut footer = Vec::new();
 
         // Store the SSTable version
-        footer.push(SSTABLE_CURRENT_VERSION) ;
+        footer.push(SSTABLE_CURRENT_VERSION);
 
         // Serialize the metaindex block handle.
         self.write_block_handle(&metaindex_handle, &mut footer);
@@ -243,7 +264,7 @@ impl<'a> SSTableWriter<'a> {
         footer.push(u8::from(self.compressor.compressor_type()));
 
         // Add padding and magic number (pad to footer length - magic number size).
-        let padding = vec![0; (SSTABLE_FOOTER_LENGTH  - 8u64) as usize - footer.len()];
+        let padding = vec![0; (SSTABLE_FOOTER_LENGTH - 8u64) as usize - footer.len()];
         footer.extend(padding);
         footer.extend(MAGIC_NUMBER.to_le_bytes());
 

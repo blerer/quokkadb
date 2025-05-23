@@ -9,7 +9,9 @@ pub struct MetricRegistry {
 
 impl MetricRegistry {
     pub fn new() -> Self {
-        MetricRegistry { metrics: BTreeMap::new()}
+        MetricRegistry {
+            metrics: BTreeMap::new(),
+        }
     }
 
     pub fn register_counter(&mut self, name: &str, counter: &Arc<Counter>) -> &mut Self {
@@ -20,11 +22,19 @@ impl MetricRegistry {
         self.register(name, Metric::AtomicGauge(gauge.clone()))
     }
 
-    pub fn register_derived_gauge(&mut self, name: &str, gauge: &Arc<DerivedGaugeU64>) -> &mut Self {
+    pub fn register_derived_gauge(
+        &mut self,
+        name: &str,
+        gauge: &Arc<DerivedGaugeU64>,
+    ) -> &mut Self {
         self.register(name, Metric::DerivedGauge(gauge.clone()))
     }
 
-    pub fn register_hit_ratio_gauge(&mut self, name: &str, gauge: &Arc<HitRatioGauge>) -> &mut Self {
+    pub fn register_hit_ratio_gauge(
+        &mut self,
+        name: &str,
+        gauge: &Arc<HitRatioGauge>,
+    ) -> &mut Self {
         self.register(name, Metric::HitRatioGauge(gauge.clone()))
     }
 
@@ -44,7 +54,7 @@ pub enum Metric {
     DerivedGauge(Arc<DerivedGaugeU64>),
     AtomicGauge(Arc<AtomicGauge>),
     HitRatioGauge(Arc<HitRatioGauge>),
-    Histogram(Arc<Histogram>)
+    Histogram(Arc<Histogram>),
 }
 
 #[derive(Default)]
@@ -53,7 +63,6 @@ pub struct Counter {
 }
 
 impl Counter {
-
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -64,26 +73,23 @@ impl Counter {
     }
 
     /// Increments the counter by one.
-    pub fn inc(&self)  {
+    pub fn inc(&self) {
         self.inc_by(1);
     }
 
     /// Increments the counter by the given amount.
-    pub fn inc_by(&self, amount: u64)  {
+    pub fn inc_by(&self, amount: u64) {
         self.atomic.fetch_add(amount, Ordering::Relaxed);
     }
 }
 
-
 pub struct DerivedGaugeU64 {
-
     /// Returns the current value of the metric as an `f64`.
     /// For integer-based metrics (e.g., `Counter`), this is a cast.
     compute: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl DerivedGaugeU64 {
-
     pub fn new(compute: Arc<dyn Fn() -> u64 + Send + Sync>) -> Arc<Self> {
         Arc::new(Self { compute })
     }
@@ -100,7 +106,6 @@ pub struct AtomicGauge {
 }
 
 impl AtomicGauge {
-
     pub fn new() -> Arc<Self> {
         Arc::new(AtomicGauge::default())
     }
@@ -108,11 +113,11 @@ impl AtomicGauge {
         self.atomic.load(Ordering::Relaxed)
     }
 
-    pub fn inc(&self)  {
+    pub fn inc(&self) {
         self.inc_by(1);
     }
 
-    pub fn inc_by(&self, amount: u64)  {
+    pub fn inc_by(&self, amount: u64) {
         self.atomic.fetch_add(amount, Ordering::Relaxed);
     }
 
@@ -120,7 +125,7 @@ impl AtomicGauge {
         self.dec_by(1);
     }
 
-    pub fn dec_by(&self, amount: u64)  {
+    pub fn dec_by(&self, amount: u64) {
         self.atomic.fetch_sub(amount, Ordering::Relaxed);
     }
 }
@@ -132,13 +137,20 @@ pub struct HitRatioGauge {
 
 impl HitRatioGauge {
     pub fn new(hit_counter: Arc<Counter>, miss_counter: Arc<Counter>) -> Arc<Self> {
-        Arc::new(Self { hit_counter, miss_counter })
+        Arc::new(Self {
+            hit_counter,
+            miss_counter,
+        })
     }
 
     pub fn get(&self) -> f64 {
         let h = self.hit_counter.get() as f64;
         let m = self.miss_counter.get() as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 }
 
@@ -159,7 +171,6 @@ pub struct Histogram {
 }
 
 impl Histogram {
-
     pub fn new_time_histogram() -> Arc<Self> {
         Self::new(&time_buckets())
     }
@@ -213,7 +224,8 @@ impl Histogram {
         self.buckets[i].1.fetch_add(1, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
         self.sum.fetch_add(value, Ordering::Relaxed);
-        self.sum_of_squares.fetch_add(value * value, Ordering::Relaxed);
+        self.sum_of_squares
+            .fetch_add(value * value, Ordering::Relaxed);
 
         // min and max: relaxed atomic min/max
         self.min.fetch_min(value, Ordering::Relaxed);
@@ -231,7 +243,11 @@ impl Histogram {
         let min = self.min.load(Ordering::Relaxed);
         let max = self.max.load(Ordering::Relaxed);
 
-        let mean = if count > 0 { sum as f64 / count as f64 } else { 0.0 };
+        let mean = if count > 0 {
+            sum as f64 / count as f64
+        } else {
+            0.0
+        };
 
         let variance = if count > 1 {
             let mean_sq = mean * mean;
@@ -333,13 +349,13 @@ pub fn time_buckets() -> Vec<u64> {
 pub fn throughput_buckets() -> Vec<u64> {
     let mut buckets = vec![];
     let mut v = 1 << 10; // Start at 1 KB/s
-    while v <= 1 << 30 { // Up to 1 GB/s
+    while v <= 1 << 30 {
+        // Up to 1 GB/s
         buckets.push(v);
         v *= 2;
     }
     buckets
 }
-
 
 /// Generates exponential size bucket upper bounds for metrics measuring data sizes.
 ///
@@ -351,7 +367,8 @@ pub fn throughput_buckets() -> Vec<u64> {
 pub fn size_buckets() -> Vec<u64> {
     let mut buckets = vec![];
     let mut v = 1 << 10; // 1 KB
-    while v <= 1 << 30 { // 1 GB
+    while v <= 1 << 30 {
+        // 1 GB
         buckets.push(v);
         v *= 2;
     }
@@ -388,8 +405,8 @@ mod tests {
     }
 
     mod histogram {
-        use std::sync::Arc;
         use crate::obs::metrics::Histogram;
+        use std::sync::Arc;
 
         fn make_histogram() -> Arc<Histogram> {
             Histogram::new(&[1, 2, 4, 8, 16, 32, 64])
@@ -425,10 +442,10 @@ mod tests {
             let buckets = snap.buckets;
 
             let expected = vec![
-                (1, 1),  // 1
-                (2, 1),  // 2
-                (4, 0),  // none
-                (8, 1),  // 5
+                (1, 1), // 1
+                (2, 1), // 2
+                (4, 0), // none
+                (8, 1), // 5
                 (16, 0),
                 (32, 0),
                 (64, 1), // 33
@@ -444,7 +461,7 @@ mod tests {
             }
 
             assert_eq!(hist.estimate_quantile(0.0), Some(1));
-            assert_eq!(hist.estimate_quantile(0.5), Some(4));  // median
+            assert_eq!(hist.estimate_quantile(0.5), Some(4)); // median
             assert_eq!(hist.estimate_quantile(1.0), Some(8));
         }
     }

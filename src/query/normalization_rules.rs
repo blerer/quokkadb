@@ -1,22 +1,22 @@
-use std::rc::Rc;
-use crate::query::logical::Expr;
 use crate::query::logical::logical_plan::LogicalPlan;
+use crate::query::logical::Expr;
 use crate::query::optimizer::NormalisationRule;
 use crate::query::tree_node::TreeNode;
+use std::rc::Rc;
 
 pub struct SimplifyExpressions;
 
 impl NormalisationRule for SimplifyExpressions {
     fn apply(&self, plan: Rc<LogicalPlan>) -> Rc<LogicalPlan> {
         plan.transform_up(&|node: Rc<LogicalPlan>| match node.as_ref() {
-            LogicalPlan::Filter {input, condition} => {
+            LogicalPlan::Filter { input, condition } => {
                 let expr = condition.clone().transform_up(&|c| Self::simplify_expr(c));
                 Rc::new(LogicalPlan::Filter {
                     input: input.clone(),
                     condition: expr,
                 })
             }
-            _ => node
+            _ => node,
         })
     }
 }
@@ -60,28 +60,28 @@ impl SimplifyExpressions {
     }
 
     fn flatten_and(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
-            let mut result = Vec::new();
-            for expr in expressions {
-                if let Expr::And(sub_exprs) = expr.as_ref() {
-                    result.extend(sub_exprs.clone());
-                } else {
-                    result.push(expr.clone());
-                }
+        let mut result = Vec::new();
+        for expr in expressions {
+            if let Expr::And(sub_exprs) = expr.as_ref() {
+                result.extend(sub_exprs.clone());
+            } else {
+                result.push(expr.clone());
             }
-            result
         }
+        result
+    }
 
-        fn flatten_or(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
-            let mut result = Vec::new();
-            for expr in expressions {
-                if let Expr::Or(sub_exprs) = expr.as_ref() {
-                    result.extend(sub_exprs.clone());
-                } else {
-                    result.push(expr.clone());
-                }
+    fn flatten_or(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
+        let mut result = Vec::new();
+        for expr in expressions {
+            if let Expr::Or(sub_exprs) = expr.as_ref() {
+                result.extend(sub_exprs.clone());
+            } else {
+                result.push(expr.clone());
             }
-            result
         }
+        result
+    }
 
     fn flatten_nor(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
         let mut result = Vec::new();
@@ -132,13 +132,17 @@ pub struct SimplifyNotExpressions;
 
 impl NormalisationRule for SimplifyNotExpressions {
     fn apply(&self, plan: Rc<LogicalPlan>) -> Rc<LogicalPlan> {
-        plan.transform_down(&|node: Rc<LogicalPlan>|
-            match node.as_ref() {
-                LogicalPlan::Filter {input, condition, ..} => {
-                    let new_condition = condition.clone().transform_down(&Self::push_down_not);
-                    Rc::new(LogicalPlan::Filter {input: input.clone(), condition: new_condition})
-                }
-                _ => node
+        plan.transform_down(&|node: Rc<LogicalPlan>| match node.as_ref() {
+            LogicalPlan::Filter {
+                input, condition, ..
+            } => {
+                let new_condition = condition.clone().transform_down(&Self::push_down_not);
+                Rc::new(LogicalPlan::Filter {
+                    input: input.clone(),
+                    condition: new_condition,
+                })
+            }
+            _ => node,
         })
     }
 }
@@ -148,7 +152,7 @@ impl SimplifyNotExpressions {
         println!("{:?}", expr);
         match expr.as_ref() {
             Expr::Not(expr) => expr.clone().negate(),
-            _ => expr.clone()
+            _ => expr.clone(),
         }
     }
 }
@@ -156,8 +160,8 @@ impl SimplifyNotExpressions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical::logical_plan::LogicalPlanBuilder;
     use crate::query::logical::expr_fn::*;
+    use crate::query::logical::logical_plan::LogicalPlanBuilder;
 
     #[test]
     fn test_not_normalization() {
@@ -165,29 +169,31 @@ mod tests {
         let original = not(not(eq(5)));
         let transformed = eq(5);
 
-        check_expr_transformation(SimplifyNotExpressions{}, original, transformed);
+        check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
 
         // Test Negation of Comparison Operators
-        check_expr_transformation(SimplifyNotExpressions{}, not(gt(5)), lte(5));
-        check_expr_transformation(SimplifyNotExpressions{}, not(lt(5)), gte(5));
-        check_expr_transformation(SimplifyNotExpressions{}, not(eq(5)), ne(5));
-        check_expr_transformation(SimplifyNotExpressions{}, not(ne(5)), eq(5));
+        check_expr_transformation(SimplifyNotExpressions {}, not(gt(5)), lte(5));
+        check_expr_transformation(SimplifyNotExpressions {}, not(lt(5)), gte(5));
+        check_expr_transformation(SimplifyNotExpressions {}, not(eq(5)), ne(5));
+        check_expr_transformation(SimplifyNotExpressions {}, not(ne(5)), eq(5));
 
         // Test De Morgan's Laws
         let original = not(and([eq(1), gt(2)]));
         let transformed = or([ne(1), lte(2)]);
 
-        check_expr_transformation(SimplifyNotExpressions{}, original, transformed);
+        check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
 
         let original = not(or([eq(1), lt(2)]));
         let transformed = and([ne(1), gte(2)]);
 
-        check_expr_transformation(SimplifyNotExpressions{}, original, transformed);
+        check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
     }
 
-
-    fn check_expr_transformation(rule: impl NormalisationRule, original: Rc<Expr>, transformed: Rc<Expr>) {
-
+    fn check_expr_transformation(
+        rule: impl NormalisationRule,
+        original: Rc<Expr>,
+        transformed: Rc<Expr>,
+    ) {
         let input_plan = scan_with_filter(original);
         let output_plan = rule.apply(input_plan);
 

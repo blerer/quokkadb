@@ -1,19 +1,18 @@
-use std::{fmt, mem, result};
-use std::fs::{File, OpenOptions};
-use std::io::{Result, ErrorKind, Read, Write, Error};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use crc32fast::Hasher;
 use crate::io::buffer::Buffer;
 use crate::io::{file_name_as_str, ZeroCopy};
 use crate::storage::files::DbFile;
+use crc32fast::Hasher;
+use std::fs::{File, OpenOptions};
+use std::io::{Error, ErrorKind, Read, Result, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::{fmt, mem, result};
 
 /// The size ot the block used in the log file. The 4KB block optimize write efficiency by
 /// aligning with disk block sizes.
 pub const BUFFER_SIZE_IN_BYTES: usize = 4096;
 
 pub struct AppendLog<F: LogFileCreator> {
-
     directory: PathBuf, // The path to the log directory
     file_creator: Arc<F>,
     current_file: LogFile<F::Observer>,
@@ -22,9 +21,12 @@ pub struct AppendLog<F: LogFileCreator> {
 }
 
 impl<F: LogFileCreator> AppendLog<F> {
-
-    pub fn new(directory: &Path, file: DbFile, file_creator: Arc<F>, observer: Arc<F::Observer>) -> Result<Self> {
-
+    pub fn new(
+        directory: &Path,
+        file: DbFile,
+        file_creator: Arc<F>,
+        observer: Arc<F::Observer>,
+    ) -> Result<Self> {
         let directory = directory.to_path_buf();
         let current_file = file_creator.new_log(directory.clone(), file, observer.clone())?;
 
@@ -37,10 +39,19 @@ impl<F: LogFileCreator> AppendLog<F> {
         })
     }
 
-    pub fn load_from(file_path: &Path, file_creator: Arc<F>, observer: Arc<F::Observer>) -> Result<Self> {
-
-        let file = DbFile::new(&file_path).ok_or(Error::new(ErrorKind::InvalidData, "Unknown file type"))?;
-        let db_path = file_path.parent().ok_or(Error::new(ErrorKind::InvalidData, "Cannot retrieve the database directory"))?
+    pub fn load_from(
+        file_path: &Path,
+        file_creator: Arc<F>,
+        observer: Arc<F::Observer>,
+    ) -> Result<Self> {
+        let file = DbFile::new(&file_path)
+            .ok_or(Error::new(ErrorKind::InvalidData, "Unknown file type"))?;
+        let db_path = file_path
+            .parent()
+            .ok_or(Error::new(
+                ErrorKind::InvalidData,
+                "Cannot retrieve the database directory",
+            ))?
             .to_path_buf();
 
         let current_file = LogFile::load_from(file_path, file.number, observer.clone())?;
@@ -70,7 +81,6 @@ impl<F: LogFileCreator> AppendLog<F> {
     }
 
     pub fn rotate(&mut self, new_log: DbFile) -> Result<(PathBuf, PathBuf)> {
-
         if !self.buffer.is_empty() {
             // Before syncing to the disk we want to pad the buffer to ensure that we fill the last block.
             let writeable = self.buffer.writable_bytes();
@@ -79,13 +89,14 @@ impl<F: LogFileCreator> AppendLog<F> {
             self.sync()?;
         }
 
-        let new_file = self.file_creator.new_log(self.directory.clone(), new_log, self.observer.clone())?;
+        let new_file =
+            self.file_creator
+                .new_log(self.directory.clone(), new_log, self.observer.clone())?;
         let old_file = mem::replace(&mut self.current_file, new_file);
         Ok((self.current_file.path.clone(), old_file.path.clone()))
     }
 
     pub fn append(&mut self, data: &[u8]) -> Result<usize> {
-
         let mut bytes_written = 0;
         let len = data.len();
 
@@ -111,8 +122,7 @@ impl<F: LogFileCreator> AppendLog<F> {
         Ok(bytes_written)
     }
 
-    fn append_to_buffer(&mut self, bytes : &[u8]) -> Result<usize> {
-
+    fn append_to_buffer(&mut self, bytes: &[u8]) -> Result<usize> {
         let to_write = bytes.len();
         let mut written = 0;
         let mut writable = self.buffer.writable_bytes();
@@ -131,14 +141,13 @@ impl<F: LogFileCreator> AppendLog<F> {
     /// Write the buffer to the underlying file if the there are not enough space available in
     /// the buffer to add the specified number of bytes.
     fn flush_buffer_if_needed(&mut self, size: usize) -> Result<usize> {
-
         if !self.buffer.is_empty() {
             let remaining = self.buffer.writable_bytes();
             if remaining < size {
                 self.buffer.pad();
                 self.observer.on_buffered(remaining as u64);
                 self.flush_buffer()?;
-                return Ok(remaining)
+                return Ok(remaining);
             }
         }
         Ok(0)
@@ -146,7 +155,8 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     /// Write the buffer content to the underlying file.
     fn flush_buffer(&mut self) -> Result<()> {
-        self.current_file.write_all(&self.buffer.read_slice(self.buffer.readable_bytes()))?;
+        self.current_file
+            .write_all(&self.buffer.read_slice(self.buffer.readable_bytes()))?;
         // If we reached the end of the buffer we want to reset it as our block is completed.
         // If not we can still write to it until the block is full.
         if self.buffer.writable_bytes() == 0 {
@@ -165,16 +175,22 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     pub fn read_log_file(
         path: PathBuf,
-        header_size: usize
-    ) -> result::Result<(Vec<u8>, impl Iterator<Item=result::Result<Vec<u8>, LogReplayError>>), LogReplayError > {
-
+        header_size: usize,
+    ) -> result::Result<
+        (
+            Vec<u8>,
+            impl Iterator<Item = result::Result<Vec<u8>, LogReplayError>>,
+        ),
+        LogReplayError,
+    > {
         let mut file = File::open(path.clone())?;
 
         let mut block = vec![0u8; BUFFER_SIZE_IN_BYTES];
-        file.read_exact(&mut block).map_err( |_e| LogReplayError::Corruption {
-            record_offset: 0,
-            reason: format!("Not enough bytes to read {} header.", path.display()),
-        })?;
+        file.read_exact(&mut block)
+            .map_err(|_e| LogReplayError::Corruption {
+                record_offset: 0,
+                reason: format!("Not enough bytes to read {} header.", path.display()),
+            })?;
 
         let mut header = vec![0; header_size];
         header.copy_from_slice(&block[..header_size]);
@@ -186,7 +202,7 @@ impl<F: LogFileCreator> AppendLog<F> {
             return Err(LogReplayError::Corruption {
                 record_offset: 0,
                 reason: format!("Invalid checksum found in {} header.", path.display()),
-            })
+            });
         }
 
         let log_iter = LogIterator::new(path, file);
@@ -195,8 +211,7 @@ impl<F: LogFileCreator> AppendLog<F> {
     }
 }
 
-
-impl <F:LogFileCreator> Drop for AppendLog<F> {
+impl<F: LogFileCreator> Drop for AppendLog<F> {
     fn drop(&mut self) {
         // If the buffer has not been flushed to disk (which is the normal path in case of a rotation),
         // it means that it is a shutdown and that we need to ensure that buffer data is flushed to disk.
@@ -210,11 +225,15 @@ impl <F:LogFileCreator> Drop for AppendLog<F> {
     }
 }
 
-pub trait LogFileCreator: Send + Sync  {
+pub trait LogFileCreator: Send + Sync {
     type Observer: LogObserver;
 
-    fn new_log(&self, directory: PathBuf, db_file: DbFile, observer: Arc<Self::Observer>) -> Result<LogFile<Self::Observer>> {
-
+    fn new_log(
+        &self,
+        directory: PathBuf,
+        db_file: DbFile,
+        observer: Arc<Self::Observer>,
+    ) -> Result<LogFile<Self::Observer>> {
         let path = directory.join(db_file.filename());
 
         let file = OpenOptions::new()
@@ -222,7 +241,6 @@ pub trait LogFileCreator: Send + Sync  {
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
             .open(path.clone())?;
-
 
         let header = self.header(db_file.number);
         let crc = compute_crc32(&header);
@@ -232,7 +250,14 @@ pub trait LogFileCreator: Send + Sync  {
         buffer.pad();
         observer.on_buffered(BUFFER_SIZE_IN_BYTES as u64);
 
-        let mut log_file = LogFile{ number: db_file.number, path, file, pending_bytes: 0, file_size: 0, observer };
+        let mut log_file = LogFile {
+            number: db_file.number,
+            path,
+            file,
+            pending_bytes: 0,
+            file_size: 0,
+            observer,
+        };
         log_file.write_all(buffer.as_slice())?;
         log_file.sync()?;
 
@@ -242,9 +267,7 @@ pub trait LogFileCreator: Send + Sync  {
     fn header(&self, id: u64) -> Vec<u8>;
 }
 
-
-pub trait LogObserver: Send + Sync  {
-
+pub trait LogObserver: Send + Sync {
     fn on_load(&self, bytes: u64);
 
     fn on_buffered(&self, bytes: u64);
@@ -263,10 +286,8 @@ pub struct LogFile<O: LogObserver> {
     observer: Arc<O>,
 }
 
-impl <O: LogObserver> LogFile<O> {
-
+impl<O: LogObserver> LogFile<O> {
     fn load_from(path: &Path, number: u64, observer: Arc<O>) -> Result<Self> {
-
         let file = OpenOptions::new()
             .write(true)
             .append(true) // Append instead of overwrite
@@ -277,15 +298,14 @@ impl <O: LogObserver> LogFile<O> {
 
         observer.on_load(file_size);
 
-        Ok(LogFile{
+        Ok(LogFile {
             number,
             path: path.to_path_buf(),
             file,
             pending_bytes: 0,
             file_size,
-            observer
+            observer,
         })
-
     }
     fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         self.file.write_all(bytes)?;
@@ -357,8 +377,8 @@ impl Iterator for LogIterator {
                         // We need to account for the 4 bytes that have been read.
                         // The skipping will be accounted for by the refill_buffer method
                         self.position += 4;
-                        continue
-                    },
+                        continue;
+                    }
                     Err(e) => return Some(Err(e.into())), // propagate error
                 }
             }
@@ -371,9 +391,11 @@ impl Iterator for LogIterator {
             if expected_crc != actual_crc {
                 return Some(Err(LogReplayError::Corruption {
                     record_offset: self.position,
-                    reason: format!("Invalid size checksum found in {}. Stopping replay.",
-                                    &self.path.to_string_lossy()),
-                }))
+                    reason: format!(
+                        "Invalid size checksum found in {}. Stopping replay.",
+                        &self.path.to_string_lossy()
+                    ),
+                }));
             }
 
             let mut data = vec![0u8; size];
@@ -394,7 +416,8 @@ impl Iterator for LogIterator {
                     }
                 }
                 let available = (size - offset).min(self.buffer.readable_bytes());
-                data[offset..offset + available].copy_from_slice(&self.buffer.read_slice(available));
+                data[offset..offset + available]
+                    .copy_from_slice(&self.buffer.read_slice(available));
                 offset += available;
             }
 
@@ -417,14 +440,16 @@ impl Iterator for LogIterator {
             if expected_crc != actual_crc {
                 return Some(Err(LogReplayError::Corruption {
                     record_offset: self.position,
-                    reason: format!("Invalid data checksum found in {}. Stopping replay.",
-                                    &self.path.to_string_lossy()),
-                }))
+                    reason: format!(
+                        "Invalid data checksum found in {}. Stopping replay.",
+                        &self.path.to_string_lossy()
+                    ),
+                }));
             }
 
             // Update the position with the record total record size:
             // size (4 bytes) + size crc (4 bytes) + data (size) + data crc (4 bytes)
-            self.position += 4 + 4 +  size as u64 + 4;
+            self.position += 4 + 4 + size as u64 + 4;
             return Some(Ok(data));
         }
     }
@@ -440,7 +465,10 @@ impl fmt::Display for LogReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LogReplayError::Io(err) => write!(f, "I/O error: {}", err),
-            LogReplayError::Corruption { record_offset, reason } => {
+            LogReplayError::Corruption {
+                record_offset,
+                reason,
+            } => {
                 write!(f, "Corruption at offset {}: {}", record_offset, reason)
             }
         }
@@ -457,9 +485,13 @@ impl From<LogReplayError> for Error {
     fn from(e: LogReplayError) -> Self {
         match e {
             LogReplayError::Io(inner) => inner,
-            LogReplayError::Corruption { record_offset: offset, reason } => {
-                Error::new(ErrorKind::InvalidData, format!("Corruption at offset {}: {}", offset, reason))
-            }
+            LogReplayError::Corruption {
+                record_offset: offset,
+                reason,
+            } => Error::new(
+                ErrorKind::InvalidData,
+                format!("Corruption at offset {}: {}", offset, reason),
+            ),
         }
     }
 }
@@ -474,10 +506,10 @@ fn compute_crc32(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use crate::io::truncate_file;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[derive(Default, Debug)]
     struct MockLogObserver {
@@ -488,7 +520,6 @@ mod tests {
     }
 
     impl MockLogObserver {
-
         fn new() -> Arc<Self> {
             Arc::new(MockLogObserver::default())
         }
@@ -517,9 +548,8 @@ mod tests {
     struct MockLogFileCreator;
 
     impl LogFileCreator for MockLogFileCreator {
-
         type Observer = MockLogObserver;
-        
+
         fn header(&self, _id: u64) -> Vec<u8> {
             Vec::from(b"HEADER")
         }
@@ -532,7 +562,13 @@ mod tests {
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(1), file_creator, MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(1),
+            file_creator,
+            MockLogObserver::new(),
+        )
+        .unwrap();
 
         let data = &vec![1; 250];
         log.append(data).unwrap();
@@ -545,7 +581,8 @@ mod tests {
         let metadata = std::fs::metadata(log_file_path.clone()).unwrap();
         assert_eq!(metadata.len(), 2 * BUFFER_SIZE_IN_BYTES as u64); // 2 blocks should have been written (header + data)
 
-        let (header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -562,16 +599,31 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(6), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(6),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
 
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0u64);
 
         log.append(&vec![1; 250]).unwrap();
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 262); // 262 + 4 (size) + 4 (size crc) + 4 (data crc)
 
-        assert_eq!(log.rotate(DbFile::new_write_ahead_log(7)).unwrap(), (path.join("000007.log"), path.join("000006.log")));
+        assert_eq!(
+            log.rotate(DbFile::new_write_ahead_log(7)).unwrap(),
+            (path.join("000007.log"), path.join("000006.log"))
+        );
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
         log.append(&vec![2; 360]).unwrap(); // 360 + 4 (size) + 4 (size crc) + 4 (data crc)
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 372);
@@ -600,7 +652,7 @@ mod tests {
 
         log.sync().unwrap(); // It should flush the buffer and sync everything to disk
         let metadata = std::fs::metadata(second_log.clone()).unwrap();
-        assert_eq!(metadata.len(),  BUFFER_SIZE_IN_BYTES as u64 + 372);
+        assert_eq!(metadata.len(), BUFFER_SIZE_IN_BYTES as u64 + 372);
 
         total_size += 372;
 
@@ -617,7 +669,13 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(9), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(9),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
 
         assert_eq!(log.append(&vec![1; 250]).unwrap(), 262);
         assert_eq!(log.append(&vec![2; 360]).unwrap(), 372);
@@ -640,7 +698,8 @@ mod tests {
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), len);
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
 
-        let (header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -660,12 +719,17 @@ mod tests {
 
     #[test]
     fn test_replay_stop_checksum_mismatch() {
-
         let dir = tempdir().unwrap();
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(10), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(10),
+            file_creator.clone(),
+            MockLogObserver::new(),
+        )
+        .unwrap();
 
         log.append(&vec![1; 250]).unwrap();
         log.sync().unwrap();
@@ -677,15 +741,21 @@ mod tests {
             .write(true)
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
-            .open(log_file_path.clone()).unwrap();
+            .open(log_file_path.clone())
+            .unwrap();
 
-        file.write_all(&vec![0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        file.write_all(&vec![
+            0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+        .unwrap();
         file.sync_all().unwrap();
         drop(file);
 
         // Replay
         assert!(log_file_path.exists());
-        let (header, mut entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path.clone(), "HEADER".len()).unwrap();
+        let (header, mut entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(log_file_path.clone(), "HEADER".len())
+                .unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -693,7 +763,10 @@ mod tests {
         let rs = entries.next().unwrap();
         let expected_offset = 4096 + 4 + 4 + 250 + 4;
         match rs {
-            Err(LogReplayError::Corruption { record_offset: offset, reason: _ }) => {
+            Err(LogReplayError::Corruption {
+                record_offset: offset,
+                reason: _,
+            }) => {
                 assert_eq!(expected_offset, offset);
             }
             _ => panic!("Unexpected result"),
@@ -709,7 +782,13 @@ mod tests {
         let path = dir.path();
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(11), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(11),
+            file_creator.clone(),
+            MockLogObserver::new(),
+        )
+        .unwrap();
 
         let mut record_offset = 4096;
 
@@ -728,17 +807,22 @@ mod tests {
             .write(true)
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
-            .open(log_file_path.clone()).unwrap();
+            .open(log_file_path.clone())
+            .unwrap();
 
         let expected_offset = record_offset as u64;
 
         assert_eq!(expected_offset, file.metadata().unwrap().len());
 
-        file.write_all(&vec![0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        file.write_all(&vec![
+            0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+        .unwrap();
         file.sync_all().unwrap();
         drop(file);
 
-        let (header, mut entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
+        let (header, mut entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, "HEADER".len()).unwrap();
 
         assert_eq!(header, b"HEADER");
 
@@ -751,7 +835,10 @@ mod tests {
 
         let rs = entries.next().unwrap();
         match rs {
-            Err(LogReplayError::Corruption { record_offset: offset, reason: _ }) => {
+            Err(LogReplayError::Corruption {
+                record_offset: offset,
+                reason: _,
+            }) => {
                 assert_eq!(expected_offset, offset);
             }
             _ => panic!("Unexpected result"),
@@ -760,7 +847,6 @@ mod tests {
 
     #[test]
     fn test_replay_stop_invalid_header() {
-
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
 
@@ -771,9 +857,13 @@ mod tests {
             .write(true)
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
-            .open(log_file_path.clone()).unwrap();
+            .open(log_file_path.clone())
+            .unwrap();
 
-        file.write_all(&vec![0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        file.write_all(&vec![
+            0, 0, 0, 10, 0, 0, 0, 0, 3, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+        .unwrap();
         file.sync_all().unwrap();
         drop(file);
 
@@ -781,7 +871,10 @@ mod tests {
         assert!(log_file_path.exists());
         let rs = AppendLog::<MockLogFileCreator>::read_log_file(log_file_path, 64);
         match rs {
-            Err(LogReplayError::Corruption { record_offset: offset, reason : _ }) => {
+            Err(LogReplayError::Corruption {
+                record_offset: offset,
+                reason: _,
+            }) => {
                 assert_eq!(0, offset);
             }
             _ => panic!("Unexpected result"),
@@ -790,14 +883,19 @@ mod tests {
 
     #[test]
     fn test_log_load_from() {
-
         // Setup
         let dir = tempdir().unwrap();
         let path = dir.path();
         let file_creator = Arc::new(MockLogFileCreator);
 
         // Create the original Log
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(42), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(42),
+            file_creator.clone(),
+            MockLogObserver::new(),
+        )
+        .unwrap();
         log.append(b"some test data").unwrap();
         log.sync().unwrap();
 
@@ -807,7 +905,8 @@ mod tests {
 
         // Now reload it
         let observer = MockLogObserver::new();
-        let reloaded_log = AppendLog::load_from(&original_path, file_creator.clone(), observer.clone()).unwrap();
+        let reloaded_log =
+            AppendLog::load_from(&original_path, file_creator.clone(), observer.clone()).unwrap();
 
         // Validate
         assert_eq!(reloaded_log.current_file.number, original_id);
@@ -829,17 +928,28 @@ mod tests {
         let log_path = path.join("000020.log");
 
         let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(20), file_creator.clone(), MockLogObserver::new()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(20),
+            file_creator.clone(),
+            MockLogObserver::new(),
+        )
+        .unwrap();
         log.append(&vec![1; 250]).unwrap();
         log.sync().unwrap();
 
         // Simulate partial write (write only size bytes of new record)
-        let mut file = OpenOptions::new().write(true).append(true).open(&log_path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap();
         file.write_all(&[0, 0, 0, 10]).unwrap();
         file.sync_all().unwrap();
         drop(file);
 
-        let (_header, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
+        let (_header, entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
         let results: Vec<_> = entries.collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_ref().unwrap().len(), 250);
@@ -852,20 +962,41 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(21),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
 
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.syncs.load(Ordering::Relaxed), 1);
-        assert_eq!(observer.files_size.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.files_size.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
 
         let max_fit = BUFFER_SIZE_IN_BYTES - 12; // minus record overhead
         let payload = vec![1; max_fit];
         log.append(&payload).unwrap();
-        assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_buffered.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.syncs.load(Ordering::Relaxed), 1);
-        assert_eq!(observer.files_size.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.files_size.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
     }
 
     #[test]
@@ -875,19 +1006,37 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(21), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(21),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
 
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.syncs.load(Ordering::Relaxed), 1);
-        assert_eq!(observer.files_size.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.files_size.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
 
         let payload = vec![1; (2 * BUFFER_SIZE_IN_BYTES) + 100];
         log.append(&payload).unwrap();
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 112);
-        assert_eq!(observer.bytes_written.load(Ordering::Relaxed), 3 * BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.bytes_written.load(Ordering::Relaxed),
+            3 * BUFFER_SIZE_IN_BYTES as u64
+        );
         assert_eq!(observer.syncs.load(Ordering::Relaxed), 1);
-        assert_eq!(observer.files_size.load(Ordering::Relaxed), BUFFER_SIZE_IN_BYTES as u64);
+        assert_eq!(
+            observer.files_size.load(Ordering::Relaxed),
+            BUFFER_SIZE_IN_BYTES as u64
+        );
     }
 
     #[test]
@@ -896,7 +1045,12 @@ mod tests {
         impl LogFileCreator for FailingLogFileCreator {
             type Observer = MockLogObserver;
 
-            fn new_log(&self, _directory: PathBuf, _db_file: DbFile, _observer: Arc<Self::Observer>) -> Result<LogFile<Self::Observer>> {
+            fn new_log(
+                &self,
+                _directory: PathBuf,
+                _db_file: DbFile,
+                _observer: Arc<Self::Observer>,
+            ) -> Result<LogFile<Self::Observer>> {
                 Err(Error::new(ErrorKind::Other, "Simulated failure"))
             }
 
@@ -910,7 +1064,12 @@ mod tests {
         let file_creator = Arc::new(FailingLogFileCreator);
         let observer = MockLogObserver::new();
 
-        let res = AppendLog::new(path, DbFile::new_write_ahead_log(22), file_creator.clone(), observer.clone());
+        let res = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(22),
+            file_creator.clone(),
+            observer.clone(),
+        );
         assert!(res.is_err());
     }
 
@@ -921,13 +1080,21 @@ mod tests {
 
         let file_creator = Arc::new(MockLogFileCreator);
         let observer = MockLogObserver::new();
-        let mut log = AppendLog::new(path, DbFile::new_write_ahead_log(23), file_creator.clone(), observer.clone()).unwrap();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(23),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
 
         let data = vec![1; 500];
         let _written = log.append(&data).unwrap();
         log.sync().unwrap();
 
-        let actual_file = std::fs::metadata(log.current_file.path.clone()).unwrap().len();
+        let actual_file = std::fs::metadata(log.current_file.path.clone())
+            .unwrap()
+            .len();
         assert_eq!(actual_file, observer.files_size.load(Ordering::Relaxed));
         assert_eq!(actual_file, observer.bytes_written.load(Ordering::Relaxed));
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);

@@ -1,17 +1,18 @@
+use crate::io::byte_reader::ByteReader;
+use crate::io::ZeroCopy;
+use crate::obs::logger::{LogLevel, LoggerAndTracer};
+use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
+use crate::options::options::DatabaseOptions;
+use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
+use crate::storage::files::DbFile;
+use crate::storage::write_batch::WriteBatch;
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::io::byte_reader::ByteReader;
-use crate::io::ZeroCopy;
-use crate::obs::logger::LoggerAndTracer;
-use crate::options::options::DatabaseOptions;
-use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
-use crate::storage::files::DbFile;
-use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
-use crate::storage::write_batch::WriteBatch;
+use crate::{debug, event, info};
 
 /// The current version of the write-ahead log format.
 const WAL_VERSION: u32 = 1;
@@ -34,17 +35,20 @@ pub struct WriteAheadLog {
 }
 
 impl WriteAheadLog {
-
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &DatabaseOptions,
         directory: &Path,
-        number: u64
+        number: u64,
     ) -> Result<Self> {
-
         let metrics = Metrics::new();
-        let append_log = AppendLog::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        let append_log = AppendLog::new(
+            directory,
+            DbFile::new_write_ahead_log(number),
+            Arc::new(WalFileCreator {}),
+            WalObserver::new(metrics.clone()),
+        )?;
         metrics.register_to(metric_registry);
         Self::new_internal(logger, metrics, options, append_log, VecDeque::new())
     }
@@ -54,11 +58,14 @@ impl WriteAheadLog {
         metric_registry: &mut MetricRegistry,
         options: &DatabaseOptions,
         file_path: &Path,
-        rotated_log_files: VecDeque<(u64, PathBuf)>
+        rotated_log_files: VecDeque<(u64, PathBuf)>,
     ) -> Result<Self> {
-
         let metrics = Metrics::new();
-        let append_log = AppendLog::load_from(&file_path, Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        let append_log = AppendLog::load_from(
+            &file_path,
+            Arc::new(WalFileCreator {}),
+            WalObserver::new(metrics.clone()),
+        )?;
         metrics.register_to(metric_registry);
         Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
     }
@@ -69,11 +76,15 @@ impl WriteAheadLog {
         options: &DatabaseOptions,
         directory: &Path,
         number: u64,
-        rotated_log_files: VecDeque<(u64, PathBuf)>
+        rotated_log_files: VecDeque<(u64, PathBuf)>,
     ) -> Result<Self> {
-
         let metrics = Metrics::new();
-        let append_log = AppendLog::new(directory, DbFile::new_write_ahead_log(number), Arc::new(WalFileCreator {}), WalObserver::new(metrics.clone()))?;
+        let append_log = AppendLog::new(
+            directory,
+            DbFile::new_write_ahead_log(number),
+            Arc::new(WalFileCreator {}),
+            WalObserver::new(metrics.clone()),
+        )?;
         metrics.register_to(metric_registry);
         Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
     }
@@ -83,9 +94,8 @@ impl WriteAheadLog {
         metrics: Metrics,
         options: &DatabaseOptions,
         append_log: AppendLog<WalFileCreator>,
-        rotated_log_files: VecDeque<(u64, PathBuf)>
+        rotated_log_files: VecDeque<(u64, PathBuf)>,
     ) -> Result<Self> {
-
         let amount = 1 + rotated_log_files.len() as u64;
         metrics.files.inc_by(amount);
 
@@ -97,7 +107,7 @@ impl WriteAheadLog {
 
         metrics.total_bytes.inc_by(rotated_files_size);
 
-        logger.info(format_args!("WAL initialized at path: {:?}", append_log.file_path()));
+        info!(logger, "WAL initialized at path: {:?}", append_log.file_path());
 
         Ok(WriteAheadLog {
             logger,
@@ -110,8 +120,7 @@ impl WriteAheadLog {
     }
 
     pub fn append(&mut self, seq: u64, batch: &WriteBatch) -> Result<()> {
-
-        self.logger.event(format_args!("event: wal append start, batch_size={}", batch.len()));
+        event!(self.logger, "wal append start, batch_size={}", batch.len());
 
         let record = batch.to_wal_record(seq);
         let bytes = self.append_log.append(&record)?;
@@ -119,21 +128,23 @@ impl WriteAheadLog {
 
         self.sync_if_needed()?;
 
-        self.logger.event(format_args!("event: wal append done, bytes={}", bytes));
+        event!(self.logger, "wal append done, bytes={}", bytes);
 
         Ok(())
     }
 
     pub fn rotate(&mut self, new_log_number: u64) -> Result<()> {
-
         let wal_file = DbFile::new_write_ahead_log(new_log_number);
-        self.logger.event(format_args!("event: wal rotation start"));
-        self.logger.info(format_args!("Rotating WAL file from {} to {}", self.append_log.filename().unwrap(), wal_file.filename()));
+        event!(self.logger, "wal rotation start");
+        info!(self.logger, "Rotating WAL file from {} to {}",
+            self.append_log.filename().unwrap(),
+            wal_file.filename()
+        );
         let (new_path, old_path) = self.append_log.rotate(wal_file)?;
         self.pending_bytes = 0;
         self.metrics.files.inc();
 
-        self.logger.event(format_args!("event: wal rotation done, new_path={:?}", new_path));
+        event!(self.logger, "wal rotation done, new_path={:?}", new_path);
 
         let number = DbFile::new(&old_path).unwrap().number;
         self.rotated_log_files.push_back((number, old_path));
@@ -141,10 +152,13 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    pub fn drain_obsolete_logs(&mut self, oldest_unflushed_log_number: u64) -> Result<Vec<PathBuf>> {
+    pub fn drain_obsolete_logs(
+        &mut self,
+        oldest_unflushed_log_number: u64,
+    ) -> Result<Vec<PathBuf>> {
         let mut obsoletes = Vec::new();
         while let Some(active_log) = self.rotated_log_files.front() {
-            if  active_log.0 < oldest_unflushed_log_number {
+            if active_log.0 < oldest_unflushed_log_number {
                 let path = self.rotated_log_files.pop_front().unwrap().1;
                 let bytes = Self::file_size(&path)?;
                 self.metrics.total_bytes.dec_by(bytes);
@@ -164,7 +178,7 @@ impl WriteAheadLog {
 
     fn sync_if_needed(&mut self) -> Result<()> {
         if self.pending_bytes >= self.wal_bytes_per_sync {
-            self.logger.debug(format_args!("WAL sync condition met, syncing..."));
+            debug!(self.logger, "WAL sync condition met, syncing...");
             self.sync()?;
         }
         Ok(())
@@ -174,45 +188,53 @@ impl WriteAheadLog {
         let start = Instant::now();
         self.append_log.sync()?;
         let duration = start.elapsed();
-        self.logger.event(format_args!("event: wal sync, duration={}µs, path={:?}", duration.as_micros(), self.append_log.file_path()));
+        event!(self.logger, "wal sync, duration={}µs, path={:?}",
+            duration.as_micros(),
+            self.append_log.file_path()
+        );
         self.pending_bytes = 0;
         Ok(())
     }
 
     pub fn replay(
-        wal_file: &Path
-    ) -> result::Result<impl Iterator<Item = result::Result<(u64, WriteBatch), LogReplayError>>, LogReplayError> {
-
+        wal_file: &Path,
+    ) -> result::Result<
+        impl Iterator<Item = result::Result<(u64, WriteBatch), LogReplayError>>,
+        LogReplayError,
+    > {
         const HEADER_SIZE: usize = 4 + 4 + 8; // MAGIC (u32) + VERSION (u32) + ID (u64)
 
-        let (header, iter) = AppendLog::<WalFileCreator>::read_log_file(wal_file.to_path_buf(), HEADER_SIZE)?;
+        let (header, iter) =
+            AppendLog::<WalFileCreator>::read_log_file(wal_file.to_path_buf(), HEADER_SIZE)?;
         let reader = ByteReader::new(&header);
 
         let magic = reader.read_u32_be()?;
         if magic != MAGIC_NUMBER {
-            return Err(LogReplayError::Corruption { record_offset: 0, reason: "Invalid wal magic number".to_string()});
+            return Err(LogReplayError::Corruption {
+                record_offset: 0,
+                reason: "Invalid wal magic number".to_string(),
+            });
         }
 
         let _version = reader.read_u32_be()?; // Could be needed one day.
         let _id = reader.read_u64_be()?;
 
-        let records = iter.map(move |rs|
-            match rs {
-                Ok(bytes) => {
-                    let seq = bytes[..8].read_u64_be(0);
-                    match WriteBatch::from_wal_record(&bytes[8..]) {
-                        Ok(batch) => Ok((seq, batch)),
-                        Err(e) => Err(e.into()),
-                    }
+        let records = iter.map(move |rs| match rs {
+            Ok(bytes) => {
+                let seq = bytes[..8].read_u64_be(0);
+                match WriteBatch::from_wal_record(&bytes[8..]) {
+                    Ok(batch) => Ok((seq, batch)),
+                    Err(e) => Err(e.into()),
                 }
-                Err(e) => Err(e),
+            }
+            Err(e) => Err(e),
         });
 
         Ok(records)
     }
 }
 
-struct WalFileCreator { }
+struct WalFileCreator {}
 
 impl LogFileCreator for WalFileCreator {
     type Observer = WalObserver;
@@ -288,7 +310,8 @@ impl Metrics {
     }
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
-        metric_registry.register_atomic_gauge("wal_files", &self.files)
+        metric_registry
+            .register_atomic_gauge("wal_files", &self.files)
             .register_atomic_gauge("wal_total_bytes", &self.total_bytes)
             .register_counter("wal_syncs", &self.syncs)
             .register_atomic_gauge("wal_bytes_buffered", &self.bytes_buffered)
@@ -299,23 +322,39 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::obs::logger;
     use crate::options::options::DatabaseOptions;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
+    use tempfile::tempdir;
 
     #[test]
     fn test_replay_write_ahead_log() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, &path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            &path,
+            1,
+        )
+        .unwrap();
 
         let batches = vec![
-            (10, WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())])),
-            (20, WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())])),
-            (30, WriteBatch::new(vec![Operation::new_delete(1, 1, b"a".to_vec())])),
+            (
+                10,
+                WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
+            ),
+            (
+                20,
+                WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
+            ),
+            (
+                30,
+                WriteBatch::new(vec![Operation::new_delete(1, 1, b"a".to_vec())]),
+            ),
         ];
 
         for (seq, batch) in &batches {
@@ -368,22 +407,39 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, &path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            &path,
+            1,
+        )
+        .unwrap();
 
         // Append and rotate to log 2
-        wal.append(1, &WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]))
-            .unwrap();
+        wal.append(
+            1,
+            &WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
+        )
+        .unwrap();
         wal.rotate(2).unwrap();
 
         // Append and rotate to log 3
-        wal.append(2, &WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]))
-            .unwrap();
+        wal.append(
+            2,
+            &WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
+        )
+        .unwrap();
         wal.rotate(3).unwrap();
 
         // Validate replay of rotated files
         for log_num in [1, 2] {
             let log_path = path.join(format!("{:06}.log", log_num));
-            assert!(log_path.exists(), "Expected {} to exist", log_path.display());
+            assert!(
+                log_path.exists(),
+                "Expected {} to exist",
+                log_path.display()
+            );
 
             let replayed: Vec<_> = WriteAheadLog::replay(&log_path)
                 .unwrap()
@@ -396,7 +452,10 @@ mod tests {
             let expected_val = if *seq == 1 { b"1" } else { b"2" };
 
             assert_eq!(batch.operations().len(), 1);
-            assert_eq!(batch.operations()[0], Operation::new_put(1, 1, expected_key.to_vec(), expected_val.to_vec()));
+            assert_eq!(
+                batch.operations()[0],
+                Operation::new_put(1, 1, expected_key.to_vec(), expected_val.to_vec())
+            );
         }
 
         assert_eq!(wal.metrics.files.get(), 3);
@@ -423,7 +482,14 @@ mod tests {
         let mut options = DatabaseOptions::default();
         options.wal_bytes_per_sync = StorageQuantity::new(1, StorageUnit::Bytes); // force sync after any write
 
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 1).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            1,
+        )
+        .unwrap();
 
         let mut batch = Vec::new();
         for i in 0..5 {
@@ -445,9 +511,17 @@ mod tests {
         let path = dir.path();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 7).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            7,
+        )
+        .unwrap();
         for i in 0..3 {
-            wal.append(100 + i as u64, &WriteBatch::new(vec![new_operation(i)])).unwrap();
+            wal.append(100 + i as u64, &WriteBatch::new(vec![new_operation(i)]))
+                .unwrap();
         }
         wal.rotate(8).unwrap();
 
@@ -455,10 +529,14 @@ mod tests {
         assert_eq!(wal.metrics.files.get(), 2); // one rotated, one active
         assert_eq!(wal.metrics.syncs.get(), 3);
         assert_eq!(wal.metrics.bytes_buffered.get(), 0);
-        assert_eq!(wal.metrics.bytes_written.get(), wal.metrics.total_bytes.get());
+        assert_eq!(
+            wal.metrics.bytes_written.get(),
+            wal.metrics.total_bytes.get()
+        );
 
         let log_file = path.join("000007.log");
-        let replayed: Vec<_> = WriteAheadLog::replay(&log_file).unwrap()
+        let replayed: Vec<_> = WriteAheadLog::replay(&log_file)
+            .unwrap()
             .map(|res| res.unwrap())
             .collect();
 
@@ -474,7 +552,14 @@ mod tests {
         let path = dir.path();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 11).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            11,
+        )
+        .unwrap();
         wal.rotate(12).unwrap();
 
         let log_file = path.join("000011.log");
@@ -497,10 +582,19 @@ mod tests {
         let path = dir.path();
         let options = DatabaseOptions::default();
 
-        let mut wal = WriteAheadLog::new(logger::test_instance(), &mut MetricRegistry::default(), &options, path, 13).unwrap();
-        wal.append(1, &WriteBatch::new(vec![
-            Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())
-        ])).unwrap();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            path,
+            13,
+        )
+        .unwrap();
+        wal.append(
+            1,
+            &WriteBatch::new(vec![Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())]),
+        )
+        .unwrap();
         wal.rotate(14).unwrap();
 
         let log_file = path.join("000013.log");

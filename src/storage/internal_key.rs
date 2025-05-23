@@ -1,6 +1,6 @@
-use std::convert::TryFrom;
 use crate::io::ZeroCopy;
 use crate::storage::operation::OperationType;
+use std::convert::TryFrom;
 
 /// The key used by the storage internally are called internal key and are composed of
 /// the collection ID (4 bytes big-endian), the index ID (4 bytes big-endian), the user key,
@@ -15,24 +15,23 @@ pub const MAX_SEQUENCE_NUMBER: u64 = (1 << 56) - 1;
 ///  The internal key
 /// Format: `[collection (u32)][index (u32)][user_key][!sequence_number (big-endian u56)][operation_type (u8)]`
 pub fn encode_internal_key(
-    collection: u32,
-    index: u32,
-    user_key: &[u8],
+    record_key: &[u8],
     sequence_number: u64,
     value_type: OperationType,
 ) -> Vec<u8> {
-
-    assert!(sequence_number <= MAX_SEQUENCE_NUMBER, "Sequence number must fit in 56 bits");
+    assert!(
+        sequence_number <= MAX_SEQUENCE_NUMBER,
+        "Sequence number must fit in 56 bits"
+    );
 
     let inverted_seq = !sequence_number;
-    let mut key = Vec::with_capacity(4 + 4 + user_key.len() + 8);
+    let mut key = Vec::with_capacity(record_key.len() + 8);
 
     // Appends the record key (collection + index + user key)
-    append_record_key(&mut key, collection, index, user_key);
+    key.extend_from_slice(record_key);
 
     // Encode inverted sequence number in big-endian format (7 bytes)
     key.extend_from_slice(&(inverted_seq.to_be_bytes()[1..]));
-
 
     // Append the operation type as the last byte
     key.push(u8::from(value_type));
@@ -51,11 +50,7 @@ fn append_record_key(key: &mut Vec<u8>, collection: u32, index: u32, user_key: &
     key.extend_from_slice(user_key);
 }
 
-pub fn encode_record_key(
-    collection: u32,
-    index: u32,
-    user_key: &[u8]) -> Vec<u8> {
-
+pub fn encode_record_key(collection: u32, index: u32, user_key: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(4 + 4 + user_key.len());
     append_record_key(&mut key, collection, index, user_key);
     key
@@ -102,22 +97,22 @@ pub fn extract_operation_type(internal_key: &[u8]) -> OperationType {
 
 #[cfg(test)]
 mod tests {
-    use bson::Bson;
-    use bson::oid::ObjectId;
     use super::*;
     use crate::storage::operation::OperationType;
     use crate::util::bson_utils::BsonKey;
+    use bson::oid::ObjectId;
+    use bson::Bson;
 
     #[test]
     fn test_internal_key_encoding_decoding() {
         let collection = 32;
         let index = 0;
-        let user_key =  Bson::ObjectId(ObjectId::new()).try_into_key().unwrap();
+        let user_key = Bson::ObjectId(ObjectId::new()).try_into_key().unwrap();
         let seq = 42;
         let op_type = OperationType::Put;
         let record_key = encode_record_key(collection, index, &user_key);
 
-        let encoded = encode_internal_key(collection, index, &user_key, seq, op_type);
+        let encoded = encode_internal_key(&record_key, seq, op_type);
 
         assert_eq!(extract_collection(&encoded), collection);
         assert_eq!(extract_index(&encoded), index);
@@ -131,15 +126,18 @@ mod tests {
     fn test_internal_key_ordering() {
         let collection = 32;
         let index = 0;
-        let id1 =  Bson::Int32(1).try_into_key().unwrap();
-        let id2 =  Bson::Int32(2).try_into_key().unwrap();
+        let id1 = Bson::Int32(1).try_into_key().unwrap();
+        let id2 = Bson::Int32(2).try_into_key().unwrap();
 
         assert!(id1 < id2);
 
-        let key1 = encode_internal_key(collection, index, &id1, 100, OperationType::Put);
-        let key2 = encode_internal_key(collection, index, &id1, 200, OperationType::Put);
-        let key3 = encode_internal_key(collection, index, &id1, 200, OperationType::Delete);
-        let key4 = encode_internal_key(collection, index, &id2, 100, OperationType::Put);
+        let record_key_1 = encode_record_key(collection, index, &id1);
+        let record_key_2 = encode_record_key(collection, index, &id2);
+
+        let key1 = encode_internal_key(&record_key_1, 100, OperationType::Put);
+        let key2 = encode_internal_key(&record_key_1, 200, OperationType::Put);
+        let key3 = encode_internal_key(&record_key_1, 200, OperationType::Delete);
+        let key4 = encode_internal_key(&record_key_2, 100, OperationType::Put);
 
         assert!(key2 < key1); // Higher sequence number sorts first
         assert!(key3 < key2); // DELETE sorts before PUT if sequence is the same

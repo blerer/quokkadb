@@ -15,12 +15,8 @@ pub struct Interval<T> {
 }
 
 impl<T> Interval<T> {
-
     pub fn new(start: Bound<T>, end: Bound<T>) -> Self {
-        Self {
-            start,
-            end,
-        }
+        Self { start, end }
     }
 
     /// Creates an open range `(a..b)`.
@@ -195,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_all() {
-        let range : Interval<i32>  = Interval::all();
+        let range: Interval<i32> = Interval::all();
         assert_eq!(range.start_bound(), Bound::Unbounded);
         assert_eq!(range.end_bound(), Bound::Unbounded);
     }

@@ -1,5 +1,5 @@
-use std::mem;
 use crate::io::varint;
+use std::mem;
 
 pub struct ByteWriter {
     buffer: Vec<u8>,

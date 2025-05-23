@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::manifest_state::SnapshotElement;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// The `Catalog` maintains the mapping from collection names to their metadata.
 ///
@@ -11,13 +11,15 @@ use crate::storage::manifest_state::SnapshotElement;
 /// such as collection IDs and index definitions.
 #[derive(Debug, PartialEq)]
 pub struct Catalog {
+    /// The next collection id (the first 10 are reserved for internal collections)
+    pub next_collection_id: u32,
     /// Mapping from collection name to its metadata.
-    collections: BTreeMap<String, Arc<CollectionMetadata>>,
+    pub collections: BTreeMap<String, Arc<CollectionMetadata>>,
 }
 
 impl SnapshotElement for Catalog {
-
     fn read_from(reader: &ByteReader) -> std::io::Result<Self> {
+        let next_collection_id = reader.read_varint_u32()?;
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
         for _ in 0..size {
@@ -25,10 +27,14 @@ impl SnapshotElement for Catalog {
             let collection = Arc::new(CollectionMetadata::read_from(reader)?);
             collections.insert(str, collection);
         }
-        Ok(Catalog { collections })
+        Ok(Catalog {
+            next_collection_id,
+            collections,
+        })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u32(self.next_collection_id);
         writer.write_varint_u32(self.collections.len() as u32);
         self.collections.iter().for_each(|(str, col)| {
             writer.write_str(str);
@@ -39,23 +45,36 @@ impl SnapshotElement for Catalog {
 
 impl Catalog {
     pub fn new() -> Self {
-        Catalog { collections: BTreeMap::new() }
+        Catalog {
+            next_collection_id: 10,
+            collections: BTreeMap::new(),
+        }
     }
 
-    pub fn get_collection_id(&self, name: &String) -> Option<u32> {
-        self.collections.get(name).map(|x| x.id)
+    pub fn get_collection(&self, name: &str) -> Option<Arc<CollectionMetadata>> {
+        self.collections.get(name).cloned()
     }
 
-    pub fn add_collection(&self, name: &String, id: u32) -> Self {
+    pub fn add_collection(&self, name: &str, id: u32) -> Self {
+        assert_eq!(self.next_collection_id, id);
         let mut collections = self.collections.clone();
-        collections.insert(name.clone(), Arc::new(CollectionMetadata::new(id, name.clone())));
-        Catalog { collections }
+        collections.insert(
+            name.to_string(),
+            Arc::new(CollectionMetadata::new(id, name)),
+        );
+        Catalog {
+            next_collection_id: id + 1,
+            collections,
+        }
     }
 
-    pub fn drop_collection(&self, name: &String) -> Self {
+    pub fn drop_collection(&self, name: &str) -> Self {
         let mut collections = self.collections.clone();
         collections.remove(name);
-        Catalog { collections }
+        Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+        }
     }
 }
 
@@ -65,20 +84,42 @@ impl Catalog {
 /// to and from the manifest.
 #[derive(Debug, PartialEq)]
 pub struct CollectionMetadata {
+    /// The id of the next index
+    pub next_index_id: u32,
     /// Globally unique collection identifier.
-    id: u32,
+    pub id: u32,
     /// Collection name.
-    name: String,
+    pub name: String,
     /// Mapping from index name to its metadata.
-    indexes: Arc<BTreeMap<String, Arc<IndexMetadata>>>,
+    pub indexes: BTreeMap<String, Arc<IndexMetadata>>,
 }
 
 impl CollectionMetadata {
-    fn new(id: u32, name: String) -> Self {
-        CollectionMetadata { id, name, indexes: Arc::new(BTreeMap::new()) }
+    pub fn new(id: u32, name: &str) -> Self {
+        CollectionMetadata {
+            next_index_id: 0,
+            id,
+            name: name.to_string(),
+            indexes: BTreeMap::new(),
+        }
     }
 
-    fn read_indexes_from(reader: &ByteReader) -> std::io::Result<Arc<BTreeMap<String, Arc<IndexMetadata>>>> {
+    fn add_index(&self, index: IndexMetadata) -> CollectionMetadata {
+        assert_eq!(self.next_index_id, index.id);
+        let next_index_id = self.next_index_id + 1;
+        let mut indexes = self.indexes.clone();
+        indexes.insert(index.name.to_string(), Arc::new(index));
+        CollectionMetadata {
+            next_index_id,
+            id: self.id,
+            name: self.name.clone(),
+            indexes,
+        }
+    }
+
+    fn read_indexes_from(
+        reader: &ByteReader,
+    ) -> std::io::Result<BTreeMap<String, Arc<IndexMetadata>>> {
         let size = reader.read_varint_u64()? as usize;
         let mut indexes = BTreeMap::new();
         for _ in 0..size {
@@ -86,7 +127,7 @@ impl CollectionMetadata {
             let index = Arc::new(IndexMetadata::read_from(reader)?);
             indexes.insert(str, index);
         }
-        Ok(Arc::new(indexes))
+        Ok(indexes)
     }
 
     fn write_indexes_to(&self, writer: &mut ByteWriter) {
@@ -99,13 +140,14 @@ impl CollectionMetadata {
 }
 
 impl SnapshotElement for CollectionMetadata {
-
     fn read_from(reader: &ByteReader) -> std::io::Result<Self> {
+        let next_index_id = reader.read_varint_u32()?;
         let id = reader.read_varint_u64()? as u32;
         let name = reader.read_str()?.to_string();
         let indexes = Self::read_indexes_from(reader)?;
 
         Ok(CollectionMetadata {
+            next_index_id,
             id,
             name,
             indexes,
@@ -113,6 +155,7 @@ impl SnapshotElement for CollectionMetadata {
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u32(self.next_index_id);
         writer.write_varint_u32(self.id);
         writer.write_str(&self.name);
         self.write_indexes_to(writer);
@@ -148,7 +191,10 @@ mod tests {
 
     #[test]
     fn test_index_metadata_serialization() {
-        check_serialization_round_trip(IndexMetadata { id: 11, name: "by_name".to_string() });
+        check_serialization_round_trip(IndexMetadata {
+            id: 11,
+            name: "by_name".to_string(),
+        });
     }
 
     #[test]
@@ -157,20 +203,14 @@ mod tests {
     }
 
     fn create_collections_with_indexes() -> CollectionMetadata {
-        let mut col_products = CollectionMetadata::new(2, "products".to_string());
-        {
-            let mut indexes = BTreeMap::new();
-            indexes.insert(
-                "by_name".to_string(),
-                Arc::new(IndexMetadata { id: 11, name: "by_name".to_string() })
-            );
-            indexes.insert(
-                "by_price".to_string(),
-                Arc::new(IndexMetadata { id: 12, name: "by_price".to_string() })
-            );
-            // Directly update the indexes field (accessible within the module)
-            col_products.indexes = Arc::new(indexes);
-        }
-        col_products
+        CollectionMetadata::new(2, "products")
+            .add_index(IndexMetadata {
+                id: 0,
+                name: "by_name".to_string(),
+            })
+            .add_index(IndexMetadata {
+                id: 1,
+                name: "by_price".to_string(),
+            })
     }
 }

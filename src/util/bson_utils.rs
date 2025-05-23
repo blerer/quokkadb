@@ -1,9 +1,18 @@
-use std::io::{Error, ErrorKind, Result};
-use bson::Bson;
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
+use crate::storage::internal_key::encode_record_key;
+use bson::oid::ObjectId;
+use bson::{to_vec, Bson, Document};
+use std::io::{Error, ErrorKind, Result};
 
-fn read_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<&'a[u8]> {
+pub fn as_key_value(doc: &Document) -> bson::ser::Result<(Vec<u8>, Vec<u8>)> {
+    let id = doc.get("id").unwrap();
+    let user_key = id.try_into_key()?;
+    let value = to_vec(&doc)?;
+    Ok((user_key, value))
+}
+
+fn read_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<&'a [u8]> {
     let end = reader.find_next_by(|b| b == 0);
     if let Some(end) = end {
         Ok(reader.read_fixed_slice(end + 1)?)
@@ -23,12 +32,18 @@ fn skip_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<()> {
 
 fn document_length(data: &[u8], offset: usize) -> Result<usize> {
     if data.len() - offset < 5 {
-        return Err(Error::new(ErrorKind::InvalidInput, "Not enough bytes for a BSON document"))
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Not enough bytes for a BSON document",
+        ));
     }
     Ok(data.read_i32_le(offset) as usize)
 }
 
-pub fn find_bson_field_value<'a>(reader: &'a ByteReader<'a>, field_name: &'a [u8]) -> Result<Option<&'a [u8]>> {
+pub fn find_bson_field_value<'a>(
+    reader: &'a ByteReader<'a>,
+    field_name: &'a [u8],
+) -> Result<Option<&'a [u8]>> {
     // Read document length (first 4 bytes)
     let doc_length = reader.read_i32_le()? as usize;
 
@@ -67,43 +82,51 @@ pub fn find_bson_field_value<'a>(reader: &'a ByteReader<'a>, field_name: &'a [u8
     Ok(None) // Field not found
 }
 
-pub fn extract_bson_value<'a>(bson_type: u8, reader:&'a ByteReader<'a>) -> Result<&'a [u8]> {
-
+pub fn extract_bson_value<'a>(bson_type: u8, reader: &'a ByteReader<'a>) -> Result<&'a [u8]> {
     match bson_type {
-        0x01 => { // Double (8 bytes)
+        0x01 => {
+            // Double (8 bytes)
             reader.read_fixed_slice(8)
         }
-        0x02 => { // String (length-prefixed + null terminator)
+        0x02 => {
+            // String (length-prefixed + null terminator)
             let str_len = reader.read_i32_le()? as usize;
             reader.read_fixed_slice(4 + str_len)
         }
-        0x03 | 0x04 => { // Embedded Document or Array (length-prefixed)
+        0x03 | 0x04 => {
+            // Embedded Document or Array (length-prefixed)
             let doc_len = reader.read_i32_le()? as usize;
             reader.read_fixed_slice(4 + doc_len)
         }
-        0x05 => { // Binary (length-prefixed + subtype + data)
+        0x05 => {
+            // Binary (length-prefixed + subtype + data)
             let bin_len = reader.read_i32_le()? as usize;
             reader.read_fixed_slice(4 + 1 + bin_len) // 4-byte length + subtype + data
         }
-        0x07 => { // ObjectId (12 bytes)
+        0x07 => {
+            // ObjectId (12 bytes)
             reader.read_fixed_slice(12)
         }
-        0x08 => { // Boolean (1 byte)
+        0x08 => {
+            // Boolean (1 byte)
             reader.read_fixed_slice(1)
         }
-        0x09 => { // UTC Datetime (8 bytes)
+        0x09 => {
+            // UTC Datetime (8 bytes)
             reader.read_fixed_slice(8)
         }
-        0x0A => { // Null
+        0x0A => {
+            // Null
             Ok(&[])
         }
-        0x0B => { // Regular Expression (cstring + cstring)
+        0x0B => {
+            // Regular Expression (cstring + cstring)
             let start = reader.position();
             let mut end = reader.find_next_by(|b| b == 0);
             if let Some(end) = end {
                 reader.seek(end + 1)?;
             } else {
-                return Err(invalid_input("End of first CString could not be found"))
+                return Err(invalid_input("End of first CString could not be found"));
             }
             end = reader.find_next_by(|b| b == 0);
             if let Some(end) = end {
@@ -113,24 +136,30 @@ pub fn extract_bson_value<'a>(bson_type: u8, reader:&'a ByteReader<'a>) -> Resul
                 Err(invalid_input("End of second CString could not be found"))
             }
         }
-        0x0D => { // JavaScript Code (length-prefixed string)
+        0x0D => {
+            // JavaScript Code (length-prefixed string)
             let str_len = reader.read_i32_le()? as usize;
             reader.read_fixed_slice(4 + str_len)
         }
-        0x0F => { // JavaScript Code w/ Scope (length-prefixed + string + document)
+        0x0F => {
+            // JavaScript Code w/ Scope (length-prefixed + string + document)
             let total_len = reader.read_i32_le()? as usize;
             reader.read_fixed_slice(total_len)
         }
-        0x10 => { // Int32 (4 bytes)
+        0x10 => {
+            // Int32 (4 bytes)
             reader.read_fixed_slice(4)
         }
-        0x11 => { // Timestamp (8 bytes: increment + timestamp)
+        0x11 => {
+            // Timestamp (8 bytes: increment + timestamp)
             reader.read_fixed_slice(8)
         }
-        0x12 => { // Int64 (8 bytes)
+        0x12 => {
+            // Int64 (8 bytes)
             reader.read_fixed_slice(8)
         }
-        0x13 => { // Decimal128 (16 bytes)
+        0x13 => {
+            // Decimal128 (16 bytes)
             reader.read_fixed_slice(16)
         }
         _ => Err(invalid_input("Unsupported BSON type")),
@@ -139,37 +168,43 @@ pub fn extract_bson_value<'a>(bson_type: u8, reader:&'a ByteReader<'a>) -> Resul
 
 pub fn skip_value<'a>(bson_type: u8, reader: &'a ByteReader<'a>) -> Result<()> {
     match bson_type {
-        0x01 => reader.skip(8),  // Double (8 bytes)
-        0x02 => { // String (length-prefixed)
+        0x01 => reader.skip(8), // Double (8 bytes)
+        0x02 => {
+            // String (length-prefixed)
             let str_len = reader.read_i32_le()? as usize;
             reader.skip(str_len)
         }
-        0x03 | 0x04 => { // Document or Array (length-prefixed)
+        0x03 | 0x04 => {
+            // Document or Array (length-prefixed)
             let doc_len = reader.read_i32_le()? as usize;
             reader.skip(doc_len - 4) // Already read 4 bytes
         }
-        0x05 => { // Binary (length-prefixed + subtype + data)
+        0x05 => {
+            // Binary (length-prefixed + subtype + data)
             let bin_len = reader.read_i32_le()? as usize;
             reader.skip(bin_len + 1) // 4-byte length + subtype
         }
         0x07 => reader.skip(12), // ObjectId (12 bytes)
         0x08 => reader.skip(1),  // Boolean (1 byte)
         0x09 => reader.skip(8),  // UTC Datetime (8 bytes)
-        0x0A => Ok(()),  // Null (0 bytes)
-        0x0B => { // Regular Expression (CString + CString)
+        0x0A => Ok(()),          // Null (0 bytes)
+        0x0B => {
+            // Regular Expression (CString + CString)
             skip_cstring(reader)?; // Skip pattern
-            skip_cstring(reader)   // Skip options
+            skip_cstring(reader) // Skip options
         }
-        0x0D => { // JavaScript Code (length-prefixed string)
+        0x0D => {
+            // JavaScript Code (length-prefixed string)
             let str_len = reader.read_i32_le()? as usize;
             reader.skip(str_len)
         }
-        0x0F => { // JavaScript Code w/ Scope (length + script + doc)
+        0x0F => {
+            // JavaScript Code w/ Scope (length + script + doc)
             let total_len = reader.read_i32_le()? as usize;
             reader.skip(total_len - 4) // Already read 4 bytes
         }
         0x10 => reader.skip(4),  // Int32 (4 bytes)
-        0x11 => reader.skip( 8),  // Timestamp (8 bytes)
+        0x11 => reader.skip(8),  // Timestamp (8 bytes)
         0x12 => reader.skip(8),  // Int64 (8 bytes)
         0x13 => reader.skip(16), // Decimal128 (16 bytes)
         _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported BSON type")),
@@ -227,12 +262,12 @@ impl BsonKey for Bson {
 
                 // **Step 1: Swap low and high parts (since BSON stores them as little-endian)**
                 let mut swapped_bytes = [0u8; 16];
-                swapped_bytes[..8].copy_from_slice(&bytes[8..]);  // Move HIGH to LOW position
-                swapped_bytes[8..].copy_from_slice(&bytes[..8]);  // Move LOW to HIGH position
+                swapped_bytes[..8].copy_from_slice(&bytes[8..]); // Move HIGH to LOW position
+                swapped_bytes[8..].copy_from_slice(&bytes[..8]); // Move LOW to HIGH position
 
                 // **Step 2: Reverse bytes within each 64-bit part (convert to big-endian)**
-                swapped_bytes[..8].reverse();  // Reverse first 8 bytes (new HIGH)
-                swapped_bytes[8..].reverse();  // Reverse last 8 bytes (new LOW)
+                swapped_bytes[..8].reverse(); // Reverse first 8 bytes (new HIGH)
+                swapped_bytes[8..].reverse(); // Reverse last 8 bytes (new LOW)
 
                 // **Example: Original BSON Decimal128 (Little-Endian)**
                 // Suppose we have the decimal value `-1000.12345`
@@ -241,7 +276,8 @@ impl BsonKey for Bson {
                 // `[176, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 246, 17, 57]`
 
                 // **Step 3: Extract and Adjust Exponent (E)**
-                let exponent = (((swapped_bytes[0] & 0b0011_1111) as u16) << 8) | (swapped_bytes[1] as u16);
+                let exponent =
+                    (((swapped_bytes[0] & 0b0011_1111) as u16) << 8) | (swapped_bytes[1] as u16);
                 // The exponent is stored in the **first 14 bits** of the high 64-bit part.
                 // We extract it using bitwise operations.
 
@@ -270,7 +306,8 @@ impl BsonKey for Bson {
                     let new_exponent = exponent.saturating_sub(shift_amount as u16);
 
                     // **Store the adjusted exponent back**
-                    swapped_bytes[0] = ((new_exponent >> 8) & 0x3F) as u8 | (swapped_bytes[0] & 0x80);
+                    swapped_bytes[0] =
+                        ((new_exponent >> 8) & 0x3F) as u8 | (swapped_bytes[0] & 0x80);
                     swapped_bytes[1] = (new_exponent & 0xFF) as u8;
                 }
 
@@ -315,7 +352,12 @@ impl BsonKey for Bson {
             }
             Bson::MaxKey => key.push(0xFF), // MaxKey -> Highest possible byte
 
-            _ => return Err(Error::new(ErrorKind::InvalidInput, format!("Unsupported BSON type: {:?}", self))),
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("Unsupported BSON type: {:?}", self),
+                ))
+            }
         }
 
         Ok(key)
@@ -324,9 +366,9 @@ impl BsonKey for Bson {
 
 #[cfg(test)]
 mod tests {
-    use bson::{Bson, Decimal128, Binary, oid::ObjectId, Timestamp, DateTime};
-    use std::str::FromStr;
     use crate::util::bson_utils::BsonKey;
+    use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
+    use std::str::FromStr;
 
     /// Helper function to check lexicographic ordering
     fn assert_ordering(a: &Bson, b: &Bson) {
@@ -397,7 +439,14 @@ mod tests {
     fn assert_decimal_ordering(a: &Decimal128, b: &Decimal128) {
         let key_a = &Bson::Decimal128(*a).try_into_key().unwrap();
         let key_b = &Bson::Decimal128(*b).try_into_key().unwrap();
-        assert!(key_a < key_b, "Expected {:?} < {:?}, but got {:?} >= {:?}", a, b, key_a, key_b);
+        assert!(
+            key_a < key_b,
+            "Expected {:?} < {:?}, but got {:?} >= {:?}",
+            a,
+            b,
+            key_a,
+            key_b
+        );
     }
 
     /// Tests that leading zeros in the coefficient (`C`) do not break sorting.
@@ -469,9 +518,18 @@ mod tests {
     /// **Test String Ordering**
     #[test]
     fn test_string_ordering() {
-        assert_ordering(&Bson::String("abc".to_string()), &Bson::String("abd".to_string()));
-        assert_ordering(&Bson::String("".to_string()), &Bson::String("a".to_string()));
-        assert_ordering(&Bson::String("a".to_string()), &Bson::String("aa".to_string()));
+        assert_ordering(
+            &Bson::String("abc".to_string()),
+            &Bson::String("abd".to_string()),
+        );
+        assert_ordering(
+            &Bson::String("".to_string()),
+            &Bson::String("a".to_string()),
+        );
+        assert_ordering(
+            &Bson::String("a".to_string()),
+            &Bson::String("aa".to_string()),
+        );
     }
 
     /// **Test Boolean Ordering**
@@ -491,8 +549,14 @@ mod tests {
     /// **Test Binary Sorting**
     #[test]
     fn test_binary_ordering() {
-        let bin1 = Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3] };
-        let bin2 = Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 4] };
+        let bin1 = Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: vec![1, 2, 3],
+        };
+        let bin2 = Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: vec![1, 2, 4],
+        };
         assert_ordering(&Bson::Binary(bin1), &Bson::Binary(bin2));
     }
 
@@ -507,8 +571,14 @@ mod tests {
     /// **Test Timestamp Ordering**
     #[test]
     fn test_timestamp_ordering() {
-        let ts1 = Timestamp { time: 1000, increment: 1 };
-        let ts2 = Timestamp { time: 2000, increment: 1 };
+        let ts1 = Timestamp {
+            time: 1000,
+            increment: 1,
+        };
+        let ts2 = Timestamp {
+            time: 2000,
+            increment: 1,
+        };
         assert_ordering(&Bson::Timestamp(ts1), &Bson::Timestamp(ts2));
     }
 }

@@ -1,7 +1,7 @@
-use std::io::Result;
 use crate::io::byte_reader::ByteReader;
 use crate::io::varint;
 use crate::storage::operation::Operation;
+use std::io::Result;
 
 #[derive(Default, Debug)]
 pub struct WriteBatch {
@@ -10,7 +10,6 @@ pub struct WriteBatch {
 }
 
 impl WriteBatch {
-
     pub fn new(operations: Vec<Operation>) -> WriteBatch {
         let precomputed_wal_record = Some(Self::precompute_wal_record(&operations));
         WriteBatch {
@@ -24,7 +23,7 @@ impl WriteBatch {
     }
 
     pub fn to_wal_record(&self, seq: u64) -> Vec<u8> {
-        let precomputed_wal_record  = if self.precomputed_wal_record.is_none() {
+        let precomputed_wal_record = if self.precomputed_wal_record.is_none() {
             &Self::precompute_wal_record(&self.operations)
         } else {
             self.precomputed_wal_record.as_ref().unwrap()
@@ -33,7 +32,6 @@ impl WriteBatch {
         vec.extend_from_slice(&seq.to_be_bytes());
         vec.extend_from_slice(precomputed_wal_record);
         vec
-
     }
 
     fn precompute_wal_record(operations: &[Operation]) -> Vec<u8> {

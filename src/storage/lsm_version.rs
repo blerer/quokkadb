@@ -1,12 +1,12 @@
-use std::cmp::Ordering;
-use std::io::Result;
-use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::storage::manifest_state::SnapshotElement;
 use crate::util::interval::Interval;
+use std::cmp::Ordering;
+use std::io::Result;
+use std::ops::{Bound, RangeBounds};
+use std::sync::Arc;
 
 /// Represents the persisted physical state of the LSM tree, excluding memtables.
 ///
@@ -49,11 +49,15 @@ impl LsmVersion {
             oldest_log_number: self.oldest_log_number,
             last_sequence_number: self.last_sequence_number,
             next_file_number,
-            sst_levels: self.sst_levels.clone()
+            sst_levels: self.sst_levels.clone(),
         }
     }
 
-    pub fn with_flushed_sstable(&self, oldest_log_number: u64, sst: &Arc<SSTableMetadata>) -> LsmVersion {
+    pub fn with_flushed_sstable(
+        &self,
+        oldest_log_number: u64,
+        sst: &Arc<SSTableMetadata>,
+    ) -> LsmVersion {
         LsmVersion {
             current_log_number: self.current_log_number,
             oldest_log_number,
@@ -84,6 +88,14 @@ impl LsmVersion {
             next_file_number,
             sst_levels: self.sst_levels.clone(),
         }
+    }
+
+    pub fn find<'a>(
+        &'a self,
+        record_key: &'a [u8],
+        snapshot: u64,
+    ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
+        self.sst_levels.find(record_key, snapshot)
     }
 }
 
@@ -123,7 +135,6 @@ pub struct Levels {
 }
 
 impl Levels {
-
     pub fn empty() -> Levels {
         Levels { levels: Vec::new() }
     }
@@ -150,10 +161,19 @@ impl Levels {
 
         Levels { levels: new_levels }
     }
+
+    pub fn find<'a>(
+        &'a self,
+        record_key: &'a [u8],
+        snapshot: u64,
+    ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
+        self.levels
+            .iter()
+            .flat_map(move |level| level.find(record_key, snapshot))
+    }
 }
 
 impl SnapshotElement for Levels {
-
     fn read_from(reader: &ByteReader) -> Result<Self> {
         let size = reader.read_varint_u64()? as usize;
         let mut levels = Vec::with_capacity(size);
@@ -176,29 +196,40 @@ impl SnapshotElement for Levels {
 /// - `Overlapping`: Used for L0, tables may have overlapping key ranges.
 /// - `NonOverlapping`: Used for L1+, tables are sorted and non-overlapping.
 #[derive(Debug, PartialEq, Clone)]
-pub enum  Level {
+pub enum Level {
     // For L0, files may overlap so we simply store a Vec.
-    Overlapping {level: u32, sstables: Vec<Arc<SSTableMetadata>>},
+    Overlapping {
+        level: u32,
+        sstables: Vec<Arc<SSTableMetadata>>,
+    },
     // For L1+ levels, files are non-overlapping and sorted by min_key.
-    NonOverlapping {level: u32, sstables: Vec<Arc<SSTableMetadata>>},
+    NonOverlapping {
+        level: u32,
+        sstables: Vec<Arc<SSTableMetadata>>,
+    },
 }
 
 impl Level {
-
     pub fn empty(level: u32) -> Self {
-       if level == 0 {
-           Overlapping {level: 0, sstables: Vec::new()}
-       }  else {
-           NonOverlapping {level, sstables: Vec::new()}
-       }
+        if level == 0 {
+            Overlapping {
+                level: 0,
+                sstables: Vec::new(),
+            }
+        } else {
+            NonOverlapping {
+                level,
+                sstables: Vec::new(),
+            }
+        }
     }
 
     pub fn new(level: u32, mut sstables: Vec<Arc<SSTableMetadata>>) -> Self {
         if level == 0 {
-            Overlapping {level: 0, sstables}
-        }  else {
+            Overlapping { level: 0, sstables }
+        } else {
             sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
-            NonOverlapping {level, sstables}
+            NonOverlapping { level, sstables }
         }
     }
 
@@ -210,7 +241,7 @@ impl Level {
         }
         Ok(sstables)
     }
-    fn write_sstables_to(&self, sstables : &Vec<Arc<SSTableMetadata>>, writer: &mut ByteWriter) {
+    fn write_sstables_to(&self, sstables: &Vec<Arc<SSTableMetadata>>, writer: &mut ByteWriter) {
         writer.write_varint_u32(sstables.len() as u32);
         sstables.iter().for_each(|sst| {
             sst.write_to(writer);
@@ -227,39 +258,46 @@ impl Level {
         }
     }
 
-    /// Finds an SSTable that contains the key and is visible under the given snapshot.
-    pub fn find(&self, record_key: &[u8], snapshot: u64) -> Vec<Arc<SSTableMetadata>> {
+    /// Finds the SSTables that contains the key and are visible under the given snapshot.
+    pub fn find<'a>(
+        &'a self,
+        record_key: &'a [u8],
+        snapshot: u64,
+    ) -> Box<dyn Iterator<Item = Arc<SSTableMetadata>> + 'a> {
         match self {
-            Overlapping {level: _, sstables} => {
-                sstables.iter()
-                    .filter(|sst| {
+            Overlapping { sstables, .. } => Box::new(
+                sstables
+                    .iter()
+                    .rev() // Iterating in reverse ensures to find the newest version first, satisfying visibility rules.
+                    .filter(move |sst| {
                         record_key >= sst.min_key.as_slice()
                             && record_key <= sst.max_key.as_slice()
                             && snapshot >= sst.min_sequence_number
                     })
-                    .cloned()
-                    .collect()
-            }
-            NonOverlapping{ level: _, sstables} => {
-                // Binary search for the SSTable covering the key.
-                let idx = sstables.binary_search_by(|sst| {
-                    if record_key < sst.min_key.as_slice() {
-                        Ordering::Greater
-                    } else if record_key > sst.max_key.as_slice() {
-                        Ordering::Less
-                    } else {
-                        Ordering::Equal
-                    }
-                }).ok();
-
-                idx.and_then(|i| {
-                    let sst = &sstables[i];
-                    if snapshot >= sst.min_sequence_number {
-                        Some(vec![sst.clone()])
-                    } else {
-                        None
-                    }
-                }).unwrap_or_default()
+                    .cloned(),
+            ),
+            NonOverlapping { sstables, .. } => {
+                let iter = sstables
+                    .binary_search_by(|sst| {
+                        if record_key < sst.min_key.as_slice() {
+                            Ordering::Greater
+                        } else if record_key > sst.max_key.as_slice() {
+                            Ordering::Less
+                        } else {
+                            Ordering::Equal
+                        }
+                    })
+                    .ok()
+                    .into_iter()
+                    .filter_map(move |i| {
+                        let sst = &sstables[i];
+                        if snapshot >= sst.min_sequence_number {
+                            Some(sst.clone())
+                        } else {
+                            None
+                        }
+                    });
+                Box::new(iter)
             }
         }
     }
@@ -267,18 +305,18 @@ impl Level {
     /// Finds all SSTables that overlap the given interval and are visible under the snapshot.
     ///
     /// The `interval` parameter is an instance of your provided `Interval` type.
-    pub fn find_range(&self, interval: &Interval<Vec<u8>>, snapshot: u64) -> Vec<Arc<SSTableMetadata>> {
+    pub fn find_range(
+        &self,
+        interval: &Interval<Vec<u8>>,
+        snapshot: u64,
+    ) -> Vec<Arc<SSTableMetadata>> {
         match self {
-            Overlapping { level: _, sstables} => {
-                sstables.iter()
-                    .filter(|sst| {
-                        overlaps(interval, sst)
-                            && snapshot >= sst.min_sequence_number
-                    })
-                    .cloned()
-                    .collect()
-            }
-            NonOverlapping { level: _, sstables} => {
+            Overlapping { level: _, sstables } => sstables
+                .iter()
+                .filter(|sst| overlaps(interval, sst) && snapshot >= sst.min_sequence_number)
+                .cloned()
+                .collect(),
+            NonOverlapping { level: _, sstables } => {
                 // Use binary search to find the first candidate SSTable.
                 // Here we use the interval's start bound as the lower limit.
                 let lower = match interval.start_bound() {
@@ -286,13 +324,15 @@ impl Level {
                     Bound::Unbounded => &vec![], // smallest possible key
                 };
 
-                let start_idx = sstables.binary_search_by(|sst| {
-                    if sst.max_key.as_slice() < lower.as_slice() {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                }).unwrap_or_else(|idx| idx);
+                let start_idx = sstables
+                    .binary_search_by(|sst| {
+                        if sst.max_key.as_slice() < lower.as_slice() {
+                            Ordering::Less
+                        } else {
+                            Ordering::Greater
+                        }
+                    })
+                    .unwrap_or_else(|idx| idx);
 
                 let mut result = Vec::new();
                 for sst in &sstables[start_idx..] {
@@ -302,9 +342,7 @@ impl Level {
                             break;
                         }
                     }
-                    if overlaps(interval, sst)
-                        && snapshot >= sst.min_sequence_number
-                    {
+                    if overlaps(interval, sst) && snapshot >= sst.min_sequence_number {
                         result.push(sst.clone());
                     }
                 }
@@ -330,7 +368,6 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
 }
 
 impl SnapshotElement for Level {
-
     fn read_from(reader: &ByteReader) -> Result<Self> {
         let level = reader.read_varint_u32()?;
         let sstables = Self::read_sstables_from(reader)?;
@@ -384,7 +421,6 @@ impl SSTableMetadata {
 }
 
 impl SnapshotElement for SSTableMetadata {
-
     fn read_from(reader: &ByteReader) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
             number: reader.read_varint_u64()?,
@@ -396,8 +432,9 @@ impl SnapshotElement for SSTableMetadata {
         })
     }
 
-    fn write_to(&self, writer:&mut ByteWriter) {
-        writer.write_varint_u64(self.number)
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer
+            .write_varint_u64(self.number)
             .write_varint_u32(self.level)
             .write_length_prefixed_slice(&self.min_key)
             .write_length_prefixed_slice(&self.max_key)
@@ -420,41 +457,42 @@ impl Ord for SSTableMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use bson::Bson;
     use crate::storage::internal_key::encode_record_key;
     use crate::storage::manifest_state::check_serialization_round_trip;
     use crate::util::bson_utils::BsonKey;
+    use bson::Bson;
+    use std::sync::Arc;
 
     #[test]
     fn test_find_overlapping() {
         // Create two overlapping SSTables:
         // sst1 covers keys 1 to 40 and is visible for snapshot 100..=200.
-        // sst2 covers keys 40 to 60 and is visible for snapshot 201..=300.
+        // sst2 covers keys 20 to 60 and is visible for snapshot 201..=300.
         let sst1 = create_sstable(1, 0, 1, 40, 100, 200);
         let sst2 = create_sstable(2, 0, 20, 60, 201, 300);
         let level = Level::new(0, vec![sst1.clone(), sst2.clone()]);
 
-        let empty : Vec<Arc<SSTableMetadata>> = vec![];
+        let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
         // Key 2 falls only in sst1.
-        let found = level.find(&record_key(2), 300);
+        let found: Vec<_> = level.find(&record_key(2), 300).collect();
         assert_eq!(vec![sst1.clone()], found);
 
         // Key 58 falls only in sst2.
-        let found = level.find(&record_key(58), 300);
+        let found: Vec<_> = level.find(&record_key(58), 300).collect();
         assert_eq!(vec![sst2.clone()], found);
 
         // If the snapshot is bellow sst2 min sequence, nothing is returned
-        let found = level.find(&record_key(58), 150);
+        let found: Vec<_> = level.find(&record_key(58), 150).collect();
         assert_eq!(empty, found);
 
         // Key 25 falls in sst1 and sst2
-        let found = level.find(&record_key(25), 300);
-        assert_eq!(vec![sst1.clone(), sst2.clone()], found);
+        let found: Vec<_> = level.find(&record_key(25), 300).collect();
+        assert_eq!(vec![sst2.clone(), sst1.clone()], found);
 
+        let found: Vec<_> = level.find(&record_key(87), 300).collect();
         // A key out of range should yield None.
-        assert_eq!(empty, level.find(&record_key(87), 300));
+        assert_eq!(empty, found)
     }
 
     #[test]
@@ -466,22 +504,23 @@ mod tests {
         let sst2 = create_sstable(2, 1, 41, 60, 201, 300);
         let level = Level::new(1, vec![sst1.clone(), sst2.clone()]);
 
-        let empty : Vec<Arc<SSTableMetadata>> = vec![];
+        let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
         // Key 2 should be found in sst1.
-        let found = level.find(&record_key(2), 300);
+        let found: Vec<_> = level.find(&record_key(2), 300).collect();
         assert_eq!(vec![sst1.clone()], found);
 
         // Key 58 falls only in sst2.
-        let found = level.find(&record_key(58), 300);
+        let found: Vec<_> = level.find(&record_key(58), 300).collect();
         assert_eq!(vec![sst2.clone()], found);
 
         // If the snapshot is bellow sst2 min sequence, nothing is returned
-        let found = level.find(&record_key(58), 150);
+        let found: Vec<_> = level.find(&record_key(58), 150).collect();
         assert_eq!(empty, found);
 
         // A key out of range should yield None.
-        assert_eq!(empty, level.find(&record_key(87), 300));
+        let found: Vec<_> = level.find(&record_key(87), 300).collect();
+        assert_eq!(empty, found);
     }
 
     #[test]
@@ -621,7 +660,7 @@ mod tests {
 
     fn create_levels() -> Levels {
         let levels = Levels {
-            levels: vec![Arc::new(create_level_0()), Arc::new(create_level_1())]
+            levels: vec![Arc::new(create_level_0()), Arc::new(create_level_1())],
         };
         levels
     }
@@ -631,14 +670,7 @@ mod tests {
     }
 
     fn create_level_0_sstable() -> SSTableMetadata {
-        SSTableMetadata::new(
-            1,
-            0,
-            &b"a".to_vec(),
-            &b"m".to_vec(),
-            100,
-            200
-        )
+        SSTableMetadata::new(1, 0, &b"a".to_vec(), &b"m".to_vec(), 100, 200)
     }
 
     fn create_level_1() -> Level {
@@ -676,7 +708,7 @@ mod tests {
             &record_key(min_key),
             &record_key(max_key),
             min_seq,
-            max_seq
+            max_seq,
         ))
     }
 }

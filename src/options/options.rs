@@ -1,6 +1,6 @@
-use std::fmt;
-use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use crate::io::compressor::CompressorType;
+use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
+use std::fmt;
 
 /// Top-level configuration struct containing database and SSTable tuning options.
 #[derive(Clone, Default)]
@@ -64,7 +64,6 @@ impl fmt::Display for Options {
 /// Database-level configuration settings.
 #[derive(Clone)]
 pub struct DatabaseOptions {
-
     pub file_write_buffer_size: StorageQuantity,
 
     /// The maximum number of file descriptors kept in the field descriptor cache.
@@ -82,7 +81,6 @@ pub struct DatabaseOptions {
 }
 
 impl DatabaseOptions {
-
     /// Override the block cache size.
     pub fn with_block_cache_size(mut self, size: StorageQuantity) -> Self {
         self.block_cache_size = size;
@@ -116,11 +114,19 @@ impl DatabaseOptions {
 
 impl fmt::Display for DatabaseOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "  File Write Buffer Size: {:?}", self.file_write_buffer_size)?;
+        writeln!(
+            f,
+            "  File Write Buffer Size: {:?}",
+            self.file_write_buffer_size
+        )?;
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
-        writeln!(f, "  Max Manifest File Size: {:?}", self.max_manifest_file_size)
+        writeln!(
+            f,
+            "  Max Manifest File Size: {:?}",
+            self.max_manifest_file_size
+        )
     }
 }
 
@@ -153,7 +159,6 @@ pub struct SSTableOptions {
 }
 
 impl SSTableOptions {
-
     /// Override SSTable block size.
     pub fn with_block_size(mut self, size: StorageQuantity) -> Self {
         self.block_size = size;

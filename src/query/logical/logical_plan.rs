@@ -1,6 +1,6 @@
-use std::rc::Rc;
 use crate::query::logical::Expr;
 use crate::query::tree_node::TreeNode;
+use std::rc::Rc;
 
 /// Represents the LogicalPlan for MongoDB-like operations
 #[derive(Debug, Clone, PartialEq)]
@@ -9,8 +9,8 @@ pub enum LogicalPlan {
     TableScan {
         collection: String,
         projection: Option<Vec<String>>, // Fields to include
-        filter: Option<Expr>,      // Optional filtering condition
-        sort: Option<Vec<SortField>>,   // Optional sorting fields
+        filter: Option<Expr>,            // Optional filtering condition
+        sort: Option<Vec<SortField>>,    // Optional sorting fields
     },
 
     /// Represents a filter operation.
@@ -34,7 +34,7 @@ pub enum LogicalPlan {
     /// Represents limit and skip combined into a single node.
     Limit {
         input: Rc<LogicalPlan>,
-        skip: Option<usize>, // Number of rows to skip
+        skip: Option<usize>,  // Number of rows to skip
         limit: Option<usize>, // Maximum number of rows to return
     },
 }
@@ -165,4 +165,3 @@ impl LogicalPlanBuilder {
         Rc::new(self.plan)
     }
 }
-

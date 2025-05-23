@@ -1,7 +1,7 @@
-use std::cell::Cell;
-use std::io::{Result, Error, ErrorKind};
-use crate::io::ZeroCopy;
 use crate::io::varint;
+use crate::io::ZeroCopy;
+use std::cell::Cell;
+use std::io::{Error, ErrorKind, Result};
 
 pub struct ByteReader<'a> {
     buffer: &'a [u8],
@@ -18,7 +18,10 @@ impl<'a> ByteReader<'a> {
 
     pub fn read_u8(&self) -> Result<u8> {
         let pos = self.position.get();
-        let byte = self.buffer.get(pos).ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"))?;
+        let byte = self
+            .buffer
+            .get(pos)
+            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"))?;
         self.position.set(pos + 1);
         Ok(*byte)
     }
@@ -85,7 +88,8 @@ impl<'a> ByteReader<'a> {
 
     pub fn read_str(&self) -> Result<&str> {
         let slice = self.read_length_prefixed_slice()?;
-        std::str::from_utf8(slice).or_else(|e| Err(Error::new(ErrorKind::InvalidData, e.to_string())))
+        std::str::from_utf8(slice)
+            .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e.to_string())))
     }
 
     pub fn position(&self) -> usize {
@@ -102,7 +106,10 @@ impl<'a> ByteReader<'a> {
 
     pub fn seek(&self, offset: usize) -> Result<()> {
         if offset > self.buffer.len() {
-            return Err(Error::new(ErrorKind::InvalidInput, "Position out of bounds"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Position out of bounds",
+            ));
         }
         self.position.set(offset);
         Ok(())
@@ -140,7 +147,10 @@ impl<'a> ByteReader<'a> {
     pub fn skip(&self, bytes: usize) -> Result<()> {
         let pos = self.position.get() + bytes;
         if pos > self.buffer.len() {
-            return Err(Error::new(ErrorKind::InvalidInput, "Position out of bounds"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Position out of bounds",
+            ));
         }
         self.position.set(pos);
         Ok(())

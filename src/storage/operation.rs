@@ -1,7 +1,7 @@
-use std::io::{Error, ErrorKind};
 use crate::io::byte_reader::ByteReader;
 use crate::io::varint;
-use crate::storage::internal_key::encode_internal_key;
+use crate::storage::internal_key::{encode_internal_key, encode_record_key};
+use std::io::{Error, ErrorKind};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum OperationType {
@@ -22,7 +22,7 @@ impl From<OperationType> for u8 {
         match item {
             OperationType::MinKey => u8::MAX,
             OperationType::Put => 0x30,
-            OperationType::Delete=> 0x10,
+            OperationType::Delete => 0x10,
             OperationType::MaxKey => 0x00,
         }
     }
@@ -76,8 +76,12 @@ impl Operation {
         }
     }
 
-    pub fn compound_key(&self, sequence: u64) -> Vec<u8> {
-        encode_internal_key(self.collection, self.index, &self.user_key, sequence, self.operation_type)
+    pub fn internal_key(&self, sequence: u64) -> Vec<u8> {
+        encode_internal_key(
+            &encode_record_key(self.collection, self.index, &self.user_key),
+            sequence,
+            self.operation_type,
+        )
     }
     pub fn operation_type(&self) -> OperationType {
         self.operation_type.clone()
@@ -96,7 +100,7 @@ impl Operation {
             + self.value.len()
     }
 
-    pub fn append_wal_record(&self, vec:&mut Vec<u8>) {
+    pub fn append_wal_record(&self, vec: &mut Vec<u8>) {
         vec.push(u8::from(self.operation_type));
         varint::write_u32(self.collection, vec);
         varint::write_u32(self.index, vec);

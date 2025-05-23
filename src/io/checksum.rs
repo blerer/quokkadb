@@ -1,8 +1,7 @@
-use std::io::{Error, ErrorKind, Result};
 use crc32fast::Hasher;
+use std::io::{Error, ErrorKind, Result};
 
 pub trait ChecksumStrategy: Send + Sync {
-
     fn checksum_size(&self) -> usize;
 
     fn checksum(&self, data: &[u8]) -> Vec<u8>;
@@ -30,7 +29,13 @@ impl ChecksumStrategy for Crc32ChecksumStrategy {
 
         // Validate
         if computed_checksum != checksum {
-            Err(Error::new(ErrorKind::InvalidData, format!("Invalid checksum: expected {:?} was {:?}", checksum, computed_checksum)))
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Invalid checksum: expected {:?} was {:?}",
+                    checksum, computed_checksum
+                ),
+            ))
         } else {
             Ok(())
         }

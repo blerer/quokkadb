@@ -54,7 +54,6 @@ pub fn write_u64(x: u64, output: &mut Vec<u8>) {
         // Encode the number of extra bytes into the first byte
         encoding_space[0] |= encode_extra_bytes_to_read(extra_bytes);
         output.append(&mut encoding_space);
-
     } else if size == 9 {
         output.push(0xFF);
         output.extend_from_slice(&x.to_be_bytes());
@@ -84,7 +83,7 @@ pub fn read_u64(input: &[u8], offset: usize) -> (u64, usize) {
 
     let offset = offset + 1;
     let limit = offset + size as usize;
-    for &byte in input[offset .. limit].iter() {
+    for &byte in input[offset..limit].iter() {
         retval = (retval << 8) | byte as u64;
     }
 
@@ -183,7 +182,6 @@ mod tests {
 
     #[test]
     fn test_write_and_read_u64() {
-
         let mut buffer = Vec::new();
 
         let test_values = vec![
@@ -195,7 +193,6 @@ mod tests {
             u64::MAX,
             u64::MAX - 1,
         ];
-
 
         for &value in &test_values {
             buffer.clear();
@@ -248,7 +245,6 @@ mod tests {
 
     #[test]
     fn test_encode_decode() {
-
         let test_values = vec![
             0i64,
             -0i64,
@@ -265,7 +261,11 @@ mod tests {
         ];
 
         for &value in &test_values {
-            assert_eq!(value, decode_zigzag_64(encode_zigzag_64(value)), "Value mismatch for {value}");
+            assert_eq!(
+                value,
+                decode_zigzag_64(encode_zigzag_64(value)),
+                "Value mismatch for {value}"
+            );
         }
     }
 }

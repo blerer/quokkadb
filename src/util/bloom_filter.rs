@@ -1,8 +1,8 @@
+use crate::io::byte_reader::ByteReader;
+use crate::io::varint;
+use crate::util::murmur_hash64::murmur_hash64a;
 use std::f64::consts::LN_2;
 use std::io::Error;
-use crate::io::byte_reader::ByteReader;
-use crate::util::murmur_hash64::murmur_hash64a;
-use crate::io::varint;
 
 /// A Bloom Filter is a probabilistic data structure that efficiently tests for the existence of an element.
 /// It may yield false positives but guarantees no false negatives. This implementation uses MurmurHash3 for hashing.
@@ -17,12 +17,12 @@ use crate::io::varint;
 /// - `hash_count`: Number of hash functions used for each item.
 pub enum BloomFilter<'a> {
     Writable {
-        bit_array: Vec<u8>,  // Used during MemTable flush
+        bit_array: Vec<u8>, // Used during MemTable flush
         size: usize,
         hash_count: usize,
     },
     ReadOnly {
-        bit_array: &'a [u8],  // Read directly from SST block (zero-copy)
+        bit_array: &'a [u8], // Read directly from SST block (zero-copy)
         size: usize,
         hash_count: usize,
     },
@@ -54,10 +54,16 @@ impl<'a> BloomFilter<'a> {
     /// # Returns
     /// A `BloomFilter` instance with an appropriately sized bit array and number of hash functions.
     pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
+
+        assert!(expected_items > 0, "expected_items must be > 0");
+        assert!(false_positive_rate > 0.0 && false_positive_rate < 1.0, "false_positive_rate must be in (0, 1)");
+
         let ln2_squared = LN_2.powi(2);
-        let size = -((expected_items as f64) * false_positive_rate.ln() / ln2_squared).ceil() as usize;
-        let hash_count = ((size as f64 / expected_items as f64) * LN_2).ceil() as usize;
-        let byte_size = size >> 3;
+        let computed_size =
+            -((expected_items as f64) * false_positive_rate.ln() / ln2_squared).ceil() as usize;
+        let size = computed_size.max(1);
+        let hash_count = (((size as f64 / expected_items as f64) * LN_2).ceil() as usize).max(1);
+        let byte_size = (size + 7) >> 3;
         BloomFilter::Writable {
             bit_array: vec![0; byte_size],
             size,
@@ -72,11 +78,17 @@ impl<'a> BloomFilter<'a> {
     ///
     /// The item is hashed using double hashing to determine the bits to set.
     pub fn add(&mut self, item: &[u8]) {
-        if let BloomFilter::Writable { bit_array, size, hash_count } = self {
+        if let BloomFilter::Writable {
+            bit_array,
+            size,
+            hash_count,
+        } = self
+        {
             let (hash1, hash2) = Self::double_hash(item);
             let normalized_hash2 = hash2 % *size as u64;
             for i in 0..*hash_count {
-                let index = (hash1.wrapping_add(i as u64 * normalized_hash2) % *size as u64) as usize;
+                let index =
+                    (hash1.wrapping_add(i as u64 * normalized_hash2) % *size as u64) as usize;
                 Self::set_bit(bit_array, index);
             }
         } else {
@@ -97,7 +109,8 @@ impl<'a> BloomFilter<'a> {
         let normalized_hash2 = hash2 % self.size() as u64;
 
         for i in 0..self.hash_count() {
-            let index = (hash1.wrapping_add(i as u64 * normalized_hash2) % self.size() as u64) as usize;
+            let index =
+                (hash1.wrapping_add(i as u64 * normalized_hash2) % self.size() as u64) as usize;
             if !self.get_bit(index) {
                 return false;
             }
@@ -118,7 +131,7 @@ impl<'a> BloomFilter<'a> {
         (hash1, hash2)
     }
 
-   /// Helper function to set a bit in the bit array.
+    /// Helper function to set a bit in the bit array.
     fn set_bit(bit_array: &mut [u8], index: usize) {
         let byte_index = index >> 3;
         let bit_index = index & 7;
@@ -135,8 +148,12 @@ impl<'a> BloomFilter<'a> {
     /// - `false` if the bit is not set.
     fn get_bit(&self, index: usize) -> bool {
         let (bit_array, _size) = match self {
-            BloomFilter::Writable { bit_array, size, .. } => (bit_array.as_slice(), *size),
-            BloomFilter::ReadOnly { bit_array, size, .. } => (*bit_array, *size),
+            BloomFilter::Writable {
+                bit_array, size, ..
+            } => (bit_array.as_slice(), *size),
+            BloomFilter::ReadOnly {
+                bit_array, size, ..
+            } => (*bit_array, *size),
         };
 
         let byte_index = index >> 3;
@@ -163,7 +180,11 @@ impl<'a> BloomFilter<'a> {
     /// Converts the Bloom filter to an SSTable block format (serializing).
     pub fn to_block(&self) -> Vec<u8> {
         match self {
-            BloomFilter::Writable { bit_array, size, hash_count } => {
+            BloomFilter::Writable {
+                bit_array,
+                size,
+                hash_count,
+            } => {
                 let mut buffer = Vec::new();
                 varint::write_u64(*hash_count as u64, &mut buffer);
                 varint::write_u64(*size as u64, &mut buffer);
@@ -194,7 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bloom_filter() {
+    fn bloom_filter() {
         let mut bloom = BloomFilter::new(1000, 0.01);
         bloom.add(b"key1");
         bloom.add(b"key2");
@@ -213,6 +234,62 @@ mod tests {
         assert!(read_only_bloom.contains(b"key2"));
         assert!(!read_only_bloom.contains(b"unknown"));
     }
+
+    #[test]
+    fn with_small_nbr_of_items() {
+        let mut bloom = BloomFilter::new(4, 0.01);
+        bloom.add(b"key1");
+        bloom.add(b"key2");
+        bloom.add(b"key3");
+        bloom.add(b"key4");
+
+        assert!(bloom.contains(b"key1"));
+        assert!(bloom.contains(b"key2"));
+        assert!(bloom.contains(b"key3"));
+        assert!(bloom.contains(b"key4"));
+        assert!(!bloom.contains(b"unknown"));
+
+        // Convert to SST block format
+        let block = bloom.to_block();
+
+        // Load as a read-only filter from SST block
+        let read_only_bloom = BloomFilter::from_block(&block).unwrap();
+
+        assert!(bloom.contains(b"key1"));
+        assert!(bloom.contains(b"key2"));
+        assert!(bloom.contains(b"key3"));
+        assert!(bloom.contains(b"key4"));
+        assert!(!bloom.contains(b"unknown"));
+    }
+
+    #[test]
+    fn zero_expected_items_should_panic() {
+        let result = std::panic::catch_unwind(|| {
+            let _ = BloomFilter::new(0, 0.01);
+        });
+        assert!(result.is_err(), "Should panic for zero expected items");
+    }
+
+    #[test]
+    fn high_false_positive_should_not_panic() {
+        let mut filter = BloomFilter::new(1, 0.99); // May produce size = 0 if not clamped
+        let item = b"high-fpr";
+        filter.add(item);
+        assert!(filter.contains(item));
+    }
+
+    #[test]
+    fn low_false_positive_should_work() {
+        let mut filter = BloomFilter::new(10, 0.0001);
+        let item = b"low-fpr";
+        filter.add(item);
+        assert!(filter.contains(item));
+    }
+
+    #[test]
+    fn should_handle_very_small_alloc() {
+        let mut filter = BloomFilter::new(1, 0.9); // May cause size = 1
+        filter.add(b"x");
+        assert!(filter.contains(b"x"));
+    }
 }
-
-

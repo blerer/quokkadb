@@ -22,27 +22,7 @@ pub enum LogLevel {
 /// trace events and checking logging/tracing status.
 pub trait LoggerAndTracer: Send + Sync {
     /// Logs a formatted message at the specified level.
-    fn log(&self, level: LogLevel, msg: Arguments);
-
-    /// Convenience method for `Info` level logging.
-    fn info(&self, msg: Arguments) {
-        self.log(LogLevel::Info, msg);
-    }
-
-    /// Convenience method for `Warn` level logging.
-    fn warn(&self, msg: Arguments) {
-        self.log(LogLevel::Warn, msg);
-    }
-
-    /// Convenience method for `Error` level logging.
-    fn error(&self, msg: Arguments) {
-        self.log(LogLevel::Error, msg);
-    }
-
-    /// Convenience method for `Debug` level logging.
-    fn debug(&self, msg: Arguments) {
-        self.log(LogLevel::Debug, msg);
-    }
+    fn log(&self, level: LogLevel, context: &'static str, msg: Arguments);
 
     /// Emits a trace event message. Format should follow:
     ///
@@ -50,13 +30,49 @@ pub trait LoggerAndTracer: Send + Sync {
     ///
     /// Example:
     /// `event: flush start, level=0, reason=log count`
-    fn event(&self, event: Arguments);
+    fn event(&self, context: &'static str, event: Arguments);
 
     /// Returns `true` if tracing events are enabled.
     fn is_tracing_enabled(&self) -> bool;
 
     /// Returns `true` if the given log level is currently enabled.
     fn level_enabled(&self, level: LogLevel) -> bool;
+}
+
+
+#[macro_export]
+macro_rules! debug {
+    ($logger:expr, $($arg:tt)*) => {
+        $logger.log(LogLevel::Debug, module_path!(), format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! info {
+    ($logger:expr, $($arg:tt)*) => {
+        $logger.log(LogLevel::Info, module_path!(), format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! warn {
+    ($logger:expr, $($arg:tt)*) => {
+        $logger.log(LogLevel::Warn, module_path!(), format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! error {
+    ($logger:expr, $($arg:tt)*) => {
+        $logger.log(LogLevel::Error, module_path!(), format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! event {
+    ($logger:expr, $($arg:tt)*) => {
+        $logger.event(module_path!(), format_args!($($arg)*));
+    };
 }
 
 /// A simple logger that prints messages to stdout with timestamps and thread IDs.
@@ -69,7 +85,10 @@ pub struct StdoutLogger {
 
 impl StdoutLogger {
     pub fn new(min_level: LogLevel, tracing_enabled: bool) -> Arc<Self> {
-        Arc::new(StdoutLogger { tracing_enabled, min_level })
+        Arc::new(StdoutLogger {
+            tracing_enabled,
+            min_level,
+        })
     }
 
     /// Returns current timestamp in microseconds since UNIX_EPOCH.
@@ -82,19 +101,22 @@ impl StdoutLogger {
 }
 
 impl LoggerAndTracer for StdoutLogger {
-    fn log(&self, level: LogLevel, msg: Arguments) {
+    fn log(&self, level: LogLevel, context: &'static str, msg: Arguments) {
         if self.level_enabled(level) {
             let timestamp = Self::now_micros();
             let thread_id = std::thread::current().id();
-            println!("[{:?}] [{}] [thread={:?}] {}", level, timestamp, thread_id, msg);
+            println!(
+                "[{:?}] [{}] [thread={:?}] [{}] {}",
+                level, timestamp, thread_id, context, msg
+            );
         }
     }
 
-    fn event(&self, event: Arguments) {
+    fn event(&self, context: &'static str, event: Arguments) {
         if self.tracing_enabled {
             let timestamp = Self::now_micros();
             let thread_id = std::thread::current().id();
-            println!("[TRACE] [{}] [thread={:?}] {}", timestamp, thread_id, event);
+            println!("[TRACE] [{}] [thread={:?}] [{}] {}", timestamp, thread_id, context, event);
         }
     }
 
