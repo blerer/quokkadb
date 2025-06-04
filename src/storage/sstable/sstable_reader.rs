@@ -304,13 +304,16 @@ mod tests {
 
         let sst = writer.finish().unwrap();
 
+        let expected_size = path.join(DbFile::new_sst(12).filename()).metadata().unwrap().len();
+
         let expected = SSTableMetadata::new(
             12,
             0,
             &encode_record_key(10, 0, &inserts[0].0),
             &encode_record_key(10, 0, &inserts[3].0),
             15,
-            18
+            18,
+            expected_size,
         );
         assert_eq!(sst, expected);
 

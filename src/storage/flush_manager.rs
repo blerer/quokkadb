@@ -105,15 +105,14 @@ impl FlushManager {
     ) -> Result<SSTableMetadata> {
         let start = Instant::now();
         let memtable_size = memtable.size();
-        let sst = memtable.flush(&db_dir, &sst_file, &options);
+        let sst = memtable.flush(&db_dir, &sst_file, &options)?;
         let duration = start.elapsed();
         metrics.memtable_size.record(memtable_size as u64);
         metrics.count.inc();
         metrics.duration.record(duration.as_micros() as u64);
 
         let sst_path = &db_dir.join(sst_file.filename());
-        let sst_size = sst_path.metadata()?.len();
-        let throughput = sst_size as f64 / duration.as_secs_f64();
+        let throughput = sst.size as f64 / duration.as_secs_f64();
         metrics.write_throughput.record(throughput as u64);
 
         info!(logger, "Memtable flushed, memtable={}, sst={}", memtable.log_number, sst_file.number);
@@ -125,8 +124,9 @@ impl FlushManager {
 
         // load the new sst in the cache to validate that everything when well and made it available
         // straightaway when the memtable is dropped
+        let sst_path = &db_dir.join(sst_file.filename());
         sst_cache.get(sst_path)?;
-        sst
+        Ok(sst)
     }
 
     pub fn enqueue(&self, task: FlushTask) -> Result<()> {
@@ -159,9 +159,9 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_counter("flush_count", &self.count)
-            .register_histogram("flush_duration", &self.duration)
-            .register_histogram("flush_write_throughput", &self.write_throughput)
-            .register_histogram("flush_memtable_size", &self.memtable_size);
+            .register_counter("flush_count", self.count.clone())
+            .register_histogram("flush_duration", self.duration.clone())
+            .register_histogram("flush_write_throughput", self.write_throughput.clone())
+            .register_histogram("flush_memtable_size", self.memtable_size.clone());
     }
 }

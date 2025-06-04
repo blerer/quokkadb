@@ -311,11 +311,11 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_atomic_gauge("wal_files", &self.files)
-            .register_atomic_gauge("wal_total_bytes", &self.total_bytes)
-            .register_counter("wal_syncs", &self.syncs)
-            .register_atomic_gauge("wal_bytes_buffered", &self.bytes_buffered)
-            .register_counter("wal_bytes_written", &self.bytes_written);
+            .register_gauge("wal_files", self.files.clone())
+            .register_gauge("wal_total_bytes", self.total_bytes.clone())
+            .register_counter("wal_syncs", self.syncs.clone())
+            .register_gauge("wal_bytes_buffered", self.bytes_buffered.clone())
+            .register_counter("wal_bytes_written", self.bytes_written.clone());
     }
 }
 
@@ -327,6 +327,7 @@ mod tests {
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
     use tempfile::tempdir;
+    use crate::obs::metrics::Gauge;
 
     #[test]
     fn test_replay_write_ahead_log() {

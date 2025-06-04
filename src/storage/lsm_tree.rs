@@ -1,15 +1,15 @@
-use crate::obs::metrics::MetricRegistry;
 use crate::storage::catalog::Catalog;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
-use crate::storage::memtable::{Memtable, MemtableMetrics};
+use crate::storage::memtable::Memtable;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::Arc;
+use crate::storage::lsm_version::Levels;
 
 pub struct LsmTree {
     pub manifest: Arc<ManifestState>,
@@ -18,27 +18,19 @@ pub struct LsmTree {
 }
 
 impl LsmTree {
-    pub fn new(
-        metric_registry: &mut MetricRegistry,
-        current_log_number: u64,
-        next_file_number: u64,
-    ) -> Self {
-        let memtable_metrics = MemtableMetrics::new();
-        memtable_metrics.register_to(metric_registry);
+    pub fn new(current_log_number: u64, next_file_number: u64,) -> Self {
         LsmTree {
             manifest: Arc::new(ManifestState::new(current_log_number, next_file_number)),
-            memtable: Arc::new(Memtable::new(memtable_metrics, current_log_number)),
+            memtable: Arc::new(Memtable::new(current_log_number)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
 
-    pub fn from(metric_registry: &mut MetricRegistry, manifest_state: ManifestState) -> Self {
-        let memtable_metrics = MemtableMetrics::new();
-        memtable_metrics.register_to(metric_registry);
+    pub fn from(manifest_state: ManifestState) -> Self {
         let oldest_log_number = manifest_state.lsm.oldest_log_number;
         LsmTree {
             manifest: Arc::new(manifest_state),
-            memtable: Arc::new(Memtable::new(memtable_metrics, oldest_log_number)),
+            memtable: Arc::new(Memtable::new(oldest_log_number)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
@@ -53,11 +45,9 @@ impl LsmTree {
                     self.imm_memtables.iter().cloned().collect();
                 imm_memtables.push_back(self.memtable.clone());
 
-                let metrics = self.memtable.metrics();
-
                 LsmTree {
                     manifest: Arc::new(self.manifest.apply(edit)),
-                    memtable: Arc::new(Memtable::new(metrics, *log_number)),
+                    memtable: Arc::new(Memtable::new(*log_number)),
                     imm_memtables: Arc::new(imm_memtables),
                 }
             }
@@ -134,7 +124,11 @@ impl LsmTree {
         }
     }
 
-    pub fn catalogue(&self) -> &Arc<Catalog> {
-        self.manifest.catalogue()
+    pub fn catalogue(&self) -> Arc<Catalog> {
+        self.manifest.catalogue().clone()
+    }
+
+    pub fn levels(&self) -> Arc<Levels> {
+        self.manifest.lsm.sst_levels.clone()
     }
 }

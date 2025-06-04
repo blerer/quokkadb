@@ -4,57 +4,51 @@ use std::sync::Arc;
 
 #[derive(Default, Clone)]
 pub struct MetricRegistry {
-    metrics: BTreeMap<String, Metric>,
+    counters: BTreeMap<String, Arc<Counter>>,
+    gauges: BTreeMap<String, Arc<dyn Gauge>>,
+    histograms: BTreeMap<String, Arc<Histogram>>,
+    computed: BTreeMap<String, Arc<dyn Computed>>,
 }
 
 impl MetricRegistry {
     pub fn new() -> Self {
-        MetricRegistry {
-            metrics: BTreeMap::new(),
-        }
+        Self::default()
     }
-
-    pub fn register_counter(&mut self, name: &str, counter: &Arc<Counter>) -> &mut Self {
-        self.register(name, Metric::Counter(counter.clone()))
-    }
-
-    pub fn register_atomic_gauge(&mut self, name: &str, gauge: &Arc<AtomicGauge>) -> &mut Self {
-        self.register(name, Metric::AtomicGauge(gauge.clone()))
-    }
-
-    pub fn register_derived_gauge(
-        &mut self,
-        name: &str,
-        gauge: &Arc<DerivedGaugeU64>,
-    ) -> &mut Self {
-        self.register(name, Metric::DerivedGauge(gauge.clone()))
-    }
-
-    pub fn register_hit_ratio_gauge(
-        &mut self,
-        name: &str,
-        gauge: &Arc<HitRatioGauge>,
-    ) -> &mut Self {
-        self.register(name, Metric::HitRatioGauge(gauge.clone()))
-    }
-
-    pub fn register_histogram(&mut self, name: &str, histogram: &Arc<Histogram>) -> &mut Self {
-        self.register(name, Metric::Histogram(histogram.clone()))
-    }
-
-    fn register(&mut self, name: &str, metric: Metric) -> &mut Self {
-        self.metrics.insert(name.to_string(), metric);
+    pub fn register_counter(&mut self, name: &str, counter: Arc<Counter>) -> &mut Self {
+        self.counters.insert(name.to_string(), counter);
         self
     }
-}
 
-#[derive(Clone)]
-pub enum Metric {
-    Counter(Arc<Counter>),
-    DerivedGauge(Arc<DerivedGaugeU64>),
-    AtomicGauge(Arc<AtomicGauge>),
-    HitRatioGauge(Arc<HitRatioGauge>),
-    Histogram(Arc<Histogram>),
+    pub fn register_gauge(&mut self, name: &str, gauge: Arc<dyn Gauge>) -> &mut Self {
+        self.gauges.insert(name.to_string(), gauge);
+        self
+    }
+
+    pub fn register_computed(&mut self, name: &str, computed: Arc<dyn Computed>) -> &mut Self {
+        self.computed.insert(name.to_string(), computed);
+        self
+    }
+
+    pub fn register_histogram(&mut self, name: &str, histogram: Arc<Histogram>) -> &mut Self {
+        self.histograms.insert(name.to_string(), histogram);
+        self
+    }
+
+    pub fn get_counter(&self, name: &str) -> Option<Arc<Counter>> {
+        self.counters.get(name).cloned()
+    }
+
+    pub fn get_gauge(&self, name: &str) -> Option<Arc<dyn Gauge>> {
+        self.gauges.get(name).cloned()
+    }
+
+    pub fn get_computed(&self, name: &str) -> Option<Arc<dyn Computed>> {
+        self.computed.get(name).cloned()
+    }
+
+    pub fn get_histogram(&self, name: &str) -> Option<Arc<Histogram>> {
+        self.histograms.get(name).cloned()
+    }
 }
 
 #[derive(Default)]
@@ -83,19 +77,27 @@ impl Counter {
     }
 }
 
-pub struct DerivedGaugeU64 {
+pub trait Gauge: Send + Sync {
+    /// Returns the current value of the gauge as an `u64`.
+    fn get(&self) -> u64;
+}
+
+pub struct DerivedGauge {
     /// Returns the current value of the metric as an `f64`.
     /// For integer-based metrics (e.g., `Counter`), this is a cast.
     compute: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
-impl DerivedGaugeU64 {
+impl DerivedGauge {
     pub fn new(compute: Arc<dyn Fn() -> u64 + Send + Sync>) -> Arc<Self> {
         Arc::new(Self { compute })
     }
+}
+
+impl Gauge for DerivedGauge {
 
     /// Returns the current computed value of the gauge.
-    pub fn get(&self) -> u64 {
+    fn get(&self) -> u64 {
         (self.compute)()
     }
 }
@@ -108,9 +110,6 @@ pub struct AtomicGauge {
 impl AtomicGauge {
     pub fn new() -> Arc<Self> {
         Arc::new(AtomicGauge::default())
-    }
-    pub fn get(&self) -> u64 {
-        self.atomic.load(Ordering::Relaxed)
     }
 
     pub fn inc(&self) {
@@ -130,20 +129,35 @@ impl AtomicGauge {
     }
 }
 
-pub struct HitRatioGauge {
+impl Gauge for AtomicGauge {
+    /// Returns the current value of the atomic gauge.
+    fn get(&self) -> u64 {
+        self.atomic.load(Ordering::Relaxed)
+    }
+}
+
+pub trait Computed: Send + Sync {
+    /// Returns the current computed value as an `f64`.
+    fn get(&self) -> f64;
+}
+
+pub struct HitRatio {
     hit_counter: Arc<Counter>,
     miss_counter: Arc<Counter>,
 }
 
-impl HitRatioGauge {
+impl HitRatio {
     pub fn new(hit_counter: Arc<Counter>, miss_counter: Arc<Counter>) -> Arc<Self> {
         Arc::new(Self {
             hit_counter,
             miss_counter,
         })
     }
+}
 
-    pub fn get(&self) -> f64 {
+impl Computed for HitRatio {
+    /// Returns the current hit ratio as an `f64`.
+    fn get(&self) -> f64 {
         let h = self.hit_counter.get() as f64;
         let m = self.miss_counter.get() as f64;
         if h + m == 0.0 {
@@ -376,17 +390,35 @@ pub fn size_buckets() -> Vec<u64> {
 }
 
 #[cfg(test)]
+pub fn assert_counter_eq(registry: &MetricRegistry, name: &str, expected: u64) {
+    if let Some(counter) = registry.get_counter(name) {
+        assert_eq!(counter.get(), expected, "Counter '{}' mismatch", name);
+    } else {
+        panic!("Counter '{}' not found in registry", name);
+    }
+}
+
+#[cfg(test)]
+pub fn assert_gauge_eq(registry: &MetricRegistry, name: &str, expected: u64) {
+    if let Some(gauge) = registry.get_gauge(name) {
+        assert_eq!(gauge.get(), expected, "Gauge '{}' mismatch", name);
+    } else {
+        panic!("Gauge '{}' not found in registry", name);
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     mod hit_ratio {
-        use crate::obs::metrics::Counter;
-        use crate::obs::metrics::HitRatioGauge;
+        use crate::obs::metrics::{Computed, Counter};
+        use crate::obs::metrics::HitRatio;
 
         #[test]
         fn test_mem_table_hit_ratio() {
             let hits = Counter::new();
             let misses = Counter::new();
-            let ratio = HitRatioGauge::new(hits.clone(), misses.clone());
+            let ratio = HitRatio::new(hits.clone(), misses.clone());
 
             // Initially: 0 hits, 0 misses → ratio should be 0.0
             assert_eq!(ratio.get(), 0.0);

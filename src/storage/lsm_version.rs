@@ -152,7 +152,7 @@ impl Levels {
 
         while new_levels.len() <= sst_level {
             let level = if sst_level == new_levels.len() {
-                Level::new(sst.level, vec![sst.clone()])
+                Level::new(sst.level, vec![sst.clone()], sst.size)
             } else {
                 Level::empty(sst.level)
             };
@@ -170,6 +170,25 @@ impl Levels {
         self.levels
             .iter()
             .flat_map(move |level| level.find(record_key, snapshot))
+    }
+
+    pub fn level(&self, level: usize) -> Option<&Level> {
+        if level >= self.levels.len() {
+            None
+        } else {
+            Some(self.levels[level].as_ref())
+        }
+    }
+    pub fn iter(&self) -> impl Iterator<Item=&Arc<Level>> {
+        self.levels.iter()
+    }
+
+    pub fn sst_count(&self) -> usize {
+        self.levels.iter().map(|level| level.sst_count()).sum()
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.levels.iter().map( |level| level.total_bytes()).sum()
     }
 }
 
@@ -201,11 +220,13 @@ pub enum Level {
     Overlapping {
         level: u32,
         sstables: Vec<Arc<SSTableMetadata>>,
+        size: u64, // Total size of all SSTables in this level
     },
     // For L1+ levels, files are non-overlapping and sorted by min_key.
     NonOverlapping {
         level: u32,
         sstables: Vec<Arc<SSTableMetadata>>,
+        size: u64, // Total size of all SSTables in this level
     },
 }
 
@@ -215,21 +236,23 @@ impl Level {
             Overlapping {
                 level: 0,
                 sstables: Vec::new(),
+                size: 0,
             }
         } else {
             NonOverlapping {
                 level,
                 sstables: Vec::new(),
+                size: 0,
             }
         }
     }
 
-    pub fn new(level: u32, mut sstables: Vec<Arc<SSTableMetadata>>) -> Self {
+    pub fn new(level: u32, mut sstables: Vec<Arc<SSTableMetadata>>, size: u64) -> Self {
         if level == 0 {
-            Overlapping { level: 0, sstables }
+            Overlapping { level: 0, sstables, size }
         } else {
             sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
-            NonOverlapping { level, sstables }
+            NonOverlapping { level, sstables, size }
         }
     }
 
@@ -250,10 +273,11 @@ impl Level {
 
     fn add(&self, sst: Arc<SSTableMetadata>) -> Self {
         match &self {
-            Overlapping { level, sstables } | NonOverlapping { level, sstables } => {
+            Overlapping { level, sstables, size } | NonOverlapping { level, sstables, size } => {
+                let size = size + sst.size;
                 let mut copy = sstables.iter().cloned().collect::<Vec<_>>();
                 copy.push(sst);
-                Level::new(*level, copy)
+                Level::new(*level, copy, size)
             }
         }
     }
@@ -311,12 +335,12 @@ impl Level {
         snapshot: u64,
     ) -> Vec<Arc<SSTableMetadata>> {
         match self {
-            Overlapping { level: _, sstables } => sstables
+            Overlapping { level: _, sstables, size: _ } => sstables
                 .iter()
                 .filter(|sst| overlaps(interval, sst) && snapshot >= sst.min_sequence_number)
                 .cloned()
                 .collect(),
-            NonOverlapping { level: _, sstables } => {
+            NonOverlapping { level: _, sstables, size: _ } => {
                 // Use binary search to find the first candidate SSTable.
                 // Here we use the interval's start bound as the lower limit.
                 let lower = match interval.start_bound() {
@@ -350,6 +374,18 @@ impl Level {
             }
         }
     }
+
+    pub fn total_bytes(&self) -> u64 {
+        match self {
+            Overlapping { size, .. } | NonOverlapping { size, .. } => *size,
+        }
+    }
+
+    pub fn sst_count(&self) -> usize {
+        match self {
+            Overlapping { sstables, .. } | NonOverlapping { sstables, .. } => sstables.len(),
+        }
+    }
 }
 
 /// A helper function that checks if an SSTable's key range overlaps with the provided interval.
@@ -371,15 +407,16 @@ impl SnapshotElement for Level {
     fn read_from(reader: &ByteReader) -> Result<Self> {
         let level = reader.read_varint_u32()?;
         let sstables = Self::read_sstables_from(reader)?;
+        let size = sstables.iter().map(|sst| sst.size).sum();
         match level {
-            0 => Ok(Overlapping { level, sstables }),
-            _ => Ok(NonOverlapping { level, sstables }),
+            0 => Ok(Overlapping { level, sstables, size }),
+            _ => Ok(NonOverlapping { level, sstables, size }),
         }
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         match &self {
-            Overlapping { level, sstables } | NonOverlapping { level, sstables } => {
+            Overlapping { level, sstables, size: _size } | NonOverlapping { level, sstables, size: _size } => {
                 writer.write_varint_u32(*level);
                 self.write_sstables_to(sstables, writer);
             }
@@ -398,6 +435,7 @@ pub struct SSTableMetadata {
     pub max_key: Vec<u8>,
     pub min_sequence_number: u64,
     pub max_sequence_number: u64,
+    pub size: u64, // Size of the SSTable file in bytes
 }
 
 impl SSTableMetadata {
@@ -408,6 +446,7 @@ impl SSTableMetadata {
         max_key: &[u8],
         min_seq: u64,
         max_seq: u64,
+        size: u64,
     ) -> SSTableMetadata {
         SSTableMetadata {
             number,
@@ -416,6 +455,7 @@ impl SSTableMetadata {
             max_key: max_key.to_vec(),
             min_sequence_number: min_seq,
             max_sequence_number: max_seq,
+            size,
         }
     }
 }
@@ -429,6 +469,7 @@ impl SnapshotElement for SSTableMetadata {
             max_key: reader.read_length_prefixed_slice()?.to_vec(),
             min_sequence_number: reader.read_varint_u64()?,
             max_sequence_number: reader.read_varint_u64()?,
+            size: reader.read_varint_u64()?,
         })
     }
 
@@ -439,7 +480,8 @@ impl SnapshotElement for SSTableMetadata {
             .write_length_prefixed_slice(&self.min_key)
             .write_length_prefixed_slice(&self.max_key)
             .write_varint_u64(self.min_sequence_number)
-            .write_varint_u64(self.max_sequence_number);
+            .write_varint_u64(self.max_sequence_number)
+            .write_varint_u64(self.size);
     }
 }
 impl PartialOrd<Self> for SSTableMetadata {
@@ -468,9 +510,9 @@ mod tests {
         // Create two overlapping SSTables:
         // sst1 covers keys 1 to 40 and is visible for snapshot 100..=200.
         // sst2 covers keys 20 to 60 and is visible for snapshot 201..=300.
-        let sst1 = create_sstable(1, 0, 1, 40, 100, 200);
-        let sst2 = create_sstable(2, 0, 20, 60, 201, 300);
-        let level = Level::new(0, vec![sst1.clone(), sst2.clone()]);
+        let sst1 = create_sstable(1, 0, 1, 40, 100, 200, 53_248);
+        let sst2 = create_sstable(2, 0, 20, 60, 201, 300, 79_872);
+        let level = Level::new(0, vec![sst1.clone(), sst2.clone()], 133_120);
 
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
@@ -500,9 +542,9 @@ mod tests {
         // For non-overlapping SSTables (e.g., L1+), assume:
         // sst1 covers 1 to 40 (snapshot 100..=200)
         // sst2 covers 41 to 60 (snapshot 201..=300)
-        let sst1 = create_sstable(1, 1, 1, 40, 100, 200);
-        let sst2 = create_sstable(2, 1, 41, 60, 201, 300);
-        let level = Level::new(1, vec![sst1.clone(), sst2.clone()]);
+        let sst1 = create_sstable(1, 1, 1, 40, 100, 200, 53_248);
+        let sst2 = create_sstable(2, 1, 41, 60, 201, 300, 79_872);
+        let level = Level::new(1, vec![sst1.clone(), sst2.clone()], 133_120);
 
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
@@ -529,10 +571,10 @@ mod tests {
         // sst1: keys 1 to 60, visible for snapshot 100..=200.
         // sst2: keys 40 to 100, visible for snapshot 201..=300.
         // sst3: keys 70 to 100, visible for snapshot 301..=400.
-        let sst1 = create_sstable(1, 0, 1, 60, 100, 200);
-        let sst2 = create_sstable(2, 0, 40, 100, 201, 300);
-        let sst3 = create_sstable(3, 0, 70, 100, 301, 400);
-        let coll = Level::new(0, vec![sst1.clone(), sst2.clone(), sst3.clone()]);
+        let sst1 = create_sstable(1, 0, 1, 60, 100, 200, 53_248);
+        let sst2 = create_sstable(2, 0, 40, 100, 201, 300, 79_872);
+        let sst3 = create_sstable(3, 0, 70, 100, 301, 400, 32_768);
+        let coll = Level::new(0, vec![sst1.clone(), sst2.clone(), sst3.clone()], 165_888);
 
         let interval = Interval::closed(record_key(50), record_key(100));
 
@@ -577,10 +619,10 @@ mod tests {
         // sst1: keys 1 to 60, visible for snapshot 100..=200.
         // sst2: keys 61 to 69, visible for snapshot 150..=300.
         // sst3: keys 70 to 100, visible for snapshot 232..=400.
-        let sst1 = create_sstable(1, 0, 1, 60, 100, 200);
-        let sst2 = create_sstable(2, 0, 61, 69, 150, 300);
-        let sst3 = create_sstable(3, 0, 70, 100, 232, 400);
-        let coll = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()]);
+        let sst1 = create_sstable(1, 0, 1, 60, 100, 200, 53_248);
+        let sst2 = create_sstable(2, 0, 61, 69, 150, 300, 79_872);
+        let sst3 = create_sstable(3, 0, 70, 100, 232, 400, 32_768);
+        let coll = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], 165_888);
 
         let interval = Interval::closed(record_key(50), record_key(100));
 
@@ -666,11 +708,11 @@ mod tests {
     }
 
     fn create_level_0() -> Level {
-        Level::new(0, vec![Arc::new(create_level_0_sstable())])
+        Level::new(0, vec![Arc::new(create_level_0_sstable())], 79_872)
     }
 
     fn create_level_0_sstable() -> SSTableMetadata {
-        SSTableMetadata::new(1, 0, &b"a".to_vec(), &b"m".to_vec(), 100, 200)
+        SSTableMetadata::new(1, 0, &b"a".to_vec(), &b"m".to_vec(), 100, 200, 79_872)
     }
 
     fn create_level_1() -> Level {
@@ -682,6 +724,7 @@ mod tests {
             max_key: b"z".to_vec(),
             min_sequence_number: 201,
             max_sequence_number: 300,
+            size: 1024,
         };
         let sstable2 = SSTableMetadata {
             number: 3,
@@ -690,8 +733,9 @@ mod tests {
             max_key: b"zz".to_vec(),
             min_sequence_number: 301,
             max_sequence_number: 400,
+            size: 1024,
         };
-        Level::new(1, vec![Arc::new(sstable1), Arc::new(sstable2)])
+        Level::new(1, vec![Arc::new(sstable1), Arc::new(sstable2)], 2048)
     }
 
     fn create_sstable(
@@ -701,6 +745,7 @@ mod tests {
         max_key: i32,
         min_seq: u64,
         max_seq: u64,
+        size: u64,
     ) -> Arc<SSTableMetadata> {
         Arc::new(SSTableMetadata::new(
             number,
@@ -709,6 +754,7 @@ mod tests {
             &record_key(max_key),
             min_seq,
             max_seq,
+            size,
         ))
     }
 }

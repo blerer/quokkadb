@@ -1,6 +1,6 @@
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::MetricRegistry;
+use crate::obs::metrics::{DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
@@ -33,7 +33,7 @@ struct StorageEngine {
     queue: Mutex<VecDeque<Arc<Writer>>>,
     manifest: Mutex<Manifest>,
     write_ahead_log: Mutex<WriteAheadLog>,
-    lsm_tree: ArcSwap<LsmTree>,
+    lsm_tree: Arc<ArcSwap<LsmTree>>,
     next_file_number: AtomicU64, // The counter used to create the file ids
     next_seq_number: AtomicU64,  // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
@@ -74,7 +74,7 @@ impl StorageEngine {
 
             let next_file_number = manifest_state.lsm.next_file_number;
 
-            let mut lsm_tree = LsmTree::from(metric_registry, manifest_state);
+            let mut lsm_tree = LsmTree::from(manifest_state);
 
             let mut rotated_log_files = VecDeque::new();
 
@@ -210,6 +210,9 @@ impl StorageEngine {
                 sst_cache.clone(),
             );
 
+            let lsm_tree = Arc::new(ArcSwap::new(Arc::new(lsm_tree)));
+            Self::add_metrics(metric_registry, &options, lsm_tree.clone());
+
             Ok(Arc::new(StorageEngine {
                 logger,
                 db_dir: db_dir.to_path_buf(),
@@ -217,7 +220,7 @@ impl StorageEngine {
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
-                lsm_tree: ArcSwap::new(Arc::new(lsm_tree)),
+                lsm_tree,
                 next_file_number,
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
@@ -231,7 +234,6 @@ impl StorageEngine {
             let manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let lsm_tree = Arc::new(LsmTree::new(
-                metric_registry,
                 log_number,
                 next_file_number.load(Ordering::Relaxed),
             ));
@@ -259,6 +261,9 @@ impl StorageEngine {
                 sst_cache.clone(),
             );
 
+            let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
+            Self::add_metrics(metric_registry, &options, lsm_tree.clone());
+
             Ok(Arc::new(StorageEngine {
                 logger,
                 db_dir: db_dir.to_path_buf(),
@@ -266,7 +271,7 @@ impl StorageEngine {
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
                 manifest: Mutex::new(manifest),
                 write_ahead_log: Mutex::new(wal),
-                lsm_tree: ArcSwap::new(lsm_tree),
+                lsm_tree,
                 next_file_number,
                 next_seq_number: AtomicU64::new(1),
                 last_visible_seq: AtomicU64::new(0),
@@ -447,13 +452,21 @@ impl StorageEngine {
     }
 
     pub fn flush(self: &Arc<Self>) -> Result<()> {
+        info!(self.logger, "Flush requested");
+        event!(self.logger, "requested_flush start");
+
+        // TODO: Handle the case where the flush is not needed (e.g. memtable is empty)
+        // TODO: Handle the case where the engine is in error mode
+
         let engine = self.clone();
         let callback = Arc::new(BlockingCallback::new(move |result| {
             engine.update_lsm_tree_sstables(result)
         }));
 
         self.perform_wal_and_memtable_rotation(&callback.clone())?;
-        callback.await_blocking()
+        callback.await_blocking()?;
+        event!(self.logger, "requested_flush completed");
+        Ok(())
     }
 
     fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) {
@@ -604,6 +617,64 @@ impl StorageEngine {
     fn handle_write_error(&self, error: &Error, writers: &Vec<Arc<Writer>>) {
         todo!()
     }
+
+    fn add_metrics(metric_registry: &mut MetricRegistry, options: &Options, lsm_tree: Arc<ArcSwap<LsmTree>>) {
+
+        for level in 0..options.db.max_levels {
+            let level_name = format!("level_{}", level);
+
+            let lsm = lsm_tree.clone();
+            metric_registry.register_gauge(
+                &format!("sstable_count_{}", level_name),
+                DerivedGauge::new(Arc::new(move || {
+                    let levels = lsm.load().levels();
+                    let may_be_level = levels.level(level as usize);
+                    may_be_level.map_or(0, |l| l.sst_count() as u64)
+                })),
+            );
+
+            let lsm = lsm_tree.clone();
+            metric_registry.register_gauge(
+                &format!("sstable_size_{}", level_name),
+                DerivedGauge::new(Arc::new(move || {
+                    let levels = lsm.load().levels();
+                    let may_be_level = levels.level(level as usize);
+                    may_be_level.map_or(0, |l| l.total_bytes())
+                })),
+            );
+        }
+
+        let lsm = lsm_tree.clone();
+        metric_registry.register_gauge("sstable_count",
+            DerivedGauge::new(Arc::new(move || { lsm.load().levels().sst_count() as u64 })),
+        );
+
+        let lsm = lsm_tree.clone();
+        metric_registry.register_gauge("stable_size",
+            DerivedGauge::new(Arc::new(move || { lsm.load().levels().total_bytes() })),
+        );
+
+        let lsm = lsm_tree.clone();
+        metric_registry.register_gauge("memtable_size",
+                                       DerivedGauge::new(Arc::new(move || { lsm.load().memtable.size() as u64 })),
+        );
+
+        let lsm = lsm_tree.clone();
+        metric_registry.register_gauge("memtable_total_size",
+                                       DerivedGauge::new(Arc::new(move || {
+                                           let lsm_tree = lsm.load();
+                                           (lsm_tree.memtable.size()
+                                               + lsm_tree.imm_memtables.iter().map(|m| m.size()).sum::<usize>())
+                                           as u64
+                                       })),
+        );
+
+        let lsm_tree = lsm_tree.clone();
+        metric_registry.register_gauge("memtable_count",
+                                       DerivedGauge::new(Arc::new(move || { (lsm_tree.load().imm_memtables.len() + 1) as u64 })),
+        );
+    }
+
 }
 
 impl Callback<Result<SSTableOperation>> for AsyncCallback<Result<SSTableOperation>> {
@@ -740,6 +811,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::Path;
     use tempfile::tempdir;
+    use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
 
     mod scan_tests {
         use super::*;
@@ -796,9 +868,10 @@ mod tests {
     fn test_read() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
         let engine = StorageEngine::new(
             test_instance(),
-            &mut MetricRegistry::default(),
+            registry,
             Arc::new(Options::lightweight()),
             &path,
         )
@@ -815,11 +888,26 @@ mod tests {
             let _ = &engine.write(put(10, 0, insert)).unwrap();
         }
 
+        let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
+
         let _ = &engine.write(delete(10, 0, 4)).unwrap();
+
+        let snapshot2 = engine.last_visible_seq.load(Ordering::Relaxed);
+
+        assert_gauge_eq(registry, "sstable_count", 0);
+        assert_gauge_eq(registry, "sstable_count_level_0", 0);
+        assert_gauge_eq(registry, "sstable_count_level_1", 0);
+        assert_counter_eq(registry, "flush_count", 0);
 
         for flush in [false, true] {
             if flush {
-                &engine.flush().unwrap();
+                let _ = &engine.flush().unwrap();
+
+                assert_gauge_eq(registry, "sstable_count", 1);
+                assert_gauge_eq(registry, "sstable_count_level_0", 1);
+                assert_gauge_eq(registry, "sstable_count_level_1", 0);
+                assert_counter_eq(registry, "flush_count", 1);
+
             }
 
             let actual = &engine.read(10, 0, &user_key(1), None).unwrap().unwrap();
@@ -833,6 +921,54 @@ mod tests {
 
             assert!(&engine.read(10, 0, &user_key(4), None).unwrap().is_none());
         }
+
+        let updates = vec![
+            doc! { "id": 2, "name": "Darth Vader", "role": "Father" },
+            doc! { "id": 3, "name": "Leia Organa", "role": "Sister" },
+            doc! { "id": 4, "name": "Han Solo", "role": "Friend" },
+        ];
+
+        for update in updates {
+            let _ = &engine.write(put(10, 0, update)).unwrap();
+        }
+
+        for flush in [false, true] {
+            if flush {
+                let _ = &engine.flush().unwrap();
+
+                assert_gauge_eq(registry, "sstable_count", 2);
+                assert_gauge_eq(registry, "sstable_count_level_0", 2);
+                assert_gauge_eq(registry, "sstable_count_level_1", 0);
+                assert_counter_eq(registry, "flush_count", 2);
+            }
+
+            let actual = &engine.read(10, 0, &user_key(1), None).unwrap().unwrap();
+            assert_doc_eq(actual, doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" });
+
+            let actual = &engine.read(10, 0, &user_key(2), None).unwrap().unwrap();
+            assert_doc_eq(actual, doc! { "id": 2, "name": "Darth Vader", "role": "Father" });
+
+            let actual = &engine.read(10, 0, &user_key(3), None).unwrap().unwrap();
+            assert_doc_eq(actual, doc! { "id": 3, "name": "Leia Organa", "role": "Sister" },);
+
+            let actual = &engine.read(10, 0, &user_key(4), None).unwrap().unwrap();
+            assert_doc_eq(actual, doc! { "id": 4, "name": "Han Solo", "role": "Friend" },);
+        }
+
+        // Now we will test with a snapshot
+        let actual = &engine.read(10, 0, &user_key(1), Some(snapshot)).unwrap().unwrap();
+        assert_doc_eq(actual, doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" });
+
+        let actual = &engine.read(10, 0, &user_key(2), Some(snapshot)).unwrap().unwrap();
+        assert_doc_eq(actual, doc! { "id": 2, "name": "Darth Vader", "role": "Sith" });
+
+        let actual = &engine.read(10, 0, &user_key(3), Some(snapshot)).unwrap().unwrap();
+        assert_doc_eq(actual, doc! { "id": 3, "name": "Leia Organa", "role": "Princess" });
+
+        let actual = &engine.read(10, 0, &user_key(4), Some(snapshot)).unwrap().unwrap();
+        assert_doc_eq(actual, doc! { "id": 4, "name": "Han Solo", "role": "Smuggler" },);
+
+        assert!(&engine.read(10, 0, &user_key(4), Some(snapshot2)).unwrap().is_none());
     }
 
     fn put(collection: u32, index: u32, doc: Document) -> WriteBatch {

@@ -12,7 +12,7 @@ use crate::storage::sstable::{
 use crate::util::bloom_filter::BloomFilter;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Result, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::storage::internal_key::extract_record_key;
 
@@ -31,6 +31,7 @@ use crate::storage::internal_key::extract_record_key;
 /// This builder provides methods to add data, construct the necessary metadata, and finalize the SSTable.
 pub struct SSTableWriter<'a> {
     id: u64,
+    file_path: PathBuf, // The path to the SSTable file.
     data_block_builder: BlockBuilder<Vec<u8>, DataEntryWriter>,
     index_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
     metaindex_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
@@ -66,7 +67,7 @@ impl<'a> SSTableWriter<'a> {
             .write(true)
             .append(true) // Append instead of overwrite
             .create(true) // Create if it doesn't exist
-            .open(file_path)?;
+            .open(file_path.clone())?;
 
         let sstable_options = &options.sst;
         let restart_interval = sstable_options.restart_interval;
@@ -81,6 +82,7 @@ impl<'a> SSTableWriter<'a> {
 
         Ok(Self {
             id,
+            file_path,
             data_block_builder,
             index_block_builder,
             metaindex_block_builder,
@@ -135,7 +137,6 @@ impl<'a> SSTableWriter<'a> {
         let properties = self.properties_builder.build();
 
         let index_handle = self.write_index_block()?;
-        println!("Index block handle: {}", index_handle.size);
 
         let bloom_filter_handle = self.write_bloom_filter()?;
         let properties_handle = self.write_properties(&properties)?;
@@ -145,6 +146,7 @@ impl<'a> SSTableWriter<'a> {
 
         let metaindex_handle = self.write_metaindex_block()?;
         self.write_footer(index_handle, metaindex_handle)?;
+        let size = self.file_path.metadata()?.len();
         Ok(SSTableMetadata::new(
             self.id,
             0,
@@ -152,6 +154,7 @@ impl<'a> SSTableWriter<'a> {
             &properties.max_key,
             properties.min_sequence,
             properties.max_sequence,
+            size,
         ))
     }
 

@@ -298,10 +298,10 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_counter("manifest_rewrite", &self.manifest_rewrite)
-            .register_counter("manifest_writes", &self.manifest_writes)
-            .register_atomic_gauge("manifest_size", &self.manifest_size)
-            .register_counter("manifest_bytes_written", &self.manifest_bytes_written);
+            .register_counter("manifest_rewrite", self.manifest_rewrite.clone())
+            .register_counter("manifest_writes", self.manifest_writes.clone())
+            .register_gauge("manifest_size", self.manifest_size.clone())
+            .register_counter("manifest_bytes_written", self.manifest_bytes_written.clone());
     }
 }
 
@@ -317,6 +317,7 @@ mod tests {
     use bson::Bson;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use crate::obs::metrics::Gauge;
 
     #[test]
     fn test_rebuild_lsm_tree_from_valid_manifest() {
@@ -345,6 +346,7 @@ mod tests {
             &record_key(1, 2567),
             0,
             2567,
+            79_872,
         ));
 
         let sst2 = Arc::new(SSTableMetadata::new(
@@ -354,6 +356,7 @@ mod tests {
             &record_key(1, 3800),
             2568,
             6489,
+            32_768,
         ));
 
         let edits = vec![

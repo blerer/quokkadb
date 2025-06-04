@@ -1,7 +1,7 @@
 use crate::io::checksum::ChecksumStrategy;
 use crate::io::compressor::Compressor;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{Counter, DerivedGaugeU64, HitRatioGauge, MetricRegistry};
+use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::DatabaseOptions;
 use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
@@ -45,7 +45,7 @@ impl BlockCache {
             .build();
 
         let cache_ptr = cache.clone();
-        let size_gauge = DerivedGaugeU64::new(Arc::new(move || cache_ptr.weighted_size()));
+        let size_gauge = DerivedGauge::new(Arc::new(move || cache_ptr.weighted_size()));
 
         let metrics = Metrics::new(size_gauge, evictions_counter);
         metrics.register_to(metric_registry);
@@ -134,7 +134,7 @@ impl BlockCache {
 /// The Block cache metrics
 struct Metrics {
     /// The current size of the block cache in bytes.
-    size: Arc<DerivedGaugeU64>,
+    size: Arc<DerivedGauge>,
 
     /// Tracks the number of block cache hit
     hits: Arc<Counter>,
@@ -143,14 +143,14 @@ struct Metrics {
     misses: Arc<Counter>,
 
     /// The ratio of Block cache hits to the total number of lookups (hits + misses)
-    hit_ratio: Arc<HitRatioGauge>,
+    hit_ratio: Arc<HitRatio>,
 
     /// Number of blocks evicted from the cache.
     evictions: Arc<Counter>,
 }
 
 impl Metrics {
-    fn new(size: Arc<DerivedGaugeU64>, evictions: Arc<Counter>) -> Metrics {
+    fn new(size: Arc<DerivedGauge>, evictions: Arc<Counter>) -> Metrics {
         let hits = Counter::new();
         let misses = Counter::new();
 
@@ -158,17 +158,17 @@ impl Metrics {
             size,
             hits: hits.clone(),
             misses: misses.clone(),
-            hit_ratio: HitRatioGauge::new(hits, misses),
+            hit_ratio: HitRatio::new(hits, misses),
             evictions,
         }
     }
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_derived_gauge("block_cache_size", &self.size)
-            .register_counter("block_cache_hit", &self.hits)
-            .register_counter("block_cache_miss", &self.misses)
-            .register_hit_ratio_gauge("block_cache_hit_ratio", &self.hit_ratio)
-            .register_counter("block_cache_evictions", &self.evictions);
+            .register_gauge("block_cache_size", self.size.clone())
+            .register_counter("block_cache_hit", self.hits.clone())
+            .register_counter("block_cache_miss", self.misses.clone())
+            .register_computed("block_cache_hit_ratio", self.hit_ratio.clone())
+            .register_counter("block_cache_evictions", self.evictions.clone());
     }
 }

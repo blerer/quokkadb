@@ -24,6 +24,7 @@ impl Options {
                 block_cache_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
                 wal_bytes_per_sync: StorageQuantity::new(1, StorageUnit::Mebibytes),
                 max_manifest_file_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
+                max_levels: 4,
             },
             sst: SSTableOptions {
                 block_size: StorageQuantity::new(8, StorageUnit::Kibibytes),
@@ -43,6 +44,7 @@ impl Options {
                 block_cache_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
                 wal_bytes_per_sync: StorageQuantity::new(512, StorageUnit::Kibibytes),
                 max_manifest_file_size: StorageQuantity::new(2, StorageUnit::Mebibytes),
+                max_levels: 5,
             },
             sst: SSTableOptions {
                 block_size: StorageQuantity::new(16, StorageUnit::Kibibytes),
@@ -78,6 +80,9 @@ pub struct DatabaseOptions {
 
     /// The size of the manifest file triggering a rotation.
     pub max_manifest_file_size: StorageQuantity,
+
+    /// The maximum number of levels in the LSM tree.
+    pub max_levels: u8,
 }
 
 impl DatabaseOptions {
@@ -110,6 +115,12 @@ impl DatabaseOptions {
         self.max_manifest_file_size = size;
         self
     }
+
+    /// Override the maximum number of levels in the LSM tree.
+    pub fn with_max_levels(mut self, levels: u8) -> Self {
+        self.max_levels = levels;
+        self
+    }
 }
 
 impl fmt::Display for DatabaseOptions {
@@ -122,11 +133,8 @@ impl fmt::Display for DatabaseOptions {
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
-        writeln!(
-            f,
-            "  Max Manifest File Size: {:?}",
-            self.max_manifest_file_size
-        )
+        writeln!(f, "  Max Manifest File Size: {:?}", self.max_manifest_file_size)?;
+        writeln!(f, "  Max Levels: {:?}", self.max_levels)
     }
 }
 
@@ -138,6 +146,7 @@ impl Default for DatabaseOptions {
             block_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             wal_bytes_per_sync: StorageQuantity::new(256, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(256, StorageUnit::Kibibytes),
+            max_levels: 3,
         }
     }
 }

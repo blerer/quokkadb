@@ -15,3 +15,9 @@ pub mod wal;
 pub mod write_batch;
 
 mod manifest;
+
+#[derive(Debug, PartialEq)]
+pub enum Direction {
+    Forward,
+    Reverse,
+}

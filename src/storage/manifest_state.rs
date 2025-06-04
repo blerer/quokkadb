@@ -1,6 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::catalog::{Catalog, CollectionMetadata};
+use crate::storage::catalog::Catalog;
 use crate::storage::lsm_version::{LsmVersion, SSTableMetadata};
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind, Result};
@@ -256,9 +256,9 @@ mod tests {
     use super::*;
     use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
-    use crate::Collection;
     use bson::Bson;
     use std::sync::Arc;
+    use crate::storage::catalog::CollectionMetadata;
 
     #[test]
     fn test_create_and_drop_collection_serialization() {
@@ -298,6 +298,7 @@ mod tests {
             &record_key(250),
             100,
             200,
+            1024,
         ));
         let edit = ManifestEdit::Flush {
             oldest_log_number: 8,

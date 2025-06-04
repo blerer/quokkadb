@@ -1,5 +1,5 @@
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{Counter, DerivedGaugeU64, HitRatioGauge, MetricRegistry};
+use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::DatabaseOptions;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
@@ -84,7 +84,7 @@ impl SSTableCache {
 
 struct Metrics {
     /// The number of open sstables (stored in the SSTableCache)
-    sstables_open_count: Arc<DerivedGaugeU64>,
+    sstables_open_count: Arc<DerivedGauge>,
 
     /// Tracks the number of sstable cache hit
     hits: Arc<Counter>,
@@ -93,7 +93,7 @@ struct Metrics {
     misses: Arc<Counter>,
 
     /// The ratio of SSTable cache hits to the total number of lookups (hits + misses)
-    hit_ratio: Arc<HitRatioGauge>,
+    hit_ratio: Arc<HitRatio>,
 }
 
 impl Metrics {
@@ -102,18 +102,18 @@ impl Metrics {
         let misses = Counter::new();
 
         Self {
-            sstables_open_count: DerivedGaugeU64::new(Arc::new(move || cache.entry_count())),
+            sstables_open_count: DerivedGauge::new(Arc::new(move || cache.entry_count())),
             hits: hits.clone(),
             misses: misses.clone(),
-            hit_ratio: HitRatioGauge::new(hits, misses),
+            hit_ratio: HitRatio::new(hits, misses),
         }
     }
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_derived_gauge("sstables_open_count", &self.sstables_open_count)
-            .register_counter("sstable_cache_hit", &self.hits)
-            .register_counter("sstable_cache_miss", &self.misses)
-            .register_hit_ratio_gauge("sstable_cache_hit_ratio", &self.hit_ratio);
+            .register_gauge("sstables_open_count", self.sstables_open_count.clone())
+            .register_counter("sstable_cache_hit", self.hits.clone())
+            .register_counter("sstable_cache_miss", self.misses.clone())
+            .register_computed("sstable_cache_hit_ratio", self.hit_ratio.clone());
     }
 }
