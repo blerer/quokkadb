@@ -111,7 +111,6 @@ impl FlushManager {
         metrics.count.inc();
         metrics.duration.record(duration.as_micros() as u64);
 
-        let sst_path = &db_dir.join(sst_file.filename());
         let throughput = sst.size as f64 / duration.as_secs_f64();
         metrics.write_throughput.record(throughput as u64);
 

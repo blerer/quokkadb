@@ -125,7 +125,8 @@ impl LsmTree {
     }
 
     pub fn catalogue(&self) -> Arc<Catalog> {
-        self.manifest.catalogue().clone()
+        let self1 = &self.manifest;
+        self1.catalog.clone()
     }
 
     pub fn levels(&self) -> Arc<Levels> {

@@ -16,9 +16,14 @@ use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use ErrorKind::InvalidData;
+use std::ops::RangeBounds;
 use crate::{event, info};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
+use crate::storage::Direction;
 use crate::storage::files::DbFile;
+use crate::storage::internal_key::{encode_internal_key, extract_record_key};
+use crate::storage::operation::OperationType;
+use crate::util::interval::Interval;
 
 pub struct SSTableReader {
     logger: Arc<dyn LoggerAndTracer>,
@@ -100,7 +105,7 @@ impl SSTableReader {
     }
 
     /// Read the block handle from the byte reader
-    fn read_block_handle(reader: &mut ByteReader) -> Result<BlockHandle> {
+    fn read_block_handle<B: AsRef<[u8]>>(reader: &mut ByteReader<B>) -> Result<BlockHandle> {
         let offset = reader.read_varint_u64()?;
         let size = reader.read_varint_u64()?;
         Ok(BlockHandle::new(offset, size))
@@ -117,8 +122,8 @@ impl SSTableReader {
 
         let mut handles = HashMap::new();
 
-        let reader = BlockReader::new(&data, IndexEntryReader)?;
-        for res in reader.entries()?
+        let reader = BlockReader::new(data, IndexEntryReader)?;
+        for res in reader.scan_all_forward()?
         {
             match res {
                 Ok((key, handle)) => {
@@ -155,14 +160,14 @@ impl SSTableReader {
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
         handle: &BlockHandle,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Arc<[u8]>> {
         let compressed_data = file.read_block(handle.offset, handle.size as usize)?;
         let mut data = compressor.decompress(compressed_data.as_ref())?;
         let checksum_size = checksum_strategy.checksum_size();
         let checksum_offset = data.len() - checksum_size;
         checksum_strategy.verify_checksum(&data[..checksum_offset], &data[checksum_offset..])?;
         data.truncate(checksum_offset);
-        Ok(data)
+        Ok(Arc::from(data))
     }
 
     /// Get the properties of the SSTable
@@ -185,22 +190,42 @@ impl SSTableReader {
 
         let index_block = self.get_block(&self.index_handle)?;
 
-        let index_reader = BlockReader::new(&index_block, IndexEntryReader)?;
+        let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
-        let block_handle = index_reader.search(record_key, snapshot)?;
+        let internal_key = encode_internal_key(record_key, snapshot, OperationType::max());
+        let mut block_handles = index_reader.scan_forward_from(&internal_key)?;
 
-        if let Some((_key, block_handle)) = block_handle {
-            let data_block = self.get_block(&block_handle)?;
-            let data_reader = BlockReader::new(&data_block, DataEntryReader)?;
-            data_reader.search(record_key, snapshot)
-        } else {
-            event!(self.logger, "read index_miss key={:?}", &record_key);
-            Ok(None)
+        let block_handle = block_handles.next();
+
+        match block_handle {
+            Some(block_handle) => {
+                let (_key, block_handle) = block_handle?;
+                let data_block = self.get_block(&block_handle)?;
+                let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                let mut iter = data_reader.scan_forward_from(&internal_key)?;
+                let result = iter.next();
+                match result {
+                    Some(result) => {
+                        let (key, value) = result?;
+                        if extract_record_key(&key) == record_key {
+                            Ok(Some((key, value)))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    None => Ok(None)
+                }
+
+            }
+            None => {
+                event!(self.logger, "read index_miss key={:?}", &record_key);
+                Ok(None)
+            }
         }
     }
 
     /// Retrieves an SSTable block from the Block cache
-    fn get_block(&self, block_handle: &BlockHandle) -> Result<Arc<Vec<u8>>> {
+    fn get_block(&self, block_handle: &BlockHandle) -> Result<Arc<[u8]>> {
         self.block_cache.get(
             &self.compressor,
             &self.checksum_strategy,
@@ -208,7 +233,31 @@ impl SSTableReader {
             block_handle,
         )
     }
+
+    pub fn range_scan(
+        &self,
+        range: &Interval<Vec<u8>>,
+        snapshot: u64,
+        direction: Direction,
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>>
+    {
+        let index_block = self.get_block(&self.index_handle)?;
+
+        let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
+
+        if direction == Direction::Reverse {
+
+        } else {
+
+        }
+
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "Range scan is not implemented yet",
+        ))
+    }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct SharedFile {

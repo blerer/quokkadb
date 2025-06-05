@@ -1,6 +1,8 @@
 use crate::io::ZeroCopy;
 use crate::storage::operation::OperationType;
 use std::convert::TryFrom;
+use crate::util::interval::Interval;
+use std::ops::{Bound, RangeBounds, Bound::Unbounded};
 
 /// The key used by the storage internally are called internal key and are composed of
 /// the collection ID (4 bytes big-endian), the index ID (4 bytes big-endian), the user key,
@@ -94,6 +96,43 @@ pub fn extract_operation_type(internal_key: &[u8]) -> OperationType {
     assert!(internal_key.len() >= 8, "Invalid internal key length");
     OperationType::try_from(internal_key[internal_key.len() - 1]).unwrap()
 }
+
+pub fn encode_internal_key_range<R>(collection: u32, index: u32, range: &R, snapshot: u64) -> Interval<Vec<u8>>
+where
+    R: RangeBounds<Vec<u8>>,
+{
+    // Convert the start and end bounds
+    let start = match range.start_bound() {
+        Bound::Included(key) => Bound::Included(encode_internal_key(
+            &encode_record_key(collection, index, &key),
+            snapshot,
+            OperationType::MaxKey,
+        )),
+        Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
+            &encode_record_key(collection, index, &key),
+            u64::MIN,
+            OperationType::MinKey,
+        )),
+        Unbounded => Unbounded,
+    };
+
+    let end = match range.end_bound() {
+        Bound::Included(key) => Bound::Included(encode_internal_key(
+            &encode_record_key(collection, index, &key),
+            u64::MIN,
+            OperationType::MinKey,
+        )),
+        Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
+            &encode_record_key(collection, index, &key),
+            snapshot,
+            OperationType::MaxKey,
+        )),
+        Unbounded => Unbounded,
+    };
+
+    Interval::new(start, end)
+}
+
 
 #[cfg(test)]
 mod tests {

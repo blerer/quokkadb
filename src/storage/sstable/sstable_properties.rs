@@ -1,4 +1,4 @@
-use crate::storage::internal_key::{extract_record_key, extract_sequence_number, extract_user_key};
+use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use bson::{from_slice, to_vec};
 use serde::{Deserialize, Serialize};
 use std::io::{Error, ErrorKind};

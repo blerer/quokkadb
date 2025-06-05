@@ -15,14 +15,20 @@ pub enum OperationType {
     MaxKey,
 }
 
+impl OperationType {
+    pub fn max() -> Self {
+        OperationType::Delete // The max operation type is Delete, as it has the lowest byte representation.
+    }
+}
+
 /// At the storage level, for a given key and sequence DELETE operation override PUT operation.
 /// This logic is enforced by the byte order where DELETE as a lower byte representation that PUT.
 impl From<OperationType> for u8 {
     fn from(item: OperationType) -> Self {
         match item {
             OperationType::MinKey => u8::MAX,
-            OperationType::Put => 0x30,
-            OperationType::Delete => 0x10,
+            OperationType::Put => 0x50,
+            OperationType::Delete => 0x30,
             OperationType::MaxKey => 0x00,
         }
     }
@@ -34,8 +40,8 @@ impl TryFrom<u8> for OperationType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             u8::MAX => Ok(OperationType::MinKey),
-            0x30 => Ok(OperationType::Put),
-            0x10 => Ok(OperationType::Delete),
+            0x50 => Ok(OperationType::Put),
+            0x30 => Ok(OperationType::Delete),
             0x00 => Ok(OperationType::MaxKey),
             _ => Err("Invalid value for OperationType"),
         }
@@ -110,7 +116,7 @@ impl Operation {
         vec.extend_from_slice(&self.value);
     }
 
-    pub fn from_wal_record(reader: &ByteReader) -> std::io::Result<Operation> {
+    pub fn from_wal_record<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Operation> {
         let op_byte = reader.read_u8()?;
         let operation_type = OperationType::try_from(op_byte)
             .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid operation type"))?;

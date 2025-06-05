@@ -18,7 +18,7 @@ pub struct Catalog {
 }
 
 impl SnapshotElement for Catalog {
-    fn read_from(reader: &ByteReader) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let next_collection_id = reader.read_varint_u32()?;
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
@@ -117,8 +117,8 @@ impl CollectionMetadata {
         }
     }
 
-    fn read_indexes_from(
-        reader: &ByteReader,
+    fn read_indexes_from<B: AsRef<[u8]>>(
+        reader: &ByteReader<B>,
     ) -> std::io::Result<BTreeMap<String, Arc<IndexMetadata>>> {
         let size = reader.read_varint_u64()? as usize;
         let mut indexes = BTreeMap::new();
@@ -140,7 +140,7 @@ impl CollectionMetadata {
 }
 
 impl SnapshotElement for CollectionMetadata {
-    fn read_from(reader: &ByteReader) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let next_index_id = reader.read_varint_u32()?;
         let id = reader.read_varint_u64()? as u32;
         let name = reader.read_str()?.to_string();
@@ -172,7 +172,7 @@ pub struct IndexMetadata {
 }
 
 impl SnapshotElement for IndexMetadata {
-    fn read_from(reader: &ByteReader) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let id = reader.read_varint_u32()?;
         let name = reader.read_str()?.to_string();
         Ok(IndexMetadata { id, name })

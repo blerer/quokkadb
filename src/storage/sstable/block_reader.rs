@@ -1,70 +1,74 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::ZeroCopy;
-use crate::storage::internal_key::{encode_internal_key, extract_operation_type, extract_record_key, extract_sequence_number};
+use crate::io::{varint, ZeroCopy};
+use crate::storage::internal_key::{encode_internal_key, extract_operation_type, MAX_SEQUENCE_NUMBER};
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::BlockHandle;
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::io::Result;
+use std::iter;
+use std::sync::Arc;
 
 /// A reader for SSTable blocks that supports restart-based prefix compression.
 /// It can use different entry readers depending on block type (e.g., index or data).
-pub struct BlockReader<'a, W: EntryReader> {
+#[derive(Clone)]
+pub struct BlockReader<W: EntryReader + 'static> {
+    block: Arc<[u8]>,
+    restarts_offset: usize,
     nbr_of_restarts: usize,
-    restarts: &'a [u8],
-    data: ByteReader<'a>,
     reader: W,
 }
 
-impl<'a, W: EntryReader> BlockReader<'a, W> {
+impl<W: EntryReader + 'static> BlockReader<W> {
     /// Constructs a new `BlockReader` from a block of bytes and a reader.
-    pub fn new(block: &'a [u8], reader: W) -> Result<Self> {
+    pub fn new(block: Arc<[u8]>, reader: W) -> Result<Self> {
+
         let len = block.len();
         let nbr_of_restarts_offset = len - 4;
-        let nbr_of_restarts = block.read_u32_le(nbr_of_restarts_offset) as usize;
+        let nbr_of_restarts = (&block[..]).read_u32_le(nbr_of_restarts_offset) as usize;
         let restarts_offset = nbr_of_restarts_offset - (nbr_of_restarts * 4);
 
-        let data = ByteReader::new(&block[..restarts_offset]);
-        let restarts = &block[restarts_offset..nbr_of_restarts_offset];
         Ok(BlockReader {
+            block,
+            restarts_offset,
             nbr_of_restarts,
-            restarts,
-            data,
             reader,
         })
     }
 
     /// Reads the restart key at the given restart index.
-    fn read_restart_key(&self, offset: usize) -> Result<&[u8]> {
-        let key_offset = self.read_key_offset(offset)?;
-        self.data.seek(key_offset + 1)?; // Skipping the shared number which is a 0 byte
-        Ok(self.data.read_length_prefixed_slice()?)
+    fn read_restart_key(&self, index: usize) -> Result<&[u8]> {
+        let key_offset = self.read_key_offset(index)?;
+        let data = &self.block[..self.restarts_offset];
+        // We skip the first byte which is the shared prefix length because we know it is a zero byte.
+        let (length, offset) = varint::read_u64(data, key_offset + 1);
+        Ok(&data[offset..(offset + length as usize)])
     }
 
     /// Reads the byte offset of a restart entry by index.
     fn read_key_offset(&self, index: usize) -> Result<usize> {
-        Ok(self.restarts.read_u32_le(index << 2) as usize)
+        Ok(self.block.read_u32_le(self.restarts_offset + (index << 2)) as usize)
     }
 
-    /// Searches for a key in the block using restart-based binary + linear scan.
-    pub fn search(&self, record_key: &[u8], snapshot: u64) -> Result<Option<(Vec<u8>, W::Output)>> {
-        let restart_key_idx = self.binary_search_restarts(record_key, snapshot)?;
-
-        if let Some(restart_key_idx) = restart_key_idx {
-            self.linear_search(record_key, snapshot, &self.data, restart_key_idx)
-        } else {
-            Ok(None)
-        }
+    pub fn scan_forward_from(&self, internal_key: &[u8]) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        BlockEntryIterator::new_from_key(self, internal_key)
     }
 
-    /// Returns an iterator over the entries in the block.
-    pub fn entries(&self) -> Result<BlockEntryIterator<'_, W>> {
-        self.data.seek(0)?;
-        BlockEntryIterator::new(&self)
+    pub fn scan_reverse_from(&self, internal_key: &[u8]) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        ReverseBlockEntryIterator::new_from_key(self, internal_key)
+    }
+
+    pub fn scan_all_forward(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        BlockEntryIterator::new(self)
+    }
+
+    pub fn scan_all_reverse(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        ReverseBlockEntryIterator::new(self)
     }
 
     /// Performs a binary search on restart points to find a candidate start offset.
-    fn binary_search_restarts(&self, record_key: &[u8], snapshot: u64) -> Result<Option<usize>> {
-        let internal_key = encode_internal_key(record_key, snapshot, OperationType::MaxKey);
+    fn binary_search_restarts(&self, internal_key: &[u8]) -> Result<Option<usize>> {
+
         let mut mid = 0;
         let mut left = 0usize;
         let mut right = self.nbr_of_restarts - 1;
@@ -76,12 +80,7 @@ impl<'a, W: EntryReader> BlockReader<'a, W> {
                 Ordering::Equal => return Ok(Some(mid)),
                 Ordering::Greater => {
                     if mid == 0 {
-                        // If the key has the same user key it is a match otherwise there is no match.
-                        return if extract_record_key(mid_key) == record_key {
-                            Ok(Some(mid))
-                        } else {
-                            Ok(None)
-                        };
+                        return Ok(None); // No valid restart point found
                     }
                     right = mid - 1
                 }
@@ -94,57 +93,22 @@ impl<'a, W: EntryReader> BlockReader<'a, W> {
         Ok(Some(mid - 1))
     }
 
-    /// Performs a linear scan from a restart offset to locate the matching entry.
-    fn linear_search(
+    /// Reads the next entry from the block, updating prefix state.
+    fn read_entry<B: AsRef<[u8]>>(
         &self,
-        record_key: &[u8],
-        snapshot: u64,
-        data: &ByteReader,
-        restart_idx: usize,
-    ) -> Result<Option<(Vec<u8>, W::Output)>> {
+        data: &ByteReader<B>,
+        prev_key: &Vec<u8>,
+        prev_value: &Option<W::Output>,
+    ) -> Result<(Vec<u8>, W::Output)> {
 
-        let mut restart_idx = restart_idx;
-        let restart_offset = self.read_key_offset(restart_idx)?;
-        let mut next_restart_offset = self.next_restart_offset(restart_idx)?;
+        let shared = data.read_varint_u64()? as usize;
+        let mut key = Vec::with_capacity(shared);
+        key.extend_from_slice(&prev_key[..shared]);
+        key.extend_from_slice(data.read_length_prefixed_slice()?);
 
-        data.seek(restart_offset)?;
-
-        let mut prev_key = Vec::new();
-        let mut prev_value: Option<W::Output> = None;
-
-        let mut restart = false;
-
-        while data.has_remaining() {
-
-            if Some(data.position()) == next_restart_offset {
-                restart = true;
-                restart_idx += 1;
-                next_restart_offset = self.next_restart_offset(restart_idx)?;
-            } else {
-                restart = false;
-            }
-
-            let mut new_key = Vec::new();
-            let shared = data.read_varint_u64()?;
-            new_key.extend_from_slice(&prev_key[..shared as usize]);
-            new_key.extend_from_slice(data.read_length_prefixed_slice()?);
-
-            let output = self.reader.read(data, &new_key, if restart { &None } else { &prev_value })?;
-
-            match self.reader.compare_keys(&new_key, record_key, snapshot, !self.data.has_remaining()) {
-                ComparisonResult::ReturnCurrent => { return Ok(Some((new_key, output))) },
-                ComparisonResult::ReturnPrevious => { return Ok(Some((prev_key, prev_value.unwrap()))) },
-                ComparisonResult::ReturnNone => { return Ok(None) },
-                ComparisonResult::Continue => { },
-            };
-
-            prev_key = new_key;
-            prev_value = Some(output);
-        }
-        Ok(None)
+        let value = self.reader.read(data, &key, prev_value)?;
+        Ok((key, value))
     }
-
-
 
     fn next_restart_offset(&self, restart_idx: usize) -> Result<Option<usize>> {
         Ok(if restart_idx + 1 < self.nbr_of_restarts {
@@ -155,53 +119,136 @@ impl<'a, W: EntryReader> BlockReader<'a, W> {
     }
 }
 
-pub struct BlockEntryIterator<'a, W: EntryReader> {
-    reader: &'a BlockReader<'a, W>,
+pub struct BlockEntryIterator<W: EntryReader + 'static> {
+    reader: BlockReader<W>,
     restart_idx: usize,
     next_restart_offset: Option<usize>,
+    data: ByteReader<Arc<[u8]>>,
     prev_key: Vec<u8>,
     prev_value: Option<W::Output>,
+    first: Option<(Vec<u8>, W::Output)>,
 }
 
-impl<'a, W: EntryReader> BlockEntryIterator<'a, W> {
-    pub fn new(reader: &'a BlockReader<'a, W>) -> Result<Self> {
+impl<W: EntryReader + 'static> BlockEntryIterator<W> {
+    pub fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
         let next_restart_offset = reader.next_restart_offset(0)?;
-        Ok(Self {
-            reader,
+
+        Ok(Box::new(Self {
+            reader: reader.clone(),
             restart_idx: 0,
             next_restart_offset,
+            data: ByteReader::new(reader.block.clone()),
             prev_key: Vec::new(),
             prev_value: None,
-        })
+            first: None,
+        }))
     }
+
+    /// Creates a new iterator starting from a specific key.
+    pub fn new_from_key(
+        reader: &BlockReader<W>,
+        internal_key: &[u8],
+    ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+
+        let mut first = None;
+        let restart_idx = reader.binary_search_restarts(internal_key)?;
+
+        if restart_idx.is_none() {
+            return Self::new(reader)
+        }
+
+        let mut restart_idx = restart_idx.unwrap();
+
+        let restart_offset = reader.read_key_offset(restart_idx)?;
+        let mut next_restart_offset = reader.next_restart_offset(restart_idx)?;
+
+        let data = ByteReader::new(reader.block.clone());
+        data.seek(restart_offset)?;
+
+        let mut prev_key = Vec::new();
+        let mut prev_value: Option<W::Output> = None;
+
+        {
+            let data = &data;
+            while data.position() < reader.restarts_offset {
+
+                let position = data.position();
+                let restart = if Some(position) == next_restart_offset {
+                    restart_idx += 1;
+                    next_restart_offset = reader.next_restart_offset(restart_idx)?;
+                    true
+                } else {
+                    false
+                };
+                let (new_key, output) = reader.read_entry(data, &prev_key, if restart { &None } else { &prev_value })?;
+
+                match internal_key.cmp(&new_key) {
+                    Ordering::Equal => {
+                        data.seek(position)?; // Reset position to the start of the entry
+                        break;
+                    },
+                    Ordering::Less => {
+                        if reader.reader.is_index_reader() {
+                            first = Some((prev_key.clone(), prev_value.clone().unwrap()));
+                        }
+                        data.seek(position)?; // Reset position to the start of the entry
+                        break
+
+                    },
+                    Ordering::Greater => {},
+                };
+
+                if reader.reader.is_index_reader() && data.position() == reader.restarts_offset  {
+                    first = Some((new_key, output));
+                } else {
+                    prev_key = new_key;
+                    prev_value = Some(output);
+                }
+            }
+        }
+
+        Ok(Box::new(Self {
+            reader: reader.clone(),
+            restart_idx,
+            next_restart_offset,
+            data,
+            prev_key,
+            prev_value,
+            first,
+        }))
+    }
+
 
     fn read_next(&mut self) -> Result<(Vec<u8>, W::Output)> {
 
-        let shared = self.reader.data.read_varint_u64()? as usize;
-        let mut key = Vec::with_capacity(shared);
-        key.extend_from_slice(&self.prev_key[..shared]);
-        key.extend_from_slice(self.reader.data.read_length_prefixed_slice()?);
+        let restart = if Some(self.data.position()) == self.next_restart_offset {
+            self.restart_idx += 1;
+            self.next_restart_offset = self.reader.next_restart_offset(self.restart_idx)?;
+            true
+        } else {
+            false
+        };
 
-        let value = self.reader.reader.read(&self.reader.data, &key, &self.prev_value)?;
+        let (key, value) = self.reader.read_entry(&self.data, &self.prev_key, if restart { &None } else { &self.prev_value})?;
 
         self.prev_key = key.clone();
-        if Some(self.reader.data.position()) == self.next_restart_offset {
-            self.restart_idx += 1;
-            self.prev_value = None;
-            self.next_restart_offset = self.reader.next_restart_offset(self.restart_idx)?;
-        } else {
-            self.prev_value = Some(value.clone());
-        }
+        self.prev_value = Some(value.clone());
 
         Ok((key, value))
     }
 }
 
-impl<'a, W: EntryReader> Iterator for BlockEntryIterator<'a, W> {
+impl<W: EntryReader + 'static> Iterator for BlockEntryIterator<W> {
     type Item = Result<(Vec<u8>, W::Output)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.reader.data.has_remaining() {
+
+        if self.first.is_some() {
+            let first = self.first.take().unwrap();
+            return Some(Ok(first));
+        }
+
+        if self.data.position() >= self.reader.restarts_offset {
             return None;
         }
 
@@ -209,43 +256,171 @@ impl<'a, W: EntryReader> Iterator for BlockEntryIterator<'a, W> {
     }
 }
 
-enum ComparisonResult {
-    ReturnCurrent,
-    ReturnPrevious,
-    ReturnNone,
-    Continue,
+pub struct ReverseBlockEntryIterator<W: EntryReader + 'static> {
+    reader: BlockReader<W>,
+    data: ByteReader<Arc<[u8]>>,
+    restart_idx: usize,
+    stack: Vec<Result<(Vec<u8>, W::Output)>>,
+}
+
+impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
+    pub fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+
+        let restart_idx = reader.nbr_of_restarts;
+
+        Ok(Box::new(Self {
+            reader: reader.clone(),
+            data: ByteReader::new(reader.block.clone()),
+            restart_idx,
+            stack: Vec::new(),
+        }))
+    }
+
+    /// Creates a new iterator starting from a specific key.
+    pub fn new_from_key(
+        reader: &BlockReader<W>,
+        internal_key: &[u8],
+    ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+
+        let restart_idx = reader.binary_search_restarts(internal_key)?;
+
+        if restart_idx.is_none() {
+            return Ok(Box::new(iter::empty()));
+        }
+
+        let mut restart_idx = restart_idx.unwrap();
+
+        let restart_offset = reader.read_key_offset(restart_idx)?;
+        let next_restart_offset = reader.next_restart_offset(restart_idx)?
+            .unwrap_or(reader.restarts_offset);
+
+        let data = ByteReader::new(reader.block.clone());
+        data.seek(restart_offset)?;
+
+        let mut prev_key = Vec::new();
+        let mut prev_value: Option<W::Output> = None;
+
+        let mut stack = Vec::new();
+        {
+            let mut restart_idx = restart_idx;
+            let mut next_restart_offset = next_restart_offset;
+
+            while data.position() < reader.restarts_offset {
+
+                let restart = if data.position() == next_restart_offset {
+                    restart_idx += 1;
+                    next_restart_offset = reader.next_restart_offset(restart_idx)?.unwrap_or(reader.restarts_offset);
+                    true
+                } else {
+                    false
+                };
+
+                let (new_key, output) = reader.read_entry(&data, &prev_key, if restart { &None } else { &prev_value })?;
+
+                match internal_key.cmp(&new_key) {
+                    Ordering::Equal => {
+                        stack.push(Ok((new_key, output)));
+                        break;
+                    },
+                    Ordering::Less => {
+                        break;
+                    },
+                    Ordering::Greater => {
+                        // Continue searching
+                    },
+                };
+
+                prev_key = new_key.clone();
+                prev_value = Some(output.clone());
+
+                stack.push(Ok((new_key, output)));
+            }
+        }
+
+        Ok(Box::new(Self {
+            reader: reader.clone(),
+            data,
+            restart_idx,
+            stack,
+        }))
+    }
+
+    fn fill_stack(&mut self) -> Result<()> {
+
+        let restart_offset = self.reader.read_key_offset(self.restart_idx)?;
+        let next_restart_offset = self.reader.next_restart_offset(self.restart_idx)?
+                                                   .unwrap_or(self.reader.restarts_offset);
+
+        self.data.seek(restart_offset)?;
+
+        let mut prev_key = Vec::new();
+        let mut prev_value: Option<W::Output> = None;
+
+        while self.data.position() < next_restart_offset {
+            let (new_key, output) = self.reader.read_entry(&self.data, &prev_key, &prev_value)?;
+
+            prev_key = new_key.clone();
+            prev_value = Some(output.clone());
+
+            self.stack.push(Ok((new_key, output)));
+        }
+
+        Ok(())
+    }
+}
+
+impl<W: EntryReader + 'static> Iterator for ReverseBlockEntryIterator<W> {
+    type Item = Result<(Vec<u8>, W::Output)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+        if self.stack.is_empty() {
+            if self.restart_idx == 0 {
+                return None;
+            }
+
+            self.restart_idx -= 1;
+            let rs = self.fill_stack();
+
+            if rs.is_err() {
+                self.restart_idx = 0; // Reset to prevent further attempts
+                return Some(Err(rs.err().unwrap()));
+            }
+        }
+
+        self.stack.pop()
+    }
 }
 
 /// Trait for reading entries from a block.
-pub trait EntryReader {
-    type Output: Clone;
+pub trait EntryReader: Clone {
+    type Output: Clone + Debug;
+
+    fn is_index_reader(&self) -> bool ;
 
     /// Reads the next value, possibly using the previous value (for deltas).
-    fn read(
+    fn read<B: AsRef<[u8]>>(
         &self,
-        data: &ByteReader,
+        data: &ByteReader<B>,
         key: &[u8],
         prev_value: &Option<Self::Output>,
     ) -> Result<Self::Output>;
-
-    fn compare_keys(
-        &self,
-        new_key: &[u8],
-        record_key: &[u8],
-        snapshot: u64,
-        is_last: bool
-    ) -> ComparisonResult;
 }
 
 /// Reader implementation for index blocks, using delta-encoded `BlockHandle`s.
+#[derive(Clone)]
 pub struct IndexEntryReader;
 
 impl EntryReader for IndexEntryReader {
     type Output = BlockHandle;
 
-    fn read(
+    fn is_index_reader(&self) -> bool {
+        true
+    }
+
+    fn read<B: AsRef<[u8]>>(
         &self,
-        data: &ByteReader,
+        data: &ByteReader<B>,
         _key: &[u8],
         prev_value: &Option<Self::Output>,
     ) -> Result<Self::Output> {
@@ -261,38 +436,22 @@ impl EntryReader for IndexEntryReader {
             BlockHandle { offset, size }
         })
     }
-
-    fn compare_keys(&self, new_key: &[u8], record_key: &[u8], snapshot: u64, is_last: bool) -> ComparisonResult {
-        match extract_record_key(&new_key).cmp(record_key) {
-            Ordering::Less => {
-                if is_last {
-                    // We reached the end of this index blocks without finding a match so we know that the last key is within this block
-                    ComparisonResult::ReturnCurrent
-                } else {
-                    ComparisonResult::Continue
-                }
-            },
-            Ordering::Equal => {
-                if extract_sequence_number(&new_key) <= snapshot {
-                    ComparisonResult::ReturnCurrent
-                } else {
-                    ComparisonResult::Continue
-                }
-            },
-            Ordering::Greater => ComparisonResult::ReturnPrevious
-        }
-    }
 }
 
 /// Reader implementation for data blocks, returning BSON document bytes for `Put` operations.
+#[derive(Clone)]
 pub struct DataEntryReader;
 
 impl EntryReader for DataEntryReader {
     type Output = Vec<u8>;
 
-    fn read(
+    fn is_index_reader(&self) -> bool {
+        false
+    }
+
+    fn read<B: AsRef<[u8]>>(
         &self,
-        data: &ByteReader,
+        data: &ByteReader<B>,
         key: &[u8],
         _prev_value: &Option<Self::Output>,
     ) -> Result<Self::Output> {
@@ -307,24 +466,11 @@ impl EntryReader for DataEntryReader {
             Ok(Vec::new())
         }
     }
-
-    fn compare_keys(&self, new_key: &[u8], record_key: &[u8], snapshot: u64, is_last: bool) -> ComparisonResult {
-        match extract_record_key(&new_key).cmp(record_key) {
-            Ordering::Less => ComparisonResult::Continue, // Do nothing
-            Ordering::Equal => {
-                if extract_sequence_number(&new_key) <= snapshot {
-                    ComparisonResult::ReturnCurrent
-                } else {
-                    ComparisonResult::Continue
-                }
-            },
-            Ordering::Greater => ComparisonResult::ReturnNone
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use super::*;
     use crate::storage::internal_key::{
         encode_internal_key, encode_record_key, MAX_SEQUENCE_NUMBER,
@@ -353,205 +499,411 @@ mod tests {
         builder.add(&put(7, 11), handle(266, 53)).unwrap();
         builder.add(&put(7, 10), handle(319, 60)).unwrap();
 
-        let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(&block_data, IndexEntryReader).unwrap();
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
 
-        assert_eq!(None, block.binary_search_restarts(&record_key(0), 1).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(1), 1).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(2), 2).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(3), 3).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(4), 4).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), 9).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), 8).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), 7).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(5), 6).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(5), 5).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(6), 11).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(7), 11).unwrap());
-        assert_eq!(Some(3), block.binary_search_restarts(&record_key(7), 10).unwrap());
-        assert_eq!(Some(3), block.binary_search_restarts(&record_key(8), 12).unwrap());
+        assert_eq!(None, block.binary_search_restarts(&max(0, 10)).unwrap());
+        assert_eq!(None, block.binary_search_restarts(&max(1, 1)).unwrap()); // Because the valid point could be in the previous block.
+        assert_eq!(Some(0), block.binary_search_restarts(&min(1)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(2, 2)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&min(2)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(3, 3)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&min(3)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(4, 4)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&min(4)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(5, 9)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(5, 8)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(5, 7)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(5, 6)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(5, 5)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&min(5)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(6, 11)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&min(6)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(7, 11)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&max(7, 10)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&min(7)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&max(8, 12)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&min(8)).unwrap());
 
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(1), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(2), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(3), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&record_key(4), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(6), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(7), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(7), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some(3), block.binary_search_restarts(&record_key(8), MAX_SEQUENCE_NUMBER).unwrap());
+        assert_eq!(None, block.binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(3), block.binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER)).unwrap());
 
-        assert_eq!(Some(2), block.binary_search_restarts(&record_key(5), 2).unwrap());
+        assert_eq!(Some(2), block.binary_search_restarts(&max(5, 2)).unwrap());
     }
 
     #[test]
-    fn test_search_index() {
+    fn test_scan_index_with_gaps() {
+        use super::*;
+
         let mut builder = BlockBuilder::new(3, IndexEntryWriter);
 
-        let key_1_1 = put(1, 1);
-        let value_1_1 = handle(0, 25);
+        // Use the same keys/values as in test_search_index
+        let mut entries = vec![
+            (put(1, 1), handle(0, 25)),
+            (put(3, 2), handle(25, 30)),
+            (put(5, 3), handle(55, 20)),
+            (put(7, 4), handle(72, 24)),
+            (delete(9, 9), handle(96, 9)),
+            (put(9, 8), handle(105, 48)),
+            (put(9, 7), handle(153, 39)),
+            (put(9, 6), handle(192, 48)),
+            (put(9, 5), handle(240, 26)),
+            (put(11, 11), handle(266, 53)),
+            (put(11, 10), handle(319, 60)),
+        ];
 
-        let key_3_2 = put(3, 2);
-        let value_3_2 = handle(25, 30);
+        for (k, v) in &entries {
+            builder.add(k, *v).unwrap();
+        }
 
-        let key_5_3 = put(5, 3);
-        let value_5_3 = handle(55, 20);
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
 
-        let key_7_4 = put(7, 4);
-        let value_7_4 = handle(72, 24);
+        // Test Forward direction
+        {
+            // Test for all existing keys
+            {
+                let mut iter = block.scan_forward_from(&delete(1, 1)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
 
-        let key_9_9 = delete(9, 9);
-        let value_9_9 = handle(96, 9);
+                let mut iter = block.scan_forward_from(&delete(5, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[1..]); // The entry could be in the previous block.
 
-        let key_9_8 = put(9, 8);
-        let value_9_8 = handle(105, 48);
+                let mut iter = block.scan_forward_from(&delete(7, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[3..]);
 
-        let key_9_7 = put(9, 7);
-        let value_9_7 = handle(153, 39);
+                let mut iter = block.scan_forward_from(&delete(9, 6)).unwrap();
+                assert_iter_eq(&mut iter, &entries[6..]);
 
-        let key_9_6 = put(9, 6);
-        let value_9_6 = handle(192, 48);
+                let mut iter = block.scan_forward_from(&delete(9, 9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[4..]);
+            }
 
-        let key_9_5 = put(9, 5);
-        let value_9_5 = handle(240, 26);
+            // Test for keys between existing entries (non-existent keys)
+            {
+                let mut iter = block.scan_forward_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
 
-        let key_11_11 = put(11, 11);
-        let value_11_11 = handle(266, 53);
+                let mut iter = block.scan_forward_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[1..]);
 
-        let key_11_10 = put(11, 10);
-        let value_11_10 = handle(319, 60);
+                let mut iter = block.scan_forward_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[10..]);
+            }
+        }
 
-        // Now adding them to the builder
-        builder.add(&key_1_1, value_1_1).unwrap();
-        builder.add(&key_3_2, value_3_2).unwrap();
-        builder.add(&key_5_3, value_5_3).unwrap();
-        builder.add(&key_7_4, value_7_4).unwrap();
-        builder.add(&key_9_9, value_9_9).unwrap();
-        builder.add(&key_9_8, value_9_8).unwrap();
-        builder.add(&key_9_7, value_9_7).unwrap();
-        builder.add(&key_9_6, value_9_6).unwrap();
-        builder.add(&key_9_5, value_9_5).unwrap();
-        builder.add(&key_11_11, value_11_11).unwrap();
-        builder.add(&key_11_10, value_11_10).unwrap();
+        // Test Reverse direction
+        {
+            entries.reverse(); // Reverse the entries for reverse iteration
 
-        let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(&block_data, IndexEntryReader).unwrap();
+            // Test for all existing keys
+            {
+                let mut iter = block.scan_reverse_from(&max(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &vec!());
 
-        assert_eq!(None, block.search(&record_key(0), 1).unwrap());
-        assert_eq!(Some((key_1_1.clone(), value_1_1)), block.search(&record_key(1), 1).unwrap());
-        assert_eq!(Some((key_1_1.clone(), value_1_1)), block.search(&record_key(2), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_3_2.clone(), value_3_2)), block.search(&record_key(3), 2).unwrap());
-        assert_eq!(Some((key_3_2.clone(), value_3_2)), block.search(&record_key(3), 3).unwrap());
-        assert_eq!(Some((key_3_2.clone(), value_3_2)), block.search(&record_key(3), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_3_2.clone(), value_3_2)), block.search(&record_key(3), 1).unwrap());
-        assert_eq!(Some((key_5_3.clone(), value_5_3)), block.search(&record_key(5), 3).unwrap());
-        assert_eq!(Some((key_7_4.clone(), value_7_4)), block.search(&record_key(7), 4).unwrap());
-        assert_eq!(Some((key_7_4.clone(), value_7_4)), block.search(&record_key(7), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_9_9.clone(), value_9_9)), block.search(&record_key(9), 9).unwrap());
-        assert_eq!(Some((key_9_9.clone(), value_9_9)), block.search(&record_key(9), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_9_8.clone(), value_9_8)), block.search(&record_key(9), 8).unwrap());
-        assert_eq!(Some((key_9_7.clone(), value_9_7)), block.search(&record_key(9), 7).unwrap());
-        assert_eq!(Some((key_9_6.clone(), value_9_6)), block.search(&record_key(9), 6).unwrap());
-        assert_eq!(Some((key_9_5.clone(), value_9_5)), block.search(&record_key(9), 5).unwrap());
-        assert_eq!(Some((key_11_11.clone(), value_11_11)), block.search(&record_key(11), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_11_11.clone(), value_11_11)), block.search(&record_key(11), 11).unwrap());
-        assert_eq!(Some((key_11_10.clone(), value_11_10)), block.search(&record_key(11), 10).unwrap());
-        assert_eq!(Some((key_11_10.clone(), value_11_10)), block.search(&record_key(12), 12).unwrap());
+                let mut iter = block.scan_reverse_from(&min(1)).unwrap();
+                assert_iter_eq(&mut iter, &entries[10..]);
 
-        let mut entries = block.entries().unwrap();
+                let mut iter = block.scan_reverse_from(&max(5, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
 
-        assert_eq!((key_1_1.clone(), value_1_1), entries.next().unwrap().unwrap());
-        assert_eq!((key_3_2.clone(), value_3_2), entries.next().unwrap().unwrap());
-        assert_eq!((key_5_3.clone(), value_5_3), entries.next().unwrap().unwrap());
-        assert_eq!((key_7_4.clone(), value_7_4), entries.next().unwrap().unwrap());
-        assert_eq!((key_9_9.clone(), value_9_9), entries.next().unwrap().unwrap());
-        assert_eq!((key_9_8.clone(), value_9_8), entries.next().unwrap().unwrap());
-        assert_eq!((key_9_7.clone(), value_9_7), entries.next().unwrap().unwrap());
-        assert_eq!((key_9_6.clone(), value_9_6), entries.next().unwrap().unwrap());
-        assert_eq!((key_9_5.clone(), value_9_5), entries.next().unwrap().unwrap());
-        assert_eq!((key_11_11.clone(), value_11_11), entries.next().unwrap().unwrap());
-        assert_eq!((key_11_10.clone(), value_11_10), entries.next().unwrap().unwrap());
-        assert!(entries.next().is_none());
+                let mut iter = block.scan_reverse_from(&delete(5, 2)).unwrap();
+                assert_iter_eq(&mut iter, &entries[8..]);
+
+                let mut iter = block.scan_reverse_from(&min(5)).unwrap();
+                assert_iter_eq(&mut iter, &entries[8..]);
+
+                let mut iter = block.scan_reverse_from(&delete(7, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[7..]);
+
+                // <= 9 - seq: 6
+                let mut iter = block.scan_reverse_from(&delete(9, 6)).unwrap();
+                assert_iter_eq(&mut iter, &entries[4..]);
+
+                // <= 9 - seq: 9
+                let mut iter = block.scan_reverse_from(&delete(9, 9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[6..]);
+            }
+
+            // Test for keys between existing entries (non-existent keys)
+            {
+                // <= 0 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &vec!());
+
+                // <= 4 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
+
+                // <= 12 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
+            }
+        }
     }
 
     #[test]
-    fn test_search_data() {
+    fn test_scan_index_with_a_single_block() {
+
+        let mut builder = BlockBuilder::new(3, IndexEntryWriter);
+
+        // Use the same keys/values as in test_search_index
+        let key = put(1, 1);
+        let value = handle(0, 25);
+
+        builder.add(&key, value).unwrap();
+
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
+
+        let mut iter = block.scan_forward_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+        assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
+
+        let mut iter = block.scan_forward_from(&delete(2, MAX_SEQUENCE_NUMBER)).unwrap();
+        assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
+    }
+
+    //
+    // #[test]
+    // fn test_search_data() {
+    //     let mut builder = BlockBuilder::new(3, DataEntryWriter);
+    //
+    //     let key_1_1 = put(1, 1);
+    //     let value_1_1 = to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap();
+    //
+    //     let key_2_2 = put(2, 2);
+    //     let value_2_2 = to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap();
+    //
+    //     let key_3_3 = put(3, 3);
+    //     let value_3_3 = to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap();
+    //
+    //     let key_4_4 = put(4, 4);
+    //     let value_4_4 = to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap();
+    //
+    //     let key_5_9 = delete(5, 9);
+    //     let value_5_9 = Vec::new();
+    //
+    //     let key_5_8 = put(5, 8);
+    //     let value_5_8 = to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}).unwrap();
+    //
+    //     let key_5_7 = put(5, 7);
+    //     let value_5_7 = to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}).unwrap();
+    //
+    //     let key_5_6 = put(5, 6);
+    //     let value_5_6 = to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}).unwrap();
+    //
+    //     let key_5_5 = put(5, 5);
+    //     let value_5_5 = to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}).unwrap();
+    //
+    //     let key_7_11 = put(7, 11);
+    //     let value_7_11 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2012}).unwrap();
+    //
+    //     let key_7_10 = put(7, 10);
+    //     let value_7_10 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2013}).unwrap();
+    //
+    //     // Add to builder
+    //     builder.add(&key_1_1, value_1_1.clone()).unwrap();
+    //     builder.add(&key_2_2, value_2_2.clone()).unwrap();
+    //     builder.add(&key_3_3, value_3_3.clone()).unwrap();
+    //     builder.add(&key_4_4, value_4_4.clone()).unwrap();
+    //     builder.add(&key_5_9, value_5_9.clone()).unwrap();
+    //     builder.add(&key_5_8, value_5_8.clone()).unwrap();
+    //     builder.add(&key_5_7, value_5_7.clone()).unwrap();
+    //     builder.add(&key_5_6, value_5_6.clone()).unwrap();
+    //     builder.add(&key_5_5, value_5_5.clone()).unwrap();
+    //     builder.add(&key_7_11, value_7_11.clone()).unwrap();
+    //     builder.add(&key_7_10, value_7_10.clone()).unwrap();
+    //
+    //     let block_data = Arc::from(builder.finish().unwrap().1);
+    //     let block = BlockReader::new(block_data, DataEntryReader).unwrap();
+    //
+    //     assert_search_eq(&block, &record_key(0), 1, &None);
+    //     assert_search_eq(&block, &record_key(1), 1, &some_entry(&key_1_1, &value_1_1));
+    //     assert_search_eq(&block, &record_key(2), 2, &some_entry(&key_2_2, &value_2_2));
+    //     assert_search_eq(&block, &record_key(2), 3, &some_entry(&key_2_2, &value_2_2));
+    //     assert_search_eq(&block, &record_key(2), MAX_SEQUENCE_NUMBER, &some_entry(&key_2_2, &value_2_2));
+    //     assert_search_eq(&block, &record_key(2), 1, &None);
+    //     assert_search_eq(&block, &record_key(3), 3, &some_entry(&key_3_3, &value_3_3));
+    //     assert_search_eq(&block, &record_key(4), 4, &some_entry(&key_4_4, &value_4_4));
+    //     assert_search_eq(&block, &record_key(4), MAX_SEQUENCE_NUMBER, &some_entry(&key_4_4, &value_4_4));
+    //     assert_search_eq(&block, &record_key(5), 9, &some_entry(&key_5_9, &value_5_9));
+    //     assert_search_eq(&block, &record_key(5), MAX_SEQUENCE_NUMBER, &some_entry(&key_5_9, &value_5_9));
+    //     assert_search_eq(&block, &record_key(5), 8, &some_entry(&key_5_8, &value_5_8));
+    //     assert_search_eq(&block, &record_key(5), 7, &some_entry(&key_5_7, &value_5_7));
+    //     assert_search_eq(&block, &record_key(5), 6, &some_entry(&key_5_6, &value_5_6));
+    //     assert_search_eq(&block, &record_key(5), 5, &some_entry(&key_5_5, &value_5_5));
+    //     assert_search_eq(&block, &record_key(7), MAX_SEQUENCE_NUMBER, &some_entry(&key_7_11, &value_7_11));
+    //     assert_search_eq(&block, &record_key(7), 11, &some_entry(&key_7_11, &value_7_11));
+    //     assert_search_eq(&block, &record_key(7), 10, &some_entry(&key_7_10, &value_7_10));
+    //     assert_search_eq(&block, &record_key(8), 12, &None);
+    // }
+    //
+    #[test]
+    fn test_scan_data_with_gaps() {
+        use super::*;
+        use bson::{doc, to_vec};
+
         let mut builder = BlockBuilder::new(3, DataEntryWriter);
 
-        let key_1_1 = put(1, 1);
-        let value_1_1 = to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap();
+        // Prepare entries: (key, value)
+        let mut entries = vec![
+            (put(1, 1), to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap()),
+            (put(3, 2), to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap()),
+            (put(5, 3), to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap()),
+            (put(7, 4), to_vec(&doc! {"id": 7, "name": "Thor"}).unwrap()),
+            (delete(9, 9), Vec::new()),
+            (put(9, 8), to_vec(&doc! {"id": 9, "name": "Hulk"}).unwrap()),
+            (put(9, 7), to_vec(&doc! {"id": 9, "name": "Hawkeye"}).unwrap()),
+            (put(9, 6), to_vec(&doc! {"id": 9, "name": "Black Widow"}).unwrap()),
+            (put(9, 5), to_vec(&doc! {"id": 9, "name": "Vision"}).unwrap()),
+            (put(11, 11), to_vec(&doc! {"id": 11, "name": "Loki"}).unwrap()),
+            (put(11, 10), to_vec(&doc! {"id": 11, "name": "Ultron"}).unwrap()),
+        ];
 
-        let key_2_2 = put(2, 2);
-        let value_2_2 = to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap();
+        for (k, v) in &entries {
+            builder.add(k, v.clone()).unwrap();
+        }
 
-        let key_3_3 = put(3, 3);
-        let value_3_3 = to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap();
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, DataEntryReader).unwrap();
 
-        let key_4_4 = put(4, 4);
-        let value_4_4 = to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap();
+        // Test Forward direction
+        {
+            // Test for all existing keys
+            {
+                let mut iter = block.scan_forward_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
 
-        let key_5_9 = delete(5, 9);
-        let value_5_9 = Vec::new();
+                let mut iter = block.scan_forward_from(&delete(5, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
 
-        let key_5_8 = put(5, 8);
-        let value_5_8 = to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}).unwrap();
+                let mut iter = block.scan_forward_from(&delete(9, 9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[4..]);
 
-        let key_5_7 = put(5, 7);
-        let value_5_7 = to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}).unwrap();
+                let mut iter = block.scan_forward_from(&delete(9, 6)).unwrap();
+                assert_iter_eq(&mut iter, &entries[7..]);
+            }
 
-        let key_5_6 = put(5, 6);
-        let value_5_6 = to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}).unwrap();
+            // Test for keys between existing entries (non-existent keys)
+            {
+                let mut iter = block.scan_forward_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
 
-        let key_5_5 = put(5, 5);
-        let value_5_5 = to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}).unwrap();
+                let mut iter = block.scan_forward_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
 
-        let key_7_11 = put(7, 11);
-        let value_7_11 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2012}).unwrap();
+                let mut iter = block.scan_forward_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert!(iter.next().is_none());
+            }
+        }
 
-        let key_7_10 = put(7, 10);
-        let value_7_10 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2013}).unwrap();
+        // Test Reverse direction
+        {
+            entries.reverse(); // Reverse the entries for reverse iteration
 
-        // Add to builder
-        builder.add(&key_1_1, value_1_1.clone()).unwrap();
-        builder.add(&key_2_2, value_2_2.clone()).unwrap();
-        builder.add(&key_3_3, value_3_3.clone()).unwrap();
-        builder.add(&key_4_4, value_4_4.clone()).unwrap();
-        builder.add(&key_5_9, value_5_9.clone()).unwrap();
-        builder.add(&key_5_8, value_5_8.clone()).unwrap();
-        builder.add(&key_5_7, value_5_7.clone()).unwrap();
-        builder.add(&key_5_6, value_5_6.clone()).unwrap();
-        builder.add(&key_5_5, value_5_5.clone()).unwrap();
-        builder.add(&key_7_11, value_7_11.clone()).unwrap();
-        builder.add(&key_7_10, value_7_10.clone()).unwrap();
+            // Test for all existing keys
+            {
+                let mut iter = block.scan_reverse_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &vec!());
 
-        let block_data = builder.finish().unwrap().1;
-        let block = BlockReader::new(&block_data, DataEntryReader).unwrap();
+                let mut iter = block.scan_reverse_from(&min(1)).unwrap();
+                assert_iter_eq(&mut iter, &entries[10..]);
 
-        assert_eq!(None, block.search(&record_key(0), 1).unwrap());
-        assert_eq!(Some((key_1_1.clone(), value_1_1.clone())), block.search(&record_key(1), 1).unwrap());
-        assert_eq!(Some((key_2_2.clone(), value_2_2.clone())), block.search(&record_key(2), 2).unwrap());
-        assert_eq!(Some((key_2_2.clone(), value_2_2.clone())), block.search(&record_key(2), 3).unwrap());
-        assert_eq!(Some((key_2_2.clone(), value_2_2.clone())), block.search(&record_key(2), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(None, block.search(&record_key(2), 1).unwrap());
-        assert_eq!(Some((key_3_3.clone(), value_3_3.clone())), block.search(&record_key(3), 3).unwrap());
-        assert_eq!(Some((key_4_4.clone(), value_4_4.clone())), block.search(&record_key(4), 4).unwrap());
-        assert_eq!(Some((key_4_4.clone(), value_4_4.clone())), block.search(&record_key(4), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_5_9.clone(), value_5_9.clone())), block.search(&record_key(5), 9).unwrap());
-        assert_eq!(Some((key_5_9.clone(), value_5_9.clone())), block.search(&record_key(5), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_5_8.clone(), value_5_8.clone())), block.search(&record_key(5), 8).unwrap());
-        assert_eq!(Some((key_5_7.clone(), value_5_7.clone())), block.search(&record_key(5), 7).unwrap());
-        assert_eq!(Some((key_5_6.clone(), value_5_6.clone())), block.search(&record_key(5), 6).unwrap());
-        assert_eq!(Some((key_5_5.clone(), value_5_5.clone())), block.search(&record_key(5), 5).unwrap());
-        assert_eq!(Some((key_7_11.clone(), value_7_11.clone())), block.search(&record_key(7), MAX_SEQUENCE_NUMBER).unwrap());
-        assert_eq!(Some((key_7_11.clone(), value_7_11.clone())), block.search(&record_key(7), 11).unwrap());
-        assert_eq!(Some((key_7_10.clone(), value_7_10.clone())), block.search(&record_key(7), 10).unwrap());
-        assert_eq!(None, block.search(&record_key(8), 12).unwrap());
+                let mut iter = block.scan_reverse_from(&delete(5, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
 
+                let mut iter = block.scan_reverse_from(&delete(5, 2)).unwrap();
+                assert_iter_eq(&mut iter, &entries[8..]);
 
+                let mut iter = block.scan_reverse_from(&delete(7, 4)).unwrap();
+                assert_iter_eq(&mut iter, &entries[8..]);
+
+                let mut iter = block.scan_reverse_from(&delete(7, 3)).unwrap();
+                assert_iter_eq(&mut iter, &entries[7..]);
+
+                let mut iter = block.scan_reverse_from(&min(7)).unwrap();
+                assert_iter_eq(&mut iter, &entries[7..]);
+
+                let mut iter = block.scan_reverse_from(&delete(9, 6)).unwrap();
+                assert_iter_eq(&mut iter, &entries[4..]);
+
+                let mut iter = block.scan_reverse_from(&delete(9, 9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[6..]);
+            }
+
+            // Test for keys between existing entries (non-existent keys)
+            {
+                // <= 0 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&min(0)).unwrap();
+                assert_iter_eq(&mut iter, &vec!());
+
+                // <= 4 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
+
+                // <= 12 - seq: MAX_SEQUENCE_NUMBER
+                let mut iter = block.scan_reverse_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
+            }
+        }
+    }
+
+    // #[test]
+    // fn test_search_data_with_gaps() {
+    //     let mut builder = BlockBuilder::new(3, DataEntryWriter);
+    //
+    //     // Prepare keys and BSON values
+    //     let key_1_1 = put(1, 1);
+    //     let value_1_1 = to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap();
+    //
+    //     let key_3_2 = put(3, 2);
+    //     let value_3_2 = to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap();
+    //
+    //     let key_5_3 = put(5, 3);
+    //     let value_5_3 = to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap();
+    //
+    //     let key_7_4 = put(7, 4);
+    //     let value_7_4 = to_vec(&doc! {"id": 7, "name": "Thor"}).unwrap();
+    //
+    //     // Add to builder
+    //     builder.add(&key_1_1, value_1_1.clone()).unwrap();
+    //     builder.add(&key_3_2, value_3_2.clone()).unwrap();
+    //     builder.add(&key_5_3, value_5_3.clone()).unwrap();
+    //     builder.add(&key_7_4, value_7_4.clone()).unwrap();
+    //
+    //     let block_data = Arc::from(builder.finish().unwrap().1);
+    //     let block = BlockReader::new(block_data, DataEntryReader).unwrap();
+    //
+    //     // Existing keys
+    //     assert_search_eq(&block, &record_key(1), 1, &some_entry(&key_1_1, &value_1_1));
+    //     assert_search_eq(&block, &record_key(3), 2, &some_entry(&key_3_2, &value_3_2));
+    //     assert_search_eq(&block, &record_key(5), 3, &some_entry(&key_5_3, &value_5_3));
+    //     assert_search_eq(&block, &record_key(7), 4, &some_entry(&key_7_4, &value_7_4));
+    //
+    //     // Non-existing keys between entries
+    //     assert_search_eq(&block, &record_key(2), 2, &None);
+    //     assert_search_eq(&block, &record_key(4), 3, &None);
+    //     assert_search_eq(&block, &record_key(6), 4, &None);
+    //
+    //     // Key before first entry
+    //     assert_search_eq(&block, &record_key(0), 1, &None);
+    //
+    //     // Key after last entry
+    //     assert_search_eq(&block, &record_key(8), 4, &None);
+    // }
+
+    fn max(id: i32, sequence_num: u64) -> Vec<u8> {
+        encode_internal_key(&record_key(id), sequence_num, OperationType::MaxKey)
+    }
+
+    fn min(id: i32) -> Vec<u8> {
+        encode_internal_key(&record_key(id), 0, OperationType::MinKey)
     }
 
     fn internal_key(id: i32, sequence_num: u64, op: OperationType) -> Vec<u8> {
@@ -572,5 +924,51 @@ mod tests {
 
     fn handle(offset: u64, size: u64) -> BlockHandle {
         BlockHandle::new(offset, size)
+    }
+
+    fn assert_iter_eq<K, V, I>(iter: &mut I, expected: &[(K, V)])
+    where
+        K: Debug + PartialEq,
+        V: Debug + PartialEq,
+        I: Iterator<Item = Result<(K, V)>>,
+    {
+        for expected in expected.iter() {
+            assert_next_entry_eq(iter, expected);
+        }
+        if let Some(Ok(actual)) = iter.next() {
+            panic!("Iterator has extra element: {:?}", actual);
+        }
+        if let Some(Err(e)) = iter.next() {
+            panic!("Iterator has extra error: {:?}", e);
+        }
+    }
+
+    fn assert_next_entry_eq<K: Debug + PartialEq, V: Debug + PartialEq, I: Iterator<Item = Result<(K, V)>>>(
+        iter: &mut I,
+        expected: &(K, V),
+    ) {
+        match iter.next() {
+            Some(Ok(ref actual)) => assert_eq!(actual, expected),
+            Some(Err(e)) => panic!("Iterator returned error: {:?}", e),
+            None => panic!("Expected {:?}, but iterator is exhausted", expected),
+        }
+    }
+    //
+    // fn assert_search_eq<V: Debug + PartialEq>(
+    //     block: &BlockReader<impl EntryReader<Output=V>>,
+    //     key: &[u8],
+    //     snapshot: u64,
+    //     expected: &Option<(Vec<u8>, V)>,
+    // ) {
+    //     let result = block.search(key, snapshot);
+    //     match (result, expected) {
+    //         (Ok(ref actual), exp) if actual == exp => {}
+    //         (Ok(actual), exp) => panic!("Expected {:?}, got {:?}", exp, actual),
+    //         (Err(e), _) => panic!("Search returned error: {:?}", e),
+    //     }
+    // }
+
+    fn some_entry<K: Clone, V: Clone>(key: &K, value: &V) -> Option<(K, V)> {
+        Some((key.clone(), value.clone()))
     }
 }

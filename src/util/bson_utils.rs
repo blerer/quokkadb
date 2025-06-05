@@ -1,7 +1,5 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
-use crate::storage::internal_key::encode_record_key;
-use bson::oid::ObjectId;
 use bson::{to_vec, Bson, Document};
 use std::io::{Error, ErrorKind, Result};
 
@@ -12,7 +10,7 @@ pub fn as_key_value(doc: &Document) -> bson::ser::Result<(Vec<u8>, Vec<u8>)> {
     Ok((user_key, value))
 }
 
-fn read_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<&'a [u8]> {
+fn read_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<&[u8]> {
     let end = reader.find_next_by(|b| b == 0);
     if let Some(end) = end {
         Ok(reader.read_fixed_slice(end + 1)?)
@@ -21,7 +19,7 @@ fn read_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<&'a [u8]> {
     }
 }
 
-fn skip_cstring<'a>(reader: &'a ByteReader<'a>) -> Result<()> {
+fn skip_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<()> {
     let end = reader.find_next_by(|b| b == 0);
     if let Some(end) = end {
         reader.skip(end + 1)
@@ -40,8 +38,8 @@ fn document_length(data: &[u8], offset: usize) -> Result<usize> {
     Ok(data.read_i32_le(offset) as usize)
 }
 
-pub fn find_bson_field_value<'a>(
-    reader: &'a ByteReader<'a>,
+pub fn find_bson_field_value<'a, B: AsRef<[u8]>>(
+    reader: &'a ByteReader<B>,
     field_name: &'a [u8],
 ) -> Result<Option<&'a [u8]>> {
     // Read document length (first 4 bytes)
@@ -82,7 +80,7 @@ pub fn find_bson_field_value<'a>(
     Ok(None) // Field not found
 }
 
-pub fn extract_bson_value<'a>(bson_type: u8, reader: &'a ByteReader<'a>) -> Result<&'a [u8]> {
+pub fn extract_bson_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>) -> Result<&[u8]> {
     match bson_type {
         0x01 => {
             // Double (8 bytes)
@@ -166,7 +164,7 @@ pub fn extract_bson_value<'a>(bson_type: u8, reader: &'a ByteReader<'a>) -> Resu
     }
 }
 
-pub fn skip_value<'a>(bson_type: u8, reader: &'a ByteReader<'a>) -> Result<()> {
+pub fn skip_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>) -> Result<()> {
     match bson_type {
         0x01 => reader.skip(8), // Double (8 bytes)
         0x02 => {

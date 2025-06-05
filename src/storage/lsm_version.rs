@@ -100,7 +100,7 @@ impl LsmVersion {
 }
 
 impl SnapshotElement for LsmVersion {
-    fn read_from(reader: &ByteReader) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let current_log_number = reader.read_varint_u64()?;
         let oldest_log_number = reader.read_varint_u64()?;
         let next_file_number = reader.read_varint_u64()?;
@@ -193,7 +193,7 @@ impl Levels {
 }
 
 impl SnapshotElement for Levels {
-    fn read_from(reader: &ByteReader) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let size = reader.read_varint_u64()? as usize;
         let mut levels = Vec::with_capacity(size);
         for _ in 0..size {
@@ -256,7 +256,7 @@ impl Level {
         }
     }
 
-    fn read_sstables_from(reader: &ByteReader) -> Result<Vec<Arc<SSTableMetadata>>> {
+    fn read_sstables_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Vec<Arc<SSTableMetadata>>> {
         let size = reader.read_varint_u32()? as usize;
         let mut sstables = Vec::with_capacity(size);
         for _ in 0..size {
@@ -404,7 +404,7 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
 }
 
 impl SnapshotElement for Level {
-    fn read_from(reader: &ByteReader) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let level = reader.read_varint_u32()?;
         let sstables = Self::read_sstables_from(reader)?;
         let size = sstables.iter().map(|sst| sst.size).sum();
@@ -461,7 +461,7 @@ impl SSTableMetadata {
 }
 
 impl SnapshotElement for SSTableMetadata {
-    fn read_from(reader: &ByteReader) -> Result<SSTableMetadata> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
             number: reader.read_varint_u64()?,
             level: reader.read_varint_u32()?,

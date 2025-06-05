@@ -27,10 +27,6 @@ impl ManifestState {
         }
     }
 
-    pub fn catalogue(&self) -> &Arc<Catalog> {
-        &self.catalog
-    }
-
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         match edit {
             ManifestEdit::WalRotation { log_number } => ManifestState {
@@ -76,7 +72,8 @@ impl ManifestState {
 }
 
 impl SnapshotElement for ManifestState {
-    fn read_from(reader: &ByteReader) -> Result<Self> {
+
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         Ok(ManifestState {
             lsm: Arc::new(LsmVersion::read_from(reader)?),
             catalog: Arc::new(Catalog::read_from(reader)?),
@@ -94,7 +91,7 @@ impl SnapshotElement for ManifestState {
 /// as their content is preserved by the write ahead log.
 pub trait SnapshotElement {
     /// Deserialized the element from the specified ByteReader
-    fn read_from(reader: &ByteReader) -> Result<Self>
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
     where
         Self: Sized;
 

@@ -9,6 +9,7 @@ use std::ops::{Bound, RangeBounds};
 /// - Unbounded (`(..)`)
 ///
 /// This struct can be used in conjunction with types like `BTreeMap` to specify range queries.
+#[derive(Clone)]
 pub struct Interval<T> {
     start: Bound<T>,
     end: Bound<T>,
