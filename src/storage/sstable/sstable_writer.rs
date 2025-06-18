@@ -182,7 +182,6 @@ impl<'a> SSTableWriter<'a> {
     /// The index block maps key ranges to their corresponding data blocks.
     fn write_index_block(&mut self) -> Result<BlockHandle> {
         let (_, data) = self.index_block_builder.finish()?;
-        println!("Index block size: {}", data.len());
         self.properties_builder.with_index_block(data.len());
         self.finalize_and_write_block(data)
     }

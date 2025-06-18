@@ -8,7 +8,8 @@ use crate::storage::sstable::sstable_properties::SSTableProperties;
 use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::{MAGIC_NUMBER, SSTABLE_FOOTER_LENGTH};
 use crate::util::bloom_filter::BloomFilter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use crate::storage::internal_key::extract_operation_type;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
 #[cfg(windows)]
@@ -16,12 +17,13 @@ use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use ErrorKind::InvalidData;
+use std::cmp::Ordering;
 use std::ops::RangeBounds;
 use crate::{event, info};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::storage::Direction;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, extract_record_key};
+use crate::storage::internal_key::{encode_internal_key, extract_record_key, extract_sequence_number};
 use crate::storage::operation::OperationType;
 use crate::util::interval::Interval;
 
@@ -175,7 +177,7 @@ impl SSTableReader {
         &self.properties
     }
 
-    /// Read a value by user key and optional snapshot (sequence number)
+    /// Read a value by user key and snapshot
     pub fn read(&self, record_key: &[u8], snapshot: u64) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
         event!(self.logger, "read start file={} key={:?} snapshot={}", &self.filename, &record_key, snapshot);
@@ -202,20 +204,22 @@ impl SSTableReader {
                 let (_key, block_handle) = block_handle?;
                 let data_block = self.get_block(&block_handle)?;
                 let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                event!(self.logger, "scanning_data_block key={:?}", &record_key);
                 let mut iter = data_reader.scan_forward_from(&internal_key)?;
-                let result = iter.next();
-                match result {
-                    Some(result) => {
-                        let (key, value) = result?;
-                        if extract_record_key(&key) == record_key {
-                            Ok(Some((key, value)))
-                        } else {
-                            Ok(None)
+                while let Some(result) = iter.next() {
+                    let (key, value) = result?;
+                    let current_record_key = extract_record_key(&key);
+                    match current_record_key.cmp(record_key) {
+                        Ordering::Less => panic!("Unexpected lower key"), // Should never happen, otherwise I did screw up the logic and need to fix it.
+                        Ordering::Greater => return Ok(None),
+                        Ordering::Equal => {
+                            if extract_sequence_number(&key) <= snapshot {
+                                return Ok(Some((key, value)));
+                            }
                         }
                     }
-                    None => Ok(None)
                 }
-
+                Ok(None)
             }
             None => {
                 event!(self.logger, "read index_miss key={:?}", &record_key);
@@ -239,22 +243,73 @@ impl SSTableReader {
         range: &Interval<Vec<u8>>,
         snapshot: u64,
         direction: Direction,
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>>
-    {
+    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>> {
+        // Fetch and parse the index block
         let index_block = self.get_block(&self.index_handle)?;
-
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
-        if direction == Direction::Reverse {
+        // Choose iterator order based on requested direction
+        let index_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, BlockHandle)>>> =
+            if direction == Direction::Reverse {
+                index_reader.scan_all_reverse()?
+            } else {
+                index_reader.scan_all_forward()?
+            };
 
-        } else {
+        // A HashSet to avoid returning multiple versions of the same user key
+        let mut seen_keys: HashSet<Vec<u8>> = HashSet::new();
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
+        // Iterate over each data-block referenced by the index
+        for index_res in index_iter {
+            let (_index_key, handle) = index_res?;
+
+            // Load and parse the data block
+            let data_block = self.get_block(&handle)?;
+            let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+
+            // Choose scan direction for the data block
+            let mut data_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>> =
+                if direction == Direction::Reverse {
+                    data_reader.scan_all_reverse()?
+                } else {
+                    data_reader.scan_all_forward()?
+                };
+
+            // Scan all entries inside the data block
+            while let Some(entry_res) = data_iter.next() {
+                let (internal_key, value) = entry_res?;
+                let seq = extract_sequence_number(&internal_key);
+
+                // Skip entries newer than the snapshot
+                if seq > snapshot {
+                    continue;
+                }
+
+                let user_key_vec = extract_record_key(&internal_key).to_vec();
+
+                // Respect the requested interval
+                if !range.contains(&user_key_vec) {
+                    continue;
+                }
+
+                // Already emitted a value for this user key?
+                if !seen_keys.insert(user_key_vec.clone()) {
+                    continue;
+                }
+
+                // Skip tombstones
+                if extract_operation_type(&internal_key) == OperationType::Delete {
+                    continue;
+                }
+
+                // Emit the entry
+                results.push((internal_key, value));
+            }
         }
 
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            "Range scan is not implemented yet",
-        ))
+        // We collected results in traversal order, just expose an iterator
+        Ok(Box::new(results.into_iter()))
     }
 }
 
@@ -313,18 +368,18 @@ impl SharedFile {
 
 #[cfg(test)]
 mod tests {
-    use bson::doc;
+    use bson::{doc, Bson, Document};
     use tempfile::tempdir;
     use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
     use super::*;
-    use crate::storage::internal_key::{encode_internal_key, encode_record_key};
+    use crate::storage::internal_key::{encode_internal_key, encode_record_key, MAX_SEQUENCE_NUMBER};
     use crate::storage::lsm_version::SSTableMetadata;
-    use crate::storage::operation::OperationType;
+    use crate::storage::operation::{Operation, OperationType};
     use crate::storage::sstable::sstable_writer::SSTableWriter;
-    use crate::util::bson_utils::as_key_value;
+    use crate::util::bson_utils::{as_key_value, BsonKey};
 
     #[test]
     fn test_open() {
@@ -382,4 +437,98 @@ mod tests {
             seq += 1;
         }
     }
+
+
+    #[test]
+    fn test_search_data() {
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Options::lightweight();
+        let mut metric_registry = MetricRegistry::new();
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+
+        let sst_file = DbFile::new_sst(12);
+
+        let col = 32;
+
+        let operations = vec![
+            (put(col, &doc! {"id": 1, "name": "Iron Man", "year": 2008}), 1u64), // 0
+            (put(col, &doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}), 2), // 1
+            (put(col, &doc! {"id": 3, "name": "Iron Man 2", "year": 2010}), 3), // 2
+            (put(col, &doc! {"id": 4, "name": "Thor", "year": 2011}), 4), // 3
+            (delete(col,5), 9), // 4
+            (put(col, &doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}), 8), // 5
+            (put(col, &doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}), 7), // 6
+            (put(col, &doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}), 6), // 7
+            (put(col, &doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}), 5), // 8
+            (put(col, &doc! {"id": 7, "name": "The Avengers", "year": 2013}), 11), // 9
+            (put(col, &doc! {"id": 7, "name": "The Avengers", "year": 2012}), 10), //10
+        ];
+
+        let mut entries = operations.iter().map(|(op, seq)| {
+            let internal_key = op.internal_key(*seq);
+            (internal_key, op.value().to_vec())
+        }).collect::<Vec<_>>();
+
+        let len = operations.len();
+        let mut writer = SSTableWriter::new(&path, &sst_file, &options, len).unwrap();
+
+        for entry in entries.iter() {
+            writer.add(&entry.0, &entry.1).unwrap();
+        }
+
+        let sst = writer.finish().unwrap();
+
+        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+
+        assert_search_eq(&reader, &record_key(col,0), MAX_SEQUENCE_NUMBER, None);
+        assert_search_eq(&reader, &record_key(col,1), MAX_SEQUENCE_NUMBER, entries.get(0));
+        assert_search_eq(&reader, &record_key(col,2), 2, entries.get(1));
+        assert_search_eq(&reader, &record_key(col,2), MAX_SEQUENCE_NUMBER, entries.get(1));
+        assert_search_eq(&reader, &record_key(col,2), 1, None);
+        assert_search_eq(&reader, &record_key(col,3), 3, entries.get(2));
+        assert_search_eq(&reader, &record_key(col,4), 4, entries.get(3));
+        assert_search_eq(&reader, &record_key(col,4), MAX_SEQUENCE_NUMBER, entries.get(3));
+        assert_search_eq(&reader, &record_key(col,5), MAX_SEQUENCE_NUMBER, entries.get(4));
+        assert_search_eq(&reader, &record_key(col,5), 9, entries.get(4));
+        assert_search_eq(&reader, &record_key(col,5), 8, entries.get(5));
+        assert_search_eq(&reader, &record_key(col,5), 7, entries.get(6));
+        assert_search_eq(&reader, &record_key(col,5), 6, entries.get(7));
+        assert_search_eq(&reader, &record_key(col,5), 5, entries.get(8));
+        assert_search_eq(&reader, &record_key(col,6), MAX_SEQUENCE_NUMBER, None);
+        assert_search_eq(&reader, &record_key(col,7), MAX_SEQUENCE_NUMBER, entries.get(9));
+        assert_search_eq(&reader, &record_key(col,7), 11, entries.get(9));
+        assert_search_eq(&reader, &record_key(col,7), 10, entries.get(10));
+        assert_search_eq(&reader, &record_key(col,8), 12, None);
+    }
+
+    fn assert_search_eq(
+        reader: &SSTableReader,
+        key: &[u8],
+        snapshot: u64,
+        expected: Option<&(Vec<u8>, Vec<u8>)>,
+    ) {
+        let result = reader.read(key, snapshot);
+        match (result, expected) {
+            (Ok(actual), exp) => { assert_eq!(actual.as_ref(), expected) }
+            (Err(e), _) => panic!("Search returned error: {:?}", e),
+        }
+    }
+
+    fn record_key(col: u32, id: i32) -> Vec<u8> {
+        let user_key = &Bson::Int32(id).try_into_key().unwrap();
+        encode_record_key(col, 0, &user_key)
+    }
+
+    fn put(col: u32, doc: &Document) -> Operation {
+        let (k, v) = as_key_value(doc).unwrap();
+        Operation::new_put(col, 0, k, v)
+    }
+
+    fn delete(col: u32, id: i32) -> Operation {
+        let user_key = Bson::Int32(id).try_into_key().unwrap();
+        Operation::new_delete(col, 0, user_key)
+    }
+
 }

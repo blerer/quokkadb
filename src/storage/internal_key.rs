@@ -106,7 +106,7 @@ where
         Bound::Included(key) => Bound::Included(encode_internal_key(
             &encode_record_key(collection, index, &key),
             snapshot,
-            OperationType::MaxKey,
+            OperationType::max(),
         )),
         Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
             &encode_record_key(collection, index, &key),
@@ -125,7 +125,7 @@ where
         Bound::Excluded(key) => Bound::Excluded(encode_internal_key(
             &encode_record_key(collection, index, &key),
             snapshot,
-            OperationType::MaxKey,
+            OperationType::max(),
         )),
         Unbounded => Unbounded,
     };

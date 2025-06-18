@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 /// A reader for SSTable blocks that supports restart-based prefix compression.
 /// It can use different entry readers depending on block type (e.g., index or data).
+///
+/// TODO: There are unnecessary cloning of the block data in the iterator. The prev value being only used for index blocks.
+/// I postponed the removal until the full pipeline is implemented. I expect that once it is done we might be able to even do more optimizations.
 #[derive(Clone)]
 pub struct BlockReader<W: EntryReader + 'static> {
     block: Arc<[u8]>,
@@ -480,7 +483,7 @@ mod tests {
     use bson::{doc, to_vec, Bson};
 
     #[test]
-    fn test_binary_search_restarts() {
+    fn test_index_binary_search_restarts() {
         // Build the index block with a restart interval of 3
         let mut builder = BlockBuilder::new(3, IndexEntryWriter);
         // 1st restart
@@ -535,6 +538,64 @@ mod tests {
         assert_eq!(Some(3), block.binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER)).unwrap());
 
         assert_eq!(Some(2), block.binary_search_restarts(&max(5, 2)).unwrap());
+    }
+
+    #[test]
+    fn test_data_binary_search_restarts() {
+
+        let mut builder = BlockBuilder::new(8, DataEntryWriter);
+
+        // 1st restart
+        builder.add(&put(1, 1), to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap()).unwrap();
+        builder.add(&put(2, 2), to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap()).unwrap();
+        builder.add(&put(3, 3), to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap()).unwrap();
+        builder.add(&put(4, 4), to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap()).unwrap();
+        builder.add(&delete(5, 9), vec!()).unwrap();
+        builder.add(&put(5, 8), to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}).unwrap()).unwrap();
+        builder.add(&put(5, 7), to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}).unwrap()).unwrap();
+        builder.add(&put(5, 6), to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}).unwrap()).unwrap();
+        // 2nd restart
+        builder.add(&put(5, 5), to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}).unwrap()).unwrap();
+        builder.add(&put(7, 11), to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2013}).unwrap()).unwrap();
+        builder.add(&put(7, 10), to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2012}).unwrap()).unwrap();
+
+
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
+
+        assert_eq!(None, block.binary_search_restarts(&max(0, 10)).unwrap());
+        assert_eq!(None, block.binary_search_restarts(&max(1, 1)).unwrap()); // Because the valid point could be in the previous block.
+        assert_eq!(Some(0), block.binary_search_restarts(&min(1)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(2, 2)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&min(2)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(3, 3)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&min(3)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(4, 4)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&min(4)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, 9)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, 8)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, 7)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, 6)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, 5)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&min(5)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(6, 11)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&min(6)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(7, 11)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(7, 10)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&min(7)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(8, 12)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&min(8)).unwrap());
+
+        assert_eq!(None, block.binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(0), block.binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(Some(1), block.binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER)).unwrap());
+
+        assert_eq!(Some(1), block.binary_search_restarts(&max(5, 2)).unwrap());
     }
 
     #[test]
@@ -669,81 +730,6 @@ mod tests {
         assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
     }
 
-    //
-    // #[test]
-    // fn test_search_data() {
-    //     let mut builder = BlockBuilder::new(3, DataEntryWriter);
-    //
-    //     let key_1_1 = put(1, 1);
-    //     let value_1_1 = to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap();
-    //
-    //     let key_2_2 = put(2, 2);
-    //     let value_2_2 = to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap();
-    //
-    //     let key_3_3 = put(3, 3);
-    //     let value_3_3 = to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap();
-    //
-    //     let key_4_4 = put(4, 4);
-    //     let value_4_4 = to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap();
-    //
-    //     let key_5_9 = delete(5, 9);
-    //     let value_5_9 = Vec::new();
-    //
-    //     let key_5_8 = put(5, 8);
-    //     let value_5_8 = to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}).unwrap();
-    //
-    //     let key_5_7 = put(5, 7);
-    //     let value_5_7 = to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}).unwrap();
-    //
-    //     let key_5_6 = put(5, 6);
-    //     let value_5_6 = to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}).unwrap();
-    //
-    //     let key_5_5 = put(5, 5);
-    //     let value_5_5 = to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}).unwrap();
-    //
-    //     let key_7_11 = put(7, 11);
-    //     let value_7_11 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2012}).unwrap();
-    //
-    //     let key_7_10 = put(7, 10);
-    //     let value_7_10 = to_vec(&doc! {"id": 7, "name": "The Avenger", "year": 2013}).unwrap();
-    //
-    //     // Add to builder
-    //     builder.add(&key_1_1, value_1_1.clone()).unwrap();
-    //     builder.add(&key_2_2, value_2_2.clone()).unwrap();
-    //     builder.add(&key_3_3, value_3_3.clone()).unwrap();
-    //     builder.add(&key_4_4, value_4_4.clone()).unwrap();
-    //     builder.add(&key_5_9, value_5_9.clone()).unwrap();
-    //     builder.add(&key_5_8, value_5_8.clone()).unwrap();
-    //     builder.add(&key_5_7, value_5_7.clone()).unwrap();
-    //     builder.add(&key_5_6, value_5_6.clone()).unwrap();
-    //     builder.add(&key_5_5, value_5_5.clone()).unwrap();
-    //     builder.add(&key_7_11, value_7_11.clone()).unwrap();
-    //     builder.add(&key_7_10, value_7_10.clone()).unwrap();
-    //
-    //     let block_data = Arc::from(builder.finish().unwrap().1);
-    //     let block = BlockReader::new(block_data, DataEntryReader).unwrap();
-    //
-    //     assert_search_eq(&block, &record_key(0), 1, &None);
-    //     assert_search_eq(&block, &record_key(1), 1, &some_entry(&key_1_1, &value_1_1));
-    //     assert_search_eq(&block, &record_key(2), 2, &some_entry(&key_2_2, &value_2_2));
-    //     assert_search_eq(&block, &record_key(2), 3, &some_entry(&key_2_2, &value_2_2));
-    //     assert_search_eq(&block, &record_key(2), MAX_SEQUENCE_NUMBER, &some_entry(&key_2_2, &value_2_2));
-    //     assert_search_eq(&block, &record_key(2), 1, &None);
-    //     assert_search_eq(&block, &record_key(3), 3, &some_entry(&key_3_3, &value_3_3));
-    //     assert_search_eq(&block, &record_key(4), 4, &some_entry(&key_4_4, &value_4_4));
-    //     assert_search_eq(&block, &record_key(4), MAX_SEQUENCE_NUMBER, &some_entry(&key_4_4, &value_4_4));
-    //     assert_search_eq(&block, &record_key(5), 9, &some_entry(&key_5_9, &value_5_9));
-    //     assert_search_eq(&block, &record_key(5), MAX_SEQUENCE_NUMBER, &some_entry(&key_5_9, &value_5_9));
-    //     assert_search_eq(&block, &record_key(5), 8, &some_entry(&key_5_8, &value_5_8));
-    //     assert_search_eq(&block, &record_key(5), 7, &some_entry(&key_5_7, &value_5_7));
-    //     assert_search_eq(&block, &record_key(5), 6, &some_entry(&key_5_6, &value_5_6));
-    //     assert_search_eq(&block, &record_key(5), 5, &some_entry(&key_5_5, &value_5_5));
-    //     assert_search_eq(&block, &record_key(7), MAX_SEQUENCE_NUMBER, &some_entry(&key_7_11, &value_7_11));
-    //     assert_search_eq(&block, &record_key(7), 11, &some_entry(&key_7_11, &value_7_11));
-    //     assert_search_eq(&block, &record_key(7), 10, &some_entry(&key_7_10, &value_7_10));
-    //     assert_search_eq(&block, &record_key(8), 12, &None);
-    // }
-    //
     #[test]
     fn test_scan_data_with_gaps() {
         use super::*;
@@ -854,50 +840,6 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_search_data_with_gaps() {
-    //     let mut builder = BlockBuilder::new(3, DataEntryWriter);
-    //
-    //     // Prepare keys and BSON values
-    //     let key_1_1 = put(1, 1);
-    //     let value_1_1 = to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap();
-    //
-    //     let key_3_2 = put(3, 2);
-    //     let value_3_2 = to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap();
-    //
-    //     let key_5_3 = put(5, 3);
-    //     let value_5_3 = to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap();
-    //
-    //     let key_7_4 = put(7, 4);
-    //     let value_7_4 = to_vec(&doc! {"id": 7, "name": "Thor"}).unwrap();
-    //
-    //     // Add to builder
-    //     builder.add(&key_1_1, value_1_1.clone()).unwrap();
-    //     builder.add(&key_3_2, value_3_2.clone()).unwrap();
-    //     builder.add(&key_5_3, value_5_3.clone()).unwrap();
-    //     builder.add(&key_7_4, value_7_4.clone()).unwrap();
-    //
-    //     let block_data = Arc::from(builder.finish().unwrap().1);
-    //     let block = BlockReader::new(block_data, DataEntryReader).unwrap();
-    //
-    //     // Existing keys
-    //     assert_search_eq(&block, &record_key(1), 1, &some_entry(&key_1_1, &value_1_1));
-    //     assert_search_eq(&block, &record_key(3), 2, &some_entry(&key_3_2, &value_3_2));
-    //     assert_search_eq(&block, &record_key(5), 3, &some_entry(&key_5_3, &value_5_3));
-    //     assert_search_eq(&block, &record_key(7), 4, &some_entry(&key_7_4, &value_7_4));
-    //
-    //     // Non-existing keys between entries
-    //     assert_search_eq(&block, &record_key(2), 2, &None);
-    //     assert_search_eq(&block, &record_key(4), 3, &None);
-    //     assert_search_eq(&block, &record_key(6), 4, &None);
-    //
-    //     // Key before first entry
-    //     assert_search_eq(&block, &record_key(0), 1, &None);
-    //
-    //     // Key after last entry
-    //     assert_search_eq(&block, &record_key(8), 4, &None);
-    // }
-
     fn max(id: i32, sequence_num: u64) -> Vec<u8> {
         encode_internal_key(&record_key(id), sequence_num, OperationType::MaxKey)
     }
@@ -953,20 +895,6 @@ mod tests {
             None => panic!("Expected {:?}, but iterator is exhausted", expected),
         }
     }
-    //
-    // fn assert_search_eq<V: Debug + PartialEq>(
-    //     block: &BlockReader<impl EntryReader<Output=V>>,
-    //     key: &[u8],
-    //     snapshot: u64,
-    //     expected: &Option<(Vec<u8>, V)>,
-    // ) {
-    //     let result = block.search(key, snapshot);
-    //     match (result, expected) {
-    //         (Ok(ref actual), exp) if actual == exp => {}
-    //         (Ok(actual), exp) => panic!("Expected {:?}, got {:?}", exp, actual),
-    //         (Err(e), _) => panic!("Search returned error: {:?}", e),
-    //     }
-    // }
 
     fn some_entry<K: Clone, V: Clone>(key: &K, value: &V) -> Option<(K, V)> {
         Some((key.clone(), value.clone()))
