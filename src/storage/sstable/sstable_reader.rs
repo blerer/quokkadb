@@ -8,7 +8,7 @@ use crate::storage::sstable::sstable_properties::SSTableProperties;
 use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::{MAGIC_NUMBER, SSTABLE_FOOTER_LENGTH};
 use crate::util::bloom_filter::BloomFilter;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use crate::storage::internal_key::extract_operation_type;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
@@ -17,7 +17,9 @@ use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use ErrorKind::InvalidData;
+use std::char::ToUppercase;
 use std::cmp::Ordering;
+use std::mem::take;
 use std::ops::RangeBounds;
 use crate::{event, info};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
@@ -29,11 +31,8 @@ use crate::util::interval::Interval;
 
 pub struct SSTableReader {
     logger: Arc<dyn LoggerAndTracer>,
-    block_cache: Arc<BlockCache>,
+    block_loader: Arc<BlockLoader>,
     filename: String,
-    file: SharedFile,
-    compressor: Arc<dyn Compressor>,
-    checksum_strategy: Arc<dyn ChecksumStrategy>,
     properties: SSTableProperties,
     index_handle: BlockHandle,
     filter_handle: BlockHandle,
@@ -93,13 +92,17 @@ impl SSTableReader {
 
         info!(logger, "SSTableReader opened file={} properties={:?}", &filename, properties);
 
-        Ok(SSTableReader {
-            logger,
+        let block_loader = Arc::new(BlockLoader::new(
             block_cache,
-            filename,
             file,
             compressor,
             checksum_strategy,
+        ));
+
+        Ok(SSTableReader {
+            logger,
+            block_loader,
+            filename,
             properties,
             index_handle,
             filter_handle,
@@ -177,6 +180,10 @@ impl SSTableReader {
         &self.properties
     }
 
+    fn get_block(&self, handle: &BlockHandle) -> Result<Arc<[u8]>> {
+        self.block_loader.load_block(handle)
+    }
+
     /// Read a value by user key and snapshot
     pub fn read(&self, record_key: &[u8], snapshot: u64) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
@@ -228,91 +235,205 @@ impl SSTableReader {
         }
     }
 
-    /// Retrieves an SSTable block from the Block cache
-    fn get_block(&self, block_handle: &BlockHandle) -> Result<Arc<[u8]>> {
-        self.block_cache.get(
-            &self.compressor,
-            &self.checksum_strategy,
-            &self.file,
-            block_handle,
-        )
-    }
-
     pub fn range_scan(
         &self,
-        range: &Interval<Vec<u8>>,
+        lower_bound: Option<Vec<u8>>,
+        upper_bound: Option<Vec<u8>>,
         snapshot: u64,
         direction: Direction,
-    ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
         // Fetch and parse the index block
         let index_block = self.get_block(&self.index_handle)?;
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
-        // Choose iterator order based on requested direction
-        let index_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, BlockHandle)>>> =
-            if direction == Direction::Reverse {
-                index_reader.scan_all_reverse()?
-            } else {
-                index_reader.scan_all_forward()?
-            };
-
-        // A HashSet to avoid returning multiple versions of the same user key
-        let mut seen_keys: HashSet<Vec<u8>> = HashSet::new();
-        let mut results: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-
-        // Iterate over each data-block referenced by the index
-        for index_res in index_iter {
-            let (_index_key, handle) = index_res?;
-
-            // Load and parse the data block
-            let data_block = self.get_block(&handle)?;
-            let data_reader = BlockReader::new(data_block, DataEntryReader)?;
-
-            // Choose scan direction for the data block
-            let mut data_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>> =
-                if direction == Direction::Reverse {
-                    data_reader.scan_all_reverse()?
+        match direction {
+            Direction::Forward => {
+                let mut index_iter = if let Some(lower_bound) = &lower_bound {
+                    index_reader.scan_forward_from(&lower_bound)?
                 } else {
-                    data_reader.scan_all_forward()?
+                    index_reader.scan_all_forward()?
                 };
 
-            // Scan all entries inside the data block
-            while let Some(entry_res) = data_iter.next() {
-                let (internal_key, value) = entry_res?;
-                let seq = extract_sequence_number(&internal_key);
+                let data_iter = match index_iter.next() {
+                    Some(Ok((index_key, handle))) => {
+                        let data_block = self.block_loader.load_block(&handle)?;
+                        let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                        Some(if let Some(lower_bound) = &lower_bound {
+                            data_reader.scan_forward_from(lower_bound)?
+                        } else {
+                            data_reader.scan_all_forward()?
+                        })
+                    },
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(Box::new(std::iter::empty())),
+                };
 
-                // Skip entries newer than the snapshot
-                if seq > snapshot {
-                    continue;
-                }
+                Ok(Box::new(SSTableRangeScanIterator {
+                    block_loader: self.block_loader.clone(),
+                    lower_bound,
+                    upper_bound,
+                    snapshot,
+                    direction,
+                    index_iter,
+                    current_data_block_iter: data_iter,
+                    previous: None,
+                }))
+            }
+            Direction::Reverse => {
+                let mut index_iter = if let Some(upper_bound) = &upper_bound {
+                    index_reader.scan_reverse_from(&upper_bound)?
+                } else {
+                    index_reader.scan_all_reverse()?
+                };
 
-                let user_key_vec = extract_record_key(&internal_key).to_vec();
+                let data_iter = match index_iter.next() {
+                    Some(Ok((index_key, handle))) => {
+                        let data_block = self.block_loader.load_block(&handle)?;
+                        let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                        Some(if let Some(upper_bound) = &upper_bound {
+                            data_reader.scan_reverse_from(upper_bound)?
+                        } else {
+                            data_reader.scan_all_reverse()?
+                        })
+                    },
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(Box::new(std::iter::empty())),
+                };
 
-                // Respect the requested interval
-                if !range.contains(&user_key_vec) {
-                    continue;
-                }
-
-                // Already emitted a value for this user key?
-                if !seen_keys.insert(user_key_vec.clone()) {
-                    continue;
-                }
-
-                // Skip tombstones
-                if extract_operation_type(&internal_key) == OperationType::Delete {
-                    continue;
-                }
-
-                // Emit the entry
-                results.push((internal_key, value));
+                Ok(Box::new(SSTableRangeScanIterator {
+                    block_loader: self.block_loader.clone(),
+                    lower_bound,
+                    upper_bound,
+                    snapshot,
+                    direction,
+                    index_iter,
+                    current_data_block_iter: data_iter,
+                    previous: None,
+                }))
             }
         }
-
-        // We collected results in traversal order, just expose an iterator
-        Ok(Box::new(results.into_iter()))
     }
 }
 
+struct SSTableRangeScanIterator {
+    block_loader: Arc<BlockLoader>,
+    lower_bound: Option<Vec<u8>>,
+    upper_bound: Option<Vec<u8>>,
+    snapshot: u64,
+    direction: Direction,
+    index_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, BlockHandle)>>>,
+    current_data_block_iter: Option<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>,
+    previous: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Iterator for SSTableRangeScanIterator {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_data_block_iter.is_none() {
+                match self.index_iter.next() {
+                    Some(Ok((_index_key, handle))) => {
+                        let data_block = match self.block_loader.load_block(&handle) {
+                            Ok(block) => block,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let data_reader = match BlockReader::new(data_block, DataEntryReader) {
+                            Ok(reader) => reader,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        let new_data_iter_result = if self.direction == Direction::Reverse {
+                            data_reader.scan_all_reverse()
+                        } else {
+                            data_reader.scan_all_forward()
+                        };
+
+                        match new_data_iter_result {
+                            Ok(iter) => self.current_data_block_iter = Some(iter),
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => return None, // No more index entries
+                }
+            }
+
+            if let Some(ref mut data_iter) = self.current_data_block_iter {
+                match data_iter.next() {
+                    Some(Ok((internal_key, value))) => {
+
+                        let seq = extract_sequence_number(&internal_key);
+                        if seq > self.snapshot {
+                            continue;
+                        }
+
+                        match self.direction {
+                            Direction::Forward => {
+                                if let Some(upper_bound) = &self.upper_bound {
+                                    if &internal_key >= upper_bound {
+                                        return None; // Stop iteration at the upper bound
+                                    }
+                                }
+
+                                let record_key = extract_record_key(&internal_key);
+
+                                if let Some((prev_key, _prev_value)) = &self.previous {
+                                    // If the current record key is the same as the previous one,
+                                    // we skip it to avoid duplicates.
+                                    if extract_record_key(prev_key) == record_key {
+                                        continue;
+                                    } else {
+                                        return Some(Ok((internal_key, value)));
+                                    }
+
+                                }  else {
+                                    self.previous = Some((internal_key.clone(), vec!())); // Store only the current key for comparison in the next iteration
+                                    return Some(Ok((internal_key, value)));
+                                }
+                            }
+                            Direction::Reverse => {
+                                if let Some(lower_bound) = &self.lower_bound {
+                                    if &internal_key <= lower_bound {
+                                        return None; // Stop iteration at the lower bound
+                                    }
+                                }
+
+                                let record_key = extract_record_key(&internal_key);
+
+                                if let Some((prev_key, prev_value)) = &self.previous {
+                                    // If the current record key is the same as the previous one,
+                                    // we skip it to avoid duplicates.
+                                    if extract_record_key(prev_key) == record_key {
+                                        continue;
+                                    } else {
+                                        let prev = self.previous.replace((internal_key, value));
+                                        return Some(Ok(prev.unwrap()));
+                                    }
+
+                                } else {
+                                    continue;
+                                }
+
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        self.current_data_block_iter = None; // Invalidate on error
+                        return Some(Err(e));
+                    }
+                    None => {
+                        self.current_data_block_iter = None; // Current data block exhausted
+                        // Loop again to fetch the next data block
+                    }
+                }
+            } else {
+                // This state should ideally not be reached if None from index_iter is handled
+                return None; 
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SharedFile {
@@ -363,6 +484,39 @@ impl SharedFile {
     pub fn len(&self) -> Result<u64> {
         let file = self.file.read().unwrap();
         Ok(file.metadata()?.len())
+    }
+}
+
+struct BlockLoader {
+    block_cache: Arc<BlockCache>,
+    file: SharedFile,
+    compressor: Arc<dyn Compressor>,
+    checksum_strategy: Arc<dyn ChecksumStrategy>,
+}
+
+impl BlockLoader {
+    pub fn new(
+        block_cache: Arc<BlockCache>,
+        file: SharedFile,
+        compressor: Arc<dyn Compressor>,
+        checksum_strategy: Arc<dyn ChecksumStrategy>,
+    ) -> Self {
+        BlockLoader {
+            block_cache,
+            file,
+            compressor,
+            checksum_strategy,
+        }
+    }
+
+    /// Retrieves an SSTable block from the Block cache, loading it if needed.
+    pub fn load_block(&self, handle: &BlockHandle) -> Result<Arc<[u8]>> {
+        self.block_cache.get(
+            &self.compressor,
+            &self.checksum_strategy,
+            &self.file,
+            handle,
+        )
     }
 }
 
