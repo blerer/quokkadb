@@ -1,6 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::{varint, ZeroCopy};
-use crate::storage::internal_key::{encode_internal_key, extract_operation_type, MAX_SEQUENCE_NUMBER};
+use crate::storage::internal_key::{extract_operation_type, InternalKeyBound};
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::BlockHandle;
 use std::cmp::Ordering;
@@ -53,12 +53,18 @@ impl<W: EntryReader + 'static> BlockReader<W> {
         Ok(self.block.read_u32_le(self.restarts_offset + (index << 2)) as usize)
     }
 
-    pub fn scan_forward_from(&self, internal_key: &[u8]) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-        BlockEntryIterator::new_from_key(self, internal_key)
+    pub fn scan_forward_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        match bound {
+            InternalKeyBound::Bounded(internal_key) => BlockEntryIterator::new_from_key(self, internal_key),
+            InternalKeyBound::Unbounded => self.scan_all_forward(),
+        }
     }
 
-    pub fn scan_reverse_from(&self, internal_key: &[u8]) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-        ReverseBlockEntryIterator::new_from_key(self, internal_key)
+    pub fn scan_reverse_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+        match bound {
+            InternalKeyBound::Bounded(internal_key) => ReverseBlockEntryIterator::new_from_key(self, internal_key),
+            InternalKeyBound::Unbounded => self.scan_all_reverse(),
+        }
     }
 
     pub fn scan_all_forward(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
@@ -133,7 +139,7 @@ pub struct BlockEntryIterator<W: EntryReader + 'static> {
 }
 
 impl<W: EntryReader + 'static> BlockEntryIterator<W> {
-    pub fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
         let next_restart_offset = reader.next_restart_offset(0)?;
 
         Ok(Box::new(Self {
@@ -148,7 +154,7 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
     }
 
     /// Creates a new iterator starting from a specific key.
-    pub fn new_from_key(
+    fn new_from_key(
         reader: &BlockReader<W>,
         internal_key: &[u8],
     ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
@@ -195,6 +201,11 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
                             first = Some((prev_key.clone(), prev_value.clone().unwrap()));
                         }
                         data.seek(position)?; // Reset position to the start of the entry
+                        // If we rewind the position we might need to rewind the restart_idx as well.
+                        if restart {
+                            restart_idx -= 1;
+                            next_restart_offset = reader.next_restart_offset(restart_idx)?;
+                        }
                         break
 
                     },
@@ -267,7 +278,7 @@ pub struct ReverseBlockEntryIterator<W: EntryReader + 'static> {
 }
 
 impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
-    pub fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
 
         let restart_idx = reader.nbr_of_restarts;
 
@@ -280,7 +291,7 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
     }
 
     /// Creates a new iterator starting from a specific key.
-    pub fn new_from_key(
+    fn new_from_key(
         reader: &BlockReader<W>,
         internal_key: &[u8],
     ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
@@ -291,7 +302,7 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
             return Ok(Box::new(iter::empty()));
         }
 
-        let mut restart_idx = restart_idx.unwrap();
+        let restart_idx = restart_idx.unwrap();
 
         let restart_offset = reader.read_key_offset(restart_idx)?;
         let next_restart_offset = reader.next_restart_offset(restart_idx)?
@@ -475,12 +486,13 @@ impl EntryReader for DataEntryReader {
 mod tests {
     use std::fmt::Debug;
     use super::*;
-    use crate::storage::internal_key::{
-        encode_internal_key, encode_record_key, MAX_SEQUENCE_NUMBER,
-    };
+    use crate::storage::internal_key::{encode_internal_key, encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER};
     use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
     use crate::util::bson_utils::BsonKey;
     use bson::{doc, to_vec, Bson};
+    use crate::storage::Direction;
+    use crate::storage::test_utils::assert_next_entry_eq;
+    use crate::util::interval::Interval;
 
     #[test]
     fn test_index_binary_search_restarts() {
@@ -630,31 +642,34 @@ mod tests {
         {
             // Test for all existing keys
             {
-                let mut iter = block.scan_forward_from(&delete(1, 1)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(1, 1)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&delete(5, 3)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(5, 3)).unwrap();
                 assert_iter_eq(&mut iter, &entries[1..]); // The entry could be in the previous block.
 
-                let mut iter = block.scan_forward_from(&delete(7, 3)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(7, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
+
+                let mut iter = block.scan_forward_from(&inc_start(7, 3)).unwrap();
                 assert_iter_eq(&mut iter, &entries[3..]);
 
-                let mut iter = block.scan_forward_from(&delete(9, 6)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(9, 6)).unwrap();
                 assert_iter_eq(&mut iter, &entries[6..]);
 
-                let mut iter = block.scan_forward_from(&delete(9, 9)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(9, 9)).unwrap();
                 assert_iter_eq(&mut iter, &entries[4..]);
             }
 
             // Test for keys between existing entries (non-existent keys)
             {
-                let mut iter = block.scan_forward_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries[1..]);
 
-                let mut iter = block.scan_forward_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
             }
         }
@@ -665,45 +680,46 @@ mod tests {
 
             // Test for all existing keys
             {
-                let mut iter = block.scan_reverse_from(&max(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &vec!());
 
-                let mut iter = block.scan_reverse_from(&min(1)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
 
-                let mut iter = block.scan_reverse_from(&max(5, 3)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(5)).unwrap();
                 assert_iter_eq(&mut iter, &entries[9..]);
 
-                let mut iter = block.scan_reverse_from(&delete(5, 2)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(5)).unwrap();
                 assert_iter_eq(&mut iter, &entries[8..]);
 
-                let mut iter = block.scan_reverse_from(&min(5)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(7)).unwrap();
                 assert_iter_eq(&mut iter, &entries[8..]);
 
-                let mut iter = block.scan_reverse_from(&delete(7, 3)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(7)).unwrap();
                 assert_iter_eq(&mut iter, &entries[7..]);
 
-                // <= 9 - seq: 6
-                let mut iter = block.scan_reverse_from(&delete(9, 6)).unwrap();
-                assert_iter_eq(&mut iter, &entries[4..]);
+                let mut iter = block.scan_reverse_from(&exc_end(9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[7..]);
 
-                // <= 9 - seq: 9
-                let mut iter = block.scan_reverse_from(&delete(9, 9)).unwrap();
-                assert_iter_eq(&mut iter, &entries[6..]);
+                let mut iter = block.scan_reverse_from(&inc_end(9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
             }
 
             // Test for keys between existing entries (non-existent keys)
             {
-                // <= 0 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(0)).unwrap();
                 assert_iter_eq(&mut iter, &vec!());
 
-                // <= 4 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(4)).unwrap();
                 assert_iter_eq(&mut iter, &entries[9..]);
 
-                // <= 12 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(4)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
+
+                let mut iter = block.scan_reverse_from(&exc_end(12)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
+
+                let mut iter = block.scan_reverse_from(&inc_end(12)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
             }
         }
@@ -723,10 +739,10 @@ mod tests {
         let block_data = Arc::from(builder.finish().unwrap().1);
         let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
 
-        let mut iter = block.scan_forward_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+        let mut iter = block.scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER)).unwrap();
         assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
 
-        let mut iter = block.scan_forward_from(&delete(2, MAX_SEQUENCE_NUMBER)).unwrap();
+        let mut iter = block.scan_forward_from(&inc_start(2, MAX_SEQUENCE_NUMBER)).unwrap();
         assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
     }
 
@@ -763,28 +779,46 @@ mod tests {
         {
             // Test for all existing keys
             {
-                let mut iter = block.scan_forward_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&delete(5, 3)).unwrap();
+                let mut iter = block.scan_forward_from(&exc_start(1)).unwrap();
+                assert_iter_eq(&mut iter, &entries[1..]);
+
+                let mut iter = block.scan_forward_from(&inc_start(5, 3)).unwrap();
                 assert_iter_eq(&mut iter, &entries[2..]);
 
-                let mut iter = block.scan_forward_from(&delete(9, 9)).unwrap();
+                let mut iter = block.scan_forward_from(&exc_start(5)).unwrap();
+                assert_iter_eq(&mut iter, &entries[3..]);
+
+                let mut iter = block.scan_forward_from(&inc_start(9, 9)).unwrap();
                 assert_iter_eq(&mut iter, &entries[4..]);
 
-                let mut iter = block.scan_forward_from(&delete(9, 6)).unwrap();
+                let mut iter = block.scan_forward_from(&exc_start(9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[9..]);
+
+                let mut iter = block.scan_forward_from(&inc_start(9, 6)).unwrap();
                 assert_iter_eq(&mut iter, &entries[7..]);
             }
 
             // Test for keys between existing entries (non-existent keys)
             {
-                let mut iter = block.scan_forward_from(&delete(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&exc_start(0)).unwrap();
+                assert_iter_eq(&mut iter, &entries);
+
+                let mut iter = block.scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER)).unwrap();
                 assert_iter_eq(&mut iter, &entries[2..]);
 
-                let mut iter = block.scan_forward_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_forward_from(&exc_start(4)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
+
+                let mut iter = block.scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                assert!(iter.next().is_none());
+
+                let mut iter = block.scan_forward_from(&exc_start(12)).unwrap();
                 assert!(iter.next().is_none());
             }
         }
@@ -795,46 +829,43 @@ mod tests {
 
             // Test for all existing keys
             {
-                let mut iter = block.scan_reverse_from(&delete(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &vec!());
 
-                let mut iter = block.scan_reverse_from(&min(1)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
 
-                let mut iter = block.scan_reverse_from(&delete(5, 3)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(5)).unwrap();
                 assert_iter_eq(&mut iter, &entries[9..]);
 
-                let mut iter = block.scan_reverse_from(&delete(5, 2)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(5)).unwrap();
                 assert_iter_eq(&mut iter, &entries[8..]);
 
-                let mut iter = block.scan_reverse_from(&delete(7, 4)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(7)).unwrap();
                 assert_iter_eq(&mut iter, &entries[8..]);
 
-                let mut iter = block.scan_reverse_from(&delete(7, 3)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(7)).unwrap();
                 assert_iter_eq(&mut iter, &entries[7..]);
 
-                let mut iter = block.scan_reverse_from(&min(7)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(9)).unwrap();
                 assert_iter_eq(&mut iter, &entries[7..]);
 
-                let mut iter = block.scan_reverse_from(&delete(9, 6)).unwrap();
-                assert_iter_eq(&mut iter, &entries[4..]);
-
-                let mut iter = block.scan_reverse_from(&delete(9, 9)).unwrap();
-                assert_iter_eq(&mut iter, &entries[6..]);
+                let mut iter = block.scan_reverse_from(&inc_end(9)).unwrap();
+                assert_iter_eq(&mut iter, &entries[2..]);
             }
 
             // Test for keys between existing entries (non-existent keys)
             {
                 // <= 0 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&min(0)).unwrap();
+                let mut iter = block.scan_reverse_from(&inc_end(0)).unwrap();
                 assert_iter_eq(&mut iter, &vec!());
 
                 // <= 4 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&delete(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(4)).unwrap();
                 assert_iter_eq(&mut iter, &entries[9..]);
 
                 // <= 12 - seq: MAX_SEQUENCE_NUMBER
-                let mut iter = block.scan_reverse_from(&delete(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block.scan_reverse_from(&exc_end(12)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
             }
         }
@@ -864,6 +895,34 @@ mod tests {
         internal_key(id, sequence_num, OperationType::Delete)
     }
 
+    fn inc_start(id: i32, sequence_num: u64) -> InternalKeyBound {
+        let user_key = Bson::Int32(id).try_into_key().unwrap();
+        let range = Interval::at_least(user_key);
+        let range = encode_internal_key_range(32, 0, &range, sequence_num, Direction::Forward);
+        range.start_bound().clone()
+    }
+
+    fn exc_start(id: i32) -> InternalKeyBound {
+        let user_key = Bson::Int32(id).try_into_key().unwrap();
+        let range = Interval::greater_than(user_key);
+        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Forward);
+        range.start_bound().clone()
+    }
+
+    fn inc_end(id: i32) -> InternalKeyBound {
+        let user_key = Bson::Int32(id).try_into_key().unwrap();
+        let range = Interval::at_most(user_key);
+        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
+        range.end_bound().clone()
+    }
+
+    fn exc_end(id: i32) -> InternalKeyBound {
+        let user_key = Bson::Int32(id).try_into_key().unwrap();
+        let range = Interval::less_than(user_key);
+        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
+        range.end_bound().clone()
+    }
+
     fn handle(offset: u64, size: u64) -> BlockHandle {
         BlockHandle::new(offset, size)
     }
@@ -883,20 +942,5 @@ mod tests {
         if let Some(Err(e)) = iter.next() {
             panic!("Iterator has extra error: {:?}", e);
         }
-    }
-
-    fn assert_next_entry_eq<K: Debug + PartialEq, V: Debug + PartialEq, I: Iterator<Item = Result<(K, V)>>>(
-        iter: &mut I,
-        expected: &(K, V),
-    ) {
-        match iter.next() {
-            Some(Ok(ref actual)) => assert_eq!(actual, expected),
-            Some(Err(e)) => panic!("Iterator returned error: {:?}", e),
-            None => panic!("Expected {:?}, but iterator is exhausted", expected),
-        }
-    }
-
-    fn some_entry<K: Clone, V: Clone>(key: &K, value: &V) -> Option<(K, V)> {
-        Some((key.clone(), value.clone()))
     }
 }

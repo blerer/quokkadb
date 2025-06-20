@@ -76,7 +76,7 @@ impl BlockCache {
         let block = self.cache.get_with(key.clone(), || {
             let path = file.path.to_string_lossy();
             let start = Instant::now();
-            event!(self.logger, "block_load start file={} offset={} size={}", path, block_handle.offset, block_handle.size);
+            event!(self.logger, "block_load start file={}, offset={}, size={}", path, block_handle.offset, block_handle.size);
 
             // Read, decompress, and validate the block
             let uncompressed_block =
@@ -90,9 +90,9 @@ impl BlockCache {
             let uncompressed_block = uncompressed_block?;
             let duration = start.elapsed();
             event!(self.logger,
-                "block_load end, size={}, duration={}ms",
+                "block_load end, size={}, duration={}us",
                 uncompressed_block.len(),
-                duration.as_millis()
+                duration.as_micros()
             );
 
             Ok(Arc::from(uncompressed_block))

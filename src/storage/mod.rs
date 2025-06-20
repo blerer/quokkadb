@@ -15,8 +15,11 @@ pub mod wal;
 pub mod write_batch;
 
 mod manifest;
+mod iterators;
+#[cfg(test)]
+mod test_utils;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Direction {
     Forward,
     Reverse,

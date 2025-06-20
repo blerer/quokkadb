@@ -135,6 +135,7 @@ impl FlushManager {
     }
 }
 
+#[allow(dead_code)]
 struct Metrics {
     /// Number of flush operations performed.
     count: Arc<Counter>,

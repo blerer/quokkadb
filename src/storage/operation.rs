@@ -15,12 +15,6 @@ pub enum OperationType {
     MaxKey,
 }
 
-impl OperationType {
-    pub fn max() -> Self {
-        OperationType::Delete // The max operation type is Delete, as it has the lowest byte representation.
-    }
-}
-
 /// At the storage level, for a given key and sequence DELETE operation override PUT operation.
 /// This logic is enforced by the byte order where DELETE as a lower byte representation that PUT.
 impl From<OperationType> for u8 {
