@@ -7,7 +7,6 @@ use crate::event;
 use crate::storage::Direction;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io;
 
 pub struct ForwardIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
@@ -269,11 +268,8 @@ impl<'a> Iterator for MergeIterator<'a> {
 mod tests {
     use super::*;
     use crate::storage::internal_key::MAX_SEQUENCE_NUMBER;
-    // ForwardIterator is brought in by super::*
-    use crate::storage::test_utils::{assert_next_entry_eq, delete_rec, put_rec, record_key as test_record_key};
+    use crate::storage::test_utils::{assert_next_entry_eq, delete_rec, put_rec};
     use std::io::{Error, ErrorKind};
-    // OperationType is no longer needed directly in tests as put_rec/delete_rec encapsulate it.
-    // encode_internal_key, rk, ik, val helpers are removed in favor of test_utils functions.
 
     #[test]
     fn forward_iterator() {

@@ -4,6 +4,7 @@ use std::convert::TryFrom;
 use std::ops::{Bound, RangeBounds, Bound::Unbounded};
 use std::rc::Rc;
 use crate::storage::Direction;
+use crate::util::interval::Interval;
 
 /// The key used by the storage internally are called internal key and are composed of
 /// the collection ID (4 bytes big-endian), the index ID (4 bytes big-endian), the user key,
@@ -144,6 +145,28 @@ impl InternalKeyRange {
     }
 }
 
+pub fn encode_record_key_range<R>(
+    collection: u32,
+    index: u32,
+    range: &R
+) -> Interval<Vec<u8>>
+where
+    R: RangeBounds<Vec<u8>>,
+{
+    let start_bound = match range.start_bound() {
+        Bound::Included(key) => Bound::Included(encode_record_key(collection, index, key)),
+        Bound::Excluded(key) => Bound::Excluded(encode_record_key(collection, index, key)),
+        Unbounded => Unbounded,
+    };
+
+    let end_bound = match range.end_bound() {
+        Bound::Included(key) => Bound::Included(encode_record_key(collection, index, key)),
+        Bound::Excluded(key) => Bound::Excluded(encode_record_key(collection, index, key)),
+        Unbounded => Unbounded,
+    };
+
+    Interval::new(start_bound, end_bound)
+}
 
 /// Creates a range of internal keys to use for range scan queries.
 /// The return value is a reference-counted `InternalKeyRange` as those often need to be cloned

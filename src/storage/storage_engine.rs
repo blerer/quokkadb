@@ -20,11 +20,26 @@ use arc_swap::ArcSwap;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::remove_file;
+use crate::storage::Direction;
 use std::io::{Error, ErrorKind, Result};
+use std::ops::RangeBounds;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use crate::{debug, error, event, info, warn};
+
+struct RangeScanIterator {
+    // This must be declared before the iterator to be dropped after.
+    _lsm_tree: Arc<LsmTree>,
+    iterator: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
+}
+
+impl Iterator for RangeScanIterator {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator.next()
+    }
+}
 
 struct StorageEngine {
     logger: Arc<dyn LoggerAndTracer>,
@@ -421,7 +436,7 @@ impl StorageEngine {
         index: u32,
         user_key: &[u8],
         snapshot: Option<u64>,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let last_visible_sequence = self.last_visible_seq.load(Ordering::Relaxed);
         let snapshot = snapshot.map_or(last_visible_sequence, |s| s.min(last_visible_sequence));
 
@@ -432,6 +447,50 @@ impl StorageEngine {
             &encode_record_key(collection, index, user_key),
             snapshot,
         )
+    }
+
+    pub fn range_scan<R>(
+        &self,
+        collection: u32,
+        index: u32,
+        user_key_range: &R,
+        snapshot: Option<u64>,
+        direction: Direction,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>
+    where
+        R: RangeBounds<Vec<u8>>,
+    {
+        let last_visible_sequence = self.last_visible_seq.load(Ordering::Relaxed);
+        let snapshot = snapshot.map_or(last_visible_sequence, |s| s.min(last_visible_sequence));
+
+        let lsm_tree = self.lsm_tree.load_full();
+
+        let iter_with_lifetime = lsm_tree.range_scan(
+            self.sst_cache.clone(),
+            &self.db_dir,
+            collection,
+            index,
+            user_key_range,
+            snapshot,
+            direction,
+        )?;
+
+        // Here we are saying that the iterator can live for 'static.
+        // This is safe because we are moving the lsm_tree Arc into the returned iterator struct,
+        // so the LsmTree will live as long as the iterator.
+        let static_iterator = unsafe {
+            std::mem::transmute::<
+                Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>,
+                Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
+            >(iter_with_lifetime)
+        };
+
+        let result_iterator = RangeScanIterator {
+            _lsm_tree: lsm_tree,
+            iterator: static_iterator,
+        };
+
+        Ok(Box::new(result_iterator))
     }
 
     fn append_to_wal(
@@ -457,6 +516,18 @@ impl StorageEngine {
 
         // TODO: Handle the case where the flush is not needed (e.g. memtable is empty)
         // TODO: Handle the case where the engine is in error mode
+
+        let lsm_tree = self.lsm_tree.load();
+
+        if lsm_tree.memtable.size() == 0 {
+            info!(self.logger, "Memtable is empty, no flush needed, syncing with the FlushManager");
+            event!(self.logger, "flush_sync start");
+            let callback = Arc::new(BlockingCallback::new(|result| { result }));
+            self.flush_scheduler.enqueue(FlushTask::Sync { callback: Some(callback.clone()) })?;
+            callback.await_blocking()?;
+            event!(self.logger, "flush_sync end");
+            return Ok(());
+        }
 
         let engine = self.clone();
         let callback = Arc::new(BlockingCallback::new(move |result| {
@@ -530,7 +601,7 @@ impl StorageEngine {
     {
         let sst_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
 
-        let flush_task = FlushTask {
+        let flush_task = FlushTask::Flush {
             sst_file: DbFile::new_sst(sst_number),
             memtable,
             callback: Some(callback.clone()),
@@ -805,13 +876,13 @@ pub enum SSTableOperation {
 mod tests {
     use super::*;
     use crate::obs::logger::test_instance;
-    use crate::storage::operation::Operation;
-    use crate::util::bson_utils::{as_key_value, BsonKey};
-    use bson::{doc, Bson, Document};
-    use std::io::Cursor;
+    use crate::util::bson_utils::BsonKey;
     use std::path::Path;
     use tempfile::tempdir;
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
+    use crate::storage::test_utils::{
+        assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, user_key,
+    };
 
     mod scan_tests {
         use super::*;
@@ -877,20 +948,23 @@ mod tests {
         )
         .unwrap();
 
+        let col = 10;
+        let idx = 0;
+
         let inserts = vec![
-            doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" },
-            doc! { "id": 2, "name": "Darth Vader", "role": "Sith" },
-            doc! { "id": 3, "name": "Leia Organa", "role": "Princess" },
-            doc! { "id": 4, "name": "Han Solo", "role": "Smuggler" },
+            put_op(col, 1, 1),
+            put_op(col, 2, 1),
+            put_op(col, 3, 1),
+            put_op(col, 4, 1),
         ];
 
         for insert in inserts {
-            let _ = &engine.write(put(10, 0, insert)).unwrap();
+            let _ = &engine.write(WriteBatch::new(vec![insert])).unwrap();
         }
 
         let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
 
-        let _ = &engine.write(delete(10, 0, 4)).unwrap();
+        let _ = &engine.write(WriteBatch::new(vec![delete_op(col, 4)])).unwrap();
 
         let snapshot2 = engine.last_visible_seq.load(Ordering::Relaxed);
 
@@ -910,26 +984,29 @@ mod tests {
 
             }
 
-            let actual = &engine.read(10, 0, &user_key(1), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" });
+            let actual = &engine.read(col, idx, &user_key(1), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 1, 1, 1));
 
-            let actual = &engine.read(10, 0, &user_key(2), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 2, "name": "Darth Vader", "role": "Sith" });
+            let actual = &engine.read(col, idx, &user_key(2), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 2, 1, 2));
 
-            let actual = &engine.read(10, 0, &user_key(3), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 3, "name": "Leia Organa", "role": "Princess" });
+            let actual = &engine.read(col, idx, &user_key(3), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 3, 1, 3));
 
-            assert!(&engine.read(10, 0, &user_key(4), None).unwrap().is_none());
+            let actual = &engine.read(col, idx, &user_key(4), None).unwrap().unwrap();
+            assert_eq!(actual, &delete_rec(col, 4, 5));
+
+            assert!(&engine.read(col, idx, &user_key(5), None).unwrap().is_none());
         }
 
         let updates = vec![
-            doc! { "id": 2, "name": "Darth Vader", "role": "Father" },
-            doc! { "id": 3, "name": "Leia Organa", "role": "Sister" },
-            doc! { "id": 4, "name": "Han Solo", "role": "Friend" },
+            put_op(col, 2, 2),
+            put_op(col, 3, 2),
+            put_op(col, 4, 2),
         ];
 
         for update in updates {
-            let _ = &engine.write(put(10, 0, update)).unwrap();
+            let _ = &engine.write(WriteBatch::new(vec![update])).unwrap();
         }
 
         for flush in [false, true] {
@@ -942,52 +1019,170 @@ mod tests {
                 assert_counter_eq(registry, "flush_count", 2);
             }
 
-            let actual = &engine.read(10, 0, &user_key(1), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" });
+            let actual = &engine.read(col, idx, &user_key(1), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 1, 1, 1));
 
-            let actual = &engine.read(10, 0, &user_key(2), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 2, "name": "Darth Vader", "role": "Father" });
+            let actual = &engine.read(col, idx, &user_key(2), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 2, 2, 6));
 
-            let actual = &engine.read(10, 0, &user_key(3), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 3, "name": "Leia Organa", "role": "Sister" },);
+            let actual = &engine.read(col, idx, &user_key(3), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 3, 2, 7));
 
-            let actual = &engine.read(10, 0, &user_key(4), None).unwrap().unwrap();
-            assert_doc_eq(actual, doc! { "id": 4, "name": "Han Solo", "role": "Friend" },);
+            let actual = &engine.read(col, idx, &user_key(4), None).unwrap().unwrap();
+            assert_eq!(actual, &put_rec(col, 4, 2, 8));
         }
 
         // Now we will test with a snapshot
-        let actual = &engine.read(10, 0, &user_key(1), Some(snapshot)).unwrap().unwrap();
-        assert_doc_eq(actual, doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" });
+        let actual = &engine.read(col, idx, &user_key(1), Some(snapshot)).unwrap().unwrap();
+        assert_eq!(actual, &put_rec(col, 1, 1, 1));
 
-        let actual = &engine.read(10, 0, &user_key(2), Some(snapshot)).unwrap().unwrap();
-        assert_doc_eq(actual, doc! { "id": 2, "name": "Darth Vader", "role": "Sith" });
+        let actual = &engine.read(col, idx, &user_key(2), Some(snapshot)).unwrap().unwrap();
+        assert_eq!(actual, &put_rec(col, 2, 1, 2));
 
-        let actual = &engine.read(10, 0, &user_key(3), Some(snapshot)).unwrap().unwrap();
-        assert_doc_eq(actual, doc! { "id": 3, "name": "Leia Organa", "role": "Princess" });
+        let actual = &engine.read(col, idx, &user_key(3), Some(snapshot)).unwrap().unwrap();
+        assert_eq!(actual, &put_rec(col, 3, 1, 3));
 
-        let actual = &engine.read(10, 0, &user_key(4), Some(snapshot)).unwrap().unwrap();
-        assert_doc_eq(actual, doc! { "id": 4, "name": "Han Solo", "role": "Smuggler" },);
-
-        assert!(&engine.read(10, 0, &user_key(4), Some(snapshot2)).unwrap().is_none());
+        let actual = &engine.read(col, idx, &user_key(4), Some(snapshot)).unwrap().unwrap();
+        assert_eq!(actual, &put_rec(col, 4, 1, 4));
     }
 
-    fn put(collection: u32, index: u32, doc: Document) -> WriteBatch {
-        let (user_key, value) = as_key_value(&doc).unwrap();
-        let op = Operation::new_put(10, 0, user_key, value);
-        WriteBatch::new(vec![op])
-    }
+    #[test]
+    fn test_range_scan() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
 
-    fn delete(collection: u32, index: u32, id: u32) -> WriteBatch {
-        let op = Operation::new_delete(10, 0, user_key(id));
-        WriteBatch::new(vec![op])
-    }
+        let col = 42;
+        let idx = 0;
 
-    fn user_key(id: u32) -> Vec<u8> {
-        Bson::Int32(id as i32).try_into_key().unwrap()
-    }
+        // Stage 1: All in memtable
+        let inserts = vec![
+            put_op(col, 1, 1), // seq 1
+            put_op(col, 2, 1), // seq 2
+            put_op(col, 3, 1), // seq 3
+            put_op(col, 4, 1), // seq 4
+            put_op(col, 5, 1), // seq 5
+        ];
+        for insert in inserts {
+            engine.write(WriteBatch::new(vec![insert])).unwrap();
+        }
 
-    fn assert_doc_eq(actual: &Vec<u8>, expected: Document) {
-        let actual = Document::from_reader(&mut Cursor::new(actual)).unwrap();
-        assert_eq!(actual, expected);
+        let snapshot1 = engine.last_visible_seq.load(Ordering::Relaxed);
+        assert_eq!(snapshot1, 5);
+
+        // update 2, delete 4
+        let updates = vec![
+            put_op(col, 2, 2), // seq 6
+            delete_op(col, 4), // seq 7
+        ];
+        for update in updates {
+            engine.write(WriteBatch::new(vec![update])).unwrap();
+        }
+
+        // --- Verification: memtable only ---
+        let mut iter = engine
+            .range_scan(col, idx, &(..), None, Direction::Forward)
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
+        assert!(iter.next().is_none());
+
+        let mut iter = engine
+            .range_scan(col, idx, &(..), Some(snapshot1), Direction::Forward)
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 2));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 4, 1, 4));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
+        assert!(iter.next().is_none());
+
+        // Stage 2: One SSTable and memtable
+        engine.flush().unwrap();
+        let snapshot2 = engine.last_visible_seq.load(Ordering::Relaxed);
+        assert_eq!(snapshot2, 7);
+
+        let updates2 = vec![
+            put_op(col, 6, 1), // seq 8
+            put_op(col, 3, 2), // seq 9
+            delete_op(col, 5), // seq 10
+        ];
+        for update in updates2 {
+            engine.write(WriteBatch::new(vec![update])).unwrap();
+        }
+
+        // --- Verification: 1 SSTable + memtable ---
+        let mut iter = engine
+            .range_scan(col, idx, &(..), None, Direction::Forward)
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
+        assert!(iter.next().is_none());
+
+        let mut iter = engine
+            .range_scan(col, idx, &(..), Some(snapshot2), Direction::Reverse)
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
+        assert!(iter.next().is_none());
+
+        // Stage 3: Two SSTables and memtable
+        engine.flush().unwrap();
+        let snapshot3 = engine.last_visible_seq.load(Ordering::Relaxed);
+        assert_eq!(snapshot3, 10);
+
+        let updates3 = vec![
+            put_op(col, 1, 2), // seq 11
+            put_op(col, 7, 1), // seq 12
+        ];
+        for update in updates3 {
+            engine.write(WriteBatch::new(vec![update])).unwrap();
+        }
+
+        // --- Verification: 2 SSTables + memtable ---
+        let mut iter = engine
+            .range_scan(col, idx, &(..), None, Direction::Forward)
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 1, 2, 11));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 7, 1, 12));
+        assert!(iter.next().is_none());
+
+        let mut iter = engine
+            .range_scan(
+                col,
+                idx,
+                &(user_key(2)..=user_key(6)),
+                Some(snapshot3),
+                Direction::Reverse,
+            )
+            .unwrap();
+        assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
+        assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
+        assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+        assert!(iter.next().is_none());
     }
 }

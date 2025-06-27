@@ -1,6 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::catalog::Catalog;
+use crate::util::interval::Interval;
 use crate::storage::lsm_version::{LsmVersion, SSTableMetadata};
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind, Result};
@@ -68,6 +69,14 @@ impl ManifestState {
         snapshot: u64,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
         self.lsm.find(record_key, snapshot)
+    }
+
+    pub fn find_range<'a>(
+        &'a self,
+        record_key_range: &'a Interval<Vec<u8>>,
+        snapshot: u64,
+    ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
+        self.lsm.find_range(record_key_range, snapshot)
     }
 }
 

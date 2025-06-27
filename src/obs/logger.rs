@@ -84,7 +84,7 @@ pub struct StdoutLogger {
 }
 
 impl StdoutLogger {
-    fn new(min_level: LogLevel, tracing_enabled: bool) -> Arc<Self> {
+    pub fn new(min_level: LogLevel, tracing_enabled: bool) -> Arc<Self> {
         Arc::new(StdoutLogger {
             tracing_enabled,
             min_level,

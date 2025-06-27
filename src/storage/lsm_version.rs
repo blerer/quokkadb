@@ -97,6 +97,14 @@ impl LsmVersion {
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
         self.sst_levels.find(record_key, snapshot)
     }
+
+    pub fn find_range<'a>(
+        &'a self,
+        record_key_range: &'a Interval<Vec<u8>>,
+        snapshot: u64,
+    ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
+        self.sst_levels.find_range(record_key_range, snapshot)
+    }
 }
 
 impl SnapshotElement for LsmVersion {
@@ -135,9 +143,6 @@ pub struct Levels {
 }
 
 impl Levels {
-    pub fn empty() -> Levels {
-        Levels { levels: Vec::new() }
-    }
 
     pub fn add_sst(&self, sst: Arc<SSTableMetadata>) -> Self {
         let sst_level = sst.level as usize;
@@ -179,7 +184,8 @@ impl Levels {
             Some(self.levels[level].as_ref())
         }
     }
-    pub fn iter(&self) -> impl Iterator<Item=&Arc<Level>> {
+
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<Level>> {
         self.levels.iter()
     }
 
@@ -189,6 +195,16 @@ impl Levels {
 
     pub fn total_bytes(&self) -> u64 {
         self.levels.iter().map( |level| level.total_bytes()).sum()
+    }
+
+    pub fn find_range<'a>(
+        &'a self,
+        record_key_range: &'a Interval<Vec<u8>>,
+        snapshot: u64,
+    ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
+        self.levels
+            .iter()
+            .flat_map(move |level| level.find_range(record_key_range, snapshot).into_iter())
     }
 }
 
@@ -331,19 +347,19 @@ impl Level {
     /// The `interval` parameter is an instance of your provided `Interval` type.
     pub fn find_range(
         &self,
-        interval: &Interval<Vec<u8>>,
+        record_key_range: &Interval<Vec<u8>>,
         snapshot: u64,
     ) -> Vec<Arc<SSTableMetadata>> {
         match self {
             Overlapping { level: _, sstables, size: _ } => sstables
                 .iter()
-                .filter(|sst| overlaps(interval, sst) && snapshot >= sst.min_sequence_number)
+                .filter(|sst| overlaps(record_key_range, sst) && snapshot >= sst.min_sequence_number)
                 .cloned()
                 .collect(),
             NonOverlapping { level: _, sstables, size: _ } => {
                 // Use binary search to find the first candidate SSTable.
                 // Here we use the interval's start bound as the lower limit.
-                let lower = match interval.start_bound() {
+                let lower = match record_key_range.start_bound() {
                     Bound::Included(val) | Bound::Excluded(val) => val,
                     Bound::Unbounded => &vec![], // smallest possible key
                 };
@@ -361,12 +377,12 @@ impl Level {
                 let mut result = Vec::new();
                 for sst in &sstables[start_idx..] {
                     // If the SSTable's min_key is beyond the interval's end, stop scanning.
-                    if let Bound::Included(end) | Bound::Excluded(end) = interval.end_bound() {
+                    if let Bound::Included(end) | Bound::Excluded(end) = record_key_range.end_bound() {
                         if sst.min_key.as_slice() > end.as_slice() {
                             break;
                         }
                     }
-                    if overlaps(interval, sst) && snapshot >= sst.min_sequence_number {
+                    if overlaps(record_key_range, sst) && snapshot >= sst.min_sequence_number {
                         result.push(sst.clone());
                     }
                 }
@@ -385,6 +401,15 @@ impl Level {
         match self {
             Overlapping { sstables, .. } | NonOverlapping { sstables, .. } => sstables.len(),
         }
+    }
+
+    /// Returns an iterator over the SSTables in this level.
+    pub fn sstables(&self) -> impl Iterator<Item = Arc<SSTableMetadata>> + '_ {
+        let tables_ref = match self {
+            Level::Overlapping { sstables, .. } => sstables,
+            Level::NonOverlapping { sstables, .. } => sstables,
+        };
+        tables_ref.iter().cloned()
     }
 }
 
@@ -613,6 +638,7 @@ mod tests {
         let results = coll.find_range(&interval, 400);
         assert_eq!(0, results.len());
     }
+
     #[test]
     fn test_find_range_non_overlapping() {
         // Create three overlapping SSTables:

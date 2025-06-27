@@ -1,15 +1,20 @@
 use crate::storage::catalog::Catalog;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::extract_operation_type;
+use crate::storage::internal_key::{encode_record_key_range};
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 use crate::storage::memtable::Memtable;
-use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_cache::SSTableCache;
+
+use crate::storage::internal_key::encode_internal_key_range;
+
+use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator};
+use crate::storage::lsm_version::Levels;
+use crate::storage::Direction;
 use std::collections::VecDeque;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
+use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
-use crate::storage::lsm_version::Levels;
 
 pub struct LsmTree {
     pub manifest: Arc<ManifestState>,
@@ -90,14 +95,16 @@ impl LsmTree {
         db_dir: &Path,
         record_key: &[u8],
         snapshot: u64,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+
         if let Some((internal_key, value)) = self.memtable.read(&record_key, snapshot) {
-            return Self::resolve_value(&internal_key, value);
+            return Ok(Some((internal_key, value)))
         }
 
-        for imm_memtable in self.imm_memtables.iter() {
+        // Iterate from newest to oldest
+        for imm_memtable in self.imm_memtables.iter().rev() {
             if let Some((internal_key, value)) = imm_memtable.read(&record_key, snapshot) {
-                return Self::resolve_value(&internal_key, value);
+                return Ok(Some((internal_key, value)))
             }
         }
 
@@ -105,23 +112,76 @@ impl LsmTree {
             let file = db_dir.join(DbFile::new_sst(sst.number).filename());
             let sst_reader = sstable_cache.get(&file)?;
             if let Some((internal_key, value)) = sst_reader.read(&record_key, snapshot)? {
-                return Self::resolve_value(&internal_key, value);
+                return Ok(Some((internal_key, value)))
             }
         }
 
         Ok(None)
     }
 
-    fn resolve_value(internal_key: &Vec<u8>, value: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let op = extract_operation_type(&internal_key);
-        match op {
-            OperationType::Put => Ok(Some(value)),
-            OperationType::Delete => Ok(None),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Unexpected operation type: {:?}", op),
-            )),
+    pub fn range_scan<'a, R>(
+        &'a self,
+        sstable_cache: Arc<SSTableCache>,
+        db_dir: &Path,
+        collection: u32,
+        index: u32,
+        user_key_range: &R,
+        snapshot: u64,
+        direction: Direction,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>>
+    where
+        R: RangeBounds<Vec<u8>>,
+    {
+        let internal_key_range_for_scan = encode_internal_key_range(
+            collection,
+            index,
+            user_key_range,
+            snapshot,
+            direction.clone(),
+        );
+
+        let mut iterators: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> =
+            Vec::new();
+
+        // Active memtable iterator
+        iterators.push(self.memtable.range_scan(
+            internal_key_range_for_scan.clone(),
+            snapshot,
+            direction.clone(),
+        )?);
+
+        // Immutable memtables iterators (iterate from newest to oldest)
+        for imm_memtable in self.imm_memtables.iter().rev() {
+            iterators.push(imm_memtable.range_scan(
+                internal_key_range_for_scan.clone(),
+                snapshot,
+                direction.clone(),
+            )?);
         }
+
+        let record_key_interval =
+            encode_record_key_range(collection, index, user_key_range);
+
+        // SSTable iterators
+        for sst_meta in self.manifest.find_range(&record_key_interval, snapshot) {
+            let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
+            let sst_reader = sstable_cache.get(&file_path)?;
+            iterators.push(sst_reader.range_scan(
+                internal_key_range_for_scan.clone(),
+                snapshot,
+                direction.clone(),
+            )?);
+        }
+
+        let merge_iter = MergeIterator::new(iterators, direction.clone())?;
+
+        let result_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> =
+            match direction {
+                Direction::Forward => Box::new(ForwardIterator::new(Box::new(merge_iter), snapshot)),
+                Direction::Reverse => Box::new(ReverseIterator::new(Box::new(merge_iter), snapshot)),
+            };
+
+        Ok(result_iter)
     }
 
     pub fn catalogue(&self) -> Arc<Catalog> {

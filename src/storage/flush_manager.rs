@@ -20,10 +20,15 @@ use std::{
 };
 use crate::{error, event, info};
 
-pub struct FlushTask {
-    pub sst_file: DbFile,
-    pub memtable: Arc<Memtable>,
-    pub callback: Option<Arc<dyn Callback<Result<SSTableOperation>>>>,
+pub enum FlushTask {
+    Flush {
+        sst_file: DbFile,
+        memtable: Arc<Memtable>,
+        callback: Option<Arc<dyn Callback<Result<SSTableOperation>>>>,
+    },
+    Sync {
+        callback: Option<Arc<dyn Callback<Result<()>>>>,
+    },
 }
 
 pub struct FlushManager {
@@ -47,39 +52,46 @@ impl FlushManager {
         let thread = {
             thread::spawn(move || {
                 while let Ok(task) = receiver.recv() {
-                    let FlushTask {
-                        sst_file,
-                        memtable,
-                        callback,
-                    } = task;
-                    event!(log, "flush start, memtable={}", memtable.log_number);
 
-                    let result = Self::flush(
-                        log.clone(),
-                        &metrics,
-                        sst_cache.clone(),
-                        &options,
-                        &memtable,
-                        &db_dir,
-                        &sst_file,
-                    );
-
-                    match result {
-                        Ok(sst) => {
-                            let operation = SSTableOperation::Flush {
-                                log_number: memtable.log_number,
-                                flushed: Arc::new(sst),
-                            };
-                            if let Some(callback) = callback {
-                                let _ = callback.call(Ok(operation));
+                    match task {
+                        FlushTask::Sync { callback } => {
+                            event!(log, "flush_sync start");
+                            if let Some(cb) = callback {
+                                let _ = cb.call(Ok(()));
                             }
+                            event!(log, "flush_sync done");
                         }
-                        Err(e) => {
-                            error!(log, "Flush failed: {}", e);
-                            if let Some(callback) = callback {
-                                let _ = callback.call(Err(e));
+                        FlushTask::Flush { sst_file, memtable, callback } => {
+                            event!(log, "flush start, memtable={}", memtable.log_number);
+
+                            let result = Self::flush(
+                                log.clone(),
+                                &metrics,
+                                sst_cache.clone(),
+                                &options,
+                                &memtable,
+                                &db_dir,
+                                &sst_file,
+                            );
+
+                            match result {
+                                Ok(sst) => {
+                                    let operation = SSTableOperation::Flush {
+                                        log_number: memtable.log_number,
+                                        flushed: Arc::new(sst),
+                                    };
+                                    if let Some(callback) = callback {
+                                        let _ = callback.call(Ok(operation));
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(log, "Flush failed: {}", e);
+                                    if let Some(callback) = callback {
+                                        let _ = callback.call(Err(e));
+                                    }
+                                    thread::sleep(Duration::from_secs(1));
+                                }
                             }
-                            thread::sleep(Duration::from_secs(1));
                         }
                     }
                 }
