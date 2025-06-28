@@ -13,45 +13,95 @@ use std::time::Instant;
 use std::{
     sync::{
         mpsc::{sync_channel, Receiver, SyncSender},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 use crate::{error, event, info};
 
+/// Represents a task to be handled by the `FlushManager`.
+///
+/// `FlushTask` can be either:
+/// - `Flush`: Requests flushing a memtable to an SSTable file. Contains the target SSTable file,
+///   the memtable to flush, and an optional callback to be invoked upon completion.
+/// - `Sync`: Used to notify the caller when all flushes scheduled before this point have completed.
+///   When a `Sync` task is enqueued, the `FlushManager` ensures all prior `Flush` tasks are finished
+///   before invoking the optional callback.
 pub enum FlushTask {
+    /// Flush a memtable to an SSTable file.
+    ///
+    /// - `sst_file`: The target SSTable file for the flush.
+    /// - `memtable`: The memtable to be flushed.
+    /// - `callback`: Optional callback to be called with the result of the flush operation.
     Flush {
         sst_file: DbFile,
         memtable: Arc<Memtable>,
         callback: Option<Arc<dyn Callback<Result<SSTableOperation>>>>,
     },
+    /// Notify when all previously scheduled flushes are complete.
+    ///
+    /// - `callback`: Optional callback to be called when the sync is complete.
     Sync {
         callback: Option<Arc<dyn Callback<Result<()>>>>,
     },
 }
 
+/// Manages background flushing of memtables to SSTable files.
+///
+/// The `FlushManager` runs a dedicated background thread that processes
+/// `FlushTask`s, which can either flush a memtable to disk or notify when all
+/// previously scheduled flushes are complete. Tasks are enqueued via the `enqueue`
+/// method. Metrics for flush operations are collected and registered.
+///
+/// In test builds, the flush thread can be paused and resumed for deterministic testing.
 pub struct FlushManager {
     sender: SyncSender<FlushTask>,
     thread: Option<JoinHandle<()>>,
+    sync_control: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
 impl FlushManager {
+
+    /// Creates a new `FlushManager` and starts its background thread.
+    ///
+    /// - `logger`: Logger for events and errors.
+    /// - `metric_registry`: Registry for flush metrics.
+    /// - `options`: Database options.
+    /// - `db_dir`: Path to the database directory.
+    /// - `sst_cache`: Cache for SSTable files.
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
         sst_cache: Arc<SSTableCache>,
-    ) -> Self {
+    ) -> Result<Self> {
         let (sender, receiver): (SyncSender<FlushTask>, Receiver<FlushTask>) = sync_channel(32);
         let db_dir = db_dir.to_path_buf();
         let log = logger.clone();
         let metrics = Metrics::new();
         metrics.register_to(metric_registry);
+
+        #[cfg(test)]
+        let sync_control = Some(Arc::new((Mutex::new(false), Condvar::new())));
+        #[cfg(not(test))]
+        let sync_control: Option<Arc<(Mutex<bool>, Condvar)>> = None;
+
+        let sync_control_for_thread = sync_control.clone();
+
         let thread = {
-            thread::spawn(move || {
+            thread::Builder::new()
+                .name("flush_manager".to_string())
+                .spawn(move || {
                 while let Ok(task) = receiver.recv() {
+                    if let Some(sync_control) = &sync_control_for_thread {
+                        let (lock, cvar) = &**sync_control;
+                        let mut paused = lock.lock().unwrap();
+                        while *paused {
+                            paused = cvar.wait(paused).unwrap();
+                        }
+                    }
 
                     match task {
                         FlushTask::Sync { callback } => {
@@ -96,14 +146,15 @@ impl FlushManager {
                     }
                 }
             })
-        };
+        }?;
 
         info!(logger, "FlushManager initialized");
 
-        Self {
+        Ok(Self {
             sender,
             thread: Some(thread),
-        }
+            sync_control,
+        })
     }
 
     fn flush(
@@ -140,10 +191,36 @@ impl FlushManager {
         Ok(sst)
     }
 
+    /// Enqueues a `FlushTask` to be processed by the background thread.
+    ///
+    /// Returns an error if the task cannot be enqueued.
     pub fn enqueue(&self, task: FlushTask) -> Result<()> {
         self.sender
             .try_send(task)
             .map_err(|e| Error::new(ErrorKind::Other, e))
+    }
+}
+
+#[cfg(test)]
+impl FlushManager {
+
+    /// (Test only) Pauses the flush thread, blocking task processing.
+    pub fn pause(&self) {
+        if let Some(sync_control) = &self.sync_control {
+            let (lock, _) = &**sync_control;
+            let mut paused = lock.lock().unwrap();
+            *paused = true;
+        }
+    }
+
+    /// (Test only) Resumes the flush thread if it was paused.
+    pub fn resume(&self) {
+        if let Some(sync_control) = &self.sync_control {
+            let (lock, cvar) = &**sync_control;
+            let mut paused = lock.lock().unwrap();
+            *paused = false;
+            cvar.notify_one();
+        }
     }
 }
 

@@ -16,30 +16,18 @@ use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::WriteBatch;
+use crate::storage::Direction;
+use crate::{debug, error, event, info, warn};
 use arc_swap::ArcSwap;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::remove_file;
-use crate::storage::Direction;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::RangeBounds;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use crate::{debug, error, event, info, warn};
 
-struct RangeScanIterator {
-    // This must be declared before the iterator to be dropped after.
-    _lsm_tree: Arc<LsmTree>,
-    iterator: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
-}
-
-impl Iterator for RangeScanIterator {
-    type Item = Result<(Vec<u8>, Vec<u8>)>;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iterator.next()
-    }
-}
 
 struct StorageEngine {
     logger: Arc<dyn LoggerAndTracer>,
@@ -53,7 +41,7 @@ struct StorageEngine {
     next_seq_number: AtomicU64,  // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
     sst_cache: Arc<SSTableCache>,
-    flush_scheduler: FlushManager,
+    flush_manager: FlushManager,
     async_callback: OnceLock<Arc<AsyncCallback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
 }
@@ -217,13 +205,13 @@ impl StorageEngine {
                 wal
             };
 
-            let flush_scheduler = FlushManager::new(
+            let flush_manager = FlushManager::new(
                 logger.clone(),
                 metric_registry,
                 options.clone(),
                 db_dir,
                 sst_cache.clone(),
-            );
+            )?;
 
             let lsm_tree = Arc::new(ArcSwap::new(Arc::new(lsm_tree)));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
@@ -240,7 +228,7 @@ impl StorageEngine {
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
                 sst_cache,
-                flush_scheduler,
+                flush_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
             }))
@@ -268,13 +256,13 @@ impl StorageEngine {
                 db_dir,
                 log_number,
             )?;
-            let flush_scheduler = FlushManager::new(
+            let flush_manager = FlushManager::new(
                 logger.clone(),
                 metric_registry,
                 options.clone(),
                 db_dir,
                 sst_cache.clone(),
-            );
+            )?;
 
             let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
@@ -291,7 +279,7 @@ impl StorageEngine {
                 next_seq_number: AtomicU64::new(1),
                 last_visible_seq: AtomicU64::new(0),
                 sst_cache,
-                flush_scheduler,
+                flush_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
             }))
@@ -347,7 +335,7 @@ impl StorageEngine {
 
         // If no leader is active, this thread becomes leader
         if self.is_leader(&writer) {
-            debug!(self.logger, "Thread {:?} is the leader and will preform the write",
+            debug!(self.logger, "Thread {:?} is the leader and will perform the write",
                 std::thread::current().id()
             );
             self.perform_writes();
@@ -514,18 +502,13 @@ impl StorageEngine {
         info!(self.logger, "Flush requested");
         event!(self.logger, "requested_flush start");
 
-        // TODO: Handle the case where the flush is not needed (e.g. memtable is empty)
         // TODO: Handle the case where the engine is in error mode
 
         let lsm_tree = self.lsm_tree.load();
 
         if lsm_tree.memtable.size() == 0 {
             info!(self.logger, "Memtable is empty, no flush needed, syncing with the FlushManager");
-            event!(self.logger, "flush_sync start");
-            let callback = Arc::new(BlockingCallback::new(|result| { result }));
-            self.flush_scheduler.enqueue(FlushTask::Sync { callback: Some(callback.clone()) })?;
-            callback.await_blocking()?;
-            event!(self.logger, "flush_sync end");
+            self.wait_for_pending_flushes()?;
             return Ok(());
         }
 
@@ -537,6 +520,15 @@ impl StorageEngine {
         self.perform_wal_and_memtable_rotation(&callback.clone())?;
         callback.await_blocking()?;
         event!(self.logger, "requested_flush completed");
+        Ok(())
+    }
+
+    fn wait_for_pending_flushes(self: &Arc<Self>) -> Result<()> {
+        event!(self.logger, "flush_sync start");
+        let callback = Arc::new(BlockingCallback::new(|result| { result }));
+        self.flush_manager.enqueue(FlushTask::Sync { callback: Some(callback.clone()) })?;
+        callback.await_blocking()?;
+        event!(self.logger, "flush_sync end");
         Ok(())
     }
 
@@ -606,7 +598,7 @@ impl StorageEngine {
             memtable,
             callback: Some(callback.clone()),
         };
-        self.flush_scheduler.enqueue(flush_task)
+        self.flush_manager.enqueue(flush_task)
     }
 
     fn update_lsm_tree_sstables(
@@ -759,14 +751,14 @@ impl Callback<Result<SSTableOperation>> for AsyncCallback<Result<SSTableOperatio
 /// Contains the list of WAL files that must be replayed,
 /// and the next available file number to assign to new files.
 #[derive(Debug)]
-pub struct StartupScanResult {
+struct StartupScanResult {
     /// WAL files to be replayed, sorted by file ID in ascending order.
     /// Each entry is a tuple of (file_number, full_path).
-    pub wal_files: Vec<(u64, PathBuf)>,
+    wal_files: Vec<(u64, PathBuf)>,
 
     /// The next unused file number. This is computed as one greater
     /// than the highest file number seen among MANIFEST, WAL, and SST files.
-    pub next_file_number: u64,
+    next_file_number: u64,
 }
 
 /// Scans the given database directory to find WAL files that need replay,
@@ -790,7 +782,7 @@ pub struct StartupScanResult {
 /// # Errors
 ///
 /// Returns an error if the directory can't be read.
-pub fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanResult> {
+fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanResult> {
     let mut wal_files = Vec::new();
     let mut max_file_num = 0;
 
@@ -872,17 +864,34 @@ pub enum SSTableOperation {
     },
 }
 
+struct RangeScanIterator {
+    // This must be declared before the iterator to be dropped after.
+    _lsm_tree: Arc<LsmTree>,
+    iterator: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
+}
+
+impl Iterator for RangeScanIterator {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iterator.next()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::obs::logger::test_instance;
-    use crate::util::bson_utils::BsonKey;
-    use std::path::Path;
-    use tempfile::tempdir;
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
+    use crate::options::storage_quantity::StorageQuantity;
+    use crate::options::storage_quantity::StorageUnit::Mebibytes;
+    use crate::storage::operation::Operation;
     use crate::storage::test_utils::{
         assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, user_key,
     };
+    use crate::util::bson_utils::BsonKey;
+    use bson::{doc, to_vec};
+    use std::path::Path;
+    use tempfile::tempdir;
 
     mod scan_tests {
         use super::*;
@@ -1184,5 +1193,155 @@ mod tests {
         assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
         assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_read_and_scan_with_immutable_memtables() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        )
+        .unwrap();
+
+        let col = 10;
+        let idx = 0;
+
+        // Pause the flush manager to keep immutable memtables around.
+        engine.flush_manager.pause();
+
+        // Write enough data to trigger a memtable rotation.
+        // We write four ~1MB values to fill up the 4MB memtable.
+        let val_1mb_string = "a".repeat(1024 * 1024);
+        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+        for i in 1..=4 {
+            engine
+                .write(WriteBatch::new(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(i),
+                    val_1mb.clone(),
+                )]))
+                .unwrap();
+        }
+
+        // This fifth write will trigger rotation, creating an immutable memtable.
+        let val_active = to_vec(&doc! { "v": "active" }).unwrap();
+        engine
+            .write(WriteBatch::new(vec![Operation::new_put(
+                col,
+                idx,
+                user_key(5),
+                val_active.clone(),
+            )]))
+            .unwrap();
+
+        // Verify that one immutable memtable now exists.
+        assert_eq!(engine.lsm_tree.load().imm_memtables.len(), 1);
+
+        // --- Verification: Read from both active and immutable memtables ---
+        // Read from what is now the immutable memtable.
+        assert_eq!(
+            engine
+                .read(col, idx, &user_key(1), None)
+                .unwrap()
+                .unwrap()
+                .1,
+            val_1mb
+        );
+        // Read from the active memtable.
+        assert_eq!(
+            engine
+                .read(col, idx, &user_key(5), None)
+                .unwrap()
+                .unwrap()
+                .1,
+            val_active
+        );
+        // Read a non-existent key.
+        assert!(engine
+            .read(col, idx, &user_key(6), None)
+            .unwrap()
+            .is_none());
+
+        // --- Verification: Range scan over both memtables ---
+        let results: Vec<_> = engine
+            .range_scan(col, idx, &(..), None, Direction::Forward)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].1, val_1mb);
+        assert_eq!(results[4].1, val_active);
+        assert!(results[0]
+            .0
+            .starts_with(&encode_record_key(col, idx, &user_key(1))));
+        assert!(results[4]
+            .0
+            .starts_with(&encode_record_key(col, idx, &user_key(5))));
+
+        // --- Verification: Updates and snapshots ---
+        let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
+        assert_eq!(snapshot, 5);
+
+        // Update a key that is in the immutable memtable. The update goes to the active memtable.
+        let val_update = to_vec(&doc! { "v": "updated" }).unwrap();
+        engine
+            .write(WriteBatch::new(vec![Operation::new_put(
+                col,
+                idx,
+                user_key(2),
+                val_update.clone(),
+            )]))
+            .unwrap();
+
+        // Read the updated key without a snapshot. Should see the new value.
+        assert_eq!(
+            engine
+                .read(col, idx, &user_key(2), None)
+                .unwrap()
+                .unwrap()
+                .1,
+            val_update
+        );
+        // Read with the snapshot. Should see the old value.
+        assert_eq!(
+            engine
+                .read(col, idx, &user_key(2), Some(snapshot))
+                .unwrap()
+                .unwrap()
+                .1,
+            val_1mb
+        );
+
+        // --- Cleanup and final verification ---
+        // Resume the flush manager and wait for it to process the pending flush task.
+        engine.flush_manager.resume();
+        engine.wait_for_pending_flushes().unwrap();
+
+        // The immutable memtable should now be flushed to an SSTable.
+        assert_eq!(engine.lsm_tree.load().imm_memtables.len(), 0);
+        assert_gauge_eq(registry, "sstable_count_level_0", 1);
+        assert_counter_eq(registry, "flush_count", 1);
+
+        // Data should still be readable from the new SSTable.
+        assert_eq!(
+            engine
+                .read(col, idx, &user_key(2), None)
+                .unwrap()
+                .unwrap()
+                .1,
+            val_update
+        );
+
+        // Flush the active memtable as well.
+        engine.flush().unwrap();
+        assert_gauge_eq(registry, "sstable_count_level_0", 2);
     }
 }

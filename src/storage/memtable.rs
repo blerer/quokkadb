@@ -133,7 +133,6 @@ impl <'a> Iterator for RangeScanIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use tempfile::tempdir;
     use crate::storage::internal_key::{encode_internal_key_range, MAX_SEQUENCE_NUMBER};
     use super::*;

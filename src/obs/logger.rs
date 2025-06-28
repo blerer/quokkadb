@@ -98,16 +98,24 @@ impl StdoutLogger {
             .unwrap()
             .as_micros()
     }
+
+    fn thread_label() -> String {
+        let thread = std::thread::current();
+        let thread_label = thread
+            .name()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("{:?}", thread.id()));
+        thread_label
+    }
 }
 
 impl LoggerAndTracer for StdoutLogger {
     fn log(&self, level: LogLevel, context: &'static str, msg: Arguments) {
         if self.level_enabled(level) {
             let timestamp = Self::now_micros();
-            let thread_id = std::thread::current().id();
             println!(
                 "[{:?}] [{}] [thread={:?}] [{}] {}",
-                level, timestamp, thread_id, context, msg
+                level, timestamp, Self::thread_label(), context, msg
             );
         }
     }
@@ -115,8 +123,7 @@ impl LoggerAndTracer for StdoutLogger {
     fn event(&self, context: &'static str, event: Arguments) {
         if self.tracing_enabled {
             let timestamp = Self::now_micros();
-            let thread_id = std::thread::current().id();
-            println!("[TRACE] [{}] [thread={:?}] [{}] {}", timestamp, thread_id, context, event);
+            println!("[TRACE] [{}] [thread={:?}] [{}] {}", timestamp, Self::thread_label(), context, event);
         }
     }
 
