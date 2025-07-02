@@ -5,7 +5,9 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 pub(crate) mod expr_fn;
+mod executor;
 pub mod logical_plan;
+pub mod physical_plan;
 pub(crate) mod parser;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]

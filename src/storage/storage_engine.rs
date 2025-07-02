@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 
-struct StorageEngine {
+pub(crate) struct StorageEngine {
     logger: Arc<dyn LoggerAndTracer>,
     db_dir: PathBuf,
     options: Arc<Options>,

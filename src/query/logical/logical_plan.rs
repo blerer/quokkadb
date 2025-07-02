@@ -112,7 +112,7 @@ pub struct LogicalPlanBuilder {
 
 impl LogicalPlanBuilder {
     /// Starts with a `TableScan` plan.
-    pub fn scan(database: &str, collection: &str) -> Self {
+    pub fn scan(_database: &str, collection: &str) -> Self {
         Self {
             plan: LogicalPlan::TableScan {
                 collection: collection.to_string(),

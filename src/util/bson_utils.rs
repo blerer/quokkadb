@@ -1,7 +1,9 @@
+use std::cmp::Ordering;
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
 use bson::{to_vec, Bson, Document};
 use std::io::{Error, ErrorKind, Result};
+use bson::spec::BinarySubtype;
 
 pub fn as_key_value(doc: &Document) -> bson::ser::Result<(Vec<u8>, Vec<u8>)> {
     let id = doc.get("id").unwrap();
@@ -213,6 +215,125 @@ fn invalid_input(message: &str) -> Error {
     Error::new(ErrorKind::InvalidInput, message)
 }
 
+/// Compare two [`Bson`] values using **MongoDB’s canonical sort order**.
+///
+/// MongoDB orders BSON values in two steps:
+///
+/// 1. **Type rank** – A fixed ranking by BSON type
+///    `MinKey < Null < Numbers < String < Document < Array < Binary < ObjectId`
+///    `< Boolean < DateTime < Timestamp < RegularExpression < MaxKey`.
+///
+/// 2. **Within-type comparison** – If the two values share the same type,
+///    comparison falls back to a rule specific to that type:
+///    * numbers by numeric value (handling cross-family comparisons)
+///    * strings lexicographically (UTF-8)
+///    * documents by key, then by value (prefix wins)
+///    * arrays element-by-element (prefix wins)
+///    * binary by subtype first, then bytes, etc.
+///
+/// Deprecated BSON variants (`Undefined`, `Symbol`, `DBPointer`, …) are not supported.
+///
+/// Returns [`Ordering::Less`], [`Ordering::Equal`], or [`Ordering::Greater`]
+/// exactly as mandated by the MongoDB wire protocol.
+pub fn cmp_bson(a: &Bson, b: &Bson) -> Ordering {
+    use Bson::*;
+
+    // 1. Type ranking (lower ⇒ smaller)
+    fn rank(v: &Bson) -> u8 {
+        match v {
+            MinKey                                                   => 0,
+            Null                                                     => 1,
+            Double(_)|Int32(_)|Int64(_)|Decimal128(_)                => 2,
+            String(_)                                                => 3,
+            Document(_)                                              => 4,
+            Array(_)                                                 => 5,
+            Binary(_)                                                => 6,
+            ObjectId(_)                                              => 7,
+            Boolean(_)                                               => 8,
+            DateTime(_)                                              => 9,
+            Timestamp(_)                                             => 10,
+            RegularExpression(_)                                     => 11,
+            MaxKey                                                   => 12,
+            _ /* legacy variants */                                  => panic!(
+                "Unsupported BSON type for comparison: {:?}. Use only supported types.",
+                v
+            ),
+        }
+    }
+
+    // Different BSON kinds → compare by rank.
+    let (ra, rb) = (rank(a), rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+
+    // Same kind → value-specific comparison.
+    match (a, b) {
+        // — numeric family —
+        (Double(x), Double(y))           => x.partial_cmp(y).unwrap_or(Ordering::Greater),
+        (Int32(x),  Int32(y))            => x.cmp(y),
+        (Int64(x),  Int64(y))            => x.cmp(y),
+        (Decimal128(x), Decimal128(y))   => x.to_string().cmp(&y.to_string()),
+
+        // cross-numeric
+        (Int32(x),  Double(y))           => (*x as f64).partial_cmp(y).unwrap(),
+        (Int64(x),  Double(y))           => (*x as f64).partial_cmp(y).unwrap(),
+        (Double(x), Int32(y))            => x.partial_cmp(&(*y as f64)).unwrap(),
+        (Double(x), Int64(y))            => x.partial_cmp(&(*y as f64)).unwrap(),
+        (Int32(x),  Int64(y))            => (*x as i64).cmp(y),
+        (Int64(x),  Int32(y))            => x.cmp(&(*y as i64)),
+
+        // — simple scalars —
+        (String(x), String(y))           => x.cmp(y),
+        (Boolean(x), Boolean(y))         => x.cmp(y),
+        (DateTime(x), DateTime(y))       => x.cmp(y),
+        (ObjectId(x), ObjectId(y))       => x.bytes().cmp(&y.bytes()),
+        (Timestamp(x), Timestamp(y))     => (x.time, x.increment).cmp(&(y.time, y.increment)),
+
+        // — binary —
+        (Binary(x), Binary(y)) => match subtype_code(x.subtype).cmp(&subtype_code(y.subtype)) {
+            Ordering::Equal => x.bytes.cmp(&y.bytes),
+            other           => other,
+        },
+
+        // — regex —
+        (RegularExpression(x), RegularExpression(y)) => match x.pattern.cmp(&y.pattern) {
+            Ordering::Equal => x.options.cmp(&y.options),
+            other           => other,
+        },
+
+        // — compound types —
+        (Array(av), Array(bv)) => {
+            for (ai, bi) in av.iter().zip(bv.iter()) {
+                let ord = cmp_bson(ai, bi);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            av.len().cmp(&bv.len())
+        }
+        (Document(ad), Document(bd)) => {
+            for ((ak, av), (bk, bv)) in ad.iter().zip(bd.iter()) {
+                match ak.cmp(bk) {
+                    Ordering::Equal => {
+                        let ord = cmp_bson(av, bv);
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    other => return other,
+                }
+            }
+            ad.len().cmp(&bd.len())
+        }
+
+        // identical MinKey / MaxKey / Null, etc.
+        _ => Ordering::Equal,
+    }
+}
+
+fn subtype_code(s: BinarySubtype) -> u8 { s.into() } // From<BinarySubtype> for u8 exists
+
 /// Trait for converting BSON values into sortable byte keys
 pub trait BsonKey {
     fn try_into_key(&self) -> Result<Vec<u8>>;
@@ -364,219 +485,287 @@ impl BsonKey for Bson {
 
 #[cfg(test)]
 mod tests {
-    use crate::util::bson_utils::BsonKey;
-    use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
-    use std::str::FromStr;
 
-    /// Helper function to check lexicographic ordering
-    fn assert_ordering(a: &Bson, b: &Bson) {
-        let key_a = a.try_into_key().expect("Failed to encode BSON A");
-        let key_b = b.try_into_key().expect("Failed to encode BSON B");
-        assert!(key_a < key_b, "Expected {:?} < {:?}", a, b);
+    mod bson_key {
+        use crate::util::bson_utils::BsonKey;
+        use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
+        use std::str::FromStr;
+
+        /// Helper function to check lexicographic ordering
+        fn assert_ordering(a: &Bson, b: &Bson) {
+            let key_a = a.try_into_key().expect("Failed to encode BSON A");
+            let key_b = b.try_into_key().expect("Failed to encode BSON B");
+            assert!(key_a < key_b, "Expected {:?} < {:?}", a, b);
+        }
+
+        /// **Test MinKey & MaxKey** (absolute ordering boundaries)
+        #[test]
+        fn minkey_maxkey() {
+            assert_ordering(&Bson::MinKey, &Bson::Null);
+            assert_ordering(&Bson::Int32(0), &Bson::MaxKey);
+        }
+
+        /// **Test Integer Sorting**
+        #[test]
+        fn int32_ordering() {
+            assert_ordering(&Bson::Int32(-1000), &Bson::Int32(-1));
+            assert_ordering(&Bson::Int32(-1), &Bson::Int32(0));
+            assert_ordering(&Bson::Int32(0), &Bson::Int32(1));
+            assert_ordering(&Bson::Int32(1), &Bson::Int32(1000));
+        }
+
+        #[test]
+        fn int64_ordering() {
+            assert_ordering(&Bson::Int64(-1_000_000_000), &Bson::Int64(-1));
+            assert_ordering(&Bson::Int64(-1), &Bson::Int64(0));
+            assert_ordering(&Bson::Int64(0), &Bson::Int64(1));
+            assert_ordering(&Bson::Int64(1), &Bson::Int64(1_000_000_000));
+        }
+
+        /// **Test Double Precision Floating-Point Sorting**
+        #[test]
+        fn double_ordering() {
+            assert_ordering(&Bson::Double(-1000.0), &Bson::Double(-1.0));
+            assert_ordering(&Bson::Double(-1.0), &Bson::Double(-0.1));
+            assert_ordering(&Bson::Double(-0.1), &Bson::Double(0.0));
+            assert_ordering(&Bson::Double(0.0), &Bson::Double(0.1));
+            assert_ordering(&Bson::Double(0.1), &Bson::Double(1.0));
+            assert_ordering(&Bson::Double(1.0), &Bson::Double(1000.0));
+        }
+
+        /// **Test Special Double Cases**
+        #[test]
+        fn double_edge_cases() {
+            assert_ordering(&Bson::Double(-1.0), &Bson::Double(1.0));
+            assert_ordering(&Bson::Double(-0.0), &Bson::Double(0.0));
+            assert_ordering(&Bson::Double(1.0e-10), &Bson::Double(1.0));
+            assert_ordering(&Bson::Double(1.0), &Bson::Double(1.0e10));
+        }
+
+        /// **Test Decimal128 Sorting**
+        #[test]
+        fn decimal128_ordering() {
+            let dec1 = Decimal128::from_str("-1000.12345").unwrap();
+            let dec2 = Decimal128::from_str("-1.0").unwrap();
+            let dec3 = Decimal128::from_str("0.0").unwrap();
+            let dec4 = Decimal128::from_str("1.0").unwrap();
+            let dec5 = Decimal128::from_str("1000.12345").unwrap();
+
+            assert_decimal_ordering(&dec1, &dec2);
+            assert_decimal_ordering(&dec2, &dec3);
+            assert_decimal_ordering(&dec3, &dec4);
+            assert_decimal_ordering(&dec4, &dec5);
+        }
+
+        fn assert_decimal_ordering(a: &Decimal128, b: &Decimal128) {
+            let key_a = &Bson::Decimal128(*a).try_into_key().unwrap();
+            let key_b = &Bson::Decimal128(*b).try_into_key().unwrap();
+            assert!(
+                key_a < key_b,
+                "Expected {:?} < {:?}, but got {:?} >= {:?}",
+                a,
+                b,
+                key_a,
+                key_b
+            );
+        }
+
+        /// Tests that leading zeros in the coefficient (`C`) do not break sorting.
+        #[test]
+        fn decimal128_leading_zero_normalization() {
+            let dec1 = Decimal128::from_str("1.000000000000000000000000000000000").unwrap();
+            let dec2 = Decimal128::from_str("1.000000000000000000000000000000001").unwrap();
+
+            // `dec1` and `dec2` should be sorted correctly, even if `dec1` has trailing zeroes.
+            assert_decimal_ordering(&dec1, &dec2);
+        }
+
+        /// Tests sorting when numbers have different exponent values.
+        #[test]
+        fn decimal128_exponent_adjustment() {
+            let dec1 = Decimal128::from_str("1.0").unwrap();
+            let dec2 = Decimal128::from_str("10.0").unwrap();
+            let dec3 = Decimal128::from_str("100.0").unwrap();
+
+            // Ensure proper ordering even when the exponent is different.
+            assert_decimal_ordering(&dec1, &dec2);
+            assert_decimal_ordering(&dec2, &dec3);
+        }
+
+        /// Tests very large and very small values to check that sorting handles extreme exponent shifts correctly.
+        #[test]
+        fn decimal128_extreme_values() {
+            let min_value = Decimal128::from_str("1E-6176").unwrap();
+            let max_value = Decimal128::from_str("9.999999999999999999999999999999999E6111").unwrap();
+
+            // Ensure smallest value sorts before largest value.
+            assert_decimal_ordering(&min_value, &max_value);
+        }
+
+        /// Tests sorting of numbers with small and large coefficients but similar exponents.
+        #[test]
+        fn decimal128_large_vs_small_coefficients() {
+            let small_coeff = Decimal128::from_str("0.00000000000000000001").unwrap();
+            let large_coeff = Decimal128::from_str("10000000000000000000.0").unwrap();
+
+            assert_decimal_ordering(&small_coeff, &large_coeff);
+        }
+
+        /// Tests correct sorting of zero (`0.0`) and negative zero (`-0.0`).
+        #[test]
+        fn decimal128_zero_ordering() {
+            let dec_zero = Decimal128::from_str("0.0").unwrap();
+            let dec_one = Decimal128::from_str("1.0").unwrap();
+            let dec_neg_zero = Decimal128::from_str("-0.0").unwrap();
+
+            assert_decimal_ordering(&dec_neg_zero, &dec_zero);
+            assert_decimal_ordering(&dec_zero, &dec_one);
+        }
+
+        /// Tests sorting of negative and positive numbers across exponent ranges.
+        #[test]
+        fn decimal128_negative_vs_positive() {
+            let neg_small = Decimal128::from_str("-1.0").unwrap();
+            let neg_large = Decimal128::from_str("-1000.0").unwrap();
+            let pos_small = Decimal128::from_str("1.0").unwrap();
+            let pos_large = Decimal128::from_str("1000.0").unwrap();
+
+            // Ensure negative numbers sort before positive numbers.
+            assert_decimal_ordering(&neg_large, &neg_small);
+            assert_decimal_ordering(&neg_small, &pos_small);
+            assert_decimal_ordering(&pos_small, &pos_large);
+        }
+
+        /// **Test String Ordering**
+        #[test]
+        fn string_ordering() {
+            assert_ordering(
+                &Bson::String("abc".to_string()),
+                &Bson::String("abd".to_string()),
+            );
+            assert_ordering(
+                &Bson::String("".to_string()),
+                &Bson::String("a".to_string()),
+            );
+            assert_ordering(
+                &Bson::String("a".to_string()),
+                &Bson::String("aa".to_string()),
+            );
+        }
+
+        /// **Test Boolean Ordering**
+        #[test]
+        fn boolean_ordering() {
+            assert_ordering(&Bson::Boolean(false), &Bson::Boolean(true));
+        }
+
+        /// **Test ObjectId Ordering**
+        #[test]
+        fn objectid_ordering() {
+            let oid1 = ObjectId::parse_str("000000000000000000000000").unwrap();
+            let oid2 = ObjectId::parse_str("ffffffffffffffffffffffff").unwrap();
+            assert_ordering(&Bson::ObjectId(oid1), &Bson::ObjectId(oid2));
+        }
+
+        /// **Test Binary Sorting**
+        #[test]
+        fn binary_ordering() {
+            let bin1 = Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![1, 2, 3],
+            };
+            let bin2 = Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![1, 2, 4],
+            };
+            assert_ordering(&Bson::Binary(bin1), &Bson::Binary(bin2));
+        }
+
+        /// **Test DateTime Ordering**
+        #[test]
+        fn datetime_ordering() {
+            let dt1 = DateTime::from_millis(1609459200000); // 2021-01-01 00:00:00 UTC
+            let dt2 = DateTime::from_millis(1640995200000); // 2022-01-01 00:00:00 UTC
+            assert_ordering(&Bson::DateTime(dt1), &Bson::DateTime(dt2));
+        }
+
+        /// **Test Timestamp Ordering**
+        #[test]
+        fn timestamp_ordering() {
+            let ts1 = Timestamp {
+                time: 1000,
+                increment: 1,
+            };
+            let ts2 = Timestamp {
+                time: 2000,
+                increment: 1,
+            };
+            assert_ordering(&Bson::Timestamp(ts1), &Bson::Timestamp(ts2));
+        }
     }
 
-    /// **Test MinKey & MaxKey** (absolute ordering boundaries)
-    #[test]
-    fn test_minkey_maxkey() {
-        assert_ordering(&Bson::MinKey, &Bson::Null);
-        assert_ordering(&Bson::Int32(0), &Bson::MaxKey);
-    }
+    mod bson_cmp {
+        use bson::{doc, Binary, Bson, DateTime, oid::ObjectId, spec::BinarySubtype};
+        use std::cmp::Ordering::*;
+        use crate::util::bson_utils;
 
-    /// **Test Integer Sorting**
-    #[test]
-    fn test_int32_ordering() {
-        assert_ordering(&Bson::Int32(-1000), &Bson::Int32(-1));
-        assert_ordering(&Bson::Int32(-1), &Bson::Int32(0));
-        assert_ordering(&Bson::Int32(0), &Bson::Int32(1));
-        assert_ordering(&Bson::Int32(1), &Bson::Int32(1000));
-    }
+        #[test]
+        fn test_type_rank() {
+            assert_eq!(bson_utils::cmp_bson(&Bson::MinKey, &Bson::Null), Less);
+            assert_eq!(bson_utils::cmp_bson(&Bson::Null, &Bson::Int32(0)), Less);
+            assert_eq!(bson_utils::cmp_bson(&Bson::Int32(0), &Bson::String("x".into())), Less);
+        }
 
-    #[test]
-    fn test_int64_ordering() {
-        assert_ordering(&Bson::Int64(-1_000_000_000), &Bson::Int64(-1));
-        assert_ordering(&Bson::Int64(-1), &Bson::Int64(0));
-        assert_ordering(&Bson::Int64(0), &Bson::Int64(1));
-        assert_ordering(&Bson::Int64(1), &Bson::Int64(1_000_000_000));
-    }
+        #[test]
+        fn test_numeric_family() {
+            assert_eq!(bson_utils::cmp_bson(&Bson::Int32(5), &Bson::Int64(5)), Equal);
+            assert_eq!(bson_utils::cmp_bson(&Bson::Double(3.1), &Bson::Int32(4)), Less);
+        }
 
-    /// **Test Double Precision Floating-Point Sorting**
-    #[test]
-    fn test_double_ordering() {
-        assert_ordering(&Bson::Double(-1000.0), &Bson::Double(-1.0));
-        assert_ordering(&Bson::Double(-1.0), &Bson::Double(-0.1));
-        assert_ordering(&Bson::Double(-0.1), &Bson::Double(0.0));
-        assert_ordering(&Bson::Double(0.0), &Bson::Double(0.1));
-        assert_ordering(&Bson::Double(0.1), &Bson::Double(1.0));
-        assert_ordering(&Bson::Double(1.0), &Bson::Double(1000.0));
-    }
+        #[test]
+        fn test_string_vs_string() {
+            assert_eq!(bson_utils::cmp_bson(&Bson::String("apple".into()), &Bson::String("banana".into())), Less);
+        }
 
-    /// **Test Special Double Cases**
-    #[test]
-    fn test_double_edge_cases() {
-        assert_ordering(&Bson::Double(-1.0), &Bson::Double(1.0));
-        assert_ordering(&Bson::Double(-0.0), &Bson::Double(0.0));
-        assert_ordering(&Bson::Double(1.0e-10), &Bson::Double(1.0));
-        assert_ordering(&Bson::Double(1.0), &Bson::Double(1.0e10));
-    }
+        #[test]
+        fn test_object_id_order() {
+            let a = ObjectId::parse_str("000000000000000000000000").unwrap();
+            let b = ObjectId::parse_str("ffffffffffffffffffffffff").unwrap();
+            assert_eq!(bson_utils::cmp_bson(&Bson::ObjectId(a), &Bson::ObjectId(b)), Less);
+        }
 
-    /// **Test Decimal128 Sorting**
-    #[test]
-    fn test_decimal128_ordering() {
-        let dec1 = Decimal128::from_str("-1000.12345").unwrap();
-        let dec2 = Decimal128::from_str("-1.0").unwrap();
-        let dec3 = Decimal128::from_str("0.0").unwrap();
-        let dec4 = Decimal128::from_str("1.0").unwrap();
-        let dec5 = Decimal128::from_str("1000.12345").unwrap();
+        #[test]
+        fn test_binary_subtype_then_bytes() {
+            let x = Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2] };
+            let y = Binary { subtype: BinarySubtype::Uuid,    bytes: vec![0] };
+            assert_eq!(bson_utils::cmp_bson(&Bson::Binary(x.clone()), &Bson::Binary(y.clone())), Less);
+            // same subtype → fall back to bytes
+            let z = Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 3] };
+            assert_eq!(bson_utils::cmp_bson(&Bson::Binary(x), &Bson::Binary(z)), Less);
+        }
 
-        assert_decimal_ordering(&dec1, &dec2);
-        assert_decimal_ordering(&dec2, &dec3);
-        assert_decimal_ordering(&dec3, &dec4);
-        assert_decimal_ordering(&dec4, &dec5);
-    }
+        #[test]
+        fn test_array_prefix_rule() {
+            let a = Bson::Array(vec![Bson::Int32(1)]);
+            let b = Bson::Array(vec![Bson::Int32(1), Bson::Int32(2)]);
+            assert_eq!(bson_utils::cmp_bson(&a, &b), Less);
+        }
 
-    fn assert_decimal_ordering(a: &Decimal128, b: &Decimal128) {
-        let key_a = &Bson::Decimal128(*a).try_into_key().unwrap();
-        let key_b = &Bson::Decimal128(*b).try_into_key().unwrap();
-        assert!(
-            key_a < key_b,
-            "Expected {:?} < {:?}, but got {:?} >= {:?}",
-            a,
-            b,
-            key_a,
-            key_b
-        );
-    }
+        #[test]
+        fn test_document_key_and_value() {
+            let a = Bson::Document(doc! { "a": 1 });
+            let b = Bson::Document(doc! { "b": 1 });
+            let c = Bson::Document(doc! { "a": 2 });
 
-    /// Tests that leading zeros in the coefficient (`C`) do not break sorting.
-    #[test]
-    fn test_decimal128_leading_zero_normalization() {
-        let dec1 = Decimal128::from_str("1.000000000000000000000000000000000").unwrap();
-        let dec2 = Decimal128::from_str("1.000000000000000000000000000000001").unwrap();
+            assert_eq!(bson_utils::cmp_bson(&a, &b), Less);   // key comparison
+            assert_eq!(bson_utils::cmp_bson(&a, &c), Less);   // same key, value comparison
+        }
 
-        // `dec1` and `dec2` should be sorted correctly, even if `dec1` has trailing zeroes.
-        assert_decimal_ordering(&dec1, &dec2);
-    }
-
-    /// Tests sorting when numbers have different exponent values.
-    #[test]
-    fn test_decimal128_exponent_adjustment() {
-        let dec1 = Decimal128::from_str("1.0").unwrap();
-        let dec2 = Decimal128::from_str("10.0").unwrap();
-        let dec3 = Decimal128::from_str("100.0").unwrap();
-
-        // Ensure proper ordering even when the exponent is different.
-        assert_decimal_ordering(&dec1, &dec2);
-        assert_decimal_ordering(&dec2, &dec3);
-    }
-
-    /// Tests very large and very small values to check that sorting handles extreme exponent shifts correctly.
-    #[test]
-    fn test_decimal128_extreme_values() {
-        let min_value = Decimal128::from_str("1E-6176").unwrap();
-        let max_value = Decimal128::from_str("9.999999999999999999999999999999999E6111").unwrap();
-
-        // Ensure smallest value sorts before largest value.
-        assert_decimal_ordering(&min_value, &max_value);
-    }
-
-    /// Tests sorting of numbers with small and large coefficients but similar exponents.
-    #[test]
-    fn test_decimal128_large_vs_small_coefficients() {
-        let small_coeff = Decimal128::from_str("0.00000000000000000001").unwrap();
-        let large_coeff = Decimal128::from_str("10000000000000000000.0").unwrap();
-
-        assert_decimal_ordering(&small_coeff, &large_coeff);
-    }
-
-    /// Tests correct sorting of zero (`0.0`) and negative zero (`-0.0`).
-    #[test]
-    fn test_decimal128_zero_ordering() {
-        let dec_zero = Decimal128::from_str("0.0").unwrap();
-        let dec_one = Decimal128::from_str("1.0").unwrap();
-        let dec_neg_zero = Decimal128::from_str("-0.0").unwrap();
-
-        assert_decimal_ordering(&dec_neg_zero, &dec_zero);
-        assert_decimal_ordering(&dec_zero, &dec_one);
-    }
-
-    /// Tests sorting of negative and positive numbers across exponent ranges.
-    #[test]
-    fn test_decimal128_negative_vs_positive() {
-        let neg_small = Decimal128::from_str("-1.0").unwrap();
-        let neg_large = Decimal128::from_str("-1000.0").unwrap();
-        let pos_small = Decimal128::from_str("1.0").unwrap();
-        let pos_large = Decimal128::from_str("1000.0").unwrap();
-
-        // Ensure negative numbers sort before positive numbers.
-        assert_decimal_ordering(&neg_large, &neg_small);
-        assert_decimal_ordering(&neg_small, &pos_small);
-        assert_decimal_ordering(&pos_small, &pos_large);
-    }
-
-    /// **Test String Ordering**
-    #[test]
-    fn test_string_ordering() {
-        assert_ordering(
-            &Bson::String("abc".to_string()),
-            &Bson::String("abd".to_string()),
-        );
-        assert_ordering(
-            &Bson::String("".to_string()),
-            &Bson::String("a".to_string()),
-        );
-        assert_ordering(
-            &Bson::String("a".to_string()),
-            &Bson::String("aa".to_string()),
-        );
-    }
-
-    /// **Test Boolean Ordering**
-    #[test]
-    fn test_boolean_ordering() {
-        assert_ordering(&Bson::Boolean(false), &Bson::Boolean(true));
-    }
-
-    /// **Test ObjectId Ordering**
-    #[test]
-    fn test_objectid_ordering() {
-        let oid1 = ObjectId::parse_str("000000000000000000000000").unwrap();
-        let oid2 = ObjectId::parse_str("ffffffffffffffffffffffff").unwrap();
-        assert_ordering(&Bson::ObjectId(oid1), &Bson::ObjectId(oid2));
-    }
-
-    /// **Test Binary Sorting**
-    #[test]
-    fn test_binary_ordering() {
-        let bin1 = Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: vec![1, 2, 3],
-        };
-        let bin2 = Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: vec![1, 2, 4],
-        };
-        assert_ordering(&Bson::Binary(bin1), &Bson::Binary(bin2));
-    }
-
-    /// **Test DateTime Ordering**
-    #[test]
-    fn test_datetime_ordering() {
-        let dt1 = DateTime::from_millis(1609459200000); // 2021-01-01 00:00:00 UTC
-        let dt2 = DateTime::from_millis(1640995200000); // 2022-01-01 00:00:00 UTC
-        assert_ordering(&Bson::DateTime(dt1), &Bson::DateTime(dt2));
-    }
-
-    /// **Test Timestamp Ordering**
-    #[test]
-    fn test_timestamp_ordering() {
-        let ts1 = Timestamp {
-            time: 1000,
-            increment: 1,
-        };
-        let ts2 = Timestamp {
-            time: 2000,
-            increment: 1,
-        };
-        assert_ordering(&Bson::Timestamp(ts1), &Bson::Timestamp(ts2));
+        #[test]
+        fn test_datetime() {
+            let t1 = DateTime::from_millis(1_000);
+            let t2 = DateTime::from_millis(2_000);
+            assert_eq!(bson_utils::cmp_bson(&Bson::DateTime(t1), &Bson::DateTime(t2)), Less);
+        }
     }
 }

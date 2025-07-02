@@ -10,7 +10,7 @@ mod manifest_state;
 pub mod memtable;
 pub mod operation;
 mod sstable;
-mod storage_engine;
+pub(crate) mod storage_engine;
 pub mod wal;
 pub mod write_batch;
 
