@@ -224,6 +224,28 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 }
                 exclude_fields.push(Rc::new(field));
             }
+            Bson::Document(projection_doc) => {
+                let field = Rc::new(parse_field(key)?);
+                if projection_doc.len() != 1 {
+                    return Err(Error::InvalidArgument(format!(
+                        "Projection document for field '{}' must have exactly one operator.",
+                        key
+                    )));
+                }
+
+                let (op, op_value) = projection_doc.iter().next().unwrap();
+                let projection_expr = match op.as_str() {
+                    "$slice" => parse_slice_projection(field, op_value)?,
+                    "$elemMatch" => parse_elem_match_projection(field, op_value)?,
+                    _ => {
+                        return Err(Error::InvalidArgument(format!(
+                            "Unknown projection operator: {}",
+                            op
+                        )))
+                    }
+                };
+                include_fields.push(projection_expr);
+            }
             _ => {
                 return Err(Error::InvalidArgument(format!(
                     "Invalid projection value for field '{}'",
@@ -242,6 +264,57 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
         (false, false) => Err(Error::InvalidArgument(
             "Projection document cannot be empty".to_string(),
         )),
+    }
+}
+
+fn parse_slice_projection(field: Rc<Expr>, value: &Bson) -> Result<Rc<Expr>, Error> {
+    let (skip, limit) = match value {
+        Bson::Int32(n) => (*n, None),
+        Bson::Int64(n) => (*n as i32, None),
+        Bson::Array(arr) => {
+            if arr.len() != 2 {
+                return Err(Error::InvalidArgument(
+                    "$slice array must have exactly two elements".to_string(),
+                ));
+            }
+            let skip = match &arr[0] {
+                Bson::Int32(n) => *n,
+                Bson::Int64(n) => *n as i32,
+                _ => {
+                    return Err(Error::InvalidArgument(
+                        "$slice first element must be an integer".to_string(),
+                    ))
+                }
+            };
+            let limit = match &arr[1] {
+                Bson::Int32(n) if *n > 0 => Some(*n as u32),
+                Bson::Int64(n) if *n > 0 => Some(*n as u32),
+                _ => {
+                    return Err(Error::InvalidArgument(
+                        "$slice limit must be a positive integer".to_string(),
+                    ))
+                }
+            };
+            (skip, limit)
+        }
+        _ => {
+            return Err(Error::InvalidArgument(
+                "$slice must be an integer or an array of two integers".to_string(),
+            ))
+        }
+    };
+
+    Ok(Rc::new(Expr::ProjectionSlice { field, skip, limit }))
+}
+
+fn parse_elem_match_projection(field: Rc<Expr>, value: &Bson) -> Result<Rc<Expr>, Error> {
+    if let Bson::Document(doc) = value {
+        let expr = parse_conditions(doc)?;
+        Ok(Rc::new(Expr::ProjectionElemMatch { field, expr }))
+    } else {
+        Err(Error::InvalidArgument(
+            "$elemMatch projection value must be a document".to_string(),
+        ))
     }
 }
 
@@ -682,6 +755,95 @@ mod tests {
         assert_eq!(
             parsed.unwrap_err().to_string(),
             "Positional fields cannot used for sorting: name.$"
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_with_slice() {
+        let projection = doc! { "comments": { "$slice": 5 } };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(vec![projection_slice(field(["comments"]), 5, None)]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_with_slice_array() {
+        let projection = doc! { "comments": { "$slice": [10, 5] } };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected =
+            Projection::Include(vec![projection_slice(field(["comments"]), 10, Some(5))]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_with_slice_invalid() {
+        let projection = doc! { "comments": { "$slice": "foo" } };
+        let err = parse_projection(&projection).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "$slice must be an integer or an array of two integers"
+        );
+
+        let projection = doc! { "comments": { "$slice": [1, 2, 3] } };
+        let err = parse_projection(&projection).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "$slice array must have exactly two elements"
+        );
+
+        let projection = doc! { "comments": { "$slice": [1, 0] } };
+        let err = parse_projection(&projection).unwrap_err();
+        assert_eq!(err.to_string(), "$slice limit must be a positive integer");
+
+        let projection = doc! { "comments": { "$slice": [1, -1] } };
+        let err = parse_projection(&projection).unwrap_err();
+        assert_eq!(err.to_string(), "$slice limit must be a positive integer");
+    }
+
+    #[test]
+    fn test_parse_projection_with_elem_match() {
+        let projection = doc! { "students": { "$elemMatch": { "school": "Hogwarts" } } };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(vec![projection_elem_match(
+            field(["students"]),
+            field_filters(field(["school"]), [eq("Hogwarts")]),
+        )]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_with_elem_match_complex() {
+        let projection =
+            doc! { "grades": { "$elemMatch": { "grade": { "$gte": 85 }, "mean": { "$gt": 90 } } } };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(vec![projection_elem_match(
+            field(["grades"]),
+            and([
+                field_filters(field(["grade"]), [gte(85)]),
+                field_filters(field(["mean"]), [gt(90)]),
+            ]),
+        )]);
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_with_elem_match_invalid() {
+        let projection = doc! { "students": { "$elemMatch": "not a doc" } };
+        let err = parse_projection(&projection).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "$elemMatch projection value must be a document"
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_with_multiple_operators() {
+        let projection = doc! { "students": { "$elemMatch": { "a": 1 }, "$slice": 5 } };
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Projection document for field 'students' must have exactly one operator."
         );
     }
 }

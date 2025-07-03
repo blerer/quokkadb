@@ -1,16 +1,9 @@
 use std::cmp::Ordering;
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
-use bson::{to_vec, Bson, Document};
+use bson::Bson;
 use std::io::{Error, ErrorKind, Result};
 use bson::spec::BinarySubtype;
-
-pub fn as_key_value(doc: &Document) -> bson::ser::Result<(Vec<u8>, Vec<u8>)> {
-    let id = doc.get("id").unwrap();
-    let user_key = id.try_into_key()?;
-    let value = to_vec(&doc)?;
-    Ok((user_key, value))
-}
 
 fn read_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<&[u8]> {
     let end = reader.find_next_by(|b| b == 0);

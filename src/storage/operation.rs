@@ -44,11 +44,11 @@ impl TryFrom<u8> for OperationType {
 #[derive(Debug, PartialEq)]
 pub struct Operation {
     /// The type of operation
-    operation_type: OperationType,
+    pub operation_type: OperationType,
     /// The collection ID
-    collection: u32,
+    pub collection: u32,
     /// The index ID
-    index: u32,
+    pub index: u32,
     /// The BSON key formatted in a byte comparable way.
     user_key: Vec<u8>,
     /// The bytes representing the BSON document
@@ -85,6 +85,10 @@ impl Operation {
     }
     pub fn operation_type(&self) -> OperationType {
         self.operation_type.clone()
+    }
+
+    pub fn user_key(&self) -> &[u8] {
+        &self.user_key
     }
 
     pub fn value(&self) -> &[u8] {

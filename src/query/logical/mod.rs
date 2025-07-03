@@ -52,6 +52,16 @@ pub enum Expr {
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
+    // Projection operators
+    ProjectionSlice {
+        field: Rc<Expr>,
+        skip: i32,
+        limit: Option<u32>,
+    },
+    ProjectionElemMatch {
+        field: Rc<Expr>,
+        expr: Rc<Expr>,
+    },
 }
 
 impl TreeNode for Expr {
@@ -76,6 +86,8 @@ impl TreeNode for Expr {
             Expr::Not(expr) => vec![expr.clone()],
             Expr::Nor(elements) => elements.iter().cloned().collect(),
             Expr::ElemMatch(predicates) => predicates.iter().cloned().collect(),
+            Expr::ProjectionSlice { field, .. } => vec![field.clone()],
+            Expr::ProjectionElemMatch { field, expr, .. } => vec![field.clone(), expr.clone()],
             _ => vec![], // Leaf nodes have no children
         }
     }
@@ -100,6 +112,17 @@ impl TreeNode for Expr {
             Expr::Not(_) => Rc::new(Expr::Not(Self::get_first(children))),
             Expr::Nor(_) => Rc::new(Expr::Nor(children)),
             Expr::ElemMatch { .. } => Rc::new(Expr::ElemMatch(children)),
+            Expr::ProjectionSlice { skip, limit, .. } => Rc::new(Expr::ProjectionSlice {
+                field: Self::get_first(children),
+                skip: *skip,
+                limit: *limit,
+            }),
+            Expr::ProjectionElemMatch { .. } => {
+                let mut iter = children.into_iter();
+                let field = iter.next().unwrap();
+                let expr = iter.next().unwrap();
+                Rc::new(Expr::ProjectionElemMatch { field, expr })
+            }
             _ => self, // No changes needed for leaf nodes
         }
     }

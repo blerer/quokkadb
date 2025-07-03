@@ -2,12 +2,15 @@ use crate::error::{Error, Result};
 use crate::query::logical::logical_plan::{SortField, SortOrder};
 use crate::query::logical::physical_plan::PhysicalPlan;
 use crate::query::logical::{BsonValue, ComparisonOperator, Expr, PathComponent};
+use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
+use crate::storage::write_batch::WriteBatch;
 use crate::storage::Direction;
+use crate::util::bson_utils::{self, BsonKey};
+use bson::oid::ObjectId;
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::sync::Arc;
-use crate::util::bson_utils;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -75,10 +78,33 @@ impl QueryExecutor {
                         .and_then(|kv| bson::from_slice(&kv.1).map_err(Into::into))
                 })))
             }
-            PhysicalPlan::Insert { .. } => {
-                // To implement Insert, we need the definition of `storage::write_batch::Operation`
-                // and a way to construct primary keys and handle index updates.
-                todo!("Insert operation not yet implemented")
+            PhysicalPlan::Insert {
+                collection,
+                documents,
+            } => {
+                let mut operations = Vec::with_capacity(documents.len());
+                let mut ids = Vec::with_capacity(documents.len());
+                // The documents are cloned to be able to mutate them to add an _id if missing.
+                for mut doc in documents.clone() {
+                    doc.entry("_id".to_string())
+                        .or_insert_with(|| Bson::ObjectId(ObjectId::new()));
+
+                    let id = doc.get("_id").unwrap();
+                    ids.push(id.clone());
+                    let user_key = id.try_into_key()?;
+                    let value = bson::to_vec(&doc)
+                        .map_err(|e| Error::InvalidArgument(e.to_string()))?;
+
+                    operations.push(Operation::new_put(*collection, 0, user_key, value));
+                }
+
+                let batch = WriteBatch::new(operations);
+                self.storage_engine.write(batch)?;
+
+                Ok(Box::new(ids.into_iter().map(|id| {
+                    let doc = id.as_document().unwrap().clone();
+                    Ok(doc)
+                })))
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let input_iter = self.execute(input.clone())?;
@@ -261,4 +287,217 @@ fn sort_documents(a: &Document, b: &Document, sort_fields: &[SortField]) -> Orde
         }
     }
     Ordering::Equal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::logical::logical_plan::{SortField, SortOrder};
+    use crate::query::logical::{Expr, PathComponent};
+    use bson::{doc, Bson};
+    use std::cmp::Ordering;
+    use std::rc::Rc;
+
+    #[test]
+    fn test_get_path_value() {
+        let doc = doc! {
+            "a": 1,
+            "b": { "c": "hello" },
+            "d": [10, 20, { "e": 30 }],
+        };
+
+        // Simple field
+        assert_eq!(
+            get_path_value(&doc, &[PathComponent::FieldName("a".to_string())]),
+            Some(&Bson::Int32(1))
+        );
+
+        // Nested field
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("b".to_string()),
+                    PathComponent::FieldName("c".to_string())
+                ]
+            ),
+            Some(&Bson::String("hello".to_string()))
+        );
+
+        // Array element
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("d".to_string()),
+                    PathComponent::ArrayElement(1)
+                ]
+            ),
+            Some(&Bson::Int32(20))
+        );
+
+        // Nested in array
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("d".to_string()),
+                    PathComponent::ArrayElement(2),
+                    PathComponent::FieldName("e".to_string())
+                ]
+            ),
+            Some(&Bson::Int32(30))
+        );
+
+        // Non-existent field
+        assert_eq!(
+            get_path_value(&doc, &[PathComponent::FieldName("z".to_string())]),
+            None
+        );
+
+        // Partially correct path
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("b".to_string()),
+                    PathComponent::FieldName("z".to_string())
+                ]
+            ),
+            None
+        );
+
+        // Path into non-document
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("a".to_string()),
+                    PathComponent::FieldName("z".to_string())
+                ]
+            ),
+            None
+        );
+
+        // Index into non-array
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("a".to_string()),
+                    PathComponent::ArrayElement(0)
+                ]
+            ),
+            None
+        );
+
+        // Empty path
+        assert_eq!(get_path_value(&doc, &[]), None);
+    }
+
+    fn make_sort_field(path: Vec<PathComponent>, order: SortOrder) -> SortField {
+        SortField {
+            field: Rc::new(Expr::Field(path)),
+            order,
+        }
+    }
+
+    #[test]
+    fn test_sort_documents() {
+        let doc1 = doc! { "a": 1, "b": "xyz", "c": { "d": 10 } };
+        let doc2 = doc! { "a": 2, "b": "abc", "c": { "d": 20 } };
+        let doc3 = doc! { "a": 2, "b": "xyz", "c": { "d": 5 } };
+
+        // Sort by 'a' ascending
+        let sort_fields = vec![make_sort_field(
+            vec![PathComponent::FieldName("a".to_string())],
+            SortOrder::Ascending,
+        )];
+        assert_eq!(sort_documents(&doc1, &doc2, &sort_fields), Ordering::Less);
+        assert_eq!(
+            sort_documents(&doc2, &doc1, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(sort_documents(&doc2, &doc3, &sort_fields), Ordering::Equal);
+
+        // Sort by 'a' descending
+        let sort_fields = vec![make_sort_field(
+            vec![PathComponent::FieldName("a".to_string())],
+            SortOrder::Descending,
+        )];
+        assert_eq!(
+            sort_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(sort_documents(&doc2, &doc1, &sort_fields), Ordering::Less);
+
+        // Sort by 'b' ascending
+        let sort_fields = vec![make_sort_field(
+            vec![PathComponent::FieldName("b".to_string())],
+            SortOrder::Ascending,
+        )];
+        assert_eq!(
+            sort_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Greater
+        ); // "xyz" > "abc"
+        assert_eq!(sort_documents(&doc2, &doc1, &sort_fields), Ordering::Less);
+
+        // Multi-key sort: 'a' asc, then 'b' asc
+        let sort_fields = vec![
+            make_sort_field(
+                vec![PathComponent::FieldName("a".to_string())],
+                SortOrder::Ascending,
+            ),
+            make_sort_field(
+                vec![PathComponent::FieldName("b".to_string())],
+                SortOrder::Ascending,
+            ),
+        ];
+        // doc2(a:2, b:"abc") vs doc3(a:2, b:"xyz")
+        assert_eq!(sort_documents(&doc2, &doc3, &sort_fields), Ordering::Less);
+
+        // Multi-key sort: 'a' asc, then 'c.d' desc
+        let sort_fields = vec![
+            make_sort_field(
+                vec![PathComponent::FieldName("a".to_string())],
+                SortOrder::Ascending,
+            ),
+            make_sort_field(
+                vec![
+                    PathComponent::FieldName("c".to_string()),
+                    PathComponent::FieldName("d".to_string()),
+                ],
+                SortOrder::Descending,
+            ),
+        ];
+        // doc2(a:2, c.d:20) vs doc3(a:2, c.d:5) -> 20 > 5, so with desc it's Less
+        assert_eq!(sort_documents(&doc2, &doc3, &sort_fields), Ordering::Less);
+
+        // Sort on nested key
+        let sort_fields = vec![make_sort_field(
+            vec![
+                PathComponent::FieldName("c".to_string()),
+                PathComponent::FieldName("d".to_string()),
+            ],
+            SortOrder::Ascending,
+        )];
+        assert_eq!(sort_documents(&doc1, &doc2, &sort_fields), Ordering::Less); // 10 < 20
+        assert_eq!(sort_documents(&doc3, &doc1, &sort_fields), Ordering::Less); // 5 < 10
+
+        // Field missing in one doc
+        let doc4 = doc! { "b": "only b" };
+        let sort_fields = vec![make_sort_field(
+            vec![PathComponent::FieldName("a".to_string())],
+            SortOrder::Ascending,
+        )];
+        // doc1 has "a": 1, doc4 has no "a", so it's Null. Null is smaller than anything else.
+        assert_eq!(
+            sort_documents(&doc1, &doc4, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(sort_documents(&doc4, &doc1, &sort_fields), Ordering::Less);
+
+        // No sort fields
+        assert_eq!(sort_documents(&doc1, &doc2, &[]), Ordering::Equal);
+    }
 }

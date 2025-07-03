@@ -133,3 +133,11 @@ where
 pub fn not(predicate: Rc<Expr>) -> Rc<Expr> {
     Rc::new(Expr::Not(predicate))
 }
+
+pub fn projection_slice(field: Rc<Expr>, skip: i32, limit: Option<u32>) -> Rc<Expr> {
+    Rc::new(Expr::ProjectionSlice { field, skip, limit })
+}
+
+pub fn projection_elem_match(field: Rc<Expr>, expr: Rc<Expr>) -> Rc<Expr> {
+    Rc::new(Expr::ProjectionElemMatch { field, expr })
+}

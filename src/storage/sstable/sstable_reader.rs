@@ -501,20 +501,20 @@ impl BlockLoader {
 
 #[cfg(test)]
 mod tests {
-    use bson::{doc, Bson};
+    use bson::Bson;
     use tempfile::tempdir;
     use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
     use super::*;
-    use crate::storage::internal_key::{encode_internal_key, encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER};
+    use crate::storage::internal_key::{encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER};
     use crate::storage::lsm_version::SSTableMetadata;
-    use crate::storage::operation::{Operation, OperationType};
+    use crate::storage::operation::Operation;
     use std::ops::{Bound, RangeBounds};
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::{delete_op, delete_rec, put_op, put_rec};
-    use crate::util::bson_utils::{as_key_value, BsonKey};
+    use crate::util::bson_utils::BsonKey;
     use crate::util::interval::Interval;
 
     #[test]
@@ -525,11 +525,13 @@ mod tests {
         let mut metric_registry = MetricRegistry::new();
         let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
 
+        let col = 10;
+
         let inserts = vec![
-            as_key_value(&doc! { "id": 1, "name": "Luke Skywalker", "role": "Jedi" }).unwrap(),
-            as_key_value(&doc! { "id": 2, "name": "Darth Vader", "role": "Sith" }).unwrap(),
-            as_key_value(&doc! { "id": 3, "name": "Leia Organa", "role": "Princess" }).unwrap(),
-            as_key_value(&doc! { "id": 4, "name": "Han Solo", "role": "Smuggler" }).unwrap(),
+            put_op(col, 1, 1),
+            put_op(col, 2, 1),
+            put_op(col, 3, 1),
+            put_op(col, 4, 1),
         ];
 
         let sst_file = DbFile::new_sst(12);
@@ -537,8 +539,8 @@ mod tests {
         let mut writer = SSTableWriter::new(&path, &sst_file, &options, inserts.len()).unwrap();
 
         let mut seq = 15;
-        for (user_key, value) in inserts.iter() {
-            writer.add(&encode_internal_key(&encode_record_key(10, 0, user_key), seq, OperationType::Put), value).unwrap();
+        for op in inserts.iter() {
+            writer.add(&op.internal_key(seq), op.value()).unwrap();
             seq += 1;
         }
 
@@ -549,8 +551,8 @@ mod tests {
         let expected = SSTableMetadata::new(
             12,
             0,
-            &encode_record_key(10, 0, &inserts[0].0),
-            &encode_record_key(10, 0, &inserts[3].0),
+            &encode_record_key(col, 0, &inserts[0].user_key()),
+            &encode_record_key(col, 0, &inserts[3].user_key()),
             15,
             18,
             expected_size,
@@ -566,10 +568,9 @@ mod tests {
         assert_eq!(properties.max_sequence, expected.max_sequence_number);
 
         let mut seq = 15;
-        for (user_key, value) in inserts.iter() {
-            let record_key = encode_record_key(10, 0, user_key);
-            let result = reader.read(&record_key, 19).unwrap();
-            assert_eq!(result, Some((encode_internal_key(&record_key, seq, OperationType::Put), value.clone())));
+        for op in inserts.iter() {
+            let result = reader.read(&encode_record_key(col, 0, op.user_key()), 19).unwrap();
+            assert_eq!(result, Some((op.internal_key(seq), op.value().to_vec())));
             seq += 1;
         }
     }
