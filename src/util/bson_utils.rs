@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
-use bson::Bson;
+use bson::{to_vec, Bson};
 use std::io::{Error, ErrorKind, Result};
 use bson::spec::BinarySubtype;
 
@@ -10,7 +10,7 @@ fn read_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<&[u8]> {
     if let Some(end) = end {
         Ok(reader.read_fixed_slice(end + 1)?)
     } else {
-        Err(invalid_input("End of CString could not be found"))
+        Err(invalid_data("End of CString could not be found"))
     }
 }
 
@@ -19,7 +19,7 @@ fn skip_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<()> {
     if let Some(end) = end {
         reader.skip(end + 1)
     } else {
-        Err(invalid_input("End of CString could not be found"))
+        Err(invalid_data("End of CString could not be found"))
     }
 }
 
@@ -41,7 +41,7 @@ pub fn find_bson_field_value<'a, B: AsRef<[u8]>>(
     let doc_length = reader.read_i32_le()? as usize;
 
     if doc_length > reader.remaining() + 4 {
-        return Err(invalid_input("Invalid BSON document length"));
+        return Err(invalid_data("Invalid BSON document length"));
     }
 
     while reader.has_remaining() {
@@ -55,7 +55,7 @@ pub fn find_bson_field_value<'a, B: AsRef<[u8]>>(
         let start_pos = reader.position();
         let field_bytes = match read_cstring(reader) {
             Ok(bytes) => bytes,
-            Err(_) => return Err(invalid_input("Invalid BSON field name")),
+            Err(_) => return Err(invalid_data("Invalid BSON field name")),
         };
 
         // Check if the field name matches
@@ -119,14 +119,14 @@ pub fn extract_bson_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>)
             if let Some(end) = end {
                 reader.seek(end + 1)?;
             } else {
-                return Err(invalid_input("End of first CString could not be found"));
+                return Err(invalid_data("End of first CString could not be found"));
             }
             end = reader.find_next_by(|b| b == 0);
             if let Some(end) = end {
                 reader.seek(start)?;
                 reader.read_fixed_slice(end + 1)
             } else {
-                Err(invalid_input("End of second CString could not be found"))
+                Err(invalid_data("End of second CString could not be found"))
             }
         }
         0x0D => {
@@ -155,7 +155,7 @@ pub fn extract_bson_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>)
             // Decimal128 (16 bytes)
             reader.read_fixed_slice(16)
         }
-        _ => Err(invalid_input("Unsupported BSON type")),
+        _ => Err(invalid_data("Unsupported BSON type")),
     }
 }
 
@@ -200,12 +200,59 @@ pub fn skip_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>) -> Resu
         0x11 => reader.skip(8),  // Timestamp (8 bytes)
         0x12 => reader.skip(8),  // Int64 (8 bytes)
         0x13 => reader.skip(16), // Decimal128 (16 bytes)
-        _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported BSON type")),
+        _ => Err(invalid_data("Unsupported BSON type")),
     }
 }
 
-fn invalid_input(message: &str) -> Error {
-    Error::new(ErrorKind::InvalidInput, message)
+fn invalid_data(message: &str) -> Error {
+    Error::new(ErrorKind::InvalidData, message)
+}
+
+/// Build the raw bytes that make up a **single BSON element**
+/// (`<type-byte><cstring key><value bytes>`), given a key and a `Bson` value.
+pub fn make_raw_bson_element(key: &str, value: &Bson) -> Result<Vec<u8>> {
+
+    // Serialize a 1-field document and slice away the outer framing:
+    // [i32 size][element …][0x00 terminator]
+    let mut doc = bson::Document::new();
+    doc.insert(key, value.clone());
+
+    let mut buf = to_vec(&doc).map_err(|e| invalid_data(&e.to_string()))?; // – full document bytes
+    buf.pop();                          // drop trailing 0
+    Ok(buf.split_off(4))             // drop 4-byte size header → element bytes
+}
+
+/// Insert a raw BSON element as the very first field of a serialized BSON
+/// document *without* deserializing either side.
+///
+/// * `doc`   – mutable buffer containing a BSON document
+/// * `field` – a complete BSON element (`type-byte || cstring key || value`)
+///
+/// Returns `Ok(())` on success, or an error if the input is not valid.
+pub fn prepend_raw_bson_field(doc: &mut Vec<u8>, field: &[u8]) -> Result<()> {
+    use std::convert::TryInto;
+
+    if doc.len() < 5 || *doc.last().unwrap() != 0 {
+        return Err(invalid_data("invalid BSON document"));
+    }
+
+    // Original size (first 4 bytes = little-endian i32)
+    let orig_size = doc.read_i32_le(0) as usize;
+    if orig_size != doc.len() {
+        return Err(invalid_data("size header does not match document length"));
+    }
+
+    // Compute the new size and write it back
+    let new_size = orig_size
+        .checked_add(field.len())
+        .ok_or(invalid_data("document would exceed 32-bit size limit"))?;
+
+    doc[0..4].copy_from_slice(&(new_size as i32).to_le_bytes());
+
+    // Splice the new field just after the size header (index 4)
+    doc.splice(4..4, field.iter().cloned());
+
+    Ok(())
 }
 
 /// Compare two [`Bson`] values using **MongoDB’s canonical sort order**.
@@ -478,6 +525,47 @@ impl BsonKey for Bson {
 
 #[cfg(test)]
 mod tests {
+
+    mod prepend_raw_bson_field {
+        use bson::{doc, to_vec, Bson};
+        use crate::util::bson_utils::{make_raw_bson_element, prepend_raw_bson_field};
+
+        #[test]
+        fn inserts_string_field_as_first() {
+            // original document { a: 1, b: true }
+            let mut doc_buf = to_vec(&doc! { "a": 1_i32, "b": true }).unwrap();
+
+            // raw element for { x: "bar" } built with the helper
+            let field = make_raw_bson_element("x", &Bson::String("bar".into())).unwrap();
+
+            prepend_raw_bson_field(&mut doc_buf, &field).unwrap();
+
+            // expect { x: "bar", a: 1, b: true }
+            assert_eq!(
+                doc_buf,
+                to_vec(&doc! { "x": "bar", "a": 1_i32, "b": true }).unwrap()
+            );
+        }
+
+        #[test]
+        fn rejects_length_mismatch() {
+            // corrupt size header
+            let mut bad = to_vec(&doc! { "a": 1_i32 }).unwrap();
+            bad[0..4].copy_from_slice(&0_i32.to_le_bytes());
+
+            let field = make_raw_bson_element("x", &Bson::Int32(0)).unwrap();
+            assert!(prepend_raw_bson_field(&mut bad, &field).is_err());
+        }
+
+        #[test]
+        fn rejects_missing_terminator() {
+            let mut bad = to_vec(&doc! { "a": 1_i32 }).unwrap();
+            bad.pop(); // drop trailing 0x00
+
+            let field = make_raw_bson_element("x", &Bson::String("y".into())).unwrap();
+            assert!(prepend_raw_bson_field(&mut bad, &field).is_err());
+        }
+    }
 
     mod bson_key {
         use crate::util::bson_utils::BsonKey;
