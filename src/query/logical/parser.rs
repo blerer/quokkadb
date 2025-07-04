@@ -1,6 +1,6 @@
 use crate::query::logical::logical_plan::{Projection, SortField, SortOrder};
 use crate::query::logical::{
-    BsonType, BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
+    BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
 use crate::Error;
 use bson::{Bson, Document};
@@ -115,7 +115,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 "$type" => {
                     if let Some(bson_type) = parse_bson_type(value) {
                         predicates.push(Rc::new(Expr::Type {
-                            bson_type,
+                            bson_type: Rc::new(Expr::Literal(BsonValue(bson_type))),
                             negated: false,
                         }))
                     } else {
@@ -126,8 +126,9 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 }
                 "$size" => {
                     if let Bson::Int32(size) = value {
+                        let size = Rc::new(Expr::Literal(BsonValue(Bson::Int32(*size))));
                         predicates.push(Rc::new(Expr::Size {
-                            size: *size as usize,
+                            size,
                             negated: false,
                         }))
                     } else {
@@ -139,7 +140,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 "$all" => {
                     if let Bson::Array(values) = value {
                         predicates.push(Rc::new(Expr::All(
-                            values.iter().map(|bson| BsonValue(bson.clone())).collect(),
+                            Rc::new(Expr::Literal(BsonValue(Bson::Array(values.clone())))),
                         )))
                     } else {
                         return Err(Error::InvalidArgument("$all must be an array".to_string()));
@@ -172,32 +173,32 @@ fn new_predicate(operator: ComparisonOperator, value: &Bson) -> Rc<Expr> {
     })
 }
 
-fn parse_bson_type(value: &Bson) -> Option<BsonType> {
+fn parse_bson_type(value: &Bson) -> Option<Bson> {
     match value {
         // Numeric BSON types
-        Bson::Int32(1) | Bson::Int64(1) => Some(BsonType::Double),
-        Bson::Int32(2) | Bson::Int64(2) => Some(BsonType::String),
-        Bson::Int32(3) | Bson::Int64(3) => Some(BsonType::Document),
-        Bson::Int32(4) | Bson::Int64(4) => Some(BsonType::Array),
-        Bson::Int32(5) | Bson::Int64(5) => Some(BsonType::Binary),
-        Bson::Int32(8) | Bson::Int64(8) => Some(BsonType::Boolean),
-        Bson::Int32(9) | Bson::Int64(9) => Some(BsonType::DateTime),
-        Bson::Int32(10) | Bson::Int64(10) => Some(BsonType::Null),
-        Bson::Int32(16) | Bson::Int64(16) => Some(BsonType::Int32),
-        Bson::Int32(18) | Bson::Int64(18) => Some(BsonType::Int64),
+        Bson::Int32(1) | Bson::Int64(1) => Some(Bson::Int32(1)), //double
+        Bson::Int32(2) | Bson::Int64(2) => Some(Bson::Int32(2)), // string
+        Bson::Int32(3) | Bson::Int64(3) => Some(Bson::Int32(3)), // document
+        Bson::Int32(4) | Bson::Int64(4) => Some(Bson::Int32(4)), // array
+        Bson::Int32(5) | Bson::Int64(5) => Some(Bson::Int32(5)), // binData
+        Bson::Int32(8) | Bson::Int64(8) => Some(Bson::Int32(8)), // bool
+        Bson::Int32(9) | Bson::Int64(9) => Some(Bson::Int32(9)), // date
+        Bson::Int32(10) | Bson::Int64(10) => Some(Bson::Int32(10)), // null
+        Bson::Int32(16) | Bson::Int64(16) => Some(Bson::Int32(16)), // int
+        Bson::Int32(18) | Bson::Int64(18) => Some(Bson::Int32(18)), // long
 
         // String-based aliases
         Bson::String(alias) => match alias.as_str() {
-            "double" => Some(BsonType::Double),
-            "string" => Some(BsonType::String),
-            "object" => Some(BsonType::Document),
-            "array" => Some(BsonType::Array),
-            "binData" => Some(BsonType::Binary),
-            "bool" => Some(BsonType::Boolean),
-            "date" => Some(BsonType::DateTime),
-            "null" => Some(BsonType::Null),
-            "int" => Some(BsonType::Int32),
-            "long" => Some(BsonType::Int64),
+            "double" => Some(Bson::Int32(1)),
+            "string" => Some(Bson::Int32(2)),
+            "object" => Some(Bson::Int32(3)),
+            "array" => Some(Bson::Int32(4)),
+            "binData" => Some(Bson::Int32(5)),
+            "bool" => Some(Bson::Int32(8)),
+            "date" => Some(Bson::Int32(9)),
+            "null" => Some(Bson::Int32(10)),
+            "int" => Some(Bson::Int32(16)),
+            "long" => Some(Bson::Int32(18)),
             _ => None,
         },
 
@@ -429,10 +430,10 @@ mod tests {
 
     #[test]
     fn test_parse_bson_type_numeric() {
-        assert_eq!(parse_bson_type(&Bson::Int32(1)), Some(BsonType::Double));
-        assert_eq!(parse_bson_type(&Bson::Int32(2)), Some(BsonType::String));
-        assert_eq!(parse_bson_type(&Bson::Int32(3)), Some(BsonType::Document));
-        assert_eq!(parse_bson_type(&Bson::Int32(10)), Some(BsonType::Null));
+        assert_eq!(parse_bson_type(&Bson::Int32(1)), Some(Bson::Int32(1)));
+        assert_eq!(parse_bson_type(&Bson::Int32(2)), Some(Bson::Int32(2)));
+        assert_eq!(parse_bson_type(&Bson::Int32(3)), Some(Bson::Int32(3)));
+        assert_eq!(parse_bson_type(&Bson::Int32(10)), Some(Bson::Int32(10)));
         assert_eq!(parse_bson_type(&Bson::Int32(999)), None); // Invalid type
     }
 
@@ -440,15 +441,15 @@ mod tests {
     fn test_parse_bson_type_alias() {
         assert_eq!(
             parse_bson_type(&Bson::String("double".to_string())),
-            Some(BsonType::Double)
+            Some(Bson::Int32(1))
         );
         assert_eq!(
             parse_bson_type(&Bson::String("string".to_string())),
-            Some(BsonType::String)
+            Some(Bson::Int32(2))
         );
         assert_eq!(
             parse_bson_type(&Bson::String("bool".to_string())),
-            Some(BsonType::Boolean)
+            Some(Bson::Int32(8))
         );
         assert_eq!(parse_bson_type(&Bson::String("unknown".to_string())), None);
         // Invalid alias
@@ -466,7 +467,7 @@ mod tests {
     fn test_parse_conditions_with_type() {
         let doc = doc! { "field": { "$type": "string" } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["field"]), [has_type(BsonType::String, false)]);
+        let expected = field_filters(field(["field"]), [has_type(2, false)]);
         assert_eq!(expected, parsed);
     }
 
@@ -482,7 +483,7 @@ mod tests {
     fn test_parse_conditions_with_all() {
         let doc = doc! { "tags": { "$all": ["tag1", "tag2"] } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["tags"]), [all(["tag1", "tag2"])]);
+        let expected = field_filters(field(["tags"]), [all(vec!("tag1", "tag2"))]);
         assert_eq!(expected, parsed);
     }
 
@@ -509,7 +510,7 @@ mod tests {
         let expected = and([
             field_filters(field(["age"]), [gte(18)]),
             field_filters(field(["status"]), [eq("active")]),
-            field_filters(field(["tags"]), [all(["tag1", "tag2"])]),
+            field_filters(field(["tags"]), [all(vec!("tag1", "tag2"))]),
         ]);
 
         assert_eq!(expected, parsed.unwrap());
@@ -584,7 +585,7 @@ mod tests {
         let expected = nor([
             or([
                 field_filters(field(["field1"]), [lte(15)]),
-                field_filters(field(["field2"]), [has_type(BsonType::String, false)]),
+                field_filters(field(["field2"]), [has_type(2, false)]),
             ]),
             field_filters(field(["field3"]), [size(3, false)]),
         ]);

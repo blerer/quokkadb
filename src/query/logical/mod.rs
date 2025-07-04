@@ -38,15 +38,15 @@ pub enum Expr {
     Exists(bool),
     /// Type check
     Type {
-        bson_type: BsonType,
+        bson_type: Rc<Expr>,
         negated: bool, // If the expression has been negated (e.g. $not: { $type : "string" })
     },
     // Array-specific operations
     Size {
-        size: usize,
+        size: Rc<Expr>,
         negated: bool,
     },
-    All(Vec<BsonValue>),
+    All(Rc<Expr>),
     ElemMatch(Vec<Rc<Expr>>),
     /// Represents an expression that is always true (e.g. $and: [])
     AlwaysTrue,
@@ -173,21 +173,20 @@ impl Expr {
             }),
             Expr::Exists(bool) => Rc::new(Expr::Exists(!*bool)),
             Expr::All(values) => {
-                let value = BsonValue(Bson::Array(values.iter().map(|v| v.to_bson()).collect()));
                 Rc::new(Expr::Comparison {
                     operator: ComparisonOperator::Nin,
-                    value: Rc::new(Expr::Literal(value)),
+                    value: values.clone(),
                 })
             }
             Expr::Type {
                 bson_type,
                 negated: not,
             } => Rc::new(Expr::Type {
-                bson_type: *bson_type,
+                bson_type: bson_type.clone(),
                 negated: !*not,
             }),
             Expr::Size { size, negated } => Rc::new(Expr::Size {
-                size: *size,
+                size: size.clone(),
                 negated: !*negated,
             }),
             Expr::AlwaysTrue => Rc::new(Expr::AlwaysFalse),
@@ -236,28 +235,6 @@ impl ComparisonOperator {
             ComparisonOperator::Nin => "$nin".to_string(),
         }
     }
-}
-
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
-pub enum BsonType {
-    Double,
-    String,
-    Array,
-    Document,
-    Boolean,
-    Null,
-    RegularExpression,
-    JavaScriptCode,
-    JavaScriptCodeWithScope,
-    Int32,
-    Int64,
-    Timestamp,
-    Binary,
-    ObjectId,
-    DateTime,
-    Decimal128,
-    MaxKey,
-    MinKey,
 }
 
 /// Represents a component in a field path

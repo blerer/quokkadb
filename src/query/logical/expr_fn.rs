@@ -1,4 +1,4 @@
-use crate::query::logical::{BsonType, BsonValue, ComparisonOperator, Expr, PathComponent};
+use crate::query::logical::{BsonValue, ComparisonOperator, Expr, PathComponent};
 use std::rc::Rc;
 
 pub fn field<T, U>(name: T) -> Rc<Expr>
@@ -27,12 +27,12 @@ pub fn exists(exists: bool) -> Rc<Expr> {
     Rc::new(Expr::Exists(exists))
 }
 
-pub fn has_type(bson_type: BsonType, negated: bool) -> Rc<Expr> {
-    Rc::new(Expr::Type { bson_type, negated })
+pub fn has_type(bson_type: impl Into<BsonValue>, negated: bool) -> Rc<Expr> {
+    Rc::new(Expr::Type { bson_type: lit(bson_type), negated })
 }
 
-pub fn size(size: usize, negated: bool) -> Rc<Expr> {
-    Rc::new(Expr::Size { size, negated })
+pub fn size(size: impl Into<BsonValue>, negated: bool) -> Rc<Expr> {
+    Rc::new(Expr::Size { size: lit(size), negated })
 }
 
 pub fn field_filters<T>(field: Rc<Expr>, predicates: T) -> Rc<Expr>
@@ -94,12 +94,8 @@ pub fn ne(bson_value: impl Into<BsonValue>) -> Rc<Expr> {
     })
 }
 
-pub fn all<T, U>(values: T) -> Rc<Expr>
-where
-    T: IntoIterator<Item = U>,
-    U: Into<BsonValue>,
-{
-    Rc::new(Expr::All(values.into_iter().map(|v| v.into()).collect()))
+pub fn all(array: impl Into<BsonValue>) -> Rc<Expr> {
+    Rc::new(Expr::All(lit(array)))
 }
 
 pub fn elem_match<T>(predicates: T) -> Rc<Expr>
