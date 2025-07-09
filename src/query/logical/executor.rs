@@ -397,7 +397,7 @@ mod tests {
 
     fn make_sort_field(path: Vec<PathComponent>, order: SortOrder) -> SortField {
         SortField {
-            field: Rc::new(Expr::Field(path)),
+            field: Arc::new(Expr::Field(path)),
             order,
         }
     }

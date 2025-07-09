@@ -2,7 +2,9 @@ use crate::query::tree_node::TreeNode;
 use bson::Bson;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::sync::Arc;
+use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
 
 pub(crate) mod expr_fn;
 mod executor;
@@ -20,47 +22,50 @@ pub enum Expr {
     PositionalField(Vec<PathComponent>),
     /// Literal values
     Literal(BsonValue),
+    /// Placeholder for parameters. After normalization, literals would be replaced by placeholders
+    /// and the parameters captured. Allowing optimizations output to be cached and reused.
+    Placeholder(u32),
     /// Multiple filters on the same field (e.g., `{ "price": { "$ne": 1.99, "$exists": true } }`)
     FieldFilters {
-        field: Rc<Expr>,
-        filters: Vec<Rc<Expr>>, // List of filters on the same field
+        field: Arc<Expr>,
+        filters: Vec<Arc<Expr>>, // List of filters on the same field
     },
     /// A single comparison (e.g., `$gt: 5`, `$eq: "Alice"`)
     Comparison {
         operator: ComparisonOperator, // `$eq`, `$ne`, `$gt`, `$lt`, etc.
-        value: Rc<Expr>,              // The literal value
+        value: Arc<Expr>,              // The literal value
     },
-    And(Vec<Rc<Expr>>),
-    Or(Vec<Rc<Expr>>),
-    Not(Rc<Expr>),
-    Nor(Vec<Rc<Expr>>),
+    And(Vec<Arc<Expr>>),
+    Or(Vec<Arc<Expr>>),
+    Not(Arc<Expr>),
+    Nor(Vec<Arc<Expr>>),
     /// Field existence
     Exists(bool),
     /// Type check
     Type {
-        bson_type: Rc<Expr>,
+        bson_type: Arc<Expr>,
         negated: bool, // If the expression has been negated (e.g. $not: { $type : "string" })
     },
     // Array-specific operations
     Size {
-        size: Rc<Expr>,
+        size: Arc<Expr>,
         negated: bool,
     },
-    All(Rc<Expr>),
-    ElemMatch(Vec<Rc<Expr>>),
+    All(Arc<Expr>),
+    ElemMatch(Vec<Arc<Expr>>),
     /// Represents an expression that is always true (e.g. $and: [])
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
     // Projection operators
     ProjectionSlice {
-        field: Rc<Expr>,
+        field: Arc<Expr>,
         skip: i32,
         limit: Option<u32>,
     },
     ProjectionElemMatch {
-        field: Rc<Expr>,
-        expr: Rc<Expr>,
+        field: Arc<Expr>,
+        expr: Arc<Expr>,
     },
 }
 
@@ -68,7 +73,7 @@ impl TreeNode for Expr {
     type Child = Expr;
 
     /// Return references to the children of the current node
-    fn children(&self) -> Vec<Rc<Self::Child>> {
+    fn children(&self) -> Vec<Arc<Self::Child>> {
         match self {
             Expr::FieldFilters {
                 field,
@@ -92,27 +97,27 @@ impl TreeNode for Expr {
         }
     }
 
-    fn with_new_children(self: Rc<Self>, children: Vec<Rc<Self::Child>>) -> Rc<Self> {
+    fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self::Child>>) -> Arc<Self> {
         match self.as_ref() {
             Expr::FieldFilters { .. } => {
                 let mut iter = children.into_iter();
                 let field = iter.next().unwrap();
                 let predicates = iter.collect();
-                Rc::new(Expr::FieldFilters {
+                Arc::new(Expr::FieldFilters {
                     field,
                     filters: predicates,
                 })
             }
-            Expr::Comparison { operator, .. } => Rc::new(Expr::Comparison {
+            Expr::Comparison { operator, .. } => Arc::new(Expr::Comparison {
                 operator: operator.clone(),
                 value: Self::get_first(children),
             }),
-            Expr::And(_) => Rc::new(Expr::And(children)),
-            Expr::Or(_) => Rc::new(Expr::Or(children)),
-            Expr::Not(_) => Rc::new(Expr::Not(Self::get_first(children))),
-            Expr::Nor(_) => Rc::new(Expr::Nor(children)),
-            Expr::ElemMatch { .. } => Rc::new(Expr::ElemMatch(children)),
-            Expr::ProjectionSlice { skip, limit, .. } => Rc::new(Expr::ProjectionSlice {
+            Expr::And(_) => Arc::new(Expr::And(children)),
+            Expr::Or(_) => Arc::new(Expr::Or(children)),
+            Expr::Not(_) => Arc::new(Expr::Not(Self::get_first(children))),
+            Expr::Nor(_) => Arc::new(Expr::Nor(children)),
+            Expr::ElemMatch { .. } => Arc::new(Expr::ElemMatch(children)),
+            Expr::ProjectionSlice { skip, limit, .. } => Arc::new(Expr::ProjectionSlice {
                 field: Self::get_first(children),
                 skip: *skip,
                 limit: *limit,
@@ -121,7 +126,7 @@ impl TreeNode for Expr {
                 let mut iter = children.into_iter();
                 let field = iter.next().unwrap();
                 let expr = iter.next().unwrap();
-                Rc::new(Expr::ProjectionElemMatch { field, expr })
+                Arc::new(Expr::ProjectionElemMatch { field, expr })
             }
             _ => self, // No changes needed for leaf nodes
         }
@@ -129,22 +134,22 @@ impl TreeNode for Expr {
 }
 
 impl Expr {
-    fn get_first(children: Vec<Rc<Expr>>) -> Rc<Expr> {
+    fn get_first(children: Vec<Arc<Expr>>) -> Arc<Expr> {
         children.into_iter().next().unwrap()
     }
 
-    pub fn negate(&self) -> Rc<Expr> {
+    pub fn negate(&self) -> Arc<Expr> {
         match self {
             Expr::Not(expr) => expr.clone(),
-            Expr::Nor(exprs) => Rc::new(Expr::Or(exprs.iter().cloned().collect())),
-            Expr::And(exprs) => Rc::new(Expr::Or(exprs.iter().map(|e| e.negate()).collect())),
-            Expr::Or(exprs) => Rc::new(Expr::And(exprs.iter().map(|e| e.negate()).collect())),
+            Expr::Nor(exprs) => Arc::new(Expr::Or(exprs.iter().cloned().collect())),
+            Expr::And(exprs) => Arc::new(Expr::Or(exprs.iter().map(|e| e.negate()).collect())),
+            Expr::Or(exprs) => Arc::new(Expr::And(exprs.iter().map(|e| e.negate()).collect())),
             Expr::FieldFilters {
                 field,
                 filters: predicates,
             } => {
                 if predicates.len() == 1 {
-                    return Rc::new(Expr::FieldFilters {
+                    return Arc::new(Expr::FieldFilters {
                         field: field.clone(),
                         filters: predicates.iter().map(|e| e.negate()).collect(),
                     });
@@ -155,25 +160,25 @@ impl Expr {
                 let field_predicates = predicates
                     .iter()
                     .map(|e| {
-                        Rc::new(Expr::FieldFilters {
+                        Arc::new(Expr::FieldFilters {
                             field: field.clone(),
                             filters: vec![e.negate()],
                         })
                     })
                     .collect();
 
-                Rc::new(Expr::FieldFilters {
+                Arc::new(Expr::FieldFilters {
                     field: field.clone(),
-                    filters: vec![Rc::new(Expr::Or(field_predicates))],
+                    filters: vec![Arc::new(Expr::Or(field_predicates))],
                 })
             }
-            Expr::Comparison { operator, value } => Rc::new(Expr::Comparison {
+            Expr::Comparison { operator, value } => Arc::new(Expr::Comparison {
                 operator: operator.negate(),
                 value: value.clone(),
             }),
-            Expr::Exists(bool) => Rc::new(Expr::Exists(!*bool)),
+            Expr::Exists(bool) => Arc::new(Expr::Exists(!*bool)),
             Expr::All(values) => {
-                Rc::new(Expr::Comparison {
+                Arc::new(Expr::Comparison {
                     operator: ComparisonOperator::Nin,
                     value: values.clone(),
                 })
@@ -181,19 +186,90 @@ impl Expr {
             Expr::Type {
                 bson_type,
                 negated: not,
-            } => Rc::new(Expr::Type {
+            } => Arc::new(Expr::Type {
                 bson_type: bson_type.clone(),
                 negated: !*not,
             }),
-            Expr::Size { size, negated } => Rc::new(Expr::Size {
+            Expr::Size { size, negated } => Arc::new(Expr::Size {
                 size: size.clone(),
                 negated: !*negated,
             }),
-            Expr::AlwaysTrue => Rc::new(Expr::AlwaysFalse),
-            Expr::AlwaysFalse => Rc::new(Expr::AlwaysTrue),
-            _ => Rc::new(self.clone()),
+            Expr::AlwaysTrue => Arc::new(Expr::AlwaysFalse),
+            Expr::AlwaysFalse => Arc::new(Expr::AlwaysTrue),
+            _ => Arc::new(self.clone()),
         }
     }
+
+    // fn write_to(&self, writer: &mut ByteWriter) {
+    //     match self {
+    //         Expr::Not(expr) => {
+    //             writer.write_u8(1);
+    //             expr.write_to(writer);
+    //         },
+    //         Expr::Nor(exprs) => {
+    //             writer.write_u8(2);
+    //             Self::write_exprs(exprs, writer);
+    //         },
+    //         Expr::And(exprs) => {
+    //             writer.write_u8(3);
+    //             Self::write_exprs(exprs, writer);
+    //         },
+    //         Expr::Or(exprs) => {
+    //             writer.write_u8(4);
+    //             Self::write_exprs(exprs, writer);
+    //         },
+    //         Expr::FieldFilters {
+    //             field,
+    //             filters: predicates,
+    //         } => {
+    //             writer.write_u8(5);
+    //             field.write_to(writer);
+    //             Self::write_exprs(predicates, writer);
+    //         }
+    //         Expr::Comparison { operator, value } => Rc::new(Expr::Comparison {
+    //             operator: operator.negate(),
+    //             value: value.clone(),
+    //         }),
+    //         Expr::Exists(bool) => {
+    //             writer.write_u8(7);
+    //             writer.write_u8(if bool { 1 } else { 0 });
+    //         },
+    //         Expr::All(values) => {
+    //             writer.write_u8(8);
+    //             values.write_to(writer);
+    //         }
+    //         Expr::Type {
+    //             bson_type,
+    //             negated,
+    //         } => {
+    //             writer.write_u8(9);
+    //             bson_type.write_to(writer);
+    //             writer.write_u8(if negated { 1 } else { 0 });
+    //         },
+    //         Expr::Size { size, negated } => {
+    //             writer.write_u8(10);
+    //             size.write_to(writer);
+    //             writer.write_u8(if negated { 1 } else { 0 });
+    //         },
+    //         Expr::AlwaysTrue => {
+    //             writer.write_u8(11);
+    //         },
+    //         Expr::AlwaysFalse => {
+    //             writer.write_u8(12);
+    //         },
+    //     }
+    // }
+    //
+    // fn write_exprs(exprs: &Vec<Rc<Expr>>, writer: &mut ByteWriter) {
+    //     for expr in exprs {
+    //         expr.write_to(writer);
+    //     }
+    // }
+    //
+    // #[cfg(test)] // The serialization is only used to compute the LogicalPlan hash for the statement cache
+    // fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    //     todo!()
+    // }
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
@@ -391,6 +467,32 @@ macro_rules! bson_value {
     ( $($tokens:tt)* ) => {
         BsonValue(bson::bson!($($tokens)*))
     };
+}
+
+pub struct Parameters {
+    parameters: Vec<BsonValue>,
+}
+
+impl Parameters {
+    pub fn new() -> Self {
+        Self {
+            parameters: Vec::new(),
+        }
+    }
+
+    pub fn collect_parameter(&mut self, value: BsonValue) -> Arc<Expr> {
+        let idx = self.parameters.len() as u32;
+        self.parameters.push(value);
+        Arc::new(Expr::Placeholder(idx))
+    }
+
+    pub fn get(&self, index: usize) -> Option<&BsonValue> {
+        self.parameters.get(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.parameters.len()
+    }
 }
 
 #[cfg(test)]

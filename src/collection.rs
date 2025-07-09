@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::query::logical::logical_plan::LogicalPlan;
 use crate::query::logical::parser;
 use bson::Document;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Collection {
     collection: String,
@@ -71,13 +71,21 @@ impl Query {
         let conditions = parser::parse_conditions(&self.filter)?;
 
         plan = LogicalPlan::Filter {
-            input: Rc::new(plan),
+            input: Arc::new(plan),
             condition: conditions,
         };
 
+        if let Some(projection) = &self.projection {
+            let projection = parser::parse_projection(&projection)?;
+            plan = LogicalPlan::Projection {
+                input: Arc::new(plan),
+                projection: Arc::new(projection),
+            }
+        }
+
         if self.limit.is_some() || self.skip.is_some() {
             plan = LogicalPlan::Limit {
-                input: Rc::new(plan),
+                input: Arc::new(plan),
                 limit: self.limit.clone(),
                 skip: self.skip.clone(),
             }

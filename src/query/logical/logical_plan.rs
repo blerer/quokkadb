@@ -1,6 +1,6 @@
 use crate::query::logical::Expr;
 use crate::query::tree_node::TreeNode;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Represents the LogicalPlan for MongoDB-like operations
 #[derive(Debug, Clone, PartialEq)]
@@ -15,25 +15,25 @@ pub enum LogicalPlan {
 
     /// Represents a filter operation.
     Filter {
-        input: Rc<LogicalPlan>,
-        condition: Rc<Expr>, // The filter expression
+        input: Arc<LogicalPlan>,
+        condition: Arc<Expr>, // The filter expression
     },
 
     /// Represents a projection operation.
     Projection {
-        input: Rc<LogicalPlan>,
-        fields: Vec<(String, String)>, // Alias mapping (new_name, existing_field)
+        input: Arc<LogicalPlan>,
+        projection: Arc<Projection>, // The projection
     },
 
     /// Represents a sort operation.
     Sort {
-        input: Rc<LogicalPlan>,
-        sort_fields: Vec<SortField>, // Fields and sort directions
+        input: Arc<LogicalPlan>,
+        sort_fields: Arc<Vec<SortField>>, // Fields and sort directions
     },
 
     /// Represents limit and skip combined into a single node.
     Limit {
-        input: Rc<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         skip: Option<usize>,  // Number of rows to skip
         limit: Option<usize>, // Maximum number of rows to return
     },
@@ -43,7 +43,7 @@ impl TreeNode for LogicalPlan {
     type Child = LogicalPlan;
 
     /// Return references to the children of the current node
-    fn children(&self) -> Vec<Rc<Self::Child>> {
+    fn children(&self) -> Vec<Arc<Self::Child>> {
         match self {
             LogicalPlan::Filter { input, .. } => vec![input.clone()],
             LogicalPlan::Projection { input, .. } => vec![input.clone()],
@@ -54,21 +54,21 @@ impl TreeNode for LogicalPlan {
     }
 
     /// Create a new node with updated children
-    fn with_new_children(self: Rc<Self>, children: Vec<Rc<Self::Child>>) -> Rc<Self> {
+    fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self::Child>>) -> Arc<Self> {
         match self.as_ref() {
-            LogicalPlan::Filter { condition, .. } => Rc::new(LogicalPlan::Filter {
+            LogicalPlan::Filter { condition, .. } => Arc::new(LogicalPlan::Filter {
                 input: Self::get_first(children),
                 condition: condition.clone(),
             }),
-            LogicalPlan::Projection { fields, .. } => Rc::new(LogicalPlan::Projection {
+            LogicalPlan::Projection { projection, .. } => Arc::new(LogicalPlan::Projection {
                 input: Self::get_first(children),
-                fields: fields.clone(),
+                projection: projection.clone(),
             }),
-            LogicalPlan::Sort { sort_fields, .. } => Rc::new(LogicalPlan::Sort {
+            LogicalPlan::Sort { sort_fields, .. } => Arc::new(LogicalPlan::Sort {
                 input: Self::get_first(children),
                 sort_fields: sort_fields.clone(),
             }),
-            LogicalPlan::Limit { skip, limit, .. } => Rc::new(LogicalPlan::Limit {
+            LogicalPlan::Limit { skip, limit, .. } => Arc::new(LogicalPlan::Limit {
                 input: Self::get_first(children),
                 skip: *skip,
                 limit: *limit,
@@ -79,7 +79,7 @@ impl TreeNode for LogicalPlan {
 }
 
 impl LogicalPlan {
-    fn get_first(children: Vec<Rc<LogicalPlan>>) -> Rc<LogicalPlan> {
+    fn get_first(children: Vec<Arc<LogicalPlan>>) -> Arc<LogicalPlan> {
         children.into_iter().next().unwrap()
     }
 }
@@ -87,8 +87,8 @@ impl LogicalPlan {
 /// Projection for included or excluded fields
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {
-    Include(Vec<Rc<Expr>>), // Fields to include
-    Exclude(Vec<Rc<Expr>>), // Fields to exclude
+    Include(Vec<Arc<Expr>>), // Fields to include
+    Exclude(Vec<Arc<Expr>>), // Fields to exclude
 }
 
 /// Represents the sort order for a field.
@@ -101,7 +101,7 @@ pub enum SortOrder {
 /// Represents a sorting instruction for a query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortField {
-    pub field: Rc<Expr>,
+    pub field: Arc<Expr>,
     pub order: SortOrder,
 }
 
@@ -124,19 +124,19 @@ impl LogicalPlanBuilder {
     }
 
     /// Adds a filter condition.
-    pub fn filter(mut self, condition: Rc<Expr>) -> Self {
+    pub fn filter(mut self, condition: Arc<Expr>) -> Self {
         self.plan = LogicalPlan::Filter {
-            input: Rc::new(self.plan),
+            input: Arc::new(self.plan),
             condition,
         };
         self
     }
 
     /// Specifies fields for projection.
-    pub fn project(mut self, fields: Vec<(String, String)>) -> Self {
+    pub fn project(mut self, projection: Projection) -> Self {
         self.plan = LogicalPlan::Projection {
-            input: Rc::new(self.plan),
-            fields,
+            input: Arc::new(self.plan),
+            projection: Arc::new(projection),
         };
         self
     }
@@ -144,8 +144,8 @@ impl LogicalPlanBuilder {
     /// Specifies sorting order.
     pub fn sort(mut self, sort_fields: Vec<SortField>) -> Self {
         self.plan = LogicalPlan::Sort {
-            input: Rc::new(self.plan),
-            sort_fields,
+            input: Arc::new(self.plan),
+            sort_fields: Arc::new(sort_fields),
         };
         self
     }
@@ -153,7 +153,7 @@ impl LogicalPlanBuilder {
     /// Adds a limit and/or skip operation.
     pub fn limit(mut self, skip: Option<usize>, limit: Option<usize>) -> Self {
         self.plan = LogicalPlan::Limit {
-            input: Rc::new(self.plan),
+            input: Arc::new(self.plan),
             skip,
             limit,
         };
@@ -161,7 +161,7 @@ impl LogicalPlanBuilder {
     }
 
     /// Finalizes the build process and returns the `LogicalPlan`.
-    pub fn build(self) -> Rc<LogicalPlan> {
-        Rc::new(self.plan)
+    pub fn build(self) -> Arc<LogicalPlan> {
+        Arc::new(self.plan)
     }
 }

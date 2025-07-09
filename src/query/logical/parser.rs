@@ -4,10 +4,10 @@ use crate::query::logical::{
 };
 use crate::Error;
 use bson::{Bson, Document};
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Parses a BSON `Document` representing a query filter into an `Expr`.
-pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
+pub fn parse_conditions(doc: &Document) -> Result<Arc<Expr>, Error> {
     let mut conditions = Vec::new();
 
     for (key, value) in doc.iter() {
@@ -15,12 +15,12 @@ pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
             // Logical Operators
             "$and" | "$or" | "$nor" => {
                 let parsed_conditions = parse_logical_operator(key, value)?;
-                conditions.push(Rc::new(parsed_conditions));
+                conditions.push(Arc::new(parsed_conditions));
             }
             "$not" => {
                 if let Bson::Document(sub_doc) = value {
                     let parsed_condition = parse_conditions(sub_doc)?;
-                    conditions.push(Rc::new(Expr::Not(parsed_condition)));
+                    conditions.push(Arc::new(Expr::Not(parsed_condition)));
                 } else {
                     return Err(Error::InvalidArgument(
                         "Invalid format for $not; must be a document".to_string(),
@@ -45,13 +45,13 @@ pub fn parse_conditions(doc: &Document) -> Result<Rc<Expr>, Error> {
     if conditions.len() == 1 {
         Ok(conditions.remove(0))
     } else {
-        Ok(Rc::new(Expr::And(conditions)))
+        Ok(Arc::new(Expr::And(conditions)))
     }
 }
 
-fn parse_field_conditions(field: Expr, value: &Bson) -> Result<Rc<Expr>, Error> {
-    Ok(Rc::new(Expr::FieldFilters {
-        field: Rc::new(field),
+fn parse_field_conditions(field: Expr, value: &Bson) -> Result<Arc<Expr>, Error> {
+    Ok(Arc::new(Expr::FieldFilters {
+        field: Arc::new(field),
         filters: parse_predicates(value)?,
     }))
 }
@@ -89,7 +89,7 @@ fn parse_logical_operator(operator: &str, value: &Bson) -> Result<Expr, Error> {
 }
 
 /// Parses predicate conditions (e.g., `$eq`, `$gt`) for a specific field or wildcard.
-fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
+fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
     let mut predicates = Vec::new();
     if let Bson::Document(sub_docs) = value {
         for (key, value) in sub_docs.iter() {
@@ -105,7 +105,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 "$nin" => predicates.push(new_predicate(Nin, value)),
                 "$exists" => {
                     if let Bson::Boolean(exists) = value {
-                        predicates.push(Rc::new(Expr::Exists(*exists)));
+                        predicates.push(Arc::new(Expr::Exists(*exists)));
                     } else {
                         return Err(Error::InvalidArgument(
                             "$exists must be a boolean".to_string(),
@@ -114,8 +114,8 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 }
                 "$type" => {
                     if let Some(bson_type) = parse_bson_type(value) {
-                        predicates.push(Rc::new(Expr::Type {
-                            bson_type: Rc::new(Expr::Literal(BsonValue(bson_type))),
+                        predicates.push(Arc::new(Expr::Type {
+                            bson_type: Arc::new(Expr::Literal(BsonValue(bson_type))),
                             negated: false,
                         }))
                     } else {
@@ -126,8 +126,8 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 }
                 "$size" => {
                     if let Bson::Int32(size) = value {
-                        let size = Rc::new(Expr::Literal(BsonValue(Bson::Int32(*size))));
-                        predicates.push(Rc::new(Expr::Size {
+                        let size = Arc::new(Expr::Literal(BsonValue(Bson::Int32(*size))));
+                        predicates.push(Arc::new(Expr::Size {
                             size,
                             negated: false,
                         }))
@@ -139,8 +139,8 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 }
                 "$all" => {
                     if let Bson::Array(values) = value {
-                        predicates.push(Rc::new(Expr::All(
-                            Rc::new(Expr::Literal(BsonValue(Bson::Array(values.clone())))),
+                        predicates.push(Arc::new(Expr::All(
+                            Arc::new(Expr::Literal(BsonValue(Bson::Array(values.clone())))),
                         )))
                     } else {
                         return Err(Error::InvalidArgument("$all must be an array".to_string()));
@@ -149,7 +149,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
                 "$elemMatch" => {
                     if let Bson::Document(_) = value {
                         let sub_condition = parse_predicates(value)?;
-                        predicates.push(Rc::new(Expr::ElemMatch(sub_condition)))
+                        predicates.push(Arc::new(Expr::ElemMatch(sub_condition)))
                     } else {
                         return Err(Error::InvalidArgument(
                             "$elemMatch must be a document".to_string(),
@@ -166,10 +166,10 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Rc<Expr>>, Error> {
     Ok(predicates)
 }
 
-fn new_predicate(operator: ComparisonOperator, value: &Bson) -> Rc<Expr> {
-    Rc::new(Expr::Comparison {
+fn new_predicate(operator: ComparisonOperator, value: &Bson) -> Arc<Expr> {
+    Arc::new(Expr::Comparison {
         operator,
-        value: Rc::new(Expr::Literal(BsonValue(value.clone()))),
+        value: Arc::new(Expr::Literal(BsonValue(value.clone()))),
     })
 }
 
@@ -213,7 +213,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
     for (key, value) in doc.iter() {
         match value {
             Bson::Int32(1) | Bson::Int64(1) => {
-                include_fields.push(Rc::new(parse_field(key)?));
+                include_fields.push(Arc::new(parse_field(key)?));
             }
             Bson::Int32(0) | Bson::Int64(0) => {
                 let field = parse_field(key)?;
@@ -223,10 +223,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                         key
                     )));
                 }
-                exclude_fields.push(Rc::new(field));
+                exclude_fields.push(Arc::new(field));
             }
             Bson::Document(projection_doc) => {
-                let field = Rc::new(parse_field(key)?);
+                let field = Arc::new(parse_field(key)?);
                 if projection_doc.len() != 1 {
                     return Err(Error::InvalidArgument(format!(
                         "Projection document for field '{}' must have exactly one operator.",
@@ -268,7 +268,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
     }
 }
 
-fn parse_slice_projection(field: Rc<Expr>, value: &Bson) -> Result<Rc<Expr>, Error> {
+fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, Error> {
     let (skip, limit) = match value {
         Bson::Int32(n) => (*n, None),
         Bson::Int64(n) => (*n as i32, None),
@@ -305,13 +305,13 @@ fn parse_slice_projection(field: Rc<Expr>, value: &Bson) -> Result<Rc<Expr>, Err
         }
     };
 
-    Ok(Rc::new(Expr::ProjectionSlice { field, skip, limit }))
+    Ok(Arc::new(Expr::ProjectionSlice { field, skip, limit }))
 }
 
-fn parse_elem_match_projection(field: Rc<Expr>, value: &Bson) -> Result<Rc<Expr>, Error> {
+fn parse_elem_match_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, Error> {
     if let Bson::Document(doc) = value {
         let expr = parse_conditions(doc)?;
-        Ok(Rc::new(Expr::ProjectionElemMatch { field, expr }))
+        Ok(Arc::new(Expr::ProjectionElemMatch { field, expr }))
     } else {
         Err(Error::InvalidArgument(
             "$elemMatch projection value must be a document".to_string(),
@@ -376,7 +376,7 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
         }
 
         fields.push(SortField {
-            field: Rc::new(parse_field(key)?),
+            field: Arc::new(parse_field(key)?),
             order,
         });
     }

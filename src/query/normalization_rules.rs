@@ -3,15 +3,16 @@ use crate::query::logical::Expr;
 use crate::query::optimizer::NormalisationRule;
 use crate::query::tree_node::TreeNode;
 use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct SimplifyExpressions;
 
 impl NormalisationRule for SimplifyExpressions {
-    fn apply(&self, plan: Rc<LogicalPlan>) -> Rc<LogicalPlan> {
-        plan.transform_up(&|node: Rc<LogicalPlan>| match node.as_ref() {
+    fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
+        plan.transform_up(&|node: Arc<LogicalPlan>| match node.as_ref() {
             LogicalPlan::Filter { input, condition } => {
                 let expr = condition.clone().transform_up(&|c| Self::simplify_expr(c));
-                Rc::new(LogicalPlan::Filter {
+                Arc::new(LogicalPlan::Filter {
                     input: input.clone(),
                     condition: expr,
                 })
@@ -22,12 +23,12 @@ impl NormalisationRule for SimplifyExpressions {
 }
 
 impl SimplifyExpressions {
-    fn simplify_expr(expr: Rc<Expr>) -> Rc<Expr> {
+    fn simplify_expr(expr: Arc<Expr>) -> Arc<Expr> {
         match expr.as_ref() {
             // ---- Flatten Nested Operators ----
-            Expr::And(conditions) => Rc::new(Expr::And(Self::flatten_and(conditions))),
-            Expr::Or(conditions) => Rc::new(Expr::Or(Self::flatten_or(conditions))),
-            Expr::Nor(conditions) => Rc::new(Expr::Nor(Self::flatten_nor(conditions))),
+            Expr::And(conditions) => Arc::new(Expr::And(Self::flatten_and(conditions))),
+            Expr::Or(conditions) => Arc::new(Expr::Or(Self::flatten_or(conditions))),
+            Expr::Nor(conditions) => Arc::new(Expr::Nor(Self::flatten_nor(conditions))),
 
             // // ---- Remove Duplicates ----
             // Expr::And(conditions) => Rc::new(Expr::And(Self::remove_duplicates(conditions))),
@@ -59,7 +60,7 @@ impl SimplifyExpressions {
         }
     }
 
-    fn flatten_and(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
+    fn flatten_and(expressions: &[Arc<Expr>]) -> Vec<Arc<Expr>> {
         let mut result = Vec::new();
         for expr in expressions {
             if let Expr::And(sub_exprs) = expr.as_ref() {
@@ -71,7 +72,7 @@ impl SimplifyExpressions {
         result
     }
 
-    fn flatten_or(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
+    fn flatten_or(expressions: &[Arc<Expr>]) -> Vec<Arc<Expr>> {
         let mut result = Vec::new();
         for expr in expressions {
             if let Expr::Or(sub_exprs) = expr.as_ref() {
@@ -83,7 +84,7 @@ impl SimplifyExpressions {
         result
     }
 
-    fn flatten_nor(expressions: &[Rc<Expr>]) -> Vec<Rc<Expr>> {
+    fn flatten_nor(expressions: &[Arc<Expr>]) -> Vec<Arc<Expr>> {
         let mut result = Vec::new();
         for expr in expressions {
             if let Expr::Nor(sub_exprs) = expr.as_ref() {
@@ -131,13 +132,13 @@ impl SimplifyExpressions {
 pub struct SimplifyNotExpressions;
 
 impl NormalisationRule for SimplifyNotExpressions {
-    fn apply(&self, plan: Rc<LogicalPlan>) -> Rc<LogicalPlan> {
-        plan.transform_down(&|node: Rc<LogicalPlan>| match node.as_ref() {
+    fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
+        plan.transform_down(&|node: Arc<LogicalPlan>| match node.as_ref() {
             LogicalPlan::Filter {
                 input, condition, ..
             } => {
                 let new_condition = condition.clone().transform_down(&Self::push_down_not);
-                Rc::new(LogicalPlan::Filter {
+                Arc::new(LogicalPlan::Filter {
                     input: input.clone(),
                     condition: new_condition,
                 })
@@ -148,8 +149,7 @@ impl NormalisationRule for SimplifyNotExpressions {
 }
 
 impl SimplifyNotExpressions {
-    fn push_down_not(expr: Rc<Expr>) -> Rc<Expr> {
-        println!("{:?}", expr);
+    fn push_down_not(expr: Arc<Expr>) -> Arc<Expr> {
         match expr.as_ref() {
             Expr::Not(expr) => expr.clone().negate(),
             _ => expr.clone(),
@@ -191,8 +191,8 @@ mod tests {
 
     fn check_expr_transformation(
         rule: impl NormalisationRule,
-        original: Rc<Expr>,
-        transformed: Rc<Expr>,
+        original: Arc<Expr>,
+        transformed: Arc<Expr>,
     ) {
         let input_plan = scan_with_filter(original);
         let output_plan = rule.apply(input_plan);
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(expected_plan, output_plan);
     }
 
-    fn scan_with_filter(filter: Rc<Expr>) -> Rc<LogicalPlan> {
+    fn scan_with_filter(filter: Arc<Expr>) -> Arc<LogicalPlan> {
         LogicalPlanBuilder::scan("test_db", "users")
             .filter(filter)
             .build()
