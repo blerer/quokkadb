@@ -230,7 +230,6 @@ pub fn make_raw_bson_element(key: &str, value: &Bson) -> Result<Vec<u8>> {
 ///
 /// Returns `Ok(())` on success, or an error if the input is not valid.
 pub fn prepend_raw_bson_field(doc: &mut Vec<u8>, field: &[u8]) -> Result<()> {
-    use std::convert::TryInto;
 
     if doc.len() < 5 || *doc.last().unwrap() != 0 {
         return Err(invalid_data("invalid BSON document"));

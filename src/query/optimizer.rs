@@ -1,5 +1,4 @@
 use crate::query::logical::logical_plan::LogicalPlan;
-use std::rc::Rc;
 use std::sync::Arc;
 use crate::query::logical::{Expr, Parameters};
 use crate::query::logical::physical_plan::PhysicalPlan;

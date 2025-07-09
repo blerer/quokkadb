@@ -1,12 +1,12 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
-use crate::storage::manifest_state::SnapshotElement;
 use crate::util::interval::Interval;
 use std::cmp::Ordering;
 use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
+use crate::io::serializable::Serializable;
 
 /// Represents the persisted physical state of the LSM tree, excluding memtables.
 ///
@@ -107,7 +107,7 @@ impl LsmVersion {
     }
 }
 
-impl SnapshotElement for LsmVersion {
+impl Serializable for LsmVersion {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let current_log_number = reader.read_varint_u64()?;
         let oldest_log_number = reader.read_varint_u64()?;
@@ -208,7 +208,7 @@ impl Levels {
     }
 }
 
-impl SnapshotElement for Levels {
+impl Serializable for Levels {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let size = reader.read_varint_u64()? as usize;
         let mut levels = Vec::with_capacity(size);
@@ -428,7 +428,7 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
     lower_ok && upper_ok
 }
 
-impl SnapshotElement for Level {
+impl Serializable for Level {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let level = reader.read_varint_u32()?;
         let sstables = Self::read_sstables_from(reader)?;
@@ -485,7 +485,7 @@ impl SSTableMetadata {
     }
 }
 
-impl SnapshotElement for SSTableMetadata {
+impl Serializable for SSTableMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
             number: reader.read_varint_u64()?,
@@ -525,7 +525,7 @@ impl Ord for SSTableMetadata {
 mod tests {
     use super::*;
     use crate::storage::internal_key::encode_record_key;
-    use crate::storage::manifest_state::check_serialization_round_trip;
+    use crate::io::serializable::check_serialization_round_trip;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;

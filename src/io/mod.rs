@@ -4,6 +4,7 @@ pub mod byte_writer;
 pub mod checksum;
 pub mod compressor;
 pub mod varint;
+pub mod serializable;
 
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use std::fs::{File, OpenOptions};

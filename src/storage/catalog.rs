@@ -1,8 +1,8 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::manifest_state::SnapshotElement;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use crate::io::serializable::Serializable;
 
 /// The `Catalog` maintains the mapping from collection names to their metadata.
 ///
@@ -17,7 +17,7 @@ pub struct Catalog {
     pub collections: BTreeMap<String, Arc<CollectionMetadata>>,
 }
 
-impl SnapshotElement for Catalog {
+impl Serializable for Catalog {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let next_collection_id = reader.read_varint_u32()?;
         let size = reader.read_varint_u64()? as usize;
@@ -139,7 +139,7 @@ impl CollectionMetadata {
     }
 }
 
-impl SnapshotElement for CollectionMetadata {
+impl Serializable for CollectionMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let next_index_id = reader.read_varint_u32()?;
         let id = reader.read_varint_u64()? as u32;
@@ -171,7 +171,7 @@ pub struct IndexMetadata {
     name: String,
 }
 
-impl SnapshotElement for IndexMetadata {
+impl Serializable for IndexMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let id = reader.read_varint_u32()?;
         let name = reader.read_str()?.to_string();
@@ -187,7 +187,7 @@ impl SnapshotElement for IndexMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::manifest_state::check_serialization_round_trip;
+    use crate::io::serializable::check_serialization_round_trip;
 
     #[test]
     fn test_index_metadata_serialization() {

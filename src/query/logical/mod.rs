@@ -2,9 +2,11 @@ use crate::query::tree_node::TreeNode;
 use bson::Bson;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
+use crate::io::serializable::Serializable;
 
 pub(crate) mod expr_fn;
 mod executor;
@@ -200,76 +202,243 @@ impl Expr {
         }
     }
 
-    // fn write_to(&self, writer: &mut ByteWriter) {
-    //     match self {
-    //         Expr::Not(expr) => {
-    //             writer.write_u8(1);
-    //             expr.write_to(writer);
-    //         },
-    //         Expr::Nor(exprs) => {
-    //             writer.write_u8(2);
-    //             Self::write_exprs(exprs, writer);
-    //         },
-    //         Expr::And(exprs) => {
-    //             writer.write_u8(3);
-    //             Self::write_exprs(exprs, writer);
-    //         },
-    //         Expr::Or(exprs) => {
-    //             writer.write_u8(4);
-    //             Self::write_exprs(exprs, writer);
-    //         },
-    //         Expr::FieldFilters {
-    //             field,
-    //             filters: predicates,
-    //         } => {
-    //             writer.write_u8(5);
-    //             field.write_to(writer);
-    //             Self::write_exprs(predicates, writer);
-    //         }
-    //         Expr::Comparison { operator, value } => Rc::new(Expr::Comparison {
-    //             operator: operator.negate(),
-    //             value: value.clone(),
-    //         }),
-    //         Expr::Exists(bool) => {
-    //             writer.write_u8(7);
-    //             writer.write_u8(if bool { 1 } else { 0 });
-    //         },
-    //         Expr::All(values) => {
-    //             writer.write_u8(8);
-    //             values.write_to(writer);
-    //         }
-    //         Expr::Type {
-    //             bson_type,
-    //             negated,
-    //         } => {
-    //             writer.write_u8(9);
-    //             bson_type.write_to(writer);
-    //             writer.write_u8(if negated { 1 } else { 0 });
-    //         },
-    //         Expr::Size { size, negated } => {
-    //             writer.write_u8(10);
-    //             size.write_to(writer);
-    //             writer.write_u8(if negated { 1 } else { 0 });
-    //         },
-    //         Expr::AlwaysTrue => {
-    //             writer.write_u8(11);
-    //         },
-    //         Expr::AlwaysFalse => {
-    //             writer.write_u8(12);
-    //         },
-    //     }
-    // }
-    //
-    // fn write_exprs(exprs: &Vec<Rc<Expr>>, writer: &mut ByteWriter) {
-    //     for expr in exprs {
-    //         expr.write_to(writer);
-    //     }
-    // }
-    //
-    // #[cfg(test)] // The serialization is only used to compute the LogicalPlan hash for the statement cache
-    // fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
-    //     todo!()
-    // }
+    fn write_exprs(exprs: &Vec<Arc<Expr>>, writer: &mut ByteWriter) {
+        for expr in exprs {
+            expr.write_to(writer);
+        }
+    }
+
+    fn write_path_components(path: &Vec<PathComponent>, writer: &mut ByteWriter) {
+        writer.write_varint_u32(path.len() as u32);
+        for comp in path {
+            comp.write_to(writer);
+        }
+    }
+
+    fn read_exprs<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Vec<Arc<Expr>>> {
+        let len = reader.read_varint_u32()? as usize;
+        let mut exprs = Vec::with_capacity(len);
+        for _ in 0..len {
+            exprs.push(Arc::new(Self::read_from(reader)?));
+        }
+        Ok(exprs)
+    }
+
+    fn read_path_components<B: AsRef<[u8]>>(
+        reader: &ByteReader<B>,
+    ) -> Result<Vec<PathComponent>> {
+        let len = reader.read_varint_u32()? as usize;
+        let mut path = Vec::with_capacity(len);
+        for _ in 0..len {
+            path.push(PathComponent::read_from(reader)?);
+        }
+        Ok(path)
+    }
+}
+
+impl Serializable for Expr {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            1 => {
+                let expr = Arc::new(Self::read_from(reader)?);
+                Ok(Expr::Not(expr))
+            }
+            2 => {
+                let exprs = Self::read_exprs(reader)?;
+                Ok(Expr::Nor(exprs))
+            }
+            3 => {
+                let exprs = Self::read_exprs(reader)?;
+                Ok(Expr::And(exprs))
+            }
+            4 => {
+                let exprs = Self::read_exprs(reader)?;
+                Ok(Expr::Or(exprs))
+            }
+            5 => {
+                let field = Arc::new(Self::read_from(reader)?);
+                let filters = Self::read_exprs(reader)?;
+                Ok(Expr::FieldFilters { field, filters })
+            }
+            6 => {
+                let operator = ComparisonOperator::read_from(reader)?;
+                let value = Arc::new(Self::read_from(reader)?);
+                Ok(Expr::Comparison { operator, value })
+            }
+            7 => {
+                let exists = reader.read_u8()? == 1;
+                Ok(Expr::Exists(exists))
+            }
+            8 => {
+                let values = Arc::new(Self::read_from(reader)?);
+                Ok(Expr::All(values))
+            }
+            9 => {
+                let bson_type = Arc::new(Self::read_from(reader)?);
+                let negated = reader.read_u8()? == 1;
+                Ok(Expr::Type {
+                    bson_type,
+                    negated,
+                })
+            }
+            10 => {
+                let size = Arc::new(Self::read_from(reader)?);
+                let negated = reader.read_u8()? == 1;
+                Ok(Expr::Size { size, negated })
+            }
+            11 => Ok(Expr::AlwaysTrue),
+            12 => Ok(Expr::AlwaysFalse),
+            13 => {
+                let path = Self::read_path_components(reader)?;
+                Ok(Expr::Field(path))
+            }
+            14 => {
+                let path = Self::read_path_components(reader)?;
+                Ok(Expr::WildcardField(path))
+            }
+            15 => {
+                let path = Self::read_path_components(reader)?;
+                Ok(Expr::PositionalField(path))
+            }
+            16 => {
+                let idx = reader.read_varint_u32()?;
+                Ok(Expr::Placeholder(idx))
+            }
+            17 => {
+                let predicates = Self::read_exprs(reader)?;
+                Ok(Expr::ElemMatch(predicates))
+            }
+            18 => {
+                let field = Arc::new(Self::read_from(reader)?);
+                let skip = reader.read_varint_i64()? as i32;
+                let limit = match reader.read_u8()? {
+                    1 => Some(reader.read_varint_u32()?),
+                    _ => None,
+                };
+                Ok(Expr::ProjectionSlice { field, skip, limit })
+            }
+            20 => {
+                let field = Arc::new(Self::read_from(reader)?);
+                let expr = Arc::new(Self::read_from(reader)?);
+                Ok(Expr::ProjectionElemMatch { field, expr })
+            }
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Unknown Expr tag: {}", tag),
+            )),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            Expr::Not(expr) => {
+                writer.write_u8(1);
+                expr.write_to(writer);
+            },
+            Expr::Nor(exprs) => {
+                writer.write_u8(2);
+                writer.write_varint_u32(exprs.len() as u32);
+                Self::write_exprs(exprs, writer);
+            },
+            Expr::And(exprs) => {
+                writer.write_u8(3);
+                writer.write_varint_u32(exprs.len() as u32);
+                Self::write_exprs(exprs, writer);
+            },
+            Expr::Or(exprs) => {
+                writer.write_u8(4);
+                writer.write_varint_u32(exprs.len() as u32);
+                Self::write_exprs(exprs, writer);
+            },
+            Expr::FieldFilters {
+                field,
+                filters: predicates,
+            } => {
+                writer.write_u8(5);
+                field.write_to(writer);
+                writer.write_varint_u32(predicates.len() as u32);
+                Self::write_exprs(predicates, writer);
+            }
+            Expr::Comparison { operator, value } => {
+                writer.write_u8(6);
+                operator.write_to(writer);
+                value.write_to(writer);
+            },
+            Expr::Exists(bool) => {
+                writer.write_u8(7);
+                writer.write_u8(if *bool { 1 } else { 0 });
+            },
+            Expr::All(values) => {
+                writer.write_u8(8);
+                values.write_to(writer);
+            }
+            Expr::Type {
+                bson_type,
+                negated,
+            } => {
+                writer.write_u8(9);
+                bson_type.write_to(writer);
+                writer.write_u8(if *negated { 1 } else { 0 });
+            },
+            Expr::Size { size, negated } => {
+                writer.write_u8(10);
+                size.write_to(writer);
+                writer.write_u8(if *negated { 1 } else { 0 });
+            },
+            Expr::AlwaysTrue => {
+                writer.write_u8(11);
+            },
+            Expr::AlwaysFalse => {
+                writer.write_u8(12);
+            },
+            Expr::Field(path) => {
+                writer.write_u8(13);
+                Self::write_path_components(path, writer);
+            }
+            Expr::WildcardField(path) => {
+                writer.write_u8(14);
+                Self::write_path_components(path, writer);
+            }
+            Expr::PositionalField(path) => {
+                writer.write_u8(15);
+                Self::write_path_components(path, writer);
+            }
+            Expr::Placeholder(idx) => {
+                writer.write_u8(16);
+                writer.write_varint_u32(*idx); // Write the placeholder index for extra safety
+            }
+            Expr::ElemMatch(predicates) => {
+                writer.write_u8(17);
+                writer.write_varint_u32(predicates.len() as u32);
+                for pred in predicates {
+                    pred.write_to(writer);
+                }
+            }
+            Expr::ProjectionSlice { field, skip, limit } => {
+                writer.write_u8(18);
+                field.write_to(writer);
+                writer.write_varint_u64((*skip as i64) as u64);
+                match limit {
+                    Some(lim) => {
+                        writer.write_u8(1);
+                        writer.write_varint_u32(*lim);
+                    }
+                    None => {
+                        writer.write_u8(0);
+                    }
+                }
+            }
+            Expr::ProjectionElemMatch { field, expr } => {
+                writer.write_u8(20);
+                field.write_to(writer);
+                expr.write_to(writer);
+            }
+            Expr::Literal(_) => {
+                panic!("LogicalPlans should never be serialized before parametrization.");
+            }
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
@@ -313,11 +482,74 @@ impl ComparisonOperator {
     }
 }
 
+impl Serializable for ComparisonOperator {
+
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+        let byte = reader.read_u8()?;
+        match byte {
+            0 => Ok(ComparisonOperator::Eq),
+            1 => Ok(ComparisonOperator::Ne),
+            2 => Ok(ComparisonOperator::Gt),
+            3 => Ok(ComparisonOperator::Gte),
+            4 => Ok(ComparisonOperator::Lt),
+            5 => Ok(ComparisonOperator::Lte),
+            6 => Ok(ComparisonOperator::In),
+            7 => Ok(ComparisonOperator::Nin),
+            _ => Err(Error::new(ErrorKind::InvalidData, "Unknown comparison operator byte",)),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        let byte = match self {
+            ComparisonOperator::Eq => 0,
+            ComparisonOperator::Ne => 1,
+            ComparisonOperator::Gt => 2,
+            ComparisonOperator::Gte => 3,
+            ComparisonOperator::Lt => 4,
+            ComparisonOperator::Lte => 5,
+            ComparisonOperator::In => 6,
+            ComparisonOperator::Nin => 7,
+        };
+        writer.write_u8(byte);
+    }
+}
+
 /// Represents a component in a field path
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum PathComponent {
     FieldName(String),   // A named field (e.g., "field" in "document.field")
     ArrayElement(usize), // An array index (e.g., "0" in "array.0")
+}
+
+impl Serializable for PathComponent {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let byte = reader.read_u8()?;
+        match byte {
+            0 => {
+                let name = reader.read_str()?;
+                Ok(PathComponent::FieldName(name.to_string()))
+            }
+            1 => {
+                let index = reader.read_varint_u32()? as usize;
+                Ok(PathComponent::ArrayElement(index))
+            }
+            _ => Err(Error::new(ErrorKind::InvalidData, "Unknown path component type",
+            )),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            PathComponent::FieldName(name) => {
+                writer.write_u8(0); // 0 for field name
+                writer.write_str(name);
+            }
+            PathComponent::ArrayElement(index) => {
+                writer.write_u8(1); // 1 for array element
+                writer.write_varint_u32(*index as u32);
+            }
+        }
+    }
 }
 
 impl From<&str> for PathComponent {
@@ -498,6 +730,8 @@ impl Parameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::byte_writer::ByteWriter;
+    use crate::io::serializable::check_serialization_round_trip;
     use bson::{Bson, Regex};
 
     #[test]
@@ -636,5 +870,125 @@ mod tests {
         assert_ne!(bson_value!(5), bson_value!("5"));
         assert_ne!(bson_value!(true), bson_value!(1));
         assert_ne!(bson_value!(Bson::Null), bson_value!(false));
+    }
+
+    #[test]
+    #[should_panic(expected = "LogicalPlans should never be serialized before parametrization.")]
+    fn test_serialize_literal_panics() {
+        let expr = Expr::Literal(bson_value!(10));
+        let mut writer = ByteWriter::new();
+        expr.write_to(&mut writer);
+    }
+
+    #[test]
+    fn test_expr_serialization_round_trip() {
+        // Simple expressions
+        check_serialization_round_trip(Expr::AlwaysTrue);
+        check_serialization_round_trip(Expr::AlwaysFalse);
+        check_serialization_round_trip(Expr::Exists(true));
+        check_serialization_round_trip(Expr::Placeholder(42));
+
+        // Field expressions
+        check_serialization_round_trip(Expr::Field(vec!["a".into(), "b".into()]));
+        check_serialization_round_trip(Expr::WildcardField(vec!["a".into(), "b".into()]));
+        check_serialization_round_trip(Expr::PositionalField(vec!["a".into(), 0.into()]));
+
+        // Comparison
+        let comparison = Expr::Comparison {
+            operator: ComparisonOperator::Eq,
+            value: Arc::new(Expr::Placeholder(0)),
+        };
+        check_serialization_round_trip(comparison);
+
+        // Logical expressions
+        let not_expr = Expr::Not(Arc::new(Expr::Exists(true)));
+        check_serialization_round_trip(not_expr);
+
+        let and_expr = Expr::And(vec![
+            Arc::new(Expr::Exists(true)),
+            Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(1)),
+            }),
+        ]);
+        check_serialization_round_trip(and_expr);
+
+        let or_expr = Expr::Or(vec![
+            Arc::new(Expr::Exists(false)),
+            Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(2)),
+            }),
+        ]);
+        check_serialization_round_trip(or_expr);
+
+        let nor_expr = Expr::Nor(vec![
+            Arc::new(Expr::Exists(true)),
+            Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(3)),
+            }),
+        ]);
+        check_serialization_round_trip(nor_expr);
+
+        // FieldFilters
+        let field_filters = Expr::FieldFilters {
+            field: Arc::new(Expr::Field(vec!["price".into()])),
+            filters: vec![
+                Arc::new(Expr::Comparison {
+                    operator: ComparisonOperator::Gt,
+                    value: Arc::new(Expr::Placeholder(4)),
+                }),
+                Arc::new(Expr::Exists(true)),
+            ],
+        };
+        check_serialization_round_trip(field_filters);
+
+        // Array expressions
+        let all_expr = Expr::All(Arc::new(Expr::Placeholder(5)));
+        check_serialization_round_trip(all_expr);
+
+        let elem_match_expr = Expr::ElemMatch(vec![Arc::new(Expr::Comparison {
+            operator: ComparisonOperator::Gte,
+            value: Arc::new(Expr::Placeholder(6)),
+        })]);
+        check_serialization_round_trip(elem_match_expr);
+
+        // Type and Size
+        let type_expr = Expr::Type {
+            bson_type: Arc::new(Expr::Placeholder(7)),
+            negated: true,
+        };
+        check_serialization_round_trip(type_expr);
+
+        let size_expr = Expr::Size {
+            size: Arc::new(Expr::Placeholder(8)),
+            negated: false,
+        };
+        check_serialization_round_trip(size_expr);
+
+        // Projection
+        let proj_slice = Expr::ProjectionSlice {
+            field: Arc::new(Expr::Field(vec!["array".into()])),
+            skip: 10,
+            limit: Some(20),
+        };
+        check_serialization_round_trip(proj_slice);
+
+        let proj_slice_no_limit = Expr::ProjectionSlice {
+            field: Arc::new(Expr::Field(vec!["array".into()])),
+            skip: 5,
+            limit: None,
+        };
+        check_serialization_round_trip(proj_slice_no_limit);
+
+        let proj_elem_match = Expr::ProjectionElemMatch {
+            field: Arc::new(Expr::Field(vec!["array".into()])),
+            expr: Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(9)),
+            }),
+        };
+        check_serialization_round_trip(proj_elem_match);
     }
 }

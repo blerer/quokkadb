@@ -80,7 +80,7 @@ impl ManifestState {
     }
 }
 
-impl SnapshotElement for ManifestState {
+impl Serializable for ManifestState {
 
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         Ok(ManifestState {
@@ -93,19 +93,6 @@ impl SnapshotElement for ManifestState {
         self.lsm.write_to(writer);
         self.catalog.write_to(writer);
     }
-}
-
-/// Represent an element of the snapshots persisted at the beginning of the Manifest file.
-/// A snapshot represent the LSM tree at a given point in time. It does not contain the Memtables
-/// as their content is preserved by the write ahead log.
-pub trait SnapshotElement {
-    /// Deserialized the element from the specified ByteReader
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
-    where
-        Self: Sized;
-
-    /// Serialize the element into the specified ByteWriter
-    fn write_to(&self, writer: &mut ByteWriter);
 }
 
 /// Represents a single atomic change to the manifest state.
@@ -221,6 +208,7 @@ impl ManifestEdit {
 }
 
 use std::fmt;
+use crate::io::serializable::Serializable;
 
 impl fmt::Display for ManifestEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -367,29 +355,4 @@ mod tests {
         let parsed = ManifestEdit::try_from_vec(&bytes).expect("Deserialization should succeed");
         assert_eq!(&edit, &parsed);
     }
-}
-
-#[cfg(test)]
-pub fn check_serialization_round_trip<T>(element: T)
-where
-    T: Debug + PartialEq + SnapshotElement,
-{
-    // Serialize the element.
-    let mut writer = ByteWriter::new();
-    element.write_to(&mut writer);
-    let bytes = writer.take_buffer();
-
-    // Deserialize the element from the serialized bytes.
-    let reader = ByteReader::new(&bytes);
-    let deserialized = SnapshotElement::read_from(&reader).expect("Deserialization should succeed");
-
-    assert_eq!(element, deserialized);
-
-    // Re-serialize the deserialized element.
-    let mut writer2 = ByteWriter::new();
-    deserialized.write_to(&mut writer2);
-    let bytes2 = writer2.take_buffer();
-
-    // Verify that the round-trip serialization is lossless.
-    assert_eq!(bytes, bytes2);
 }

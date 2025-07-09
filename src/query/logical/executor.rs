@@ -296,7 +296,6 @@ mod tests {
     use crate::query::logical::{Expr, PathComponent};
     use bson::{doc, Bson};
     use std::cmp::Ordering;
-    use std::rc::Rc;
 
     #[test]
     fn test_get_path_value() {

@@ -2,7 +2,6 @@ use crate::query::logical::logical_plan::LogicalPlan;
 use crate::query::logical::Expr;
 use crate::query::optimizer::NormalisationRule;
 use crate::query::tree_node::TreeNode;
-use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct SimplifyExpressions;
