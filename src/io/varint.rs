@@ -62,6 +62,10 @@ pub fn write_u64(x: u64, output: &mut Vec<u8>) {
     }
 }
 
+pub fn write_i32(x: i32, output: &mut Vec<u8>) {
+    write_i64(x as i64, output)
+}
+
 pub fn write_u32(x: u32, output: &mut Vec<u8>) {
     write_u64(x as u64, output);
 }
@@ -93,6 +97,11 @@ pub fn read_u64(input: &[u8], offset: usize) -> (u64, usize) {
 pub fn read_i64(input: &[u8], offset: usize) -> (i64, usize) {
     let (value, new_offset) = read_u64(input, offset);
     (decode_zigzag_64(value), new_offset)
+}
+
+pub fn read_i32(input: &[u8], offset: usize) -> (i32, usize) {
+    let (value, new_offset) = read_i64(input, offset);
+    (value as i32, new_offset)
 }
 
 /// Decode a ZigZag-encoded 64-bit value.  ZigZag encodes signed integers
@@ -237,6 +246,38 @@ mod tests {
 
             // Test read_u64
             let (decoded, offset) = read_i64(&mut buffer, 0);
+
+            assert_eq!(value, decoded, "Value mismatch for {value}");
+            assert_eq!(len, offset, "Offset mismatch for {value}");
+        }
+    }
+
+    #[test]
+    fn test_write_and_read_i32() {
+        let mut buffer = Vec::new();
+
+        let test_values = vec![
+            0i32,
+            -0i32,
+            127i32,
+            -127i32,
+            128i32,
+            -128i32,
+            16_383i32,
+            -16_384i32,
+            16_384i32,
+            -16_384i32,
+            i32::MIN,
+            i32::MAX,
+        ];
+
+        for &value in &test_values {
+            buffer.clear();
+
+            write_i32(value, &mut buffer);
+            let len = buffer.len();
+
+            let (decoded, offset) = read_i32(&buffer, 0);
 
             assert_eq!(value, decoded, "Value mismatch for {value}");
             assert_eq!(len, offset, "Offset mismatch for {value}");

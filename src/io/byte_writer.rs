@@ -19,8 +19,18 @@ impl ByteWriter {
         self
     }
 
+    pub fn write_varint_i32(&mut self, value: i32) -> &mut Self {
+        varint::write_i32(value, &mut self.buffer);
+        self
+    }
+
     pub fn write_varint_u64(&mut self, value: u64) -> &mut Self {
         varint::write_u64(value, &mut self.buffer);
+        self
+    }
+
+    pub fn write_varint_i64(&mut self, value: i64) -> &mut Self {
+        varint::write_i64(value, &mut self.buffer);
         self
     }
 

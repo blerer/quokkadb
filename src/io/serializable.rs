@@ -1,4 +1,5 @@
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
+use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 
@@ -14,6 +15,99 @@ pub trait Serializable {
     fn write_to(&self, writer: &mut ByteWriter);
 }
 
+impl Serializable for i32 {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        reader.read_varint_i32()
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_i32(*self);
+    }
+}
+
+impl Serializable for u64 {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        reader.read_varint_u64()
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u64(*self);
+    }
+}
+
+impl Serializable for usize {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        Ok(reader.read_varint_u64()? as usize)
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u64(*self as u64);
+    }
+}
+
+impl<T> Serializable for Option<T>
+where
+    T: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let presence = reader.read_u8()?;
+        if presence == 1 {
+            let value = T::read_from(reader)?;
+            Ok(Some(value))
+        } else if presence == 0 {
+            Ok(None)
+        } else {
+            Err(Error::new(ErrorKind::InvalidData, "Invalid option presence byte"))
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            Some(value) => {
+                writer.write_u8(1); // Indicate presence
+                value.write_to(writer);
+            }
+            None => {
+                writer.write_u8(0); // Indicate absence
+            }
+        }
+    }
+}
+
+impl<T> Serializable for Vec<T>
+where
+    T: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let length = reader.read_varint_u64()? as usize;
+        let mut vec = Vec::with_capacity(length);
+        for _ in 0..length {
+            vec.push(T::read_from(reader)?);
+        }
+        Ok(vec)
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u64(self.len() as u64);
+        for item in self {
+            item.write_to(writer);
+        }
+    }
+}
+
+impl<T> Serializable for Arc<T>
+where
+    T: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        Ok(Arc::new(T::read_from(reader)?))
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        (**self).write_to(writer);
+    }
+}
+
 #[cfg(test)]
 pub fn check_serialization_round_trip<T>(element: T)
 where
@@ -26,7 +120,7 @@ where
 
     // Deserialize the element from the serialized bytes.
     let reader = ByteReader::new(&bytes);
-    let deserialized = Serializable::read_from(&reader).expect("Deserialization should succeed");
+    let deserialized = Serializable::read_from(&reader).unwrap();
 
     assert_eq!(element, deserialized);
 

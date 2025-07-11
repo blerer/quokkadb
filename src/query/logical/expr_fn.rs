@@ -130,7 +130,7 @@ pub fn not(predicate: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Not(predicate))
 }
 
-pub fn projection_slice(field: Arc<Expr>, skip: i32, limit: Option<u32>) -> Arc<Expr> {
+pub fn projection_slice(field: Arc<Expr>, skip: i32, limit: Option<i32>) -> Arc<Expr> {
     Arc::new(Expr::ProjectionSlice { field, skip, limit })
 }
 

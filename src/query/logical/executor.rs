@@ -28,7 +28,7 @@ impl QueryExecutor {
     /// Executes the given physical plan.
     pub fn execute(&self, plan: Arc<PhysicalPlan>) -> Result<QueryOutput> {
         match plan.as_ref() {
-            PhysicalPlan::TableScan {
+            PhysicalPlan::CollectionScan {
                 collection,
                 range,
                 direction,

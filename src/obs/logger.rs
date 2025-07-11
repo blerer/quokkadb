@@ -75,6 +75,28 @@ macro_rules! event {
     };
 }
 
+/// A no-operation logger that does nothing when logging or tracing.
+#[derive(Default)]
+pub struct NoOpLogger;
+
+impl LoggerAndTracer for NoOpLogger {
+    fn log(&self, _level: LogLevel, _context: &'static str, _msg: Arguments) {
+        // No operation logger does nothing
+    }
+
+    fn event(&self, _context: &'static str, _event: Arguments) {
+        // No operation logger does nothing
+    }
+
+    fn is_tracing_enabled(&self) -> bool {
+        false // No tracing in NoOpLogger
+    }
+
+    fn level_enabled(&self, _level: LogLevel) -> bool {
+        false // No levels enabled in NoOpLogger
+    }
+}
+
 /// A simple logger that prints messages to stdout with timestamps and thread IDs.
 pub struct StdoutLogger {
     /// Minimum log level to emit.

@@ -3,23 +3,25 @@ use crate::query::logical::logical_plan::LogicalPlan;
 use crate::query::logical::parser;
 use bson::Document;
 use std::sync::Arc;
+use crate::DbImpl;
 
 pub struct Collection {
+    db_impl: Arc<DbImpl>,
     collection: String,
 }
 
 impl Collection {
-    pub fn new(collection: String) -> Collection {
-        Collection { collection }
+    pub fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
+        Collection { db_impl, collection }
     }
 
     pub fn find(&self, filter: Document) -> Query {
-        Query::new(self.collection.clone(), filter)
+        Query::new(self.db_impl.clone(), self.collection.clone(), filter)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    db_impl: Arc<DbImpl>,
     collection: String,
     filter: Document, // Unified filter representation using Expr
     projection: Option<Document>,
@@ -29,8 +31,9 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn new(collection: String, filter: Document) -> Query {
+    pub fn new(db_impl: Arc<DbImpl>, collection: String, filter: Document) -> Query {
         Query {
+            db_impl,
             collection,
             filter,
             projection: None,
@@ -60,9 +63,12 @@ impl Query {
         self
     }
 
-    pub fn execute(&self) -> Result<Vec<Document>> {
-        let mut plan = LogicalPlan::TableScan {
-            collection: self.collection.clone(),
+    pub fn execute(&self) -> Result<Box<dyn Iterator<Item=Result<Document>>>> {
+
+        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+
+        let mut plan = LogicalPlan::CollectionScan {
+            collection: collection_id,
             filter: None,
             projection: None,
             sort: None,
@@ -80,7 +86,7 @@ impl Query {
             plan = LogicalPlan::Projection {
                 input: Arc::new(plan),
                 projection: Arc::new(projection),
-            }
+            };
         }
 
         if self.limit.is_some() || self.skip.is_some() {
@@ -88,10 +94,18 @@ impl Query {
                 input: Arc::new(plan),
                 limit: self.limit.clone(),
                 skip: self.skip.clone(),
-            }
+            };
         }
 
-        Err(Error::InvalidArgument("Not implemented".to_string()))
+        if let Some(sort) = &self.sort {
+            let sort = parser::parse_sort(&sort)?;
+            plan = LogicalPlan::Sort {
+                input: Arc::new(plan),
+                sort_fields: Arc::new(sort),
+            };
+        }
+
+        self.db_impl.execute_plan(plan)
     }
 }
 

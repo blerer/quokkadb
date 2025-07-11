@@ -147,6 +147,12 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
         Ok(value)
     }
 
+    pub fn read_varint_i32(&self) -> Result<i32> {
+        let (value, offset) = varint::read_i32(self.buffer.as_ref(), self.position.get());
+        self.position.set(offset);
+        Ok(value)
+    }
+
     pub fn skip(&self, bytes: usize) -> Result<()> {
         let pos = self.position.get() + bytes;
         if pos > self.buffer.as_ref().len() {

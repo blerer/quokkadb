@@ -210,19 +210,12 @@ impl Levels {
 
 impl Serializable for Levels {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let size = reader.read_varint_u64()? as usize;
-        let mut levels = Vec::with_capacity(size);
-        for _ in 0..size {
-            levels.push(Arc::new(Level::read_from(reader)?));
-        }
+        let levels= Vec::<Arc<Level>>::read_from(reader)?;
         Ok(Levels { levels })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
-        writer.write_varint_u64(self.levels.len() as u64);
-        self.levels.iter().for_each(|level| {
-            level.write_to(writer);
-        });
+        self.levels.write_to(writer);
     }
 }
 
@@ -270,21 +263,6 @@ impl Level {
             sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
             NonOverlapping { level, sstables, size }
         }
-    }
-
-    fn read_sstables_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Vec<Arc<SSTableMetadata>>> {
-        let size = reader.read_varint_u32()? as usize;
-        let mut sstables = Vec::with_capacity(size);
-        for _ in 0..size {
-            sstables.push(Arc::new(SSTableMetadata::read_from(reader)?));
-        }
-        Ok(sstables)
-    }
-    fn write_sstables_to(&self, sstables: &Vec<Arc<SSTableMetadata>>, writer: &mut ByteWriter) {
-        writer.write_varint_u32(sstables.len() as u32);
-        sstables.iter().for_each(|sst| {
-            sst.write_to(writer);
-        });
     }
 
     fn add(&self, sst: Arc<SSTableMetadata>) -> Self {
@@ -431,7 +409,7 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
 impl Serializable for Level {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let level = reader.read_varint_u32()?;
-        let sstables = Self::read_sstables_from(reader)?;
+        let sstables = Vec::<Arc<SSTableMetadata>>::read_from(reader)?;
         let size = sstables.iter().map(|sst| sst.size).sum();
         match level {
             0 => Ok(Overlapping { level, sstables, size }),
@@ -443,7 +421,7 @@ impl Serializable for Level {
         match &self {
             Overlapping { level, sstables, size: _size } | NonOverlapping { level, sstables, size: _size } => {
                 writer.write_varint_u32(*level);
-                self.write_sstables_to(sstables, writer);
+                sstables.write_to(writer);
             }
         }
     }

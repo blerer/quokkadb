@@ -63,7 +63,7 @@ pub enum Expr {
     ProjectionSlice {
         field: Arc<Expr>,
         skip: i32,
-        limit: Option<u32>,
+        limit: Option<i32>,
     },
     ProjectionElemMatch {
         field: Arc<Expr>,
@@ -201,39 +201,6 @@ impl Expr {
             _ => Arc::new(self.clone()),
         }
     }
-
-    fn write_exprs(exprs: &Vec<Arc<Expr>>, writer: &mut ByteWriter) {
-        for expr in exprs {
-            expr.write_to(writer);
-        }
-    }
-
-    fn write_path_components(path: &Vec<PathComponent>, writer: &mut ByteWriter) {
-        writer.write_varint_u32(path.len() as u32);
-        for comp in path {
-            comp.write_to(writer);
-        }
-    }
-
-    fn read_exprs<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Vec<Arc<Expr>>> {
-        let len = reader.read_varint_u32()? as usize;
-        let mut exprs = Vec::with_capacity(len);
-        for _ in 0..len {
-            exprs.push(Arc::new(Self::read_from(reader)?));
-        }
-        Ok(exprs)
-    }
-
-    fn read_path_components<B: AsRef<[u8]>>(
-        reader: &ByteReader<B>,
-    ) -> Result<Vec<PathComponent>> {
-        let len = reader.read_varint_u32()? as usize;
-        let mut path = Vec::with_capacity(len);
-        for _ in 0..len {
-            path.push(PathComponent::read_from(reader)?);
-        }
-        Ok(path)
-    }
 }
 
 impl Serializable for Expr {
@@ -245,20 +212,20 @@ impl Serializable for Expr {
                 Ok(Expr::Not(expr))
             }
             2 => {
-                let exprs = Self::read_exprs(reader)?;
+                let exprs = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::Nor(exprs))
             }
             3 => {
-                let exprs = Self::read_exprs(reader)?;
+                let exprs = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::And(exprs))
             }
             4 => {
-                let exprs = Self::read_exprs(reader)?;
+                let exprs = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::Or(exprs))
             }
             5 => {
                 let field = Arc::new(Self::read_from(reader)?);
-                let filters = Self::read_exprs(reader)?;
+                let filters = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::FieldFilters { field, filters })
             }
             6 => {
@@ -290,15 +257,15 @@ impl Serializable for Expr {
             11 => Ok(Expr::AlwaysTrue),
             12 => Ok(Expr::AlwaysFalse),
             13 => {
-                let path = Self::read_path_components(reader)?;
+                let path = Vec::<PathComponent>::read_from(reader)?;
                 Ok(Expr::Field(path))
             }
             14 => {
-                let path = Self::read_path_components(reader)?;
+                let path = Vec::<PathComponent>::read_from(reader)?;
                 Ok(Expr::WildcardField(path))
             }
             15 => {
-                let path = Self::read_path_components(reader)?;
+                let path = Vec::<PathComponent>::read_from(reader)?;
                 Ok(Expr::PositionalField(path))
             }
             16 => {
@@ -306,16 +273,13 @@ impl Serializable for Expr {
                 Ok(Expr::Placeholder(idx))
             }
             17 => {
-                let predicates = Self::read_exprs(reader)?;
+                let predicates = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::ElemMatch(predicates))
             }
             18 => {
                 let field = Arc::new(Self::read_from(reader)?);
-                let skip = reader.read_varint_i64()? as i32;
-                let limit = match reader.read_u8()? {
-                    1 => Some(reader.read_varint_u32()?),
-                    _ => None,
-                };
+                let skip = i32::read_from(reader)?;
+                let limit = Option::<i32>::read_from(reader)?;
                 Ok(Expr::ProjectionSlice { field, skip, limit })
             }
             20 => {
@@ -338,27 +302,23 @@ impl Serializable for Expr {
             },
             Expr::Nor(exprs) => {
                 writer.write_u8(2);
-                writer.write_varint_u32(exprs.len() as u32);
-                Self::write_exprs(exprs, writer);
+                exprs.write_to(writer);
             },
             Expr::And(exprs) => {
                 writer.write_u8(3);
-                writer.write_varint_u32(exprs.len() as u32);
-                Self::write_exprs(exprs, writer);
+                exprs.write_to(writer);
             },
             Expr::Or(exprs) => {
                 writer.write_u8(4);
-                writer.write_varint_u32(exprs.len() as u32);
-                Self::write_exprs(exprs, writer);
+                exprs.write_to(writer);
             },
             Expr::FieldFilters {
                 field,
-                filters: predicates,
+                filters,
             } => {
                 writer.write_u8(5);
                 field.write_to(writer);
-                writer.write_varint_u32(predicates.len() as u32);
-                Self::write_exprs(predicates, writer);
+                filters.write_to(writer);
             }
             Expr::Comparison { operator, value } => {
                 writer.write_u8(6);
@@ -394,15 +354,15 @@ impl Serializable for Expr {
             },
             Expr::Field(path) => {
                 writer.write_u8(13);
-                Self::write_path_components(path, writer);
+                path.write_to(writer);
             }
             Expr::WildcardField(path) => {
                 writer.write_u8(14);
-                Self::write_path_components(path, writer);
+                path.write_to(writer);
             }
             Expr::PositionalField(path) => {
                 writer.write_u8(15);
-                Self::write_path_components(path, writer);
+                path.write_to(writer);
             }
             Expr::Placeholder(idx) => {
                 writer.write_u8(16);
@@ -410,24 +370,13 @@ impl Serializable for Expr {
             }
             Expr::ElemMatch(predicates) => {
                 writer.write_u8(17);
-                writer.write_varint_u32(predicates.len() as u32);
-                for pred in predicates {
-                    pred.write_to(writer);
-                }
+                predicates.write_to(writer);
             }
             Expr::ProjectionSlice { field, skip, limit } => {
                 writer.write_u8(18);
                 field.write_to(writer);
-                writer.write_varint_u64((*skip as i64) as u64);
-                match limit {
-                    Some(lim) => {
-                        writer.write_u8(1);
-                        writer.write_varint_u32(*lim);
-                    }
-                    None => {
-                        writer.write_u8(0);
-                    }
-                }
+                skip.write_to(writer);
+                limit.write_to(writer);
             }
             Expr::ProjectionElemMatch { field, expr } => {
                 writer.write_u8(20);

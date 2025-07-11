@@ -74,7 +74,8 @@ mod tests {
     #[test]
     fn test_parametrize_simple_filter() {
         let optimizer = Optimizer::new(vec![]);
-        let plan = LogicalPlanBuilder::scan("db", "collection")
+        let collection = 14;
+        let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(field(["a"]), vec![eq(10)]))
             .build();
 
@@ -92,7 +93,7 @@ mod tests {
                 value: Arc::new(Expr::Placeholder(0)),
             })],
         });
-        let expected_plan = LogicalPlanBuilder::scan("db", "collection")
+        let expected_plan = LogicalPlanBuilder::scan(collection)
             .filter(expected_condition)
             .build();
 
@@ -102,7 +103,8 @@ mod tests {
     #[test]
     fn test_parametrize_complex_filter() {
         let optimizer = Optimizer::new(vec![]);
-        let plan = LogicalPlanBuilder::scan("db", "collection")
+        let collection = 14;
+        let plan = LogicalPlanBuilder::scan(collection)
             .filter(and(vec![
                 field_filters(field(["a"]), vec![eq(10)]),
                 field_filters(field(["b"]), vec![eq("hello")]),
@@ -134,7 +136,7 @@ mod tests {
             }),
         ]);
 
-        let expected_plan = LogicalPlanBuilder::scan("db", "collection")
+        let expected_plan = LogicalPlanBuilder::scan(collection)
             .filter(expected_condition)
             .build();
 
@@ -144,7 +146,8 @@ mod tests {
     #[test]
     fn test_parametrize_no_literals() {
         let optimizer = Optimizer::new(vec![]);
-        let plan = LogicalPlanBuilder::scan("db", "collection")
+        let collection = 14;
+        let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(
                 field(["a"]),
                 vec![Arc::new(Expr::Exists(true))],

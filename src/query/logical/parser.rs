@@ -271,7 +271,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
 fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, Error> {
     let (skip, limit) = match value {
         Bson::Int32(n) => (*n, None),
-        Bson::Int64(n) => (*n as i32, None),
+        Bson::Int64(n) => {
+            let skip = (*n).try_into().map_err(|_| Error::InvalidArgument("$slice value out of i32 range".to_string()))?;
+            (skip, None)
+        },
         Bson::Array(arr) => {
             if arr.len() != 2 {
                 return Err(Error::InvalidArgument(
@@ -280,7 +283,8 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
             }
             let skip = match &arr[0] {
                 Bson::Int32(n) => *n,
-                Bson::Int64(n) => *n as i32,
+                Bson::Int64(n) => (*n).try_into()
+                                            .map_err(|_| Error::InvalidArgument("$slice value out of i32 range".to_string()))?,
                 _ => {
                     return Err(Error::InvalidArgument(
                         "$slice first element must be an integer".to_string(),
@@ -288,8 +292,8 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
                 }
             };
             let limit = match &arr[1] {
-                Bson::Int32(n) if *n > 0 => Some(*n as u32),
-                Bson::Int64(n) if *n > 0 => Some(*n as u32),
+                Bson::Int32(n) if *n > 0 => Some(*n),
+                Bson::Int64(n) if *n > 0 => Some(*n as i32),
                 _ => {
                     return Err(Error::InvalidArgument(
                         "$slice limit must be a positive integer".to_string(),

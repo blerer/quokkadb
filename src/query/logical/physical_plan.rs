@@ -13,7 +13,7 @@ use crate::storage::Direction;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     /// Scans a collection, optionally over a specific range of primary keys.
-    TableScan {
+    CollectionScan {
         /// The identifier for the collection.
         collection: u32,
         /// The range for the scan on the user primary key.

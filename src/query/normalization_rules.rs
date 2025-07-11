@@ -201,7 +201,8 @@ mod tests {
     }
 
     fn scan_with_filter(filter: Arc<Expr>) -> Arc<LogicalPlan> {
-        LogicalPlanBuilder::scan("test_db", "users")
+        let collection = 22;
+        LogicalPlanBuilder::scan(collection)
             .filter(filter)
             .build()
     }
