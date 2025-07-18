@@ -1,7 +1,7 @@
 use crate::query::logical::{logical_plan::SortField, Expr};
-use bson::Document;
-use std::ops::Range;
+use std::ops::Bound;
 use std::sync::Arc;
+use crate::query::logical::logical_plan::Projection;
 use crate::storage::Direction;
 
 /// Represents a physical plan that can be executed by the query engine.
@@ -10,18 +10,20 @@ use crate::storage::Direction;
 /// to execute a query. It is generated from a `LogicalPlan` by the optimizer.
 /// Unlike the logical plan, which describes *what* data is needed, the physical
 /// plan describes *how* to get it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum PhysicalPlan {
     /// Scans a collection, optionally over a specific range of primary keys.
     CollectionScan {
         /// The identifier for the collection.
         collection: u32,
-        /// The range for the scan on the user primary key.
-        range: Range<Vec<u8>>,
+        /// The start bound of the range for the scan on the user primary key.
+        start: Bound<Expr>,
+        /// The end bound of the range for the scan on the user primary key.
+        end: Bound<Expr>,
         /// The direction in which the scan must be performed
         direction: Direction,
         /// An optional list of fields to project. If `None`, all fields are returned.
-        projection: Option<Vec<String>>,
+        projection: Option<Arc<Projection>>,
     },
 
     /// Performs a lookup on an index for a single key.
@@ -31,9 +33,9 @@ pub enum PhysicalPlan {
         /// The identifier for the index.
         index: u32,
         /// The user key to search for.
-        key: Vec<u8>,
+        key: Expr,
         /// An optional list of fields to project. If `None`, all fields are returned.
-        projection: Option<Vec<String>>,
+        projection: Option<Arc<Projection>>,
     },
 
     /// Scans an index over a given range.
@@ -42,18 +44,20 @@ pub enum PhysicalPlan {
         collection: u32,
         /// The identifier for the index.
         index: u32,
-        /// The range to scan on the index.
-        range: Range<Vec<u8>>,
+        /// The start bound of the range for the scan on the index.
+        start: Bound<Expr>,
+        /// The end bound of the range for the scan on the index.
+        end: Bound<Expr>,
         /// An optional list of fields to project. If `None`, all fields are returned.
-        projection: Option<Vec<String>>,
+        projection: Option<Arc<Projection>>,
     },
 
     /// Inserts a set of documents into a collection. This is a terminal operator.
-    Insert {
+    InsertMany {
         /// The identifier for the collection.
         collection: u32,
         /// The documents to be inserted.
-        documents: Vec<Document>,
+        documents: Vec<Vec<u8>>,
     },
 
     /// Filters rows from its input based on a predicate.
@@ -70,7 +74,7 @@ pub enum PhysicalPlan {
         /// The input plan that provides the data.
         input: Arc<PhysicalPlan>,
         /// A list of (new_name, existing_field) tuples for projection.
-        fields: Vec<(String, String)>,
+        projection: Arc<Projection>,
     },
 
     /// Sorts the input in memory. This is for datasets that are expected to fit in memory.
@@ -78,7 +82,7 @@ pub enum PhysicalPlan {
         /// The input plan that provides the data.
         input: Arc<PhysicalPlan>,
         /// The fields and direction to sort by.
-        sort_fields: Vec<SortField>,
+        sort_fields: Arc<Vec<SortField>>,
     },
 
     /// Sorts a large input using external merge sort, which can spill to disk.
@@ -86,7 +90,7 @@ pub enum PhysicalPlan {
         /// The input plan that provides the data.
         input: Arc<PhysicalPlan>,
         /// The fields and direction to sort by.
-        sort_fields: Vec<SortField>,
+        sort_fields: Arc<Vec<SortField>>,
     },
 
     /// Finds the top K elements using a heap. This is an optimization for `ORDER BY ... LIMIT`.
@@ -94,7 +98,7 @@ pub enum PhysicalPlan {
         /// The input plan that provides the data.
         input: Arc<PhysicalPlan>,
         /// The fields and direction to sort by.
-        sort_fields: Vec<SortField>,
+        sort_fields: Arc<Vec<SortField>>,
         /// The number of top elements to retrieve.
         k: usize,
     },

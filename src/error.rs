@@ -6,16 +6,18 @@ pub enum Error {
     Io(io::Error),
     DeserializationError(String),
     InvalidArgument(String),
+    InvalidState(String),
     BsonDeError(bson::de::Error),
+    BsonRawError(bson::raw::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{}", e),
-            Error::DeserializationError(reason) => write!(f, "{}", reason),
-            Error::InvalidArgument(reason) => write!(f, "{}", reason),
+            Error::DeserializationError(reason) | Error::InvalidArgument(reason) | Error::InvalidState(reason) => write!(f, "{}", reason),
             Error::BsonDeError(e) => write!(f, "{}", e),
+            Error::BsonRawError(e) => write!(f, "{}", e),
         }
     }
 }
@@ -29,6 +31,12 @@ impl From<io::Error> for Error {
 impl From<bson::de::Error> for Error {
     fn from(err: bson::de::Error) -> Self {
         Error::BsonDeError(err)
+    }
+}
+
+impl From<bson::raw::Error> for Error {
+    fn from(err: bson::raw::Error) -> Self {
+        Error::BsonRawError(err)
     }
 }
 

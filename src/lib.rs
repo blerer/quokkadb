@@ -12,10 +12,13 @@ mod util;
 use crate::error::Error;
 use std::path::Path;
 use std::sync::Arc;
+use bson::Document;
 use crate::collection::Collection;
 use crate::obs::logger::NoOpLogger;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
+use crate::query::logical::executor::QueryExecutor;
+use crate::query::logical::logical_plan::LogicalPlan;
 use crate::query::optimizer::Optimizer;
 use crate::storage::storage_engine::StorageEngine;
 
@@ -37,8 +40,10 @@ impl QuokkaDB {
         let mut metric_registry = MetricRegistry::new();
         let storage_engine = StorageEngine::new(logger, &mut metric_registry, options.clone(), path)?;
         let optimizer = Arc::new(Optimizer::new(vec![])); // Add normalization rules as needed
+        let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
         let db_impl = Arc::new(DbImpl {
             optimizer,
+            executor,
             storage_engine,
         });
 
@@ -59,11 +64,27 @@ impl QuokkaDB {
 
 struct DbImpl {
     optimizer: Arc<Optimizer>,
+    executor: Arc<QueryExecutor>,
     storage_engine: Arc<StorageEngine>,
 }
 
 impl DbImpl {
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> error::Result<u32> {
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
+    }
+
+    pub fn execute_plan(&self, logical_plan: LogicalPlan) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
+
+        // First, normalize the logical plan
+        let normalized_plan = self.optimizer.normalize(logical_plan);
+        // Then, parametrize the plan to collect parameters
+        let (logical_plan, parameters) = self.optimizer.parametrize(normalized_plan);
+
+        // Checks the statement cache for the physical plan
+
+        // If the plan is not cached, optimize it
+        let physical_plan = self.optimizer.optimize(logical_plan);
+
+        self.executor.execute_cached(physical_plan, parameters)
     }
 }

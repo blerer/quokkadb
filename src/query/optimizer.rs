@@ -15,16 +15,16 @@ impl Optimizer {
         }
     }
 
-    pub fn optimize(&self, plan: LogicalPlan) -> PhysicalPlan {
+    pub fn optimize(&self, plan: Arc<LogicalPlan>) -> Arc<PhysicalPlan> {
         todo!()
     }
 
-    pub fn normalize(&self, plan: LogicalPlan) -> LogicalPlan {
+    pub fn normalize(&self, plan: LogicalPlan) -> Arc<LogicalPlan> {
         let mut current_plan = Arc::new(plan);
         for rule in &self.normalization_rules {
             current_plan = rule.apply(current_plan);
         }
-        current_plan.as_ref().clone()
+        current_plan
     }
 
     pub fn parametrize(&self, plan: Arc<LogicalPlan>) -> (Arc<LogicalPlan>, Parameters) {
@@ -83,7 +83,7 @@ mod tests {
 
         // Check params
         assert_eq!(params.len(), 1);
-        assert_eq!(params.get(0), Some(&BsonValue::from(10)));
+        assert_eq!(params.get(0).unwrap(), &BsonValue::from(10));
 
         // Check plan
         let expected_condition = Arc::new(Expr::FieldFilters {
@@ -115,8 +115,8 @@ mod tests {
 
         // Check params
         assert_eq!(params.len(), 2);
-        assert_eq!(params.get(0), Some(&BsonValue::from(10)));
-        assert_eq!(params.get(1), Some(&BsonValue::from("hello")));
+        assert_eq!(params.get(0).unwrap(), &BsonValue::from(10));
+        assert_eq!(params.get(1).unwrap(), &BsonValue::from("hello"));
 
         // Check plan
         let expected_condition = and(vec![

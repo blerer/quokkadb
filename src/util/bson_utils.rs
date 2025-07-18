@@ -5,6 +5,13 @@ use bson::{to_vec, Bson};
 use std::io::{Error, ErrorKind, Result};
 use bson::spec::BinarySubtype;
 
+pub fn prepend_field(doc: &mut Vec<u8>, key: &str, value: &Bson) -> Result<()> {
+    let raw_field = make_raw_bson_element(key, value)?;
+    // Prepend the field to the raw BSON data
+    prepend_raw_bson_field(doc, &raw_field)?;
+    Ok(())
+}
+
 fn read_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<&[u8]> {
     let end = reader.find_next_by(|b| b == 0);
     if let Some(end) = end {

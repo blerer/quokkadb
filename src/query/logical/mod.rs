@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
+use crate::util::bson_utils::BsonKey;
 
 pub(crate) mod expr_fn;
-mod executor;
+pub(crate) mod executor;
 pub mod logical_plan;
 pub mod physical_plan;
 pub(crate) mod parser;
@@ -643,6 +644,13 @@ where
     }
 }
 
+impl BsonKey for BsonValue {
+
+    fn try_into_key(&self) -> Result<Vec<u8>> {
+        self.0.try_into_key()
+    }
+}
+
 #[macro_export]
 macro_rules! bson_value {
     ( $($tokens:tt)* ) => {
@@ -667,8 +675,13 @@ impl Parameters {
         Arc::new(Expr::Placeholder(idx))
     }
 
-    pub fn get(&self, index: usize) -> Option<&BsonValue> {
-        self.parameters.get(index)
+    pub fn get(&self, index: u32) -> Result<&BsonValue> {
+        self.parameters.get(index as usize).ok_or(
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("Parameter index {} out of bounds", index),
+            ),
+        )
     }
 
     pub fn len(&self) -> usize {

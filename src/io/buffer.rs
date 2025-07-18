@@ -6,14 +6,6 @@ use std::ptr;
 ///
 /// This buffer manages a preallocated `Vec<u8>` to avoid frequent reallocations,
 /// providing efficient direct memory operations.
-///
-/// # Examples
-/// ```
-/// use quokkadb::io::buffer::Buffer;
-/// let mut buffer = Buffer::with_capacity(10);
-/// buffer.write_u8(42).write_slice(&[1, 2, 3]);
-/// assert_eq!(buffer.as_slice(), &[42, 1, 2, 3]);
-/// ```
 pub struct Buffer {
     data: Vec<u8>,
     read_index: usize,

@@ -1,16 +1,19 @@
 use crate::error::{Error, Result};
 use crate::query::logical::logical_plan::{SortField, SortOrder};
 use crate::query::logical::physical_plan::PhysicalPlan;
-use crate::query::logical::{BsonValue, ComparisonOperator, Expr, PathComponent};
-use crate::storage::operation::Operation;
+use crate::query::logical::{BsonValue, ComparisonOperator, Expr, Parameters, PathComponent};
+use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
-use crate::storage::Direction;
 use crate::util::bson_utils::{self, BsonKey};
 use bson::oid::ObjectId;
-use bson::{Bson, Document};
+use bson::{Bson, Document, RawDocument};
 use std::cmp::Ordering;
+use std::io::Cursor;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
+use crate::storage::internal_key::extract_operation_type;
+use crate::util::interval::Interval;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -25,25 +28,91 @@ impl QueryExecutor {
         Self { storage_engine }
     }
 
+    pub fn execute_direct(&self, plan: PhysicalPlan) -> Result<QueryOutput> {
+        match plan {
+            PhysicalPlan::InsertMany {
+                collection,
+                documents,
+            } => {
+                let mut operations = Vec::with_capacity(documents.len());
+                let mut ids = Vec::with_capacity(documents.len());
+                for mut doc in documents {
+                    // Ensure each document has an _id field
+                    let id = RawDocument::from_bytes(&doc)?.get("_id")?;
+
+                    let user_key = match id {
+                        Some(id) => {
+                            let bson: Bson = id.to_raw_bson().try_into()?;
+                            ids.push(bson.clone());
+                            bson.try_into_key()?
+                        },
+                        None => {
+                            let bson = Bson::ObjectId(ObjectId::new());
+                            bson_utils::prepend_field(&mut doc,"_id", &bson)?;
+                            ids.push(bson.clone());
+                            bson.try_into_key()?
+                        }
+                    };
+
+                    operations.push(Operation::new_put(collection, 0, user_key, doc));
+                }
+
+                let batch = WriteBatch::new(operations);
+                self.storage_engine.write(batch)?;
+
+                let mut result = Document::new();
+                let array = Bson::Array(ids.into_iter().map(Bson::from).collect());
+                result.insert("inserted_ids", array);
+                Ok(Box::new(std::iter::once(Ok(result))))
+            }
+            _ => {
+                // Other plans, should be cached
+                Err(Error::InvalidArgument(format!(
+                    "Direct execution not supported for plan: {:?}",
+                    plan
+                )))
+            }
+        }
+    }
+
     /// Executes the given physical plan.
-    pub fn execute(&self, plan: Arc<PhysicalPlan>) -> Result<QueryOutput> {
+    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: Parameters) -> Result<QueryOutput> {
         match plan.as_ref() {
             PhysicalPlan::CollectionScan {
                 collection,
-                range,
+                start,
+                end,
                 direction,
                 projection: _, // Projection pushdown is not yet supported at this level
             } => {
+                let range = Self::bind_key_range_parameters(start, end, &parameters)?;
+
                 Ok(Box::new(self.storage_engine.range_scan(
-                        *collection,
-                        0, // This is table scan so index is 0
-                        range,
-                        None,
-                        direction.clone(),
-                    )?.map(|res| {
-                        res.map_err(Into::into)
-                        .and_then(|kv| bson::from_slice(&kv.1).map_err(Into::into))
-                    })))
+                    *collection,
+                    0, // This is table scan so index is 0
+                    &range,
+                    None,
+                    direction.clone(),
+                )?.filter_map(|res| {
+                    match res {
+                        Ok((k, v)) => {
+                            let op = extract_operation_type(&k);
+                            match op {
+                                OperationType::Delete => None,
+                                OperationType::Put => {
+                                    // Deserialize the value into a Document
+                                    let doc = Document::from_reader(Cursor::new(v));
+                                    match doc {
+                                        Err(e) => Some(Err(e.into())),
+                                        Ok(doc) => Some(Ok(doc))
+                                    }
+                                },
+                                _ => Some(Err(Error::InvalidState(format!("Unexpected operation type: {:?}", op)))),
+                            }
+                        }
+                        Err(e) => Some(Err(e.into())),
+                    }
+                })))
             }
             PhysicalPlan::PointSearch {
                 collection,
@@ -51,11 +120,19 @@ impl QueryExecutor {
                 key,
                 projection: _,
             } => {
+                let key = Self::bind_key_parameter(key, &parameters)?;
                 let result = self.storage_engine.read(*collection, *index, &key, None)?;
                 let iter: QueryOutput = match result {
-                    Some(kv_pair) => {
-                        let doc = bson::from_slice(&kv_pair.1).map_err(Into::into);
-                        Box::new(std::iter::once(doc))
+                    Some((k, v)) => {
+                        let op = extract_operation_type(&k);
+                        match op {
+                            OperationType::Delete => Box::new(std::iter::empty()),
+                            OperationType::Put => {
+                                Box::new(std::iter::once(Document::from_reader(Cursor::new(v))
+                                    .map_err(|e| e.into())))
+                            }
+                            _ => return Err(Error::InvalidState(format!("Unexpected operation type: {:?}", op))),
+                        }
                     }
                     None => Box::new(std::iter::empty()),
                 };
@@ -64,50 +141,14 @@ impl QueryExecutor {
             PhysicalPlan::IndexScan {
                 collection,
                 index,
-                range,
+                start ,
+                end,
                 projection: _,
             } => {
-                Ok(Box::new(self.storage_engine.range_scan(
-                    *collection,
-                    *index,
-                    range,
-                    None,
-                    Direction::Forward,
-                )?.map(|res| {
-                    res.map_err(Into::into)
-                        .and_then(|kv| bson::from_slice(&kv.1).map_err(Into::into))
-                })))
-            }
-            PhysicalPlan::Insert {
-                collection,
-                documents,
-            } => {
-                let mut operations = Vec::with_capacity(documents.len());
-                let mut ids = Vec::with_capacity(documents.len());
-                // The documents are cloned to be able to mutate them to add an _id if missing.
-                for mut doc in documents.clone() {
-                    doc.entry("_id".to_string())
-                        .or_insert_with(|| Bson::ObjectId(ObjectId::new()));
-
-                    let id = doc.get("_id").unwrap();
-                    ids.push(id.clone());
-                    let user_key = id.try_into_key()?;
-                    let value = bson::to_vec(&doc)
-                        .map_err(|e| Error::InvalidArgument(e.to_string()))?;
-
-                    operations.push(Operation::new_put(*collection, 0, user_key, value));
-                }
-
-                let batch = WriteBatch::new(operations);
-                self.storage_engine.write(batch)?;
-
-                Ok(Box::new(ids.into_iter().map(|id| {
-                    let doc = id.as_document().unwrap().clone();
-                    Ok(doc)
-                })))
+                todo!()
             }
             PhysicalPlan::Filter { input, predicate } => {
-                let input_iter = self.execute(input.clone())?;
+                let input_iter = self.execute_cached(input.clone(), parameters)?;
                 let predicate = predicate.clone();
                 let filtered_iter = input_iter.filter_map(move |res| match res {
                     Ok(doc) => match eval_predicate(&doc, &predicate) {
@@ -119,27 +160,14 @@ impl QueryExecutor {
                 });
                 Ok(Box::new(filtered_iter))
             }
-            PhysicalPlan::Projection { input, fields } => {
-                let input_iter = self.execute(input.clone())?;
-                let fields = fields.clone();
-                let projected_iter = input_iter.map(move |res| {
-                    res.map(|doc| {
-                        let mut new_doc = Document::new();
-                        for (new_name, old_name) in &fields {
-                            if let Some(value) = doc.get(old_name) {
-                                new_doc.insert(new_name.clone(), value.clone());
-                            }
-                        }
-                        new_doc
-                    })
-                });
-                Ok(Box::new(projected_iter))
+            PhysicalPlan::Projection { input, projection } => {
+                todo!()
             }
             PhysicalPlan::InMemorySort {
                 input,
                 sort_fields,
             } => {
-                let input_iter = self.execute(input.clone())?;
+                let input_iter = self.execute_cached(input.clone(), parameters)?;
                 let mut rows: Vec<Document> = input_iter.collect::<Result<Vec<_>>>()?;
                 rows.sort_by(|a, b| sort_documents(a, b, &sort_fields));
                 Ok(Box::new(rows.into_iter().map(Ok)))
@@ -155,7 +183,7 @@ impl QueryExecutor {
                 skip,
                 limit,
             } => {
-                let mut iter = self.execute(input.clone())?;
+                let mut iter = self.execute_cached(input.clone(), parameters)?;
                 if let Some(s) = skip {
                     iter = Box::new(iter.skip(*s));
                 }
@@ -164,6 +192,53 @@ impl QueryExecutor {
                 }
                 Ok(iter)
             }
+            _ => {
+                Err(Error::InvalidArgument(format!(
+                    "Non-parametrized physical plan: {:?}",
+                    plan
+                )))
+            }
+        }
+    }
+
+    fn bind_key_range_parameters(start: &Bound<Expr>, end: &Bound<Expr>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
+        let start = Self::bind_key_bound_parameter(start, &parameters)?;
+        let end = Self::bind_key_bound_parameter(end, &parameters)?;
+        let range = Interval::new(start, end);
+        Ok(range)
+    }
+
+    fn bind_key_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<Vec<u8>>> {
+        let start = match start {
+            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)?.try_into_key()?),
+            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)?.try_into_key()?),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        Ok(start)
+    }
+
+    fn bind_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<BsonValue>> {
+        let start = match start {
+            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)?),
+            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)?),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        Ok(start)
+    }
+
+    fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result<Vec<u8>> {
+        if let Expr::Placeholder(idx) = expr {
+            Ok(parameters.get(*idx)?.try_into_key()?)
+        } else {
+            Err(Error::InvalidState(format!("Expecting placeholder but was: {:?}", expr)))
+        }
+    }
+
+    fn bind_parameter(expr: &Expr, parameters: &Parameters) -> Result<BsonValue> {
+        if let Expr::Placeholder(idx) = expr {
+            Ok(parameters.get(*idx)?.clone())
+        } else {
+            Err(Error::InvalidState(format!("Expecting placeholder but was: {:?}", expr)))
         }
     }
 }

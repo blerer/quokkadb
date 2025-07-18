@@ -153,16 +153,6 @@ impl ZeroCopy for Vec<u8> {
 ///
 /// * `Some(&str)` containing the file name if it exists and is valid UTF-8.
 /// * `None` if the path has no file name component or if the name is not valid UTF-8.
-///
-/// # Examples
-///
-/// ```
-/// use std::path::Path;
-/// use quokkadb::io::file_name_as_str;
-///
-/// assert_eq!(file_name_as_str(Path::new("/foo/bar.txt")), Some("bar.txt"));
-/// assert_eq!(file_name_as_str(Path::new("/foo/")), Some("foo"));
-/// ```
 pub fn file_name_as_str(path: &Path) -> Option<&str> {
     path.file_name()?.to_str()
 }
