@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::query::logical::Expr;
+use crate::query::Expr;
 use crate::query::tree_node::TreeNode;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
@@ -341,8 +341,8 @@ impl LogicalPlanBuilder {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::logical::expr_fn::field;
-    use crate::query::logical::ComparisonOperator;
+    use crate::query::logical_expr_fn::field;
+    use crate::query::ComparisonOperator;
 
     #[test]
     fn test_logical_plan_serialization_round_trip() {

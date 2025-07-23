@@ -1,6 +1,6 @@
-use crate::query::logical::logical_plan::LogicalPlan;
-use crate::query::logical::Expr;
-use crate::query::optimizer::NormalisationRule;
+use crate::query::logical_plan::LogicalPlan;
+use crate::query::Expr;
+use crate::query::optimizer::optimizer::NormalisationRule;
 use crate::query::tree_node::TreeNode;
 use std::sync::Arc;
 
@@ -159,8 +159,8 @@ impl SimplifyNotExpressions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical::expr_fn::*;
-    use crate::query::logical::logical_plan::LogicalPlanBuilder;
+    use crate::query::logical_expr_fn::*;
+    use crate::query::logical_plan::LogicalPlanBuilder;
 
     #[test]
     fn test_not_normalization() {

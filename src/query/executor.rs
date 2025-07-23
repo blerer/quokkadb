@@ -1,13 +1,13 @@
 use crate::error::{Error, Result};
-use crate::query::logical::logical_plan::{SortField, SortOrder};
-use crate::query::logical::physical_plan::PhysicalPlan;
-use crate::query::logical::{BsonValue, ComparisonOperator, Expr, Parameters, PathComponent};
+use crate::query::logical_plan::{SortField, SortOrder};
+use crate::query::physical_plan::PhysicalPlan;
+use crate::query::{BsonValue, ComparisonOperator, Expr, Parameters, PathComponent};
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::bson_utils::{self, BsonKey};
 use bson::oid::ObjectId;
-use bson::{Bson, Document, RawDocument};
+use bson::{doc, Bson, Document, RawDocument};
 use std::cmp::Ordering;
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
@@ -37,22 +37,11 @@ impl QueryExecutor {
                 let mut operations = Vec::with_capacity(documents.len());
                 let mut ids = Vec::with_capacity(documents.len());
                 for mut doc in documents {
-                    // Ensure each document has an _id field
-                    let id = RawDocument::from_bytes(&doc)?.get("_id")?;
 
-                    let user_key = match id {
-                        Some(id) => {
-                            let bson: Bson = id.to_raw_bson().try_into()?;
-                            ids.push(bson.clone());
-                            bson.try_into_key()?
-                        },
-                        None => {
-                            let bson = Bson::ObjectId(ObjectId::new());
-                            bson_utils::prepend_field(&mut doc,"_id", &bson)?;
-                            ids.push(bson.clone());
-                            bson.try_into_key()?
-                        }
-                    };
+                    let id = Self::prepend_id_if_needed(&mut doc)?;
+                    ids.push(id.clone());
+                    // Convert the BSON _id to a key
+                    let user_key = id.try_into_key()?;
 
                     operations.push(Operation::new_put(collection, 0, user_key, doc));
                 }
@@ -60,9 +49,8 @@ impl QueryExecutor {
                 let batch = WriteBatch::new(operations);
                 self.storage_engine.write(batch)?;
 
-                let mut result = Document::new();
-                let array = Bson::Array(ids.into_iter().map(Bson::from).collect());
-                result.insert("inserted_ids", array);
+                let result = doc! { "inserted_ids": ids.into_iter().map(Bson::from).collect::<Vec<_>>() };
+
                 Ok(Box::new(std::iter::once(Ok(result))))
             }
             _ => {
@@ -73,6 +61,24 @@ impl QueryExecutor {
                 )))
             }
         }
+    }
+
+    /// Ensures that each document has an `_id` field, prepending it if necessary.
+    fn prepend_id_if_needed(mut doc: &mut Vec<u8>) -> Result<Bson> {
+
+        let id = RawDocument::from_bytes(&doc)?.get("_id")?;
+
+        let id: Bson = match id {
+            Some(id) => {
+                id.to_raw_bson().try_into()?
+            },
+            None => {
+                let bson = Bson::ObjectId(ObjectId::new());
+                bson_utils::prepend_field(&mut doc, "_id", &bson)?;
+                bson
+            }
+        };
+        Ok(id)
     }
 
     /// Executes the given physical plan.
@@ -367,8 +373,8 @@ fn sort_documents(a: &Document, b: &Document, sort_fields: &[SortField]) -> Orde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical::logical_plan::{SortField, SortOrder};
-    use crate::query::logical::{Expr, PathComponent};
+    use crate::query::logical_plan::{SortField, SortOrder};
+    use crate::query::{Expr, PathComponent};
     use bson::{doc, Bson};
     use std::cmp::Ordering;
 

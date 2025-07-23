@@ -1,4 +1,4 @@
-use crate::query::logical::{BsonValue, ComparisonOperator, Expr, PathComponent};
+use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent};
 use std::sync::Arc;
 
 pub fn field<T, U>(name: T) -> Arc<Expr>

@@ -17,9 +17,9 @@ use crate::collection::Collection;
 use crate::obs::logger::NoOpLogger;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
-use crate::query::logical::executor::QueryExecutor;
-use crate::query::logical::logical_plan::LogicalPlan;
-use crate::query::optimizer::Optimizer;
+use query::executor::QueryExecutor;
+use query::logical_plan::LogicalPlan;
+use crate::query::optimizer::optimizer::Optimizer;
 use crate::storage::storage_engine::StorageEngine;
 
 pub struct QuokkaDB {

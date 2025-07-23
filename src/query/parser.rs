@@ -1,5 +1,5 @@
-use crate::query::logical::logical_plan::{Projection, SortField, SortOrder};
-use crate::query::logical::{
+use crate::query::logical_plan::{Projection, SortField, SortOrder};
+use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
 use crate::Error;
@@ -429,7 +429,7 @@ fn validate_field_name(field_name: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical::expr_fn::*;
+    use crate::query::logical_expr_fn::*;
     use bson::{doc, Bson};
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::error::Error;
-use crate::query::logical::logical_plan::LogicalPlan;
-use crate::query::logical::parser;
+use crate::query::logical_plan::LogicalPlan;
+use crate::query::parser;
 use bson::Document;
 use std::sync::Arc;
 use crate::DbImpl;

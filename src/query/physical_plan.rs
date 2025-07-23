@@ -1,7 +1,8 @@
-use crate::query::logical::{logical_plan::SortField, Expr};
+use crate::query::Expr;
 use std::ops::Bound;
 use std::sync::Arc;
-use crate::query::logical::logical_plan::Projection;
+use crate::query::logical_plan::Projection;
+use crate::query::logical_plan::SortField;
 use crate::storage::Direction;
 
 /// Represents a physical plan that can be executed by the query engine.

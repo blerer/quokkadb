@@ -1,7 +1,7 @@
-use crate::query::logical::logical_plan::LogicalPlan;
+use crate::query::logical_plan::LogicalPlan;
 use std::sync::Arc;
-use crate::query::logical::{Expr, Parameters};
-use crate::query::logical::physical_plan::PhysicalPlan;
+use crate::query::{Expr, Parameters};
+use crate::query::physical_plan::PhysicalPlan;
 use crate::query::tree_node::TreeNode;
 
 pub struct Optimizer {
@@ -67,9 +67,9 @@ pub trait NormalisationRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical::expr_fn::{and, eq, field, field_filters};
-    use crate::query::logical::logical_plan::LogicalPlanBuilder;
-    use crate::query::logical::{BsonValue, ComparisonOperator, Expr};
+    use crate::query::logical_expr_fn::{and, eq, field, field_filters};
+    use crate::query::logical_plan::LogicalPlanBuilder;
+    use crate::query::{BsonValue, ComparisonOperator, Expr};
 
     #[test]
     fn test_parametrize_simple_filter() {
