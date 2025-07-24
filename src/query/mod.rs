@@ -1,21 +1,25 @@
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
-use bson::Bson;
+use bson::{Bson, Document};
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::query::tree_node::TreeNode;
+use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
 
+pub(crate) mod execution;
 pub (crate) mod optimizer;
 pub(crate) mod parser;
-pub(crate) mod executor;
-pub(crate) mod logical_expr_fn;
 pub(crate) mod logical_plan;
 pub(crate) mod physical_plan;
 mod tree_node;
+
+#[cfg(test)]
+pub(crate) mod logical_expr_fn;
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Expr {
     /// Field reference
@@ -473,7 +477,7 @@ pub enum PathComponent {
 }
 
 impl Serializable for PathComponent {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
             0 => {
@@ -515,6 +519,29 @@ impl From<usize> for PathComponent {
     }
 }
 
+/// Extracts a BSON value from a document given a path.
+pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<BsonValueRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut current = match path.first()? {
+        PathComponent::FieldName(name) => doc.get(name)?,
+        _ => return None,
+    };
+
+    for component in path.iter().skip(1) {
+        current = match (component, current) {
+            (PathComponent::FieldName(name), Bson::Document(d)) => d.get(name)?,
+            (PathComponent::ArrayElement(index), Bson::Array(a)) => a.get(*index)?,
+            _ => return None,
+        };
+    }
+
+    Some(BsonValueRef(current))
+}
+
+
 #[derive(Debug, Clone)]
 pub struct BsonValue(pub Bson);
 
@@ -522,49 +549,15 @@ impl BsonValue {
     pub fn to_bson(&self) -> Bson {
         self.0.clone()
     }
+
+    pub fn as_ref(&self) -> BsonValueRef {
+        BsonValueRef(&self.0)
+    }
 }
 
 impl PartialEq for BsonValue {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            // Handle NaN correctly (MongoDB: NaN == NaN)
-            (Bson::Double(x), Bson::Double(y)) if x.is_nan() && y.is_nan() => true,
-            // Exact match for same BSON type
-            (Bson::Int32(x), Bson::Int32(y)) => x == y,
-            (Bson::Int64(x), Bson::Int64(y)) => x == y,
-            (Bson::Double(x), Bson::Double(y)) => (x - y).abs() < f64::EPSILON,
-
-            // Normalize and compare mixed numeric types
-            (Bson::Int32(x), Bson::Int64(y)) => *x as i64 == *y,
-            (Bson::Int32(x), Bson::Double(y)) => (*x as f64 - *y).abs() < f64::EPSILON,
-            (Bson::Int64(x), Bson::Double(y)) => (*x as f64 - *y).abs() < f64::EPSILON,
-            (Bson::Int64(x), Bson::Int32(y)) => *x == *y as i64,
-            (Bson::Double(x), Bson::Int32(y)) => (*x - *y as f64).abs() < f64::EPSILON,
-            (Bson::Double(x), Bson::Int64(y)) => (*x - *y as f64).abs() < f64::EPSILON,
-
-            // Compare objects/maps in a canonical order
-            (Bson::Document(a), Bson::Document(b)) => {
-                let a_sorted: BTreeMap<_, _> = a.iter().collect();
-                let b_sorted: BTreeMap<_, _> = b.iter().collect();
-                a_sorted == b_sorted
-            }
-
-            // Compare arrays element-wise
-            (Bson::Array(a), Bson::Array(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                    .zip(b)
-                    .all(|(x, y)| BsonValue(x.clone()) == BsonValue(y.clone()))
-            }
-
-            // Compare regex patterns and options
-            (Bson::RegularExpression(a), Bson::RegularExpression(b)) => {
-                a.pattern == b.pattern && a.options == b.options
-            }
-
-            // Default strict equality for other types
-            _ => self.0 == other.0, // Default case
-        }
+        bson_utils::bson_eq(&self.0, &other.0)
     }
 }
 
@@ -572,43 +565,19 @@ impl Eq for BsonValue {}
 
 impl Hash for BsonValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match &self.0 {
-            // Normalize NaN to a fixed value
-            Bson::Int32(x) => x.hash(state),
-            Bson::Int64(x) => x.hash(state),
-            Bson::Double(x) => {
-                if x.is_nan() {
-                    0x7FF8_0000_0000_0000u64.hash(state)
-                } else {
-                    x.to_bits().hash(state)
-                }
-            } // Normalize floating point hashing
-            Bson::String(s) => s.hash(state),
-            Bson::Boolean(b) => b.hash(state),
+        bson_utils::bson_hash(&self.0, state);
+    }
+}
 
-            // Hash BSON arrays
-            Bson::Array(arr) => {
-                for elem in arr {
-                    BsonValue(elem.clone()).hash(state);
-                }
-            }
+impl PartialOrd for BsonValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(bson_utils::cmp_bson(&self.0, &other.0))
+    }
+}
 
-            // Hash BSON documents (sorted order)
-            Bson::Document(doc) => {
-                let sorted: BTreeMap<_, _> = doc.iter().collect();
-                for (key, value) in sorted {
-                    key.hash(state);
-                    BsonValue(value.clone()).hash(state);
-                }
-            }
-
-            Bson::RegularExpression(regex) => {
-                regex.pattern.hash(state);
-                regex.options.hash(state);
-            }
-
-            _ => (),
-        }
+impl Ord for BsonValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        bson_utils::cmp_bson(&self.0, &other.0)
     }
 }
 
@@ -632,7 +601,7 @@ impl From<&str> for BsonValue {
 
 impl From<bool> for BsonValue {
     fn from(value: bool) -> Self {
-        BsonValue(bson::Bson::Boolean(value))
+        BsonValue(Bson::Boolean(value))
     }
 }
 
@@ -649,6 +618,41 @@ impl BsonKey for BsonValue {
 
     fn try_into_key(&self) -> Result<Vec<u8>> {
         self.0.try_into_key()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BsonValueRef<'a>(pub &'a Bson);
+
+impl<'a> BsonValueRef<'a> {
+    pub fn to_owned(&self) -> BsonValue {
+        BsonValue(self.0.clone())
+    }
+}
+
+impl<'a> PartialEq for BsonValueRef<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        bson_utils::bson_eq(&self.0, &other.0)
+    }
+}
+
+impl<'a> Eq for BsonValueRef<'a> {}
+
+impl<'a> Hash for BsonValueRef<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        bson_utils::bson_hash(&self.0, state);
+    }
+}
+
+impl<'a> PartialOrd for BsonValueRef<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(bson_utils::cmp_bson(&self.0, &other.0))
+    }
+}
+
+impl<'a> Ord for BsonValueRef<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        bson_utils::cmp_bson(&self.0, &other.0)
     }
 }
 
@@ -695,7 +699,112 @@ mod tests {
     use super::*;
     use crate::io::byte_writer::ByteWriter;
     use crate::io::serializable::check_serialization_round_trip;
-    use bson::{Bson, Regex};
+    use bson::{doc, Bson, Document, Regex};
+
+    fn create_sort_test_doc(id: i32, name: &str, value: f64) -> Document {
+        doc! {
+            "id": id,
+            "name": name,
+            "value": value,
+        }
+    }
+
+    #[test]
+    fn test_get_path_value() {
+        let doc = doc! {
+            "a": 1,
+            "b": { "c": "hello" },
+            "d": [10, 20, { "e": 30 }],
+        };
+
+        // Simple field
+        assert_eq!(
+            get_path_value(&doc, &[PathComponent::FieldName("a".to_string())]),
+            Some(BsonValueRef(&Bson::Int32(1)))
+        );
+
+        // Nested field
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("b".to_string()),
+                    PathComponent::FieldName("c".to_string())
+                ]
+            ),
+            Some(BsonValueRef(&Bson::String("hello".to_string())))
+        );
+
+        // Array element
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("d".to_string()),
+                    PathComponent::ArrayElement(1)
+                ]
+            ),
+            Some(BsonValueRef(&Bson::Int32(20)))
+        );
+
+        // Nested in array
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("d".to_string()),
+                    PathComponent::ArrayElement(2),
+                    PathComponent::FieldName("e".to_string())
+                ]
+            ),
+            Some(BsonValueRef(&Bson::Int32(30)))
+        );
+
+        // Non-existent field
+        assert_eq!(
+            get_path_value(&doc, &[PathComponent::FieldName("z".to_string())]),
+            None
+        );
+
+        // Partially correct path
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("b".to_string()),
+                    PathComponent::FieldName("z".to_string())
+                ]
+            ),
+            None
+        );
+
+        // Path into non-document
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("a".to_string()),
+                    PathComponent::FieldName("z".to_string())
+                ]
+            ),
+            None
+        );
+
+        // Index into non-array
+        assert_eq!(
+            get_path_value(
+                &doc,
+                &[
+                    PathComponent::FieldName("a".to_string()),
+                    PathComponent::ArrayElement(0)
+                ]
+            ),
+            None
+        );
+
+        // Empty path
+        assert_eq!(get_path_value(&doc, &[]), None);
+    }
 
     #[test]
     fn test_basic_numeric_equality() {

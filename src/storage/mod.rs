@@ -17,7 +17,7 @@ pub(crate) mod write_batch;
 mod manifest;
 mod iterators;
 #[cfg(test)]
-mod test_utils;
+pub(crate) mod test_utils;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Direction {

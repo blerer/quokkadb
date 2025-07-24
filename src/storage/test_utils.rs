@@ -1,6 +1,12 @@
-use std::io::Result;
+use crate::obs::metrics::MetricRegistry;
+use crate::storage::storage_engine::StorageEngine;
 use std::fmt::Debug;
+use std::io::Result;
+use std::sync::Arc;
+use tempfile::{tempdir, TempDir};
 use bson::{doc, to_vec, Bson, Document};
+use crate::obs::logger::test_instance;
+use crate::options::options::Options;
 use crate::storage::internal_key::encode_record_key;
 use crate::storage::operation::Operation;
 use crate::util::bson_utils::BsonKey;
@@ -48,4 +54,13 @@ fn document(user_key: i32, version: u32) -> Document {
             "version": version,
             "payload": format!("This is document {} version {}.", user_key, version)
         }
+}
+
+pub fn storage_engine() -> Result<(Arc<StorageEngine>, TempDir)> {
+    let dir = tempdir()?;
+    let options = Arc::new(Options::lightweight());
+    let mut metric_registry = MetricRegistry::new();
+    let logger = test_instance();
+    let storage_engine = StorageEngine::new(logger, &mut metric_registry, options, dir.path())?;
+    Ok((storage_engine, dir))
 }

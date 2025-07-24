@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
-use crate::io::byte_reader::ByteReader;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use crate::io::ZeroCopy;
 use bson::{to_vec, Bson};
 use std::io::{Error, ErrorKind, Result};
@@ -10,205 +11,6 @@ pub fn prepend_field(doc: &mut Vec<u8>, key: &str, value: &Bson) -> Result<()> {
     // Prepend the field to the raw BSON data
     prepend_raw_bson_field(doc, &raw_field)?;
     Ok(())
-}
-
-fn read_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<&[u8]> {
-    let end = reader.find_next_by(|b| b == 0);
-    if let Some(end) = end {
-        Ok(reader.read_fixed_slice(end + 1)?)
-    } else {
-        Err(invalid_data("End of CString could not be found"))
-    }
-}
-
-fn skip_cstring<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<()> {
-    let end = reader.find_next_by(|b| b == 0);
-    if let Some(end) = end {
-        reader.skip(end + 1)
-    } else {
-        Err(invalid_data("End of CString could not be found"))
-    }
-}
-
-fn document_length(data: &[u8], offset: usize) -> Result<usize> {
-    if data.len() - offset < 5 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Not enough bytes for a BSON document",
-        ));
-    }
-    Ok(data.read_i32_le(offset) as usize)
-}
-
-pub fn find_bson_field_value<'a, B: AsRef<[u8]>>(
-    reader: &'a ByteReader<B>,
-    field_name: &'a [u8],
-) -> Result<Option<&'a [u8]>> {
-    // Read document length (first 4 bytes)
-    let doc_length = reader.read_i32_le()? as usize;
-
-    if doc_length > reader.remaining() + 4 {
-        return Err(invalid_data("Invalid BSON document length"));
-    }
-
-    while reader.has_remaining() {
-        // Read field type (1 byte)
-        let bson_type = match reader.read_u8() {
-            Ok(t) => t,
-            Err(_) => return Ok(None), // End of document
-        };
-
-        // Read field name (CString)
-        let start_pos = reader.position();
-        let field_bytes = match read_cstring(reader) {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(invalid_data("Invalid BSON field name")),
-        };
-
-        // Check if the field name matches
-        if field_bytes == field_name {
-            // Extract the BSON value
-            return extract_bson_value(bson_type, reader).map(Some);
-        }
-
-        // Skip over the field name (CString includes null byte)
-        let new_pos = start_pos + field_bytes.len() + 1;
-        reader.seek(new_pos)?;
-
-        // Skip value bytes (using extract_bson_value to determine length, but ignore the value)
-        let _ = skip_value(bson_type, reader)?;
-    }
-
-    Ok(None) // Field not found
-}
-
-pub fn extract_bson_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>) -> Result<&[u8]> {
-    match bson_type {
-        0x01 => {
-            // Double (8 bytes)
-            reader.read_fixed_slice(8)
-        }
-        0x02 => {
-            // String (length-prefixed + null terminator)
-            let str_len = reader.read_i32_le()? as usize;
-            reader.read_fixed_slice(4 + str_len)
-        }
-        0x03 | 0x04 => {
-            // Embedded Document or Array (length-prefixed)
-            let doc_len = reader.read_i32_le()? as usize;
-            reader.read_fixed_slice(4 + doc_len)
-        }
-        0x05 => {
-            // Binary (length-prefixed + subtype + data)
-            let bin_len = reader.read_i32_le()? as usize;
-            reader.read_fixed_slice(4 + 1 + bin_len) // 4-byte length + subtype + data
-        }
-        0x07 => {
-            // ObjectId (12 bytes)
-            reader.read_fixed_slice(12)
-        }
-        0x08 => {
-            // Boolean (1 byte)
-            reader.read_fixed_slice(1)
-        }
-        0x09 => {
-            // UTC Datetime (8 bytes)
-            reader.read_fixed_slice(8)
-        }
-        0x0A => {
-            // Null
-            Ok(&[])
-        }
-        0x0B => {
-            // Regular Expression (cstring + cstring)
-            let start = reader.position();
-            let mut end = reader.find_next_by(|b| b == 0);
-            if let Some(end) = end {
-                reader.seek(end + 1)?;
-            } else {
-                return Err(invalid_data("End of first CString could not be found"));
-            }
-            end = reader.find_next_by(|b| b == 0);
-            if let Some(end) = end {
-                reader.seek(start)?;
-                reader.read_fixed_slice(end + 1)
-            } else {
-                Err(invalid_data("End of second CString could not be found"))
-            }
-        }
-        0x0D => {
-            // JavaScript Code (length-prefixed string)
-            let str_len = reader.read_i32_le()? as usize;
-            reader.read_fixed_slice(4 + str_len)
-        }
-        0x0F => {
-            // JavaScript Code w/ Scope (length-prefixed + string + document)
-            let total_len = reader.read_i32_le()? as usize;
-            reader.read_fixed_slice(total_len)
-        }
-        0x10 => {
-            // Int32 (4 bytes)
-            reader.read_fixed_slice(4)
-        }
-        0x11 => {
-            // Timestamp (8 bytes: increment + timestamp)
-            reader.read_fixed_slice(8)
-        }
-        0x12 => {
-            // Int64 (8 bytes)
-            reader.read_fixed_slice(8)
-        }
-        0x13 => {
-            // Decimal128 (16 bytes)
-            reader.read_fixed_slice(16)
-        }
-        _ => Err(invalid_data("Unsupported BSON type")),
-    }
-}
-
-pub fn skip_value<B: AsRef<[u8]>>(bson_type: u8, reader: &ByteReader<B>) -> Result<()> {
-    match bson_type {
-        0x01 => reader.skip(8), // Double (8 bytes)
-        0x02 => {
-            // String (length-prefixed)
-            let str_len = reader.read_i32_le()? as usize;
-            reader.skip(str_len)
-        }
-        0x03 | 0x04 => {
-            // Document or Array (length-prefixed)
-            let doc_len = reader.read_i32_le()? as usize;
-            reader.skip(doc_len - 4) // Already read 4 bytes
-        }
-        0x05 => {
-            // Binary (length-prefixed + subtype + data)
-            let bin_len = reader.read_i32_le()? as usize;
-            reader.skip(bin_len + 1) // 4-byte length + subtype
-        }
-        0x07 => reader.skip(12), // ObjectId (12 bytes)
-        0x08 => reader.skip(1),  // Boolean (1 byte)
-        0x09 => reader.skip(8),  // UTC Datetime (8 bytes)
-        0x0A => Ok(()),          // Null (0 bytes)
-        0x0B => {
-            // Regular Expression (CString + CString)
-            skip_cstring(reader)?; // Skip pattern
-            skip_cstring(reader) // Skip options
-        }
-        0x0D => {
-            // JavaScript Code (length-prefixed string)
-            let str_len = reader.read_i32_le()? as usize;
-            reader.skip(str_len)
-        }
-        0x0F => {
-            // JavaScript Code w/ Scope (length + script + doc)
-            let total_len = reader.read_i32_le()? as usize;
-            reader.skip(total_len - 4) // Already read 4 bytes
-        }
-        0x10 => reader.skip(4),  // Int32 (4 bytes)
-        0x11 => reader.skip(8),  // Timestamp (8 bytes)
-        0x12 => reader.skip(8),  // Int64 (8 bytes)
-        0x13 => reader.skip(16), // Decimal128 (16 bytes)
-        _ => Err(invalid_data("Unsupported BSON type")),
-    }
 }
 
 fn invalid_data(message: &str) -> Error {
@@ -378,6 +180,86 @@ pub fn cmp_bson(a: &Bson, b: &Bson) -> Ordering {
     }
 }
 
+pub fn bson_eq(a: &Bson, b: &Bson) -> bool {
+    match (a, b) {
+        // Handle NaN correctly (MongoDB: NaN == NaN)
+        (Bson::Double(x), Bson::Double(y)) if x.is_nan() && y.is_nan() => true,
+        // Exact match for same BSON type
+        (Bson::Int32(x), Bson::Int32(y)) => x == y,
+        (Bson::Int64(x), Bson::Int64(y)) => x == y,
+        (Bson::Double(x), Bson::Double(y)) => (x - y).abs() < f64::EPSILON,
+
+        // Normalize and compare mixed numeric types
+        (Bson::Int32(x), Bson::Int64(y)) => *x as i64 == *y,
+        (Bson::Int32(x), Bson::Double(y)) => (*x as f64 - *y).abs() < f64::EPSILON,
+        (Bson::Int64(x), Bson::Double(y)) => (*x as f64 - *y).abs() < f64::EPSILON,
+        (Bson::Int64(x), Bson::Int32(y)) => *x == *y as i64,
+        (Bson::Double(x), Bson::Int32(y)) => (*x - *y as f64).abs() < f64::EPSILON,
+        (Bson::Double(x), Bson::Int64(y)) => (*x - *y as f64).abs() < f64::EPSILON,
+
+        // Compare objects/maps in a canonical order
+        (Bson::Document(a), Bson::Document(b)) => {
+            let a_sorted: BTreeMap<_, _> = a.iter().collect();
+            let b_sorted: BTreeMap<_, _> = b.iter().collect();
+            a_sorted == b_sorted
+        }
+
+        // Compare arrays element-wise
+        (Bson::Array(a), Bson::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| bson_eq(x, y))
+        }
+
+        // Compare regex patterns and options
+        (Bson::RegularExpression(a), Bson::RegularExpression(b)) => {
+            a.pattern == b.pattern && a.options == b.options
+        }
+
+        // Default strict equality for other types
+        _ => a == b,
+    }
+}
+pub fn bson_hash<H: Hasher>(bson: &Bson, state: &mut H) {
+    match bson {
+        // Normalize NaN to a fixed value
+        Bson::Int32(x) => x.hash(state),
+        Bson::Int64(x) => x.hash(state),
+        Bson::Double(x) => {
+            if x.is_nan() {
+                0x7FF8_0000_0000_0000u64.hash(state)
+            } else {
+                x.to_bits().hash(state)
+            }
+        } // Normalize floating point hashing
+        Bson::String(s) => s.hash(state),
+        Bson::Boolean(b) => b.hash(state),
+
+        // Hash BSON arrays
+        Bson::Array(arr) => {
+            for elem in arr {
+                bson_hash(elem, state);
+            }
+        }
+
+        // Hash BSON documents (sorted order)
+        Bson::Document(doc) => {
+            let sorted: BTreeMap<_, _> = doc.iter().collect();
+            for (key, value) in sorted {
+                key.hash(state);
+                bson_hash(value, state);
+            }
+        }
+
+        Bson::RegularExpression(regex) => {
+            regex.pattern.hash(state);
+            regex.options.hash(state);
+        }
+
+        _ => (),
+    }
+}
 fn subtype_code(s: BinarySubtype) -> u8 { s.into() } // From<BinarySubtype> for u8 exists
 
 /// Trait for converting BSON values into sortable byte keys

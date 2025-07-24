@@ -53,6 +53,14 @@ pub enum PhysicalPlan {
         projection: Option<Arc<Projection>>,
     },
 
+    /// Inserts a document into a collection. This is a terminal operator.
+    InsertOne {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The document to be inserted.
+        document: Vec<u8>,
+    },
+
     /// Inserts a set of documents into a collection. This is a terminal operator.
     InsertMany {
         /// The identifier for the collection.
@@ -92,6 +100,9 @@ pub enum PhysicalPlan {
         input: Arc<PhysicalPlan>,
         /// The fields and direction to sort by.
         sort_fields: Arc<Vec<SortField>>,
+        /// The maximum number of rows to keep in memory before spilling to disk.
+        /// This is used to control memory usage.
+        max_in_memory_rows: usize,
     },
 
     /// Finds the top K elements using a heap. This is an optimization for `ORDER BY ... LIMIT`.

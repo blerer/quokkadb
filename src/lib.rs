@@ -17,7 +17,7 @@ use crate::collection::Collection;
 use crate::obs::logger::NoOpLogger;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
-use query::executor::QueryExecutor;
+use query::execution::executor::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use crate::query::optimizer::optimizer::Optimizer;
 use crate::storage::storage_engine::StorageEngine;

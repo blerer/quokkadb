@@ -888,7 +888,6 @@ mod tests {
     use crate::storage::test_utils::{
         assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, user_key,
     };
-    use crate::util::bson_utils::BsonKey;
     use bson::{doc, to_vec};
     use std::path::Path;
     use tempfile::tempdir;
