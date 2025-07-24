@@ -32,10 +32,10 @@ pub fn compare_documents(a: &Document, b: &Document, sort_fields: &[SortField]) 
 
 pub fn in_memory_sort(
     input_iter: Box<dyn Iterator<Item = Result<Document>>>,
-    sort_fields: &&Arc<Vec<SortField>>
+    sort_fields: &Arc<Vec<SortField>>,
 ) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
     let mut rows: Vec<Document> = input_iter.collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|a, b| compare_documents(a, b, &sort_fields));
+    rows.sort_by(|a, b| compare_documents(a, b, sort_fields));
     Ok(Box::new(rows.into_iter().map(Ok)))
 }
 
@@ -293,8 +293,13 @@ mod tests {
         assert_eq!(compare_documents(&doc1, &doc2, &[]), Ordering::Equal);
     }
 
-    #[test]
-    fn test_in_memory_sort() {
+    fn run_sort_test<F>(mut sort_fn: F)
+    where
+        F: FnMut(
+            Box<dyn Iterator<Item = Result<Document>>>,
+            Arc<Vec<SortField>>,
+        ) -> Result<Box<dyn Iterator<Item = Result<Document>>>>,
+    {
         let docs = vec![
             doc! { "_id": 1, "name": "c", "value": 10.0 },
             doc! { "_id": 2, "name": "a", "value": 30.0 },
@@ -315,7 +320,7 @@ mod tests {
             ),
         ]);
         let input_iter_asc = Box::new(docs.clone().into_iter().map(Ok));
-        let sorted_iter_asc = in_memory_sort(input_iter_asc, &&sort_fields_asc).unwrap();
+        let sorted_iter_asc = sort_fn(input_iter_asc, sort_fields_asc.clone()).unwrap();
         let sorted_docs_asc: Vec<Document> = sorted_iter_asc.map(Result::unwrap).collect();
         let ids_asc: Vec<i32> = sorted_docs_asc
             .iter()
@@ -335,7 +340,7 @@ mod tests {
             ),
         ]);
         let input_iter_desc = Box::new(docs.clone().into_iter().map(Ok));
-        let sorted_iter_desc = in_memory_sort(input_iter_desc, &&sort_fields_desc).unwrap();
+        let sorted_iter_desc = sort_fn(input_iter_desc, sort_fields_desc).unwrap();
         let sorted_docs_desc: Vec<Document> = sorted_iter_desc.map(Result::unwrap).collect();
         let ids_desc: Vec<i32> = sorted_docs_desc
             .iter()
@@ -346,83 +351,25 @@ mod tests {
         // Edge case: Empty input
         let docs_empty: Vec<Document> = vec![];
         let input_iter_empty = Box::new(docs_empty.into_iter().map(Ok));
-        let sorted_iter_empty = in_memory_sort(input_iter_empty, &&sort_fields_asc).unwrap();
+        let sorted_iter_empty = sort_fn(input_iter_empty, sort_fields_asc.clone()).unwrap();
         assert_eq!(sorted_iter_empty.count(), 0);
 
         // Edge case: Single document
         let docs_single = vec![doc! { "_id": 1 }];
         let input_iter_single = Box::new(docs_single.into_iter().map(Ok));
-        let sorted_iter_single = in_memory_sort(input_iter_single, &&sort_fields_asc).unwrap();
+        let sorted_iter_single = sort_fn(input_iter_single, sort_fields_asc).unwrap();
         let sorted_docs_single: Vec<Document> = sorted_iter_single.map(Result::unwrap).collect();
         assert_eq!(sorted_docs_single.len(), 1);
         assert_eq!(sorted_docs_single[0].get_i32("_id").unwrap(), 1);
     }
 
     #[test]
+    fn test_in_memory_sort() {
+        run_sort_test(|iter, fields| in_memory_sort(iter, &fields));
+    }
+
+    #[test]
     fn test_external_merge_sort() {
-        let docs = vec![
-            doc! { "_id": 1, "name": "c", "value": 10.0 },
-            doc! { "_id": 2, "name": "a", "value": 30.0 },
-            doc! { "_id": 3, "name": "b", "value": 20.0 },
-            doc! { "_id": 4, "name": "a", "value": 10.0 },
-            doc! { "_id": 5, "name": "c", "value": 5.0 },
-        ];
-
-        // Ascending sort
-        let sort_fields_asc = Arc::new(vec![
-            make_sort_field(
-                vec![PathComponent::FieldName("name".to_string())],
-                SortOrder::Ascending,
-            ),
-            make_sort_field(
-                vec![PathComponent::FieldName("value".to_string())],
-                SortOrder::Ascending,
-            ),
-        ]);
-        let input_iter_asc = Box::new(docs.clone().into_iter().map(Ok));
-        let sorted_iter_asc =
-            external_merge_sort(input_iter_asc, sort_fields_asc.clone(), 2).unwrap();
-        let sorted_docs_asc: Vec<Document> = sorted_iter_asc.map(Result::unwrap).collect();
-        let ids_asc: Vec<i32> = sorted_docs_asc
-            .iter()
-            .map(|d| d.get_i32("_id").unwrap())
-            .collect();
-        assert_eq!(ids_asc, vec![4, 2, 3, 5, 1]);
-
-        // Descending sort
-        let sort_fields_desc = Arc::new(vec![
-            make_sort_field(
-                vec![PathComponent::FieldName("name".to_string())],
-                SortOrder::Descending,
-            ),
-            make_sort_field(
-                vec![PathComponent::FieldName("value".to_string())],
-                SortOrder::Descending,
-            ),
-        ]);
-        let input_iter_desc = Box::new(docs.clone().into_iter().map(Ok));
-        let sorted_iter_desc = external_merge_sort(input_iter_desc, sort_fields_desc, 2).unwrap();
-        let sorted_docs_desc: Vec<Document> = sorted_iter_desc.map(Result::unwrap).collect();
-        let ids_desc: Vec<i32> = sorted_docs_desc
-            .iter()
-            .map(|d| d.get_i32("_id").unwrap())
-            .collect();
-        assert_eq!(ids_desc, vec![1, 5, 3, 2, 4]);
-
-        // Edge case: Empty input
-        let docs_empty: Vec<Document> = vec![];
-        let input_iter_empty = Box::new(docs_empty.into_iter().map(Ok));
-        let sorted_iter_empty =
-            external_merge_sort(input_iter_empty, sort_fields_asc.clone(), 2).unwrap();
-        assert_eq!(sorted_iter_empty.count(), 0);
-
-        // Edge case: Single document
-        let docs_single = vec![doc! { "_id": 1 }];
-        let input_iter_single = Box::new(docs_single.into_iter().map(Ok));
-        let sorted_iter_single =
-            external_merge_sort(input_iter_single, sort_fields_asc, 2).unwrap();
-        let sorted_docs_single: Vec<Document> = sorted_iter_single.map(Result::unwrap).collect();
-        assert_eq!(sorted_docs_single.len(), 1);
-        assert_eq!(sorted_docs_single[0].get_i32("_id").unwrap(), 1);
+        run_sort_test(|iter, fields| external_merge_sort(iter, fields, 2));
     }
 }
