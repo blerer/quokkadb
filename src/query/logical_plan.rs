@@ -276,6 +276,14 @@ impl Serializable for SortField {
     }
 }
 
+#[cfg(test)]
+pub fn make_sort_field(path: Vec<crate::query::PathComponent>, order: SortOrder) -> SortField {
+    SortField {
+        field: Arc::new(Expr::Field(path)),
+        order,
+    }
+}
+
 /// A builder for constructing `LogicalPlan` instances.
 pub struct LogicalPlanBuilder {
     plan: LogicalPlan,

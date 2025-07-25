@@ -200,8 +200,13 @@ impl QueryExecutor {
                 let input_iter = self.execute_cached(input.clone(), parameters)?;
                 sort::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
             }
-            PhysicalPlan::TopKHeapSort { .. } => {
-                todo!("Top-K heap sort not yet implemented")
+            PhysicalPlan::TopKHeapSort {
+                input,
+                sort_fields,
+                k,
+            } => {
+                let input_iter = self.execute_cached(input.clone(), parameters)?;
+                sort::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
             PhysicalPlan::Limit {
                 input,
@@ -352,7 +357,8 @@ fn eval_filter(doc_val: Option<BsonValueRef>, filter: &Expr) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::query::{BsonValue, Parameters};
+    use crate::query::logical_plan::{make_sort_field, SortField, SortOrder};
+    use crate::query::{BsonValue, Parameters, PathComponent};
     use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
@@ -715,6 +721,103 @@ mod tests {
         assert_eq!(found_docs_edge.len(), 2);
         assert_eq!(found_docs_edge[0].get_i32("_id").unwrap(), 4);
         assert_eq!(found_docs_edge[1].get_i32("_id").unwrap(), 5);
+
+        Ok(())
+    }
+
+    fn assert_sorted_results(
+        executor: &QueryExecutor,
+        plan: Arc<PhysicalPlan>,
+        expected_ids: &[i32],
+    ) -> Result<()> {
+        let results = executor.execute_cached(plan, Parameters::new())?;
+        let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
+        let found_ids: Vec<i32> = found_docs
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
+        assert_eq!(found_ids, expected_ids);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sort_plans_execution() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_sorts")?;
+
+        // 2. Insert test data
+        let docs = vec![
+            doc! { "_id": 1, "name": "c", "value": 10.0 },
+            doc! { "_id": 2, "name": "a", "value": 30.0 },
+            doc! { "_id": 3, "name": "b", "value": 20.0 },
+            doc! { "_id": 4, "name": "a", "value": 10.0 },
+            doc! { "_id": 5, "name": "c", "value": 5.0 },
+        ];
+        for doc in &docs {
+            let insert_plan = PhysicalPlan::InsertOne {
+                collection: collection_id,
+                document: bson::to_vec(doc)?,
+            };
+            let mut result = executor.execute_direct(insert_plan)?;
+            result.next().unwrap()?; // consume result
+        }
+
+        // 3. Define sort fields and expected order
+        let sort_fields = Arc::new(vec![
+            make_sort_field(vec!["name".into()], SortOrder::Ascending),
+            make_sort_field(vec!["value".into()], SortOrder::Ascending),
+        ]);
+        let expected_ids = vec![4, 2, 3, 5, 1];
+
+        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+            direction: Direction::Forward,
+            projection: None,
+        });
+
+        // --- In-Memory Sort ---
+        let mem_sort_plan = Arc::new(PhysicalPlan::InMemorySort {
+            input: scan_plan.clone(),
+            sort_fields: sort_fields.clone(),
+        });
+        assert_sorted_results(&executor, mem_sort_plan, &expected_ids)?;
+
+        // --- External Merge Sort ---
+        let ext_sort_plan = Arc::new(PhysicalPlan::ExternalMergeSort {
+            input: scan_plan.clone(),
+            sort_fields: sort_fields.clone(),
+            max_in_memory_rows: 2,
+        });
+        assert_sorted_results(&executor, ext_sort_plan, &expected_ids)?;
+
+        // --- Top-K Heap Sort ---
+        // k=3
+        let topk_plan = Arc::new(PhysicalPlan::TopKHeapSort {
+            input: scan_plan.clone(),
+            sort_fields: sort_fields.clone(),
+            k: 3,
+        });
+        assert_sorted_results(&executor, topk_plan, &expected_ids[..3])?;
+
+        // k=0
+        let topk_plan_0 = Arc::new(PhysicalPlan::TopKHeapSort {
+            input: scan_plan.clone(),
+            sort_fields: sort_fields.clone(),
+            k: 0,
+        });
+        assert_sorted_results(&executor, topk_plan_0, &[])?;
+
+        // k > items
+        let topk_plan_10 = Arc::new(PhysicalPlan::TopKHeapSort {
+            input: scan_plan,
+            sort_fields: sort_fields.clone(),
+            k: 10,
+        });
+        assert_sorted_results(&executor, topk_plan_10, &expected_ids)?;
 
         Ok(())
     }
