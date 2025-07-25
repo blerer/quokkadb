@@ -1,6 +1,5 @@
 use crate::error::Result;
-use crate::query::logical_plan::{SortField, SortOrder};
-use crate::query::{get_path_value, BsonValueRef, Expr};
+use crate::query::{get_path_value, BsonValueRef, Expr, SortField, SortOrder};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -259,8 +258,7 @@ impl Iterator for MergeIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical_plan::{make_sort_field, SortField, SortOrder};
-    use crate::query::{Expr, PathComponent};
+    use crate::query::{make_sort_field, SortField, SortOrder};
     use bson::doc;
     use std::cmp::Ordering;
     use std::sync::Arc;

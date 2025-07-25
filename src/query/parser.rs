@@ -1,4 +1,4 @@
-use crate::query::logical_plan::{Projection, SortField, SortOrder};
+use crate::query::{Projection, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };

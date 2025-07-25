@@ -185,10 +185,6 @@ impl Levels {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<Level>> {
-        self.levels.iter()
-    }
-
     pub fn sst_count(&self) -> usize {
         self.levels.iter().map(|level| level.sst_count()).sum()
     }
@@ -379,15 +375,6 @@ impl Level {
         match self {
             Overlapping { sstables, .. } | NonOverlapping { sstables, .. } => sstables.len(),
         }
-    }
-
-    /// Returns an iterator over the SSTables in this level.
-    pub fn sstables(&self) -> impl Iterator<Item = Arc<SSTableMetadata>> + '_ {
-        let tables_ref = match self {
-            Level::Overlapping { sstables, .. } => sstables,
-            Level::NonOverlapping { sstables, .. } => sstables,
-        };
-        tables_ref.iter().cloned()
     }
 }
 

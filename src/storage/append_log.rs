@@ -44,8 +44,6 @@ impl<F: LogFileCreator> AppendLog<F> {
         file_creator: Arc<F>,
         observer: Arc<F::Observer>,
     ) -> Result<Self> {
-        let file = DbFile::new(&file_path)
-            .ok_or(Error::new(ErrorKind::InvalidData, "Unknown file type"))?;
         let db_path = file_path
             .parent()
             .ok_or(Error::new(
@@ -54,7 +52,7 @@ impl<F: LogFileCreator> AppendLog<F> {
             ))?
             .to_path_buf();
 
-        let current_file = LogFile::load_from(file_path, file.number, observer.clone())?;
+        let current_file = LogFile::load_from(file_path, observer.clone())?;
 
         Ok(AppendLog {
             directory: db_path,
@@ -251,7 +249,6 @@ pub trait LogFileCreator: Send + Sync {
         observer.on_buffered(BUFFER_SIZE_IN_BYTES as u64);
 
         let mut log_file = LogFile {
-            number: db_file.number,
             path,
             file,
             pending_bytes: 0,
@@ -278,7 +275,6 @@ pub trait LogObserver: Send + Sync {
 }
 
 pub struct LogFile<O: LogObserver> {
-    number: u64,
     path: PathBuf,
     file: File,
     pending_bytes: u64,
@@ -287,7 +283,7 @@ pub struct LogFile<O: LogObserver> {
 }
 
 impl<O: LogObserver> LogFile<O> {
-    fn load_from(path: &Path, number: u64, observer: Arc<O>) -> Result<Self> {
+    fn load_from(path: &Path, observer: Arc<O>) -> Result<Self> {
         let file = OpenOptions::new()
             .write(true)
             .append(true) // Append instead of overwrite
@@ -299,7 +295,6 @@ impl<O: LogObserver> LogFile<O> {
         observer.on_load(file_size);
 
         Ok(LogFile {
-            number,
             path: path.to_path_buf(),
             file,
             pending_bytes: 0,
@@ -901,7 +896,6 @@ mod tests {
 
         let original_path = log.current_file.path.clone();
         let original_file_size = log.current_file.file_size;
-        let original_id = log.current_file.number;
 
         // Now reload it
         let observer = MockLogObserver::new();
@@ -909,7 +903,6 @@ mod tests {
             AppendLog::load_from(&original_path, file_creator.clone(), observer.clone()).unwrap();
 
         // Validate
-        assert_eq!(reloaded_log.current_file.number, original_id);
         assert_eq!(reloaded_log.current_file.path, original_path);
         assert_eq!(reloaded_log.current_file.file_size, original_file_size);
 

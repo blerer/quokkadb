@@ -396,6 +396,97 @@ impl Serializable for Expr {
     }
 }
 
+/// Projection for included or excluded fields
+#[derive(Debug, Clone, PartialEq)]
+pub enum Projection {
+    Include(Vec<Arc<Expr>>), // Fields to include
+    Exclude(Vec<Arc<Expr>>), // Fields to exclude
+}
+
+impl Serializable for Projection {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(Projection::Include(Vec::<Arc<Expr>>::read_from(reader)?)),
+            1 => Ok(Projection::Exclude(Vec::<Arc<Expr>>::read_from(reader)?)),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid tag for Projection",
+            )),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            Projection::Include(exprs) => {
+                writer.write_u8(0);
+                exprs.write_to(writer);
+            }
+            Projection::Exclude(exprs) => {
+                writer.write_u8(1);
+                exprs.write_to(writer);
+            }
+        }
+    }
+}
+
+/// Represents the sort order for a field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+impl Serializable for SortOrder {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(SortOrder::Ascending),
+            1 => Ok(SortOrder::Descending),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid tag for SortOrder",
+            )),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        let byte = match self {
+            SortOrder::Ascending => 0,
+            SortOrder::Descending => 1,
+        };
+        writer.write_u8(byte);
+    }
+}
+
+/// Represents a sorting instruction for a query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortField {
+    pub field: Arc<Expr>,
+    pub order: SortOrder,
+}
+
+impl Serializable for SortField {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let field = Arc::<Expr>::read_from(reader)?;
+        let order = SortOrder::read_from(reader)?;
+        Ok(SortField { field, order })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        self.field.write_to(writer);
+        self.order.write_to(writer);
+    }
+}
+
+#[cfg(test)]
+pub fn make_sort_field(path: Vec<crate::query::PathComponent>, order: SortOrder) -> SortField {
+    SortField {
+        field: Arc::new(Expr::Field(path)),
+        order,
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
 pub enum ComparisonOperator {
     Eq,  // `$eq`

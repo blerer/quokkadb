@@ -60,16 +60,6 @@ pub fn encode_record_key(collection: u32, index: u32, user_key: &[u8]) -> Vec<u8
     key
 }
 
-pub fn extract_collection(internal_key: &[u8]) -> u32 {
-    assert!(internal_key.len() >= 8, "Invalid internal key length");
-    internal_key.read_u32_be(0)
-}
-
-pub fn extract_index(internal_key: &[u8]) -> u32 {
-    assert!(internal_key.len() >= 8, "Invalid internal key length");
-    internal_key.read_u32_be(4)
-}
-
 /// Extracts the record key from an internal key.
 pub fn extract_record_key(internal_key: &[u8]) -> &[u8] {
     assert!(internal_key.len() >= 16, "Invalid internal key length");
@@ -246,8 +236,6 @@ mod tests {
 
         let encoded = encode_internal_key(&record_key, seq, op_type);
 
-        assert_eq!(extract_collection(&encoded), collection);
-        assert_eq!(extract_index(&encoded), index);
         assert_eq!(extract_user_key(&encoded), user_key);
         assert_eq!(extract_sequence_number(&encoded), seq);
         assert_eq!(extract_operation_type(&encoded), op_type);

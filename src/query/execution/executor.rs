@@ -355,8 +355,8 @@ fn eval_filter(doc_val: Option<BsonValueRef>, filter: &Expr) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::query::logical_plan::{make_sort_field, SortField, SortOrder};
-    use crate::query::{BsonValue, Parameters, PathComponent};
+    use crate::query::{make_sort_field, SortOrder};
+    use crate::query::{BsonValue, Parameters};
     use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
