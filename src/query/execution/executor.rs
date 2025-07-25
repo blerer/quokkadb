@@ -351,8 +351,6 @@ fn eval_filter(doc_val: Option<BsonValueRef>, filter: &Expr) -> Result<bool> {
     }
 }
 
-/// Extracts a BSON value from a document given a path.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +600,21 @@ mod tests {
             result_unbounded_end.next().is_none(),
             "Scan with unbounded end should find one doc"
         );
+
+        // 8. CollectionScan with full range in reverse
+        let plan_scan_reverse = Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+            direction: Direction::Reverse,
+            projection: None,
+        });
+        let result_scan_reverse = executor.execute_cached(plan_scan_reverse, Parameters::new())?;
+        let found_docs_reverse: Vec<Document> = result_scan_reverse.collect::<Result<Vec<_>>>()?;
+        assert_eq!(found_docs_reverse.len(), 3);
+        assert_eq!(found_docs_reverse[0], doc3.clone());
+        assert_eq!(found_docs_reverse[1], doc2.clone());
+        assert_eq!(found_docs_reverse[2], doc1.clone());
 
         Ok(())
     }
