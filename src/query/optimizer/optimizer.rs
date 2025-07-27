@@ -67,7 +67,7 @@ pub trait NormalisationRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical_expr_fn::{and, eq, field, field_filters};
+    use crate::query::expr_fn::{and, eq, field, field_filters, lit};
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::query::{BsonValue, ComparisonOperator, Expr};
 
@@ -76,14 +76,14 @@ mod tests {
         let optimizer = Optimizer::new(vec![]);
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
-            .filter(field_filters(field(["a"]), vec![eq(10)]))
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
             .build();
 
         let (parametrized_plan, params) = optimizer.parametrize(plan);
 
         // Check params
         assert_eq!(params.len(), 1);
-        assert_eq!(params.get(0).unwrap(), &BsonValue::from(10));
+        assert_eq!(params.get(0), &BsonValue::from(10));
 
         // Check plan
         let expected_condition = Arc::new(Expr::FieldFilters {
@@ -106,8 +106,8 @@ mod tests {
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(and(vec![
-                field_filters(field(["a"]), vec![eq(10)]),
-                field_filters(field(["b"]), vec![eq("hello")]),
+                field_filters(field(["a"]), vec![eq(lit(10))]),
+                field_filters(field(["b"]), vec![eq(lit("hello"))]),
             ]))
             .build();
 
@@ -115,8 +115,8 @@ mod tests {
 
         // Check params
         assert_eq!(params.len(), 2);
-        assert_eq!(params.get(0).unwrap(), &BsonValue::from(10));
-        assert_eq!(params.get(1).unwrap(), &BsonValue::from("hello"));
+        assert_eq!(params.get(0), &BsonValue::from(10));
+        assert_eq!(params.get(1), &BsonValue::from("hello"));
 
         // Check plan
         let expected_condition = and(vec![

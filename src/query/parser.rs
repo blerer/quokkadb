@@ -22,7 +22,7 @@ pub fn parse_conditions(doc: &Document) -> Result<Arc<Expr>, Error> {
                     let parsed_condition = parse_conditions(sub_doc)?;
                     conditions.push(Arc::new(Expr::Not(parsed_condition)));
                 } else {
-                    return Err(Error::InvalidArgument(
+                    return Err(Error::InvalidRequest(
                         "Invalid format for $not; must be a document".to_string(),
                     ));
                 }
@@ -31,7 +31,7 @@ pub fn parse_conditions(doc: &Document) -> Result<Arc<Expr>, Error> {
                 // Handle fields (regular or wildcard)
                 let field = parse_field(key)?;
                 if matches!(field, Expr::PositionalField(_)) {
-                    return Err(Error::InvalidArgument(format!(
+                    return Err(Error::InvalidRequest(format!(
                         "Positional fields are not supported in condition: {}",
                         key
                     )));
@@ -64,7 +64,7 @@ fn parse_logical_operator(operator: &str, value: &Bson) -> Result<Expr, Error> {
             if let Bson::Document(sub_doc) = bson {
                 parsed_conditions.push(parse_conditions(sub_doc)?);
             } else {
-                return Err(Error::InvalidArgument(format!(
+                return Err(Error::InvalidRequest(format!(
                     "Invalid format for {}; must be an array of documents",
                     operator
                 )));
@@ -75,13 +75,13 @@ fn parse_logical_operator(operator: &str, value: &Bson) -> Result<Expr, Error> {
             "$and" => Ok(Expr::And(parsed_conditions)),
             "$or" => Ok(Expr::Or(parsed_conditions)),
             "$nor" => Ok(Expr::Nor(parsed_conditions)),
-            _ => Err(Error::InvalidArgument(format!(
+            _ => Err(Error::InvalidRequest(format!(
                 "Unknown logical operator: {}",
                 operator
             ))),
         }
     } else {
-        Err(Error::InvalidArgument(format!(
+        Err(Error::InvalidRequest(format!(
             "Invalid format for {}; must be an array",
             operator
         )))
@@ -107,7 +107,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                     if let Bson::Boolean(exists) = value {
                         predicates.push(Arc::new(Expr::Exists(*exists)));
                     } else {
-                        return Err(Error::InvalidArgument(
+                        return Err(Error::InvalidRequest(
                             "$exists must be a boolean".to_string(),
                         ));
                     }
@@ -119,7 +119,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                             negated: false,
                         }))
                     } else {
-                        return Err(Error::InvalidArgument(
+                        return Err(Error::InvalidRequest(
                             "$type must be a valid BSON type".to_string(),
                         ));
                     }
@@ -132,7 +132,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                             negated: false,
                         }))
                     } else {
-                        return Err(Error::InvalidArgument(
+                        return Err(Error::InvalidRequest(
                             "$size must be an integer".to_string(),
                         ));
                     }
@@ -143,7 +143,7 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                             Arc::new(Expr::Literal(BsonValue(Bson::Array(values.clone())))),
                         )))
                     } else {
-                        return Err(Error::InvalidArgument("$all must be an array".to_string()));
+                        return Err(Error::InvalidRequest("$all must be an array".to_string()));
                     }
                 }
                 "$elemMatch" => {
@@ -151,12 +151,12 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                         let sub_condition = parse_predicates(value)?;
                         predicates.push(Arc::new(Expr::ElemMatch(sub_condition)))
                     } else {
-                        return Err(Error::InvalidArgument(
+                        return Err(Error::InvalidRequest(
                             "$elemMatch must be a document".to_string(),
                         ));
                     }
                 }
-                _ => return Err(Error::InvalidArgument(format!("Unknown operator: {}", key))),
+                _ => return Err(Error::InvalidRequest(format!("Unknown operator: {}", key))),
             }
         }
     } else {
@@ -218,7 +218,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
             Bson::Int32(0) | Bson::Int64(0) => {
                 let field = parse_field(key)?;
                 if matches!(field, Expr::PositionalField(_)) {
-                    return Err(Error::InvalidArgument(format!(
+                    return Err(Error::InvalidRequest(format!(
                         "Positional fields cannot be excluded: {}",
                         key
                     )));
@@ -228,7 +228,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
             Bson::Document(projection_doc) => {
                 let field = Arc::new(parse_field(key)?);
                 if projection_doc.len() != 1 {
-                    return Err(Error::InvalidArgument(format!(
+                    return Err(Error::InvalidRequest(format!(
                         "Projection document for field '{}' must have exactly one operator.",
                         key
                     )));
@@ -239,7 +239,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                     "$slice" => parse_slice_projection(field, op_value)?,
                     "$elemMatch" => parse_elem_match_projection(field, op_value)?,
                     _ => {
-                        return Err(Error::InvalidArgument(format!(
+                        return Err(Error::InvalidRequest(format!(
                             "Unknown projection operator: {}",
                             op
                         )))
@@ -248,7 +248,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 include_fields.push(projection_expr);
             }
             _ => {
-                return Err(Error::InvalidArgument(format!(
+                return Err(Error::InvalidRequest(format!(
                     "Invalid projection value for field '{}'",
                     key
                 )))
@@ -259,10 +259,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
     match (!include_fields.is_empty(), !exclude_fields.is_empty()) {
         (true, false) => Ok(Projection::Include(include_fields)),
         (false, true) => Ok(Projection::Exclude(exclude_fields)),
-        (true, true) => Err(Error::InvalidArgument(
+        (true, true) => Err(Error::InvalidRequest(
             "Cannot mix inclusion and exclusion projections".to_string(),
         )),
-        (false, false) => Err(Error::InvalidArgument(
+        (false, false) => Err(Error::InvalidRequest(
             "Projection document cannot be empty".to_string(),
         )),
     }
@@ -272,21 +272,21 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
     let (skip, limit) = match value {
         Bson::Int32(n) => (*n, None),
         Bson::Int64(n) => {
-            let skip = (*n).try_into().map_err(|_| Error::InvalidArgument("$slice value out of i32 range".to_string()))?;
+            let skip = (*n).try_into().map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
             (skip, None)
         },
         Bson::Array(arr) => {
             if arr.len() != 2 {
-                return Err(Error::InvalidArgument(
+                return Err(Error::InvalidRequest(
                     "$slice array must have exactly two elements".to_string(),
                 ));
             }
             let skip = match &arr[0] {
                 Bson::Int32(n) => *n,
                 Bson::Int64(n) => (*n).try_into()
-                                            .map_err(|_| Error::InvalidArgument("$slice value out of i32 range".to_string()))?,
+                                            .map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?,
                 _ => {
-                    return Err(Error::InvalidArgument(
+                    return Err(Error::InvalidRequest(
                         "$slice first element must be an integer".to_string(),
                     ))
                 }
@@ -295,7 +295,7 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
                 Bson::Int32(n) if *n > 0 => Some(*n),
                 Bson::Int64(n) if *n > 0 => Some(*n as i32),
                 _ => {
-                    return Err(Error::InvalidArgument(
+                    return Err(Error::InvalidRequest(
                         "$slice limit must be a positive integer".to_string(),
                     ))
                 }
@@ -303,7 +303,7 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
             (skip, limit)
         }
         _ => {
-            return Err(Error::InvalidArgument(
+            return Err(Error::InvalidRequest(
                 "$slice must be an integer or an array of two integers".to_string(),
             ))
         }
@@ -317,7 +317,7 @@ fn parse_elem_match_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Exp
         let expr = parse_conditions(doc)?;
         Ok(Arc::new(Expr::ProjectionElemMatch { field, expr }))
     } else {
-        Err(Error::InvalidArgument(
+        Err(Error::InvalidRequest(
             "$elemMatch projection value must be a document".to_string(),
         ))
     }
@@ -326,8 +326,6 @@ fn parse_elem_match_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Exp
 fn parse_field(s: &String) -> Result<Expr, Error> {
     if s.ends_with(".$") {
         parse_field_path(s.trim_end_matches(".$")).map(Expr::PositionalField)
-    } else if s.ends_with(".*") {
-        parse_field_path(s.trim_end_matches(".*")).map(Expr::WildcardField)
     } else {
         parse_field_path(s).map(Expr::Field)
     }
@@ -354,7 +352,7 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
             Some(1) => SortOrder::Ascending,
             Some(-1) => SortOrder::Descending,
             _ => {
-                return Err(Error::InvalidArgument(format!(
+                return Err(Error::InvalidRequest(format!(
                     "Invalid sort order for field '{}'",
                     key
                 )))
@@ -365,14 +363,8 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
 
         match field {
             Expr::PositionalField(_) => {
-                return Err(Error::InvalidArgument(format!(
+                return Err(Error::InvalidRequest(format!(
                     "Positional fields cannot used for sorting: {}",
-                    key
-                )))
-            }
-            Expr::WildcardField(_) => {
-                return Err(Error::InvalidArgument(format!(
-                    "Wildcard fields cannot used for sorting: {}",
                     key
                 )))
             }
@@ -392,32 +384,32 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
 fn validate_field_name(field_name: &str) -> Result<(), Error> {
     // Check for empty field name
     if field_name.is_empty() {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidRequest(
             "Field name cannot be empty.".to_string(),
         ));
     }
 
     // Check for reserved characters
     if field_name.contains('.') {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidRequest(
             "Field name cannot contain '.'. Nested paths should use dot-separated keys."
                 .to_string(),
         ));
     }
     if field_name.starts_with('$') {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidRequest(
             "Field name cannot start with '$'. This is reserved for operators.".to_string(),
         ));
     }
     if field_name.contains('\0') {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidRequest(
             "Field name cannot contain null characters ('\\0').".to_string(),
         ));
     }
 
     // Check for length
     if field_name.len() > 255 {
-        return Err(Error::InvalidArgument(
+        return Err(Error::InvalidRequest(
             "Field name cannot exceed 255 characters.".to_string(),
         ));
     }
@@ -429,7 +421,7 @@ fn validate_field_name(field_name: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical_expr_fn::*;
+    use crate::query::expr_fn::*;
     use bson::{doc, Bson};
 
     #[test]
@@ -471,7 +463,7 @@ mod tests {
     fn test_parse_conditions_with_type() {
         let doc = doc! { "field": { "$type": "string" } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["field"]), [has_type(2, false)]);
+        let expected = field_filters(field(["field"]), [has_type(lit(2), false)]);
         assert_eq!(expected, parsed);
     }
 
@@ -479,7 +471,7 @@ mod tests {
     fn test_parse_conditions_with_size() {
         let doc = doc! { "arrayField": { "$size": 3 } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["arrayField"]), [size(3, false)]);
+        let expected = field_filters(field(["arrayField"]), [size(lit(3), false)]);
         assert_eq!(expected, parsed);
     }
 
@@ -487,7 +479,7 @@ mod tests {
     fn test_parse_conditions_with_all() {
         let doc = doc! { "tags": { "$all": ["tag1", "tag2"] } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["tags"]), [all(vec!("tag1", "tag2"))]);
+        let expected = field_filters(field(["tags"]), [all(lit(vec!("tag1", "tag2")))]);
         assert_eq!(expected, parsed);
     }
 
@@ -495,7 +487,7 @@ mod tests {
     fn test_parse_conditions_with_elem_match() {
         let doc = doc! { "nestedArray": { "$elemMatch": { "$gt": 22, "$lt": 30 } } };
         let parsed = parse_conditions(&doc).unwrap();
-        let expected = field_filters(field(["nestedArray"]), [elem_match([gt(22), lt(30)])]);
+        let expected = field_filters(field(["nestedArray"]), [elem_match([gt(lit(22)), lt(lit(30))])]);
         assert_eq!(expected, parsed);
     }
 
@@ -512,9 +504,9 @@ mod tests {
         let parsed = parse_conditions(&filter);
         assert!(parsed.is_ok());
         let expected = and([
-            field_filters(field(["age"]), [gte(18)]),
-            field_filters(field(["status"]), [eq("active")]),
-            field_filters(field(["tags"]), [all(vec!("tag1", "tag2"))]),
+            field_filters(field(["age"]), [gte(lit(18))]),
+            field_filters(field(["status"]), [eq(lit("active"))]),
+            field_filters(field(["tags"]), [all(lit(vec!("tag1", "tag2")))]),
         ]);
 
         assert_eq!(expected, parsed.unwrap());
@@ -536,10 +528,10 @@ mod tests {
         assert!(parsed.is_ok());
         let expected = and([
             or([
-                field_filters(field(["field1"]), [gte(10)]),
-                field_filters(field(["field2"]), [eq("value")]),
+                field_filters(field(["field1"]), [gte(lit(10))]),
+                field_filters(field(["field2"]), [eq(lit("value"))]),
             ]),
-            field_filters(field(["field3"]), [lt(20)]),
+            field_filters(field(["field3"]), [lt(lit(20))]),
         ]);
         assert_eq!(expected, parsed.unwrap());
     }
@@ -562,9 +554,9 @@ mod tests {
         assert!(parsed.is_ok());
 
         let expected = not(and([
-            field_filters(field(["field1"]), [ne(5)]),
+            field_filters(field(["field1"]), [ne(lit(5))]),
             or([
-                field_filters(field(["field2"]), [within(vec![1, 2, 3])]),
+                field_filters(field(["field2"]), [within(lit(vec![1, 2, 3]))]),
                 field_filters(field(["field3"]), [exists(true)]),
             ]),
         ]));
@@ -588,10 +580,10 @@ mod tests {
 
         let expected = nor([
             or([
-                field_filters(field(["field1"]), [lte(15)]),
-                field_filters(field(["field2"]), [has_type(2, false)]),
+                field_filters(field(["field1"]), [lte(lit(15))]),
+                field_filters(field(["field2"]), [has_type(lit(2), false)]),
             ]),
-            field_filters(field(["field3"]), [size(3, false)]),
+            field_filters(field(["field3"]), [size(lit(3), false)]),
         ]);
 
         assert_eq!(expected, parsed.unwrap());
@@ -616,11 +608,11 @@ mod tests {
 
         let expected = and([
             nor([
-                field_filters(field(["field1"]), [gt(50)]),
-                field_filters(field(["field2"]), [eq("test")]),
+                field_filters(field(["field1"]), [gt(lit(50))]),
+                field_filters(field(["field2"]), [eq(lit("test"))]),
             ]),
             or([
-                field_filters(field(["field3"]), [lt(20)]),
+                field_filters(field(["field3"]), [lt(lit(20))]),
                 not(field_filters(field(["field4"]), [exists(false)])),
             ]),
         ]);
@@ -658,17 +650,6 @@ mod tests {
         assert_eq!(
             parsed.unwrap(),
             Projection::Include(vec![field(["name"]), field(["age"]),])
-        );
-    }
-
-    #[test]
-    fn test_parse_projection_include_with_wildcard() {
-        let projection = doc! {"name.*": 1, "age": 1};
-        let parsed = parse_projection(&projection);
-        assert!(parsed.is_ok());
-        assert_eq!(
-            parsed.unwrap(),
-            Projection::Include(vec![wildcard_field(["name"]), field(["age"]),])
         );
     }
 
@@ -740,18 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_sort_invalid_wildcard_field() {
-        let sort = doc! { "name.*": 1, "age": 1 };
-
-        let parsed = parse_sort(&sort);
-        assert!(parsed.is_err());
-        assert_eq!(
-            parsed.unwrap_err().to_string(),
-            "Wildcard fields cannot used for sorting: name.*"
-        );
-    }
-
-    #[test]
     fn test_parse_sort_invalid_field() {
         let sort = doc! { "name.$": 1, "age": 1 };
 
@@ -811,7 +780,7 @@ mod tests {
         let parsed = parse_projection(&projection).unwrap();
         let expected = Projection::Include(vec![projection_elem_match(
             field(["students"]),
-            field_filters(field(["school"]), [eq("Hogwarts")]),
+            field_filters(field(["school"]), [eq(lit("Hogwarts"))]),
         )]);
         assert_eq!(parsed, expected);
     }
@@ -824,8 +793,8 @@ mod tests {
         let expected = Projection::Include(vec![projection_elem_match(
             field(["grades"]),
             and([
-                field_filters(field(["grade"]), [gte(85)]),
-                field_filters(field(["mean"]), [gt(90)]),
+                field_filters(field(["grade"]), [gte(lit(85))]),
+                field_filters(field(["mean"]), [gt(lit(90))]),
             ]),
         )]);
         assert_eq!(parsed, expected);

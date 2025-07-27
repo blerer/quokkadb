@@ -159,31 +159,31 @@ impl SimplifyNotExpressions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::logical_expr_fn::*;
+    use crate::query::expr_fn::*;
     use crate::query::logical_plan::LogicalPlanBuilder;
 
     #[test]
     fn test_not_normalization() {
         // Test Double Negation: NOT(NOT(X)) → X
-        let original = not(not(eq(5)));
-        let transformed = eq(5);
+        let original = not(not(eq(lit(5))));
+        let transformed = eq(lit(5));
 
         check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
 
         // Test Negation of Comparison Operators
-        check_expr_transformation(SimplifyNotExpressions {}, not(gt(5)), lte(5));
-        check_expr_transformation(SimplifyNotExpressions {}, not(lt(5)), gte(5));
-        check_expr_transformation(SimplifyNotExpressions {}, not(eq(5)), ne(5));
-        check_expr_transformation(SimplifyNotExpressions {}, not(ne(5)), eq(5));
+        check_expr_transformation(SimplifyNotExpressions {}, not(gt(lit(5))), lte(lit(5)));
+        check_expr_transformation(SimplifyNotExpressions {}, not(lt(lit(5))), gte(lit(5)));
+        check_expr_transformation(SimplifyNotExpressions {}, not(eq(lit(5))), ne(lit(5)));
+        check_expr_transformation(SimplifyNotExpressions {}, not(ne(lit(5))), eq(lit(5)));
 
         // Test De Morgan's Laws
-        let original = not(and([eq(1), gt(2)]));
-        let transformed = or([ne(1), lte(2)]);
+        let original = not(and([eq(lit(1)), gt(lit(2))]));
+        let transformed = or([ne(lit(1)), lte(lit(2))]);
 
         check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
 
-        let original = not(or([eq(1), lt(2)]));
-        let transformed = and([ne(1), gte(2)]);
+        let original = not(or([eq(lit(1)), lt(lit(2))]));
+        let transformed = and([ne(lit(1)), gte(lit(2))]);
 
         check_expr_transformation(SimplifyNotExpressions {}, original, transformed);
     }

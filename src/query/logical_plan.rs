@@ -258,7 +258,7 @@ impl LogicalPlanBuilder {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::logical_expr_fn::field;
+    use crate::query::expr_fn::field;
     use crate::query::{ComparisonOperator, SortOrder};
 
     #[test]

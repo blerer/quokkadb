@@ -1,7 +1,7 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::query::physical_plan::PhysicalPlan;
-use crate::query::{get_path_value, BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters};
-use crate::query::execution::sort;
+use crate::query::{BsonValue, Expr, Parameters};
+use crate::query::execution::{filters, sorts};
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
@@ -10,7 +10,6 @@ use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
 use bson::oid::ObjectId;
 use bson::{doc, Bson, Document, RawDocument};
-use std::cmp::Ordering;
 use std::io::Cursor;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -71,10 +70,7 @@ impl QueryExecutor {
             }
             _ => {
                 // Other plans, should be cached
-                Err(Error::InvalidArgument(format!(
-                    "Direct execution not supported for plan: {:?}",
-                    plan
-                )))
+                panic!("Direct execution not supported for plan: {:?}", plan);
             }
         }
     }
@@ -129,7 +125,7 @@ impl QueryExecutor {
                                         Ok(doc) => Some(Ok(doc))
                                     }
                                 },
-                                _ => Some(Err(Error::InvalidState(format!("Unexpected operation type: {:?}", op)))),
+                                _ => panic!("Unexpected operation type: {:?}", op),
                             }
                         }
                         Err(e) => Some(Err(e.into())),
@@ -153,7 +149,7 @@ impl QueryExecutor {
                                 Box::new(std::iter::once(Document::from_reader(Cursor::new(v))
                                     .map_err(|e| e.into())))
                             }
-                            _ => return Err(Error::InvalidState(format!("Unexpected operation type: {:?}", op))),
+                            _ => panic!("Unexpected operation type: {:?}", op),
                         }
                     }
                     None => Box::new(std::iter::empty()),
@@ -170,17 +166,11 @@ impl QueryExecutor {
                 todo!()
             }
             PhysicalPlan::Filter { input, predicate } => {
+                let filter = filters::to_filter(predicate.clone(), &parameters);
                 let input_iter = self.execute_cached(input.clone(), parameters)?;
-                let predicate = predicate.clone();
-                let filtered_iter = input_iter.filter_map(move |res| match res {
-                    Ok(doc) => match eval_predicate(&doc, &predicate) {
-                        Ok(true) => Some(Ok(doc)),
-                        Ok(false) => None,
-                        Err(e) => Some(Err(e)),
-                    },
-                    Err(e) => Some(Err(e)),
-                });
-                Ok(Box::new(filtered_iter))
+                Ok(Box::new(input_iter.filter(move |res| {
+                    if res.is_err() { true } else { filter(res.as_ref().unwrap()) }
+                })))
             }
             PhysicalPlan::Projection { input, projection } => {
                 todo!()
@@ -190,7 +180,7 @@ impl QueryExecutor {
                 sort_fields,
             } => {
                 let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sort::in_memory_sort(input_iter, &sort_fields)
+                sorts::in_memory_sort(input_iter, &sort_fields)
             }
             PhysicalPlan::ExternalMergeSort {
                 input,
@@ -198,7 +188,7 @@ impl QueryExecutor {
                 max_in_memory_rows,
             } => {
                 let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sort::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
+                sorts::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
             }
             PhysicalPlan::TopKHeapSort {
                 input,
@@ -206,7 +196,7 @@ impl QueryExecutor {
                 k,
             } => {
                 let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sort::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
+                sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
             PhysicalPlan::Limit {
                 input,
@@ -223,10 +213,7 @@ impl QueryExecutor {
                 Ok(iter)
             }
             _ => {
-                Err(Error::InvalidArgument(format!(
-                    "Non-parametrized physical plan: {:?}",
-                    plan
-                )))
+                panic!("Non-parametrized physical plan: {:?}", plan);
             }
         }
     }
@@ -240,8 +227,8 @@ impl QueryExecutor {
 
     fn bind_key_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<Vec<u8>>> {
         let start = match start {
-            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)?.try_into_key()?),
-            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)?.try_into_key()?),
+            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters).try_into_key()?),
+            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters).try_into_key()?),
             Bound::Unbounded => Bound::Unbounded,
         };
         Ok(start)
@@ -249,8 +236,8 @@ impl QueryExecutor {
 
     fn bind_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<BsonValue>> {
         let start = match start {
-            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)?),
-            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)?),
+            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)),
+            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)),
             Bound::Unbounded => Bound::Unbounded,
         };
         Ok(start)
@@ -258,110 +245,33 @@ impl QueryExecutor {
 
     fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result<Vec<u8>> {
         if let Expr::Placeholder(idx) = expr {
-            Ok(parameters.get(*idx)?.try_into_key()?)
+            Ok(parameters.get(*idx).try_into_key()?)
         } else {
-            Err(Error::InvalidState(format!("Expecting placeholder but was: {:?}", expr)))
+            panic!("Expecting placeholder but was: {:?}", expr);
         }
     }
 
-    fn bind_parameter(expr: &Expr, parameters: &Parameters) -> Result<BsonValue> {
+    fn bind_parameter(expr: &Expr, parameters: &Parameters) -> BsonValue {
         if let Expr::Placeholder(idx) = expr {
-            Ok(parameters.get(*idx)?.clone())
+            parameters.get(*idx).clone()
         } else {
-            Err(Error::InvalidState(format!("Expecting placeholder but was: {:?}", expr)))
+            panic!("Expecting placeholder but was: {:?}", expr)
         }
-    }
-}
-
-/// Evaluates a predicate expression against a document.
-fn eval_predicate(doc: &Document, predicate: &Expr) -> Result<bool> {
-    match predicate {
-        Expr::And(exprs) => {
-            for expr in exprs {
-                if !eval_predicate(doc, expr)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        Expr::Or(exprs) => {
-            for expr in exprs {
-                if eval_predicate(doc, expr)? {
-                    return Ok(true);
-                }
-            }
-            Ok(exprs.is_empty())
-        }
-        Expr::Not(expr) => Ok(!eval_predicate(doc, expr)?),
-        Expr::FieldFilters { field, filters } => {
-            let field_path = if let Expr::Field(path) = field.as_ref() {
-                path
-            } else {
-                return Err(Error::InvalidArgument(format!("Unsupported field expression in filter: {:?}", field)));
-            };
-
-            let doc_val = get_path_value(doc, field_path);
-
-            for filter in filters {
-                if !eval_filter(doc_val, filter)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        _ => Err(Error::InvalidArgument(format!(
-            "Unsupported predicate expression: {:?}",
-            predicate
-        ))),
-    }
-}
-
-/// Evaluates a single filter condition against a value from a document.
-fn eval_filter(doc_val: Option<BsonValueRef>, filter: &Expr) -> Result<bool> {
-    match filter {
-        Expr::Comparison { operator, value } => {
-            let literal = if let Expr::Literal(val) = value.as_ref() {
-                val
-            } else {
-                return Err(Error::InvalidArgument("Comparison value must be a literal".to_string()));
-            };
-            let doc_val = doc_val.unwrap_or(BsonValueRef(&Bson::Null));
-
-            let literal = literal.as_ref();
-            let ordering = doc_val.cmp(&literal);
-
-            Ok(match operator {
-                ComparisonOperator::Eq => doc_val == literal,
-                ComparisonOperator::Ne => doc_val != literal,
-                ComparisonOperator::Gt => ordering == Ordering::Greater,
-                ComparisonOperator::Gte => ordering != Ordering::Less,
-                ComparisonOperator::Lt => ordering == Ordering::Less,
-                ComparisonOperator::Lte => ordering != Ordering::Greater,
-                _ => return Err(Error::InvalidArgument(format!(
-                    "Unsupported comparison operator: {:?}",
-                    operator
-                ))),
-            })
-        }
-        Expr::Exists(exists) => {
-            let value_exists = doc_val.is_some() && doc_val != Some(BsonValueRef(&Bson::Null));
-            Ok(value_exists == *exists)
-        }
-        _ => Err(Error::InvalidArgument(format!("Unsupported filter expression: {:?}", filter))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Result;
-    use crate::query::{make_sort_field, SortOrder};
-    use crate::query::{BsonValue, Parameters};
-    use crate::storage::test_utils::storage_engine;
+use crate::error::Result;
+use crate::query::{make_sort_field, SortOrder};
+use crate::query::{expr_fn, BsonValue, ComparisonOperator, Expr, Parameters};
+use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::ops::Bound;
     use std::sync::Arc;
+    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, gte, has_type, lit, lt, lte, ne, nor, not, or, size, within};
 
     #[test]
     fn test_execution_roundtrip() -> Result<()> {
@@ -831,6 +741,241 @@ mod tests {
             k: 10,
         });
         assert_sorted_results(&executor, topk_plan_10, &expected_ids)?;
+
+        Ok(())
+    }
+
+    // Helper to run a filter plan and check the _id's of the results.
+    fn run_filter_test(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        filter_expr: Arc<Expr>,
+        parameters: Parameters,
+        expected_ids: &[i32],
+    ) -> Result<()> {
+        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+            direction: Direction::Forward,
+            projection: None,
+        });
+
+        let filter_plan = Arc::new(PhysicalPlan::Filter {
+            input: scan_plan,
+            predicate: filter_expr,
+        });
+
+        let results = executor.execute_cached(filter_plan, parameters)?;
+        let mut found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
+        found_docs.sort_by_key(|d| d.get_i32("_id").unwrap());
+
+        let found_ids: Vec<i32> = found_docs
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
+        assert_eq!(
+            expected_ids, found_ids,
+            "Filter test failed. Expected: {:?}, Found: {:?}",
+            expected_ids, found_ids
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_plan_execution() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_filters")?;
+
+        // 2. Insert test data
+        let docs = vec![
+            doc! { "_id": 1, "name": "c", "value": 10.0, "tags": ["a", "b"], "items": [ doc!{ "k": "x", "v": 1 }, doc!{ "k": "y", "v": 2 } ] },
+            doc! { "_id": 2, "name": "a", "value": 30.0, "tags": ["b", "c"], "nested": { "val": 5 } },
+            doc! { "_id": 3, "name": "b", "value": 20.0, "tags": ["c", "d"] },
+            doc! { "_id": 4, "name": "a", "value": 10.0, "tags": ["d", "a"] },
+            doc! { "_id": 5, "name": "c", "value": 5.0 }, // no tags
+            doc! { "_id": 6, "name": "d", "value": Bson::Null, "tags": [] },
+        ];
+        for doc in &docs {
+            let insert_plan = PhysicalPlan::InsertOne {
+                collection: collection_id,
+                document: bson::to_vec(doc)?,
+            };
+            let mut result = executor.execute_direct(insert_plan)?;
+            result.next().unwrap()?; // consume result
+        }
+
+        // $eq
+        let mut params = Parameters::new();
+        let p = params.collect_parameter("a".into());
+        let filter = field_filters(field(["name"]), [eq(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[2, 4])?;
+
+        // $gt
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(15.0.into());
+        let filter = field_filters(field(["value"]), [gt(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[2, 3])?;
+
+        // $in
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(vec!["a", "b"].into());
+        let filter = field_filters(field(["name"]), [within(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[2, 3, 4])?;
+
+        // $exists: true
+        let filter = field_filters(field(["nested"]), [exists(true)]);
+        run_filter_test(&executor, collection_id, filter, Parameters::new(), &[2])?;
+
+        // $exists: false
+        let filter = field_filters(field(["nested"]), [exists(false)]);
+        run_filter_test(
+            &executor,
+            collection_id,
+            filter,
+            Parameters::new(),
+            &[1, 3, 4, 5, 6],
+        )?;
+
+        // $type: "double"
+        let mut params = Parameters::new();
+        let p = params.collect_parameter("double".into());
+        let filter = field_filters(field(["value"]), [has_type(p, false)]);
+        run_filter_test(
+            &executor,
+            collection_id,
+            filter,
+            params,
+            &[1, 2, 3, 4, 5],
+        )?;
+
+        // $size: 2
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(2.into());
+        let filter = field_filters(field(["tags"]), [size(p, false)]);
+        run_filter_test(
+            &executor,
+            collection_id,
+            filter,
+            params,
+            &[1, 2, 3, 4],
+        )?;
+
+        // $all
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(vec!["a", "d"].into());
+        let filter = field_filters(field(["tags"]), [all(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[4])?;
+
+        // $elemMatch on documents
+        let mut params = Parameters::new();
+        let p_k = params.collect_parameter("y".into());
+        let p_v = params.collect_parameter(2.into());
+        let filter = field_filters(field(["items"]),
+                                   [elem_match(
+                                       vec![
+                                           field_filters(field(["k"]), [eq(p_k)]),
+                                           field_filters(field(["v"]), [eq(p_v)])
+                                       ]
+                                   )]);
+        run_filter_test(&executor, collection_id, filter, params, &[1])?;
+
+        // $and
+        let mut params = Parameters::new();
+        let p_name = params.collect_parameter("a".into());
+        let p_val = params.collect_parameter(10.0.into());
+        let f1 = field_filters(field(["name"]), [eq(p_name)]);
+        let f2 = field_filters(field(["value"]), [eq(p_val)]);
+        let filter = and(vec![f1, f2]);
+        run_filter_test(&executor, collection_id, filter, params, &[4])?;
+
+        // $or
+        let mut params = Parameters::new();
+        let p_name = params.collect_parameter("b".into());
+        let p_val = params.collect_parameter(5.0.into());
+        let f1 = field_filters(field(["name"]), [eq(p_name)]);
+        let f2 = field_filters(field(["value"]), [eq(p_val)]);
+        let filter = or(vec![f1, f2]);
+        run_filter_test(&executor, collection_id, filter, params, &[3, 5])?;
+
+        // $not (top-level)
+        let mut params = Parameters::new();
+        let p = params.collect_parameter("a".into());
+        let inner_filter = field_filters(field(["name"]), [eq(p)]);
+        let filter = not(inner_filter);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 3, 5, 6])?;
+
+        // $nor
+        let mut params = Parameters::new();
+        let p_name1 = params.collect_parameter("a".into());
+        let p_name2 = params.collect_parameter("b".into());
+        let f1 = field_filters(field(["name"]), [eq(p_name1)]);
+        let f2 = field_filters(field(["name"]), [eq(p_name2)]);
+        let filter = nor(vec![f1, f2]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 5, 6])?;
+
+        // $lt
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(15.0.into());
+        let filter = field_filters(field(["value"]), [lt(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5])?;
+
+        // $lte
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(10.0.into());
+        let filter = field_filters(field(["value"]), [lte(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5])?;
+
+        // $gte
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(20.0.into());
+        let filter = field_filters(field(["value"]), [gte(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[2, 3])?;
+
+        // $ne
+        let mut params = Parameters::new();
+        let p = params.collect_parameter("a".into());
+        let filter = field_filters(field(["name"]), [ne(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 3, 5, 6])?;
+
+        // $nin
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(vec!["a", "b"].into());
+        let filter = field_filters(field(["name"]), [not(within(p))]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 5, 6])?;
+
+        // Nested logical operators: $or inside $and
+        let mut params = Parameters::new();
+        let p1 = params.collect_parameter("a".into());
+        let p2 = params.collect_parameter("b".into());
+        let p3 = params.collect_parameter(10.0.into());
+        let f1 = or(vec![
+            field_filters(field(["name"]), [eq(p1)]),
+            field_filters(field(["name"]), [eq(p2)]),
+        ]);
+        let f2 = field_filters(field(["value"]), [eq(p3)]);
+        let filter = and(vec![f1, f2]);
+        run_filter_test(&executor, collection_id, filter, params, &[4])?;
+
+        // Complex/nested field path
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(5.into());
+        let filter = field_filters(field(["nested", "val"]), [eq(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[2])?;
+
+        // Null check: field is null
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(BsonValue(Bson::Null));
+        let filter = field_filters(field(["value"]), [eq(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[6])?;
+
+        // Null check: field does not exist (should not match null)
+        let mut params = Parameters::new();
+        let p = params.collect_parameter(BsonValue(Bson::Null));
+        let filter = field_filters(field(["tags"]), [eq(p)]);
+        run_filter_test(&executor, collection_id, filter, params, &[5])?;
 
         Ok(())
     }

@@ -18,14 +18,12 @@ pub(crate) mod physical_plan;
 mod tree_node;
 
 #[cfg(test)]
-pub(crate) mod logical_expr_fn;
+pub(crate) mod expr_fn;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Expr {
     /// Field reference
     Field(Vec<PathComponent>),
-    /// Wildcard field reference (e.g., "field.*")
-    WildcardField(Vec<PathComponent>),
     ///  Positional projection in queries (e.g. "array.$")
     PositionalField(Vec<PathComponent>),
     /// Literal values
@@ -268,27 +266,23 @@ impl Serializable for Expr {
             }
             14 => {
                 let path = Vec::<PathComponent>::read_from(reader)?;
-                Ok(Expr::WildcardField(path))
-            }
-            15 => {
-                let path = Vec::<PathComponent>::read_from(reader)?;
                 Ok(Expr::PositionalField(path))
             }
-            16 => {
+            15 => {
                 let idx = reader.read_varint_u32()?;
                 Ok(Expr::Placeholder(idx))
             }
-            17 => {
+            16 => {
                 let predicates = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::ElemMatch(predicates))
             }
-            18 => {
+            17 => {
                 let field = Arc::new(Self::read_from(reader)?);
                 let skip = i32::read_from(reader)?;
                 let limit = Option::<i32>::read_from(reader)?;
                 Ok(Expr::ProjectionSlice { field, skip, limit })
             }
-            20 => {
+            18 => {
                 let field = Arc::new(Self::read_from(reader)?);
                 let expr = Arc::new(Self::read_from(reader)?);
                 Ok(Expr::ProjectionElemMatch { field, expr })
@@ -362,30 +356,26 @@ impl Serializable for Expr {
                 writer.write_u8(13);
                 path.write_to(writer);
             }
-            Expr::WildcardField(path) => {
+            Expr::PositionalField(path) => {
                 writer.write_u8(14);
                 path.write_to(writer);
             }
-            Expr::PositionalField(path) => {
-                writer.write_u8(15);
-                path.write_to(writer);
-            }
             Expr::Placeholder(idx) => {
-                writer.write_u8(16);
+                writer.write_u8(15);
                 writer.write_varint_u32(*idx); // Write the placeholder index for extra safety
             }
             Expr::ElemMatch(predicates) => {
-                writer.write_u8(17);
+                writer.write_u8(16);
                 predicates.write_to(writer);
             }
             Expr::ProjectionSlice { field, skip, limit } => {
-                writer.write_u8(18);
+                writer.write_u8(17);
                 field.write_to(writer);
                 skip.write_to(writer);
                 limit.write_to(writer);
             }
             Expr::ProjectionElemMatch { field, expr } => {
-                writer.write_u8(20);
+                writer.write_u8(18);
                 field.write_to(writer);
                 expr.write_to(writer);
             }
@@ -684,6 +674,12 @@ impl From<i64> for BsonValue {
     }
 }
 
+impl From<f64> for BsonValue {
+    fn from(value: f64) -> Self {
+        BsonValue(Bson::Double(value))
+    }
+}
+
 impl From<&str> for BsonValue {
     fn from(value: &str) -> Self {
         BsonValue(Bson::String(value.to_string()))
@@ -771,13 +767,12 @@ impl Parameters {
         Arc::new(Expr::Placeholder(idx))
     }
 
-    pub fn get(&self, index: u32) -> Result<&BsonValue> {
-        self.parameters.get(index as usize).ok_or(
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("Parameter index {} out of bounds", index),
-            ),
-        )
+    pub fn get(&self, index: u32) -> &BsonValue {
+        let param = self.parameters.get(index as usize);
+        if param.is_none() {
+            panic!("Parameter index {} out of bounds", index);
+        }
+        param.unwrap()
     }
 
     pub fn len(&self) -> usize {
@@ -1053,7 +1048,6 @@ mod tests {
 
         // Field expressions
         check_serialization_round_trip(Expr::Field(vec!["a".into(), "b".into()]));
-        check_serialization_round_trip(Expr::WildcardField(vec!["a".into(), "b".into()]));
         check_serialization_round_trip(Expr::PositionalField(vec!["a".into(), 0.into()]));
 
         // Comparison

@@ -9,16 +9,6 @@ where
     Arc::new(Expr::Field(name.into_iter().map(|c| c.into()).collect()))
 }
 
-pub fn wildcard_field<T, U>(name: T) -> Arc<Expr>
-where
-    T: IntoIterator<Item = U>,
-    U: Into<PathComponent>,
-{
-    Arc::new(Expr::WildcardField(
-        name.into_iter().map(|c| c.into()).collect(),
-    ))
-}
-
 pub fn lit(value: impl Into<BsonValue>) -> Arc<Expr> {
     Arc::new(Expr::Literal(value.into()))
 }
@@ -27,12 +17,12 @@ pub fn exists(exists: bool) -> Arc<Expr> {
     Arc::new(Expr::Exists(exists))
 }
 
-pub fn has_type(bson_type: impl Into<BsonValue>, negated: bool) -> Arc<Expr> {
-    Arc::new(Expr::Type { bson_type: lit(bson_type), negated })
+pub fn has_type(bson_type: Arc<Expr>, negated: bool) -> Arc<Expr> {
+    Arc::new(Expr::Type { bson_type, negated })
 }
 
-pub fn size(size: impl Into<BsonValue>, negated: bool) -> Arc<Expr> {
-    Arc::new(Expr::Size { size: lit(size), negated })
+pub fn size(size: Arc<Expr>, negated: bool) -> Arc<Expr> {
+    Arc::new(Expr::Size { size, negated })
 }
 
 pub fn field_filters<T>(field: Arc<Expr>, predicates: T) -> Arc<Expr>
@@ -45,57 +35,57 @@ where
     })
 }
 
-pub fn gt(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn gt(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Gt,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn gte(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn gte(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Gte,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn lt(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn lt(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Lt,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn lte(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn lte(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Lte,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn within(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn within(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::In,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn eq(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn eq(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Eq,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn ne(bson_value: impl Into<BsonValue>) -> Arc<Expr> {
+pub fn ne(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::Ne,
-        value: lit(bson_value),
+        value: bson_value,
     })
 }
 
-pub fn all(array: impl Into<BsonValue>) -> Arc<Expr> {
-    Arc::new(Expr::All(lit(array)))
+pub fn all(array: Arc<Expr>) -> Arc<Expr> {
+    Arc::new(Expr::All(array))
 }
 
 pub fn elem_match<T>(predicates: T) -> Arc<Expr>

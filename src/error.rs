@@ -5,8 +5,7 @@ use std::io;
 pub enum Error {
     Io(io::Error),
     DeserializationError(String),
-    InvalidArgument(String),
-    InvalidState(String),
+    InvalidRequest(String),
     BsonDeError(bson::de::Error),
     BsonSerError(bson::ser::Error),
     BsonRawError(bson::raw::Error),
@@ -16,7 +15,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{}", e),
-            Error::DeserializationError(reason) | Error::InvalidArgument(reason) | Error::InvalidState(reason) => write!(f, "{}", reason),
+            Error::DeserializationError(reason) | Error::InvalidRequest(reason) => write!(f, "{}", reason),
             Error::BsonSerError(e) => write!(f, "{}", e),
             Error::BsonDeError(e) => write!(f, "{}", e),
             Error::BsonRawError(e) => write!(f, "{}", e),
