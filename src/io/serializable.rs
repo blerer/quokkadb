@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::hash::Hash;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
@@ -91,6 +93,28 @@ where
         writer.write_varint_u64(self.len() as u64);
         for item in self {
             item.write_to(writer);
+        }
+    }
+}
+
+impl<K, V> Serializable for BTreeMap<K, V>
+where
+    K: Eq + Hash + Ord + Serializable, V: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let length = reader.read_varint_u64()? as usize;
+        let mut map = BTreeMap::new();
+        for _ in 0..length {
+            map.insert(K::read_from(reader)?, V::read_from(reader)?);
+        }
+        Ok(map)
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u64(self.len() as u64);
+        for (key, value) in self {
+            key.write_to(writer);
+            value.write_to(writer);
         }
     }
 }

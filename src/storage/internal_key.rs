@@ -66,12 +66,6 @@ pub fn extract_record_key(internal_key: &[u8]) -> &[u8] {
     &internal_key[..internal_key.len() - 8]
 }
 
-/// Extracts the user key from an internal key.
-pub fn extract_user_key(internal_key: &[u8]) -> &[u8] {
-    assert!(internal_key.len() >= 16, "Invalid internal key length");
-    &internal_key[8..internal_key.len() - 8]
-}
-
 /// Extracts the original sequence number from an internal key.
 pub fn extract_sequence_number(internal_key: &[u8]) -> u64 {
     assert!(internal_key.len() >= 8, "Invalid internal key length");
@@ -236,7 +230,6 @@ mod tests {
 
         let encoded = encode_internal_key(&record_key, seq, op_type);
 
-        assert_eq!(extract_user_key(&encoded), user_key);
         assert_eq!(extract_sequence_number(&encoded), seq);
         assert_eq!(extract_operation_type(&encoded), op_type);
         assert_eq!(extract_record_key(&encoded), record_key);

@@ -1,4 +1,4 @@
-use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent};
+use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, ProjectionExpr};
 use std::sync::Arc;
 
 pub fn field<T, U>(name: T) -> Arc<Expr>
@@ -11,6 +11,10 @@ where
 
 pub fn lit(value: impl Into<BsonValue>) -> Arc<Expr> {
     Arc::new(Expr::Literal(value.into()))
+}
+
+pub fn placeholder(idx: u32) -> Arc<Expr> {
+    Arc::new(Expr::Placeholder(idx))
 }
 
 pub fn exists(exists: bool) -> Arc<Expr> {
@@ -120,10 +124,40 @@ pub fn not(predicate: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Not(predicate))
 }
 
-pub fn projection_slice(field: Arc<Expr>, skip: i32, limit: Option<i32>) -> Arc<Expr> {
-    Arc::new(Expr::ProjectionSlice { field, skip, limit })
+pub fn proj_field() -> Arc<ProjectionExpr> {
+    Arc::new(ProjectionExpr::Field)
 }
 
-pub fn projection_elem_match(field: Arc<Expr>, expr: Arc<Expr>) -> Arc<Expr> {
-    Arc::new(Expr::ProjectionElemMatch { field, expr })
+pub fn proj_positional_field() -> Arc<ProjectionExpr> {
+    Arc::new(ProjectionExpr::PositionalField)
 }
+
+pub fn proj_slice(skip: Option<i32>, limit: i32) -> Arc<ProjectionExpr> {
+    Arc::new(ProjectionExpr::Slice { skip, limit })
+}
+
+pub fn proj_elem_match(filter: Arc<Expr>) -> Arc<ProjectionExpr> {
+    Arc::new(ProjectionExpr::ElemMatch { filter })
+}
+
+pub fn proj_fields<T, U>(children: T) -> Arc<ProjectionExpr>
+where
+    T: IntoIterator<Item = (U, Arc<ProjectionExpr>)>,
+    U: Into<PathComponent>,
+{
+    Arc::new(ProjectionExpr::Fields {
+        children: children.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+    })
+}
+
+pub fn proj_array_elements<T, U>(children: T) -> Arc<ProjectionExpr>
+where
+    T: IntoIterator<Item = (U, Arc<ProjectionExpr>)>,
+    U: Into<PathComponent>,
+{
+    Arc::new(ProjectionExpr::ArrayElements {
+        children: children.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+    })
+}
+
+

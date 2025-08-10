@@ -1,4 +1,5 @@
-use crate::query::{Projection, SortField, SortOrder};
+use std::collections::BTreeMap;
+use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
@@ -206,27 +207,63 @@ fn parse_bson_type(value: &Bson) -> Option<Bson> {
     }
 }
 
+/// Parses a projection document into a `Projection`.
+///
+/// - Fields with value `1` are included (inclusion projection).
+/// - Fields with value `0` are excluded (exclusion projection).
+/// - Fields with a document value are treated as special projection operators
+///   (e.g., `$slice`, `$elemMatch`), which are only valid in inclusion projections.
+/// - Mixing inclusion and exclusion in the same projection is not allowed.
+/// - Returns an error for invalid projection values, unknown operators,
+///   or if the projection document is empty.
 pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
-    let mut include_fields = Vec::new();
-    let mut exclude_fields = Vec::new();
+    let mut include_fields = ProjectionExpr::Fields { children: BTreeMap::new() };
+    let mut exclude_fields = ProjectionExpr::Fields { children: BTreeMap::new() };
+    let mut has_id = false;
+    let mut exclude_id = false;
 
     for (key, value) in doc.iter() {
-        match value {
-            Bson::Int32(1) | Bson::Int64(1) => {
-                include_fields.push(Arc::new(parse_field(key)?));
+        if key == "_id" {
+            has_id = true;
+            if matches!(value, Bson::Int32(0) | Bson::Int64(0)) {
+                exclude_id = true;
             }
-            Bson::Int32(0) | Bson::Int64(0) => {
-                let field = parse_field(key)?;
-                if matches!(field, Expr::PositionalField(_)) {
+        }
+        let field = parse_field(key)?;
+        match value {
+            Bson::Int32(1) | Bson::Int64(1) => match field {
+                Expr::PositionalField(path) => {
+                    include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::PositionalField))?;
+                }
+                Expr::Field(path) => {
+                    include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;
+                }
+                _ => panic!("Invalid projection value for field '{}': expected field or positional field", key),
+            },
+            Bson::Int32(0) | Bson::Int64(0) => match field {
+                Expr::Field(path) => {
+                    exclude_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;
+                }
+                Expr::PositionalField(_) => {
                     return Err(Error::InvalidRequest(format!(
-                        "Positional fields cannot be excluded: {}",
+                        "Invalid projection value for field '{}': expected field",
                         key
                     )));
                 }
-                exclude_fields.push(Arc::new(field));
-            }
+                _ => panic!("Invalid projection value for field '{}': expected field", key),
+            },
             Bson::Document(projection_doc) => {
-                let field = Arc::new(parse_field(key)?);
+                let path = match field {
+                    Expr::Field(ref path) => path,
+                    Expr::PositionalField(_) => {
+                        return Err(Error::InvalidRequest(format!(
+                            "Invalid projection value for field '{}': expected field",
+                            key
+                        )));
+                    }
+                    _ => panic!("Invalid projection value for field '{}': expected field", key),
+                };
+
                 if projection_doc.len() != 1 {
                     return Err(Error::InvalidRequest(format!(
                         "Projection document for field '{}' must have exactly one operator.",
@@ -236,8 +273,8 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
 
                 let (op, op_value) = projection_doc.iter().next().unwrap();
                 let projection_expr = match op.as_str() {
-                    "$slice" => parse_slice_projection(field, op_value)?,
-                    "$elemMatch" => parse_elem_match_projection(field, op_value)?,
+                    "$slice" => parse_slice_projection(op_value)?,
+                    "$elemMatch" => parse_elem_match_projection(op_value)?,
                     _ => {
                         return Err(Error::InvalidRequest(format!(
                             "Unknown projection operator: {}",
@@ -245,7 +282,8 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                         )))
                     }
                 };
-                include_fields.push(projection_expr);
+
+                include_fields.add_expr(path, 0, Arc::new(projection_expr))?;
             }
             _ => {
                 return Err(Error::InvalidRequest(format!(
@@ -256,24 +294,40 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
         }
     }
 
+    let id_path = vec![PathComponent::FieldName("_id".to_string())];
+
     match (!include_fields.is_empty(), !exclude_fields.is_empty()) {
-        (true, false) => Ok(Projection::Include(include_fields)),
-        (false, true) => Ok(Projection::Exclude(exclude_fields)),
-        (true, true) => Err(Error::InvalidRequest(
-            "Cannot mix inclusion and exclusion projections".to_string(),
-        )),
+        (true, false) => {
+            // If _id is not specified, add it to the include_fields
+            if !has_id {
+                include_fields.add_expr(&id_path, 0, Arc::new(ProjectionExpr::Field))?;
+            }
+            Ok(Projection::Include(Arc::new(include_fields)))
+        }
+        (false, true) => Ok(Projection::Exclude(Arc::new(exclude_fields))),
+        (true, true) => {
+            if exclude_id && exclude_fields.children().len() == 1 {
+                // Only _id is excluded, remove it from inclusion
+                include_fields.remove_expr(&vec!["_id".into()], 0)?;
+            } else {
+                return Err(Error::InvalidRequest(
+                    "Projection cannot have a mix of inclusion and exclusion.".to_string(),
+                ));
+            }
+            Ok(Projection::Include(Arc::new(include_fields)))
+        },
         (false, false) => Err(Error::InvalidRequest(
             "Projection document cannot be empty".to_string(),
         )),
     }
 }
 
-fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, Error> {
+fn parse_slice_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
     let (skip, limit) = match value {
-        Bson::Int32(n) => (*n, None),
+        Bson::Int32(n) => (None, *n),
         Bson::Int64(n) => {
-            let skip = (*n).try_into().map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
-            (skip, None)
+            let limit = (*n).try_into().map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
+            (None, limit)
         },
         Bson::Array(arr) => {
             if arr.len() != 2 {
@@ -281,7 +335,7 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
                     "$slice array must have exactly two elements".to_string(),
                 ));
             }
-            let skip = match &arr[0] {
+            let skip = Some(match &arr[0] {
                 Bson::Int32(n) => *n,
                 Bson::Int64(n) => (*n).try_into()
                                             .map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?,
@@ -290,10 +344,10 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
                         "$slice first element must be an integer".to_string(),
                     ))
                 }
-            };
+            });
             let limit = match &arr[1] {
-                Bson::Int32(n) if *n > 0 => Some(*n),
-                Bson::Int64(n) if *n > 0 => Some(*n as i32),
+                Bson::Int32(n) if *n > 0 => *n,
+                Bson::Int64(n) if *n > 0 => *n as i32,
                 _ => {
                     return Err(Error::InvalidRequest(
                         "$slice limit must be a positive integer".to_string(),
@@ -309,13 +363,13 @@ fn parse_slice_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, E
         }
     };
 
-    Ok(Arc::new(Expr::ProjectionSlice { field, skip, limit }))
+    Ok(ProjectionExpr::Slice { skip, limit })
 }
 
-fn parse_elem_match_projection(field: Arc<Expr>, value: &Bson) -> Result<Arc<Expr>, Error> {
+fn parse_elem_match_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
     if let Bson::Document(doc) = value {
-        let expr = parse_conditions(doc)?;
-        Ok(Arc::new(Expr::ProjectionElemMatch { field, expr }))
+        let filter = parse_conditions(doc)?;
+        Ok(ProjectionExpr::ElemMatch { filter })
     } else {
         Err(Error::InvalidRequest(
             "$elemMatch projection value must be a document".to_string(),
@@ -643,51 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_projection_include() {
-        let projection = doc! {"name": 1, "age": 1};
-        let parsed = parse_projection(&projection);
-        assert!(parsed.is_ok());
-        assert_eq!(
-            parsed.unwrap(),
-            Projection::Include(vec![field(["name"]), field(["age"]),])
-        );
-    }
-
-    #[test]
-    fn test_parse_projection_exclude() {
-        let projection = doc! {"password": 0, "secret": 0};
-        let parsed = parse_projection(&projection);
-        assert!(parsed.is_ok());
-        assert_eq!(
-            parsed.unwrap(),
-            Projection::Exclude(vec![field(["password"]), field(["secret"]),])
-        );
-    }
-
-    #[test]
-    fn test_parse_projection_mixed_include_exclude() {
-        let projection = doc! {"name": 1, "password": 0};
-        let parsed = parse_projection(&projection);
-        assert!(parsed.is_err());
-        assert_eq!(
-            parsed.unwrap_err().to_string(),
-            "Cannot mix inclusion and exclusion projections"
-        );
-    }
-
-    #[test]
-    fn test_parse_projection_invalid_value() {
-        let projection = doc! { "name": "invalid" };
-
-        let parsed = parse_projection(&projection);
-        assert!(parsed.is_err());
-        assert_eq!(
-            parsed.unwrap_err().to_string(),
-            "Invalid projection value for field 'name'"
-        );
-    }
-
-    #[test]
     fn test_parse_sort_valid() {
         let sort = doc! { "name": 1, "age": -1 };
 
@@ -736,7 +745,10 @@ mod tests {
     fn test_parse_projection_with_slice() {
         let projection = doc! { "comments": { "$slice": 5 } };
         let parsed = parse_projection(&projection).unwrap();
-        let expected = Projection::Include(vec![projection_slice(field(["comments"]), 5, None)]);
+        let expected = Projection::Include(proj_fields([
+            ("_id", proj_field()),
+            ("comments", proj_slice(None, 5))
+        ]));
         assert_eq!(parsed, expected);
     }
 
@@ -744,8 +756,10 @@ mod tests {
     fn test_parse_projection_with_slice_array() {
         let projection = doc! { "comments": { "$slice": [10, 5] } };
         let parsed = parse_projection(&projection).unwrap();
-        let expected =
-            Projection::Include(vec![projection_slice(field(["comments"]), 10, Some(5))]);
+        let expected = Projection::Include(proj_fields([
+            ("_id", proj_field()),
+            ("comments", proj_slice(Some(10), 5))
+        ]));
         assert_eq!(parsed, expected);
     }
 
@@ -778,10 +792,7 @@ mod tests {
     fn test_parse_projection_with_elem_match() {
         let projection = doc! { "students": { "$elemMatch": { "school": "Hogwarts" } } };
         let parsed = parse_projection(&projection).unwrap();
-        let expected = Projection::Include(vec![projection_elem_match(
-            field(["students"]),
-            field_filters(field(["school"]), [eq(lit("Hogwarts"))]),
-        )]);
+        let expected = Projection::Include(proj_fields([("_id", proj_field()), ("students", proj_elem_match(field_filters(field(["school"]), [eq(lit("Hogwarts"))])))]));
         assert_eq!(parsed, expected);
     }
 
@@ -790,13 +801,15 @@ mod tests {
         let projection =
             doc! { "grades": { "$elemMatch": { "grade": { "$gte": 85 }, "mean": { "$gt": 90 } } } };
         let parsed = parse_projection(&projection).unwrap();
-        let expected = Projection::Include(vec![projection_elem_match(
-            field(["grades"]),
-            and([
-                field_filters(field(["grade"]), [gte(lit(85))]),
-                field_filters(field(["mean"]), [gt(lit(90))]),
-            ]),
-        )]);
+        let expected = Projection::Include(proj_fields([
+            ("_id", proj_field()),
+            ("grades", proj_elem_match(
+                and([
+                    field_filters(field(["grade"]), [gte(lit(85))]),
+                    field_filters(field(["mean"]), [gt(lit(90))]),
+                ]),
+            )
+        )]));
         assert_eq!(parsed, expected);
     }
 
@@ -820,4 +833,120 @@ mod tests {
             "Projection document for field 'students' must have exactly one operator."
         );
     }
+
+    #[test]
+    fn test_parse_projection_simple_inclusion() {
+        let projection = doc! { "a": 1, "b": 1 };
+        let parsed = parse_projection(&projection).unwrap();
+        // _id is implicitly included
+        let expected = Projection::Include(proj_fields([
+            ("a", proj_field()),
+            ("b", proj_field()),
+            ("_id", proj_field()),
+        ]));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_simple_inclusion_with_explicit_id() {
+        let projection = doc! { "a": 1, "b": 1, "_id": 1 };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(proj_fields([
+            ("a", proj_field()),
+            ("b", proj_field()),
+            ("_id", proj_field()),
+        ]));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_simple_exclusion() {
+        let projection = doc! { "a": 0, "b": 0 };
+        let parsed = parse_projection(&projection).unwrap();
+        // _id is implicitly included
+        let expected = Projection::Exclude(proj_fields([
+            ("a", proj_field()),
+            ("b", proj_field()),
+        ]));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_exclusion_with_explicit_id() {
+        // Excluding other fields means _id is included by default.
+        let projection = doc! { "a": 0, "_id": 1 };
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Projection cannot have a mix of inclusion and exclusion."
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_inclusion_and_id_exclusion() {
+        let projection = doc! { "a": 1, "b": 1, "_id": 0 };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(proj_fields([
+            ("a", proj_field()),
+            ("b", proj_field()),
+        ]));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_mixing_inclusion_and_exclusion_is_error() {
+        let projection = doc! { "a": 1, "b": 0 };
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Projection cannot have a mix of inclusion and exclusion."
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_empty_is_error() {
+        let projection = doc! {};
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Projection document cannot be empty"
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_invalid_value_is_error() {
+        let projection = doc! { "a": "invalid" };
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid projection value for field 'a'"
+        );
+    }
+
+    #[test]
+    fn test_parse_projection_positional() {
+        let projection = doc! { "a.$": 1 };
+        let parsed = parse_projection(&projection).unwrap();
+        let expected = Projection::Include(proj_fields([
+            ("_id", proj_field()),
+            ("a", proj_positional_field()),
+        ]));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_projection_positional_exclusion_is_error() {
+        let projection = doc! { "a.$": 0 };
+        let result = parse_projection(&projection);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid projection value for field 'a.$': expected field"
+        );
+    }
+
 }

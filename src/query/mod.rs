@@ -1,8 +1,11 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use bson::{Bson, Document};
+use crate::error;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
@@ -63,16 +66,6 @@ pub enum Expr {
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
-    // Projection operators
-    ProjectionSlice {
-        field: Arc<Expr>,
-        skip: i32,
-        limit: Option<i32>,
-    },
-    ProjectionElemMatch {
-        field: Arc<Expr>,
-        expr: Arc<Expr>,
-    },
 }
 
 impl TreeNode for Expr {
@@ -97,8 +90,6 @@ impl TreeNode for Expr {
             Expr::Not(expr) => vec![expr.clone()],
             Expr::Nor(elements) => elements.iter().cloned().collect(),
             Expr::ElemMatch(predicates) => predicates.iter().cloned().collect(),
-            Expr::ProjectionSlice { field, .. } => vec![field.clone()],
-            Expr::ProjectionElemMatch { field, expr, .. } => vec![field.clone(), expr.clone()],
             _ => vec![], // Leaf nodes have no children
         }
     }
@@ -123,17 +114,6 @@ impl TreeNode for Expr {
             Expr::Not(_) => Arc::new(Expr::Not(Self::get_first(children))),
             Expr::Nor(_) => Arc::new(Expr::Nor(children)),
             Expr::ElemMatch { .. } => Arc::new(Expr::ElemMatch(children)),
-            Expr::ProjectionSlice { skip, limit, .. } => Arc::new(Expr::ProjectionSlice {
-                field: Self::get_first(children),
-                skip: *skip,
-                limit: *limit,
-            }),
-            Expr::ProjectionElemMatch { .. } => {
-                let mut iter = children.into_iter();
-                let field = iter.next().unwrap();
-                let expr = iter.next().unwrap();
-                Arc::new(Expr::ProjectionElemMatch { field, expr })
-            }
             _ => self, // No changes needed for leaf nodes
         }
     }
@@ -276,21 +256,7 @@ impl Serializable for Expr {
                 let predicates = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::ElemMatch(predicates))
             }
-            17 => {
-                let field = Arc::new(Self::read_from(reader)?);
-                let skip = i32::read_from(reader)?;
-                let limit = Option::<i32>::read_from(reader)?;
-                Ok(Expr::ProjectionSlice { field, skip, limit })
-            }
-            18 => {
-                let field = Arc::new(Self::read_from(reader)?);
-                let expr = Arc::new(Self::read_from(reader)?);
-                Ok(Expr::ProjectionElemMatch { field, expr })
-            }
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Unknown Expr tag: {}", tag),
-            )),
+            _ => panic!("Unknown Expr tag: {}", tag),
         }
     }
 
@@ -368,17 +334,6 @@ impl Serializable for Expr {
                 writer.write_u8(16);
                 predicates.write_to(writer);
             }
-            Expr::ProjectionSlice { field, skip, limit } => {
-                writer.write_u8(17);
-                field.write_to(writer);
-                skip.write_to(writer);
-                limit.write_to(writer);
-            }
-            Expr::ProjectionElemMatch { field, expr } => {
-                writer.write_u8(18);
-                field.write_to(writer);
-                expr.write_to(writer);
-            }
             Expr::Literal(_) => {
                 panic!("LogicalPlans should never be serialized before parametrization.");
             }
@@ -386,23 +341,186 @@ impl Serializable for Expr {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectionExpr {
+    Fields { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
+    ArrayElements { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
+    Field,
+    PositionalField,
+    Slice { skip: Option<i32>, limit: i32 },
+    ElemMatch { filter: Arc<Expr>, },
+}
+
+impl ProjectionExpr {
+
+    fn get_children_for_component_mut<'a, 'b: 'a>(&'a mut self, path: &'b [PathComponent], component: usize) -> error::Result<&'a mut BTreeMap<PathComponent, Arc<ProjectionExpr>>> {
+        match self {
+            ProjectionExpr::Fields { children } => {
+                if component < path.len() && matches!(&path[component], &PathComponent::ArrayElement(_)) {
+                    return Err(error::Error::InvalidRequest(format!("Cannot use the array index {} in path: {}. Expecting a field name.", &path[component], format_path(path))));
+                }
+                Ok(children)
+            }
+            ProjectionExpr::ArrayElements { children } => {
+                if component < path.len() && matches!(&path[component], &PathComponent::FieldName(_)) {
+                    return Err(error::Error::InvalidRequest(format!("Cannot use the field name {} in path: {}. Expecting an array element.", &path[component], format_path(path))));
+                }
+                Ok(children)
+            }
+            _ => Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path)))),
+        }
+    }
+
+    pub fn add_expr(&mut self, path: &[PathComponent], component: usize, expr: Arc<ProjectionExpr>) -> error::Result<()> {
+        let children = self.get_children_for_component_mut(path, component)?;
+        Self::add_to_children(path, component, expr, children)
+    }
+
+    pub fn remove_expr(&mut self, path: &[PathComponent], component: usize) -> error::Result<()> {
+        let children = self.get_children_for_component_mut(path, component)?;
+        Self::remove_from_children(path, component, children)
+    }
+
+    fn add_to_children(
+        path: &[PathComponent],
+        component: usize,
+        expr: Arc<ProjectionExpr>,
+        children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>
+    ) -> error::Result<()> {
+
+        let current_component = &path[component];
+        let existing = children.get_mut(&current_component);
+        match existing {
+            None => {
+                if path.len() == component + 1 {
+                    children.insert(current_component.clone(), expr);
+                } else {
+                    let mut sub_node = if matches!(path[1], PathComponent::FieldName(_)) {
+                        ProjectionExpr::Fields { children: BTreeMap::new() }
+                    } else {
+                        ProjectionExpr::ArrayElements { children: BTreeMap::new() }
+                    };
+                    sub_node.add_expr(path, component + 1, expr)?;
+                    children.insert(current_component.clone(), Arc::new(sub_node));
+                }
+            }
+            Some(existing) => {
+                match existing.as_ref() {
+                    ProjectionExpr::Fields { children: _ } | ProjectionExpr::ArrayElements { children: _ } => {
+                        if path.len() == component + 1 {
+                            return Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path))))
+                        } else if let Some(existing) = Arc::get_mut(existing) {
+                            existing.add_expr(path, component + 1, expr)?;
+                        } else {
+                            panic!("Arc strong count is not 1 but should be ")
+                        }
+                    },
+                    _ => return Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path))))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_from_children(path: &[PathComponent], component: usize, children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>) -> error::Result<()> {
+        let current_component = &path[component];
+
+        if path.len() == component + 1 {
+            children.remove(current_component);
+            return Ok(());
+        }
+
+        if let Some(child_arc) = children.get_mut(current_component) {
+            if let Some(child) = Arc::get_mut(child_arc) {
+                child.remove_expr(path, component + 1)?;
+                if child.is_empty() {
+                    children.remove(current_component);
+                }
+            } else {
+                panic!("Arc strong count is not 1 but should be ")
+            }
+        }
+        Ok(())
+    }
+
+    pub fn children(&self) -> &BTreeMap<PathComponent, Arc<ProjectionExpr>> {
+        match self {
+            ProjectionExpr::Fields { children } => children,
+            ProjectionExpr::ArrayElements { children } => children,
+            _ => {
+                static EMPTY: BTreeMap<PathComponent, Arc<ProjectionExpr>> = BTreeMap::new();
+                &EMPTY
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ProjectionExpr::Fields { children } => children.is_empty(),
+            ProjectionExpr::ArrayElements { children } => children.is_empty(),
+            _ => true,
+        }
+    }
+}
+
+impl Serializable for ProjectionExpr {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(ProjectionExpr::Fields { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
+            1 => Ok(ProjectionExpr::ArrayElements { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
+            2 => Ok(ProjectionExpr::Field),
+            3 => Ok(ProjectionExpr::PositionalField),
+            4 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
+            5 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
+            _ => panic!("Invalid tag for ProjectionExpr: {}", tag),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            ProjectionExpr::Fields { children } => {
+                writer.write_u8(0);
+                children.write_to(writer);
+            },
+            ProjectionExpr::ArrayElements { children } => {
+                writer.write_u8(1);
+                children.write_to(writer);
+            },
+            ProjectionExpr::Field => {
+                writer.write_u8(2);
+            },
+            ProjectionExpr::PositionalField => {
+                writer.write_u8(3);
+            },
+            ProjectionExpr::Slice { skip, limit } => {
+                writer.write_u8(4);
+                skip.write_to(writer);
+                writer.write_varint_i32(*limit);
+            },
+            ProjectionExpr::ElemMatch { filter } => {
+                writer.write_u8(5);
+                filter.write_to(writer);
+            },
+        }
+    }
+}
+
 /// Projection for included or excluded fields
+/// This is used to specify which fields to include or exclude in the result set of a query.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {
-    Include(Vec<Arc<Expr>>), // Fields to include
-    Exclude(Vec<Arc<Expr>>), // Fields to exclude
+    Include(Arc<ProjectionExpr>), // Fields to include
+    Exclude(Arc<ProjectionExpr>), // Fields to exclude
 }
 
 impl Serializable for Projection {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
-            0 => Ok(Projection::Include(Vec::<Arc<Expr>>::read_from(reader)?)),
-            1 => Ok(Projection::Exclude(Vec::<Arc<Expr>>::read_from(reader)?)),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "Invalid tag for Projection",
-            )),
+            0 => Ok(Projection::Include(Arc::<ProjectionExpr>::read_from(reader)?)),
+            1 => Ok(Projection::Exclude(Arc::<ProjectionExpr>::read_from(reader)?)),
+            _ => panic!("Invalid tag for Projection: {}", tag),
         }
     }
 
@@ -557,6 +675,24 @@ pub enum PathComponent {
     ArrayElement(usize), // An array index (e.g., "0" in "array.0")
 }
 
+impl PartialOrd for PathComponent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PathComponent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use PathComponent::*;
+        match (self, other) {
+            (FieldName(a), FieldName(b)) => a.cmp(b),
+            (ArrayElement(a), ArrayElement(b)) => a.cmp(b),
+            (FieldName(_), ArrayElement(_)) => Ordering::Less,
+            (ArrayElement(_), FieldName(_)) => Ordering::Greater,
+        }
+    }
+}
+
 impl Serializable for PathComponent {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let byte = reader.read_u8()?;
@@ -600,6 +736,15 @@ impl From<usize> for PathComponent {
     }
 }
 
+impl fmt::Display for PathComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PathComponent::FieldName(name) => write!(f, "{}", name),
+            PathComponent::ArrayElement(index) => write!(f, "{}", index),
+        }
+    }
+}
+
 /// Extracts a BSON value from a document given a path.
 pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<BsonValueRef<'a>> {
     if path.is_empty() {
@@ -622,6 +767,12 @@ pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<B
     Some(BsonValueRef(current))
 }
 
+pub fn format_path(path: &[PathComponent]) -> String {
+    path.iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(".")
+}
 
 #[derive(Debug, Clone)]
 pub struct BsonValue(pub Bson);
@@ -786,14 +937,7 @@ mod tests {
     use crate::io::byte_writer::ByteWriter;
     use crate::io::serializable::check_serialization_round_trip;
     use bson::{doc, Bson, Document, Regex};
-
-    fn create_sort_test_doc(id: i32, name: &str, value: f64) -> Document {
-        doc! {
-            "id": id,
-            "name": name,
-            "value": value,
-        }
-    }
+    use crate::query::expr_fn::*;
 
     #[test]
     fn test_get_path_value() {
@@ -1123,29 +1267,155 @@ mod tests {
             negated: false,
         };
         check_serialization_round_trip(size_expr);
+    }
+
+    #[test]
+    fn test_projection_serialization_round_trip() {
+        // Simple ProjectionExpr
+        check_serialization_round_trip(proj_field());
+        check_serialization_round_trip(proj_positional_field());
+        check_serialization_round_trip(proj_slice(Some(5), 10));
+        check_serialization_round_trip(proj_slice(None, 20));
+        let elem_match_expr = proj_elem_match(eq(placeholder(0)));
+        check_serialization_round_trip((*elem_match_expr).clone());
+
+        // Complex ProjectionExpr
+        let complex_projection_expr = proj_fields([
+            ("field_a", proj_field()),
+            (
+                "field_b",
+                proj_fields([("nested_field", proj_field())]),
+            ),
+            (
+                "array_field",
+                proj_array_elements([(0, proj_slice(Some(5), 10))]),
+            ),
+        ]);
+        check_serialization_round_trip(complex_projection_expr.clone());
 
         // Projection
-        let proj_slice = Expr::ProjectionSlice {
-            field: Arc::new(Expr::Field(vec!["array".into()])),
-            skip: 10,
-            limit: Some(20),
-        };
-        check_serialization_round_trip(proj_slice);
+        check_serialization_round_trip(Projection::Include(complex_projection_expr.clone()));
+        check_serialization_round_trip(Projection::Exclude(complex_projection_expr.clone()));
 
-        let proj_slice_no_limit = Expr::ProjectionSlice {
-            field: Arc::new(Expr::Field(vec!["array".into()])),
-            skip: 5,
-            limit: None,
-        };
-        check_serialization_round_trip(proj_slice_no_limit);
+        let simple_include = Projection::Include(proj_fields([("a", proj_field())]));
+        check_serialization_round_trip(simple_include);
 
-        let proj_elem_match = Expr::ProjectionElemMatch {
-            field: Arc::new(Expr::Field(vec!["array".into()])),
-            expr: Arc::new(Expr::Comparison {
-                operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(9)),
-            }),
+        let simple_exclude = Projection::Exclude(proj_fields([("b", proj_field())]));
+        check_serialization_round_trip(simple_exclude);
+    }
+
+    #[test]
+    fn test_projection_expr_add_remove() {
+        // Initial empty projection
+        let mut proj = proj_fields::<_, &str>([]);
+        let proj = Arc::get_mut(&mut proj).unwrap();
+        assert!(proj.is_empty());
+
+        // Add a simple field "a"
+        let path_a: Vec<PathComponent> = vec!["a".into()];
+        proj.add_expr(&path_a, 0, proj_field()).unwrap();
+        assert_eq!(*proj, *proj_fields([("a", proj_field())]));
+
+        // Add a nested field "b.c"
+        let path_b_c: Vec<PathComponent> = vec!["b".into(), "c".into()];
+        proj.add_expr(&path_b_c, 0, proj_field()).unwrap();
+
+        let expected = proj_fields([
+            ("a", proj_field()),
+            ("b", proj_fields([("c", proj_field())])),
+        ]);
+        assert_eq!(*proj, *expected);
+
+        // Add an array projection "d" with element "0"
+        let path_d: Vec<PathComponent> = vec!["d".into()];
+        let proj_array_d = proj_array_elements([(0, proj_field())]);
+        proj.add_expr(&path_d, 0, proj_array_d).unwrap();
+
+        let expected_d = proj_array_elements([(0, proj_field())]);
+        let children_of_root = match &proj {
+            ProjectionExpr::Fields { children } => children,
+            _ => panic!("Expected Fields projection"),
         };
-        check_serialization_round_trip(proj_elem_match);
+        assert_eq!(
+            children_of_root.get(&"d".into()).unwrap().as_ref(),
+            expected_d.as_ref()
+        );
+
+        // --- Test removals ---
+
+        // Remove "a"
+        proj.remove_expr(&path_a, 0).unwrap();
+        let children_of_root = match &proj {
+            ProjectionExpr::Fields { children } => children,
+            _ => panic!("Expected Fields projection"),
+        };
+        assert!(!children_of_root.contains_key(&"a".into()));
+
+        // Remove "b.c" - this should also remove "b" as it becomes empty
+        proj.remove_expr(&path_b_c, 0).unwrap();
+        let children_of_root = match &proj {
+            ProjectionExpr::Fields { children } => children,
+            _ => panic!("Expected Fields projection"),
+        };
+        assert!(children_of_root.get(&"b".into()).is_none());
+        assert!(!proj.is_empty()); // "d" should still be there
+
+        // Remove "d"
+        proj.remove_expr(&path_d, 0).unwrap();
+        assert!(proj.is_empty());
+    }
+
+    #[test]
+    fn test_projection_expr_errors() {
+        let mut proj = (*proj_fields::<_, &str>([])).clone();
+
+        // Add "a"
+        let path_a: Vec<PathComponent> = vec!["a".into()];
+        proj.add_expr(&path_a, 0, proj_field()).unwrap();
+
+        // Error: Try to add "a.b" when "a" is already a terminal field
+        let path_a_b: Vec<PathComponent> = vec!["a".into(), "b".into()];
+        let result = proj.add_expr(&path_a_b, 0, proj_field());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid projection specification for path a.b"
+        );
+
+        // Error: Try to add "a" again, which is an invalid replacement
+        let result = proj.add_expr(&path_a, 0, proj_field());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid projection specification for path a"
+        );
+
+        // Error: Invalid path component type (array index for Fields)
+        let path_invalid_component: Vec<PathComponent> = vec![0.into()];
+        let result = proj.add_expr(&path_invalid_component, 0, proj_field());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cannot use the array index 0 in path: 0. Expecting a field name."
+        );
+
+        let mut proj_array = proj_array_elements::<_, usize>([]);
+        let proj_array = Arc::get_mut(&mut proj_array).unwrap();
+
+        // Error: Invalid path component type (field name for ArrayElements)
+        let path_invalid_component_for_array: Vec<PathComponent> = vec!["field".into()];
+        let result =
+            proj_array.add_expr(&path_invalid_component_for_array, 0, proj_field());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cannot use the field name field in path: field. Expecting an array element."
+        );
+
+        // Test removing non-existent path is a no-op
+        let path_z: Vec<PathComponent> = vec!["z".into()];
+        let original_proj = proj.clone();
+        proj.remove_expr(&path_z, 0).unwrap();
+        assert_eq!(proj, original_proj);
     }
 }
