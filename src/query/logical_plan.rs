@@ -258,38 +258,43 @@ impl LogicalPlanBuilder {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::expr_fn::field;
+    use crate::query::expr_fn::{field, proj_field, proj_fields};
     use crate::query::{ComparisonOperator, SortOrder};
 
-    // #[test]
-    // fn test_logical_plan_serialization_round_trip() {
-    //     let plan = LogicalPlan::CollectionScan {
-    //         collection: 32,
-    //         projection: Some(Projection::Include(vec![field(["field1"]), field(["field2"])])),
-    //         filter: Some(Expr::Comparison {
-    //             operator: ComparisonOperator::Eq,
-    //             value: Arc::new(Expr::Placeholder(0)),
-    //         }),
-    //         sort: Some(vec![SortField {
-    //             field: field(["a"]),
-    //             order: SortOrder::Ascending,
-    //         }]),
-    //     };
-    //     check_serialization_round_trip(plan);
-    //
-    //     let plan_arc = LogicalPlanBuilder::scan(32)
-    //         .filter(Arc::new(Expr::Comparison {
-    //             operator: ComparisonOperator::Eq,
-    //             value: Arc::new(Expr::Placeholder(0)),
-    //         }))
-    //         .project(Projection::Include(vec![field(["a"])]))
-    //         .sort(vec![SortField {
-    //             field: field(["b"]),
-    //             order: SortOrder::Descending,
-    //         }])
-    //         .limit(Some(10), Some(20))
-    //         .build();
-    //
-    //     check_serialization_round_trip(plan_arc.as_ref().clone());
-    // }
+    #[test]
+    fn test_logical_plan_serialization_round_trip() {
+        let plan = LogicalPlan::CollectionScan {
+            collection: 32,
+            projection: Some(Projection::Include(proj_fields([
+            ("field1", proj_field()),
+            ("field2", proj_field()),
+            ]))),
+            filter: Some(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(0)),
+            }),
+            sort: Some(vec![SortField {
+                field: field(["a"]),
+                order: SortOrder::Ascending,
+            }]),
+        };
+        check_serialization_round_trip(plan);
+
+        let plan_arc = LogicalPlanBuilder::scan(32)
+            .filter(Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Eq,
+                value: Arc::new(Expr::Placeholder(0)),
+            }))
+            .project(Projection::Include(proj_fields([
+                ("a", proj_field()),
+            ])))
+            .sort(vec![SortField {
+                field: field(["b"]),
+                order: SortOrder::Descending,
+            }])
+            .limit(Some(10), Some(20))
+            .build();
+
+        check_serialization_round_trip(plan_arc.as_ref().clone());
+    }
 }

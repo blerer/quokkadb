@@ -158,26 +158,45 @@ fn compare_value(
 }
 
 /// Converts a value filter expression into a function that can be applied to document values.
-fn to_value_filter(
+pub fn to_value_filter(
     filter: Arc<Expr>,
     parameters: &Parameters,
-) -> Box<dyn Fn(Option<BsonValueRef>, &Document) -> bool + Send + Sync> {
+) -> Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync> {
 
     match filter.as_ref() {
+        Expr::FieldFilters { field, filters } => {
+            let path = match field.as_ref() {
+                Expr::Field(path) => path.clone(),
+                _ => panic!("Expected a field expression"),
+            };
+            let value_filters = to_value_filters(filters, parameters);
+            Box::new(move |field_value| {
+                if field_value.is_none() {
+                    return false; // If the field is missing, no filters can match
+                }
+                let doc = match field_value.unwrap() {
+                    BsonValueRef(Bson::Document(doc)) => doc,
+                    _ => return false, // If the field value is not a document, no filters can match
+                };
+                // Resolve the field value using the path
+                let field_value = get_path_value(doc, &path);
+                value_filters.iter().all(|f| f(field_value))
+            })
+        }
         Expr::Comparison { operator, value } => {
             let operator = *operator;
             let comparison_value = match value.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
                 _ => panic!("Comparison value must be a placeholder"),
             };
-            Box::new(move |field_value, _doc| compare_value(operator, comparison_value.as_ref(), field_value))
+            Box::new(move |field_value| compare_value(operator, comparison_value.as_ref(), field_value))
         }
         // Implements the `$exists` filter as:
         // - `$exists: true` matches documents where the field is present.
         // - `$exists: false` matches documents where the field is missing.
         Expr::Exists(exists) => {
             let exists = *exists;
-            Box::new(move |field_value, _doc| {
+            Box::new(move |field_value| {
                 field_value.is_some() == exists
             })
         }
@@ -190,7 +209,7 @@ fn to_value_filter(
 
             if is_doc_filter {
                 let elem_filters: Vec<_> = to_filters(filters, parameters);
-                Box::new(move |field_value, _doc| {
+                Box::new(move |field_value| {
                     elem_match_array(field_value, |elem| {
                         if let Bson::Document(sub_doc) = elem {
                             elem_filters.iter().all(|f| f(sub_doc))
@@ -201,10 +220,10 @@ fn to_value_filter(
                 })
             } else {
                 let elem_filters = to_value_filters(filters, parameters);
-                Box::new(move |field_value, doc| {
+                Box::new(move |field_value| {
                     elem_match_array(field_value, |elem| {
                         let elem = BsonValueRef(elem);
-                        elem_filters.iter().all(|f| f(Some(elem), doc))
+                        elem_filters.iter().all(|f| f(Some(elem)))
                     })
                 })
             }
@@ -220,7 +239,7 @@ fn to_value_filter(
             };
             let negated = *negated;
 
-            Box::new(move |field_value, _doc| {
+            Box::new(move |field_value| {
                 let result = if let Some(field_value) = field_value {
                     check_bson_type(field_value, &type_spec)
                 } else {
@@ -243,7 +262,7 @@ fn to_value_filter(
                 _ => panic!("$size value must be a placeholder"),
             };
             let negated = *negated;
-            Box::new(move |field_value, _doc| {
+            Box::new(move |field_value| {
                 let result = if let Some(BsonValueRef(Bson::Array(arr))) = field_value {
                     arr.len() == size
                 } else {
@@ -264,7 +283,7 @@ fn to_value_filter(
                 _ => panic!("$all value must be a placeholder"),
             };
 
-            Box::new(move |field_value, _doc| {
+            Box::new(move |field_value| {
                 if let Some(BsonValueRef(Bson::Array(array))) = field_value {
                     let set: HashSet<_> = array.iter().map(BsonValueRef).collect();
                     comparison_array
@@ -277,7 +296,7 @@ fn to_value_filter(
         },
         Expr::Not(child) => {
             let inner = to_value_filter(child.clone(), parameters);
-            Box::new(move |field_value, doc| !inner(field_value, doc))
+            Box::new(move |field_value| !inner(field_value))
         }
         _ => panic!("Unsupported value filter: {:?}", filter),
     }
@@ -325,14 +344,14 @@ pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Docume
             let value_filters = to_value_filters(filters, parameters);
             Box::new(move |doc: &Document| {
                 let field_value = get_path_value(doc, &path);
-                value_filters.iter().all(|f| f(field_value, doc))
+                value_filters.iter().all(|f| f(field_value))
             })
         },
         _ => panic!("Unsupported top-level filter: {:?}", expr),
     }
 }
 
-fn to_value_filters(filters: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn Fn(Option<BsonValueRef>, &Document) -> bool + Send + Sync>> {
+fn to_value_filters(filters: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
     filters.iter()
            .map(|f| to_value_filter(f.clone(), parameters))
            .collect()

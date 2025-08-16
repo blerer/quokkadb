@@ -233,7 +233,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
         match value {
             Bson::Int32(1) | Bson::Int64(1) => match field {
                 Expr::PositionalField(path) => {
-                    include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::PositionalField))?;
+                    include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::PositionalFieldRef))?;
                 }
                 Expr::Field(path) => {
                     include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;

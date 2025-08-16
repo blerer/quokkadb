@@ -346,7 +346,11 @@ pub enum ProjectionExpr {
     Fields { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
     ArrayElements { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
     Field,
-    PositionalField,
+    /// Positional field reference (e.g. "array.$")
+    /// This is used in queries to refer to the first matching element in an array.
+    PositionalFieldRef,
+    /// Positional field reference associated to the query filter to which it is corresponding
+    PositionalField { filter: Arc<Expr> },
     Slice { skip: Option<i32>, limit: i32 },
     ElemMatch { filter: Arc<Expr>, },
 }
@@ -470,9 +474,10 @@ impl Serializable for ProjectionExpr {
             0 => Ok(ProjectionExpr::Fields { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
             1 => Ok(ProjectionExpr::ArrayElements { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
             2 => Ok(ProjectionExpr::Field),
-            3 => Ok(ProjectionExpr::PositionalField),
-            4 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
-            5 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
+            3 => Ok(ProjectionExpr::PositionalFieldRef),
+            4 => Ok(ProjectionExpr::PositionalField { filter: Arc::<Expr>::read_from(reader)? }),
+            5 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
+            6 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
             _ => panic!("Invalid tag for ProjectionExpr: {}", tag),
         }
     }
@@ -490,16 +495,20 @@ impl Serializable for ProjectionExpr {
             ProjectionExpr::Field => {
                 writer.write_u8(2);
             },
-            ProjectionExpr::PositionalField => {
+            ProjectionExpr::PositionalFieldRef => {
                 writer.write_u8(3);
             },
-            ProjectionExpr::Slice { skip, limit } => {
+            ProjectionExpr::PositionalField { filter } => {
                 writer.write_u8(4);
+                filter.write_to(writer);
+            },
+            ProjectionExpr::Slice { skip, limit } => {
+                writer.write_u8(5);
                 skip.write_to(writer);
                 writer.write_varint_i32(*limit);
             },
             ProjectionExpr::ElemMatch { filter } => {
-                writer.write_u8(5);
+                writer.write_u8(6);
                 filter.write_to(writer);
             },
         }

@@ -129,7 +129,7 @@ pub fn proj_field() -> Arc<ProjectionExpr> {
 }
 
 pub fn proj_positional_field() -> Arc<ProjectionExpr> {
-    Arc::new(ProjectionExpr::PositionalField)
+    Arc::new(ProjectionExpr::PositionalFieldRef)
 }
 
 pub fn proj_slice(skip: Option<i32>, limit: i32) -> Arc<ProjectionExpr> {

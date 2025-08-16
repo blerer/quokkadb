@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{BsonValue, Expr, Parameters};
-use crate::query::execution::{filters, sorts};
+use crate::query::execution::{filters, projections, sorts};
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
@@ -173,7 +173,11 @@ impl QueryExecutor {
                 })))
             }
             PhysicalPlan::Projection { input, projection } => {
-                todo!()
+                let projector = projections::to_projector(projection, &parameters)?;
+                let input_iter = self.execute_cached(input.clone(), parameters)?;
+                Ok(Box::new(input_iter.map(move |res| {
+                    res.and_then(|doc| projector(doc))
+                })))
             }
             PhysicalPlan::InMemorySort {
                 input,
@@ -265,13 +269,13 @@ mod tests {
     use super::*;
 use crate::error::Result;
 use crate::query::{make_sort_field, SortOrder};
-use crate::query::{expr_fn, BsonValue, ComparisonOperator, Expr, Parameters};
+use crate::query::{BsonValue, Expr, Parameters, Projection, ProjectionExpr};
 use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::ops::Bound;
     use std::sync::Arc;
-    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, gte, has_type, lit, lt, lte, ne, nor, not, or, size, within};
+    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, gte, has_type, lt, lte, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice};
 
     #[test]
     fn test_execution_roundtrip() -> Result<()> {
@@ -976,6 +980,216 @@ use crate::storage::test_utils::storage_engine;
         let p = params.collect_parameter(BsonValue(Bson::Null));
         let filter = field_filters(field(["tags"]), [eq(p)]);
         run_filter_test(&executor, collection_id, filter, params, &[5])?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_projection_plan_execution() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_projections")?;
+
+        // 2. Insert test data
+        let test_doc = doc! {
+            "_id": 1,
+            "name": "test_doc",
+            "scalar": 123,
+            "nested": { "a": 1, "b": "hello" },
+            "array_scalar": [10, 20, 30, 40, 50],
+            "array_doc": [
+                doc!{ "val": 10, "tag": "a" },
+                doc!{ "val": 20, "tag": "b" },
+                doc!{ "val": 30, "tag": "a" },
+                doc!{ "val": 40, "tag": "c" },
+            ]
+        };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&test_doc)?,
+        };
+        let mut result = executor.execute_direct(insert_plan)?;
+        result.next().unwrap()?; // consume result
+
+        // Helper to run a projection and check the result
+        fn run_projection_test(
+            executor: &QueryExecutor,
+            collection_id: u32,
+            projection: Projection,
+            parameters: Parameters,
+            expected_doc: Document,
+        ) -> Result<()> {
+            let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
+                collection: collection_id,
+                start: Bound::Unbounded,
+                end: Bound::Unbounded,
+                direction: Direction::Forward,
+                projection: None,
+            });
+
+            let projection_plan = Arc::new(PhysicalPlan::Projection {
+                input: scan_plan,
+                projection: Arc::new(projection),
+            });
+
+            let results = executor.execute_cached(projection_plan, parameters)?;
+            let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
+            assert_eq!(found_docs.len(), 1);
+            assert_eq!(
+                found_docs[0], expected_doc,
+                "\nProjection test failed.\nExpected: {:#?}\n   Found: {:#?}",
+                expected_doc, found_docs[0]
+            );
+            Ok(())
+        }
+
+        // --- Test Cases ---
+
+        // Case 1: Simple include
+        let proj_expr_1 = proj_fields(vec![("name", proj_field()), ("scalar", proj_field())]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_1),
+            Parameters::new(),
+            doc! { "name": "test_doc", "scalar": 123 },
+        )?;
+
+        // Case 2: Nested include
+        let proj_expr_2 = proj_fields(vec![
+            ("name", proj_field()),
+            ("nested", proj_fields(vec![("b", proj_field())])),
+        ]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_2),
+            Parameters::new(),
+            doc! { "name": "test_doc", "nested": { "b": "hello" } },
+        )?;
+
+        // Case 3: Simple exclude
+        let proj_expr_3 = proj_fields(vec![
+            ("scalar", proj_field()),
+            ("array_scalar", proj_field()),
+            ("array_doc", proj_field()),
+        ]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Exclude(proj_expr_3),
+            Parameters::new(),
+            doc! { "_id": 1, "name": "test_doc", "nested": { "a": 1, "b": "hello" } },
+        )?;
+
+        // Case 4: Slice projection { array_scalar: { $slice: [1, 2] } }
+        let proj_expr_4 = proj_fields(vec![("array_scalar", proj_slice(Some(1), 2))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_4),
+            Parameters::new(),
+            doc! { "array_scalar": [20, 30] },
+        )?;
+
+        // Case 5: ElemMatch projection
+        let mut params_5 = Parameters::new();
+        let p_5 = params_5.collect_parameter("a".into());
+        let filter_5 = field_filters(field(["tag"]), [eq(p_5)]);
+        let proj_expr_5 = proj_fields(vec![("array_doc", proj_elem_match(filter_5))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_5),
+            params_5,
+            doc! {
+                "array_doc": [
+                    doc!{ "val": 10, "tag": "a" },
+                    doc!{ "val": 30, "tag": "a" },
+                ]
+            },
+        )?;
+
+        // Case 6: PositionalField ($) projection
+        let mut params_6 = Parameters::new();
+        let p_6 = params_6.collect_parameter(25.into());
+        // Filter for elements > 25. The field for FieldFilters is empty path, meaning the element itself.
+        let filter_6 = gt(p_6);
+        let proj_expr_6 = proj_fields(vec![(
+            "array_scalar",
+            Arc::new(ProjectionExpr::PositionalField { filter: filter_6 }),
+        )]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_6),
+            params_6,
+            doc! { "array_scalar": [30] },
+        )?;
+
+        // Case 7: ArrayElements projection (non-standard, returns a document)
+        let proj_expr_7 = proj_fields(vec![(
+            "array_scalar",
+            proj_array_elements(vec![(1, proj_field()), (3, proj_field())]),
+        )]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_7),
+            Parameters::new(),
+            doc! { "array_scalar": doc! { "1": 20, "3": 40 } },
+        )?;
+
+        // Case 8: ElemMatch with no matches
+        let mut params_8 = Parameters::new();
+        let p_8 = params_8.collect_parameter("z".into()); // No element has tag "z"
+        let filter_8 = field_filters(field(["tag"]), [eq(p_8)]);
+        let proj_expr_8 = proj_fields(vec![("array_doc", proj_elem_match(filter_8))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_8),
+            params_8,
+            doc! { "array_doc": []}, // Expect empty array since no matches
+        )?;
+
+        // Case 9: PositionalField ($) with multiple matches (should return first)
+        let mut params_9 = Parameters::new();
+        let p_9 = params_9.collect_parameter("a".into());
+        // Filter for elements where tag is "a". This matches two elements.
+        let filter_9 = field_filters(field(["tag"]), [eq(p_9)]);
+        let proj_expr_9 = proj_fields(vec![(
+            "array_doc",
+            Arc::new(ProjectionExpr::PositionalField { filter: filter_9 }),
+        )]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_9),
+            params_9,
+            doc! { "array_doc": [ doc!{ "val": 10, "tag": "a" } ] },
+        )?;
+
+        // Case 10: Projection on a non-existent field
+        let proj_expr_10 = proj_fields(vec![("non_existent", proj_field())]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_10),
+            Parameters::new(),
+            doc! {}, // Expect an empty document
+        )?;
+
+        // Case 11: Array projection on a non-array field
+        let proj_expr_11 = proj_fields(vec![("scalar", proj_slice(None, 2))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_11),
+            Parameters::new(),
+            doc! {}, // Field should be omitted
+        )?;
 
         Ok(())
     }
