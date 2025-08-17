@@ -177,9 +177,17 @@ impl Projector {
                 }
             },
             Projector::Slice { skip, limit } => {
-                let skip = skip.unwrap_or(0) as usize;
-                let limit = *limit as usize;
                 if let Bson::Array(array) = value {
+
+                    // If limit is negative, it means we want to slice from the end
+                    let (limit, skip) = if *limit < 0 {
+                        let skip = ((array.len() as i32) + *limit).max(0)  as usize;
+                        let limit = array.len();
+                        (limit, skip)
+                    } else {
+                        (*limit as usize, skip.unwrap_or(0) as usize)
+                    };
+
                     let sliced = array.iter()
                         .skip(skip)
                         .take(limit)

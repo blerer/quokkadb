@@ -1191,6 +1191,26 @@ use crate::storage::test_utils::storage_engine;
             doc! {}, // Field should be omitted
         )?;
 
+        // Case 12: Slice with only negative limit (last N elements)
+        let proj_expr_12 = proj_fields(vec![("array_scalar", proj_slice(None, -2))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_12),
+            Parameters::new(),
+            doc! { "array_scalar": [40, 50] },
+        )?;
+
+        // Case 13: Slice with zero skip and negative limit
+        let proj_expr_13 = proj_fields(vec![("array_scalar", proj_slice(Some(0), -2))]);
+        run_projection_test(
+            &executor,
+            collection_id,
+            Projection::Include(proj_expr_13),
+            Parameters::new(),
+            doc! { "array_scalar": [40, 50] },
+        )?;
+
         Ok(())
     }
 }

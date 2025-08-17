@@ -323,47 +323,36 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
 }
 
 fn parse_slice_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
-    let (skip, limit) = match value {
-        Bson::Int32(n) => (None, *n),
-        Bson::Int64(n) => {
+    match value {
+        Bson::Int32(n) if *n > 0 || *n < 0 => {
+            Ok(ProjectionExpr::Slice { skip: None, limit: *n })
+        }
+        Bson::Int64(n) if *n > 0 || *n < 0 => {
             let limit = (*n).try_into().map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
-            (None, limit)
-        },
+            Ok(ProjectionExpr::Slice { skip: None, limit })
+        }
         Bson::Array(arr) => {
             if arr.len() != 2 {
-                return Err(Error::InvalidRequest(
-                    "$slice array must have exactly two elements".to_string(),
-                ));
+                return Err(Error::InvalidRequest("$slice array must have exactly two elements".to_string()));
             }
-            let skip = Some(match &arr[0] {
-                Bson::Int32(n) => *n,
-                Bson::Int64(n) => (*n).try_into()
-                                            .map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?,
-                _ => {
-                    return Err(Error::InvalidRequest(
-                        "$slice first element must be an integer".to_string(),
-                    ))
-                }
-            });
+            let skip = match &arr[0] {
+                Bson::Int32(n) if *n >= 0 => Some(*n),
+                Bson::Int64(n) if *n >= 0 => Some((*n).try_into().map_err(|_| Error::InvalidRequest("$slice skip out of i32 range".to_string()))?),
+                _ => return Err(Error::InvalidRequest("$slice skip must be a non-negative integer".to_string())),
+            };
             let limit = match &arr[1] {
                 Bson::Int32(n) if *n > 0 => *n,
-                Bson::Int64(n) if *n > 0 => *n as i32,
-                _ => {
-                    return Err(Error::InvalidRequest(
-                        "$slice limit must be a positive integer".to_string(),
-                    ))
-                }
+                Bson::Int64(n) if *n > 0 => (*n).try_into().map_err(|_| Error::InvalidRequest("$slice limit out of i32 range".to_string()))?,
+                Bson::Int32(n) if *n < 0 && skip == Some(0) => *n,
+                Bson::Int64(n) if *n < 0 && skip == Some(0) => (*n).try_into().map_err(|_| Error::InvalidRequest("$slice limit out of i32 range".to_string()))?,
+                Bson::Int32(n) if *n < 0 && skip != Some(0) => return Err(Error::InvalidRequest("$slice with negative limit and non-zero skip is invalid".to_string())),
+                Bson::Int64(n) if *n < 0 && skip != Some(0) => return Err(Error::InvalidRequest("$slice with negative limit and non-zero skip is invalid".to_string())),
+                _ => return Err(Error::InvalidRequest("$slice limit must be a non-zero integer".to_string())),
             };
-            (skip, limit)
+            Ok(ProjectionExpr::Slice { skip, limit })
         }
-        _ => {
-            return Err(Error::InvalidRequest(
-                "$slice must be an integer or an array of two integers".to_string(),
-            ))
-        }
-    };
-
-    Ok(ProjectionExpr::Slice { skip, limit })
+        _ => Err(Error::InvalidRequest("$slice must be an integer or an array of two integers".to_string())),
+    }
 }
 
 fn parse_elem_match_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
@@ -781,11 +770,11 @@ mod tests {
 
         let projection = doc! { "comments": { "$slice": [1, 0] } };
         let err = parse_projection(&projection).unwrap_err();
-        assert_eq!(err.to_string(), "$slice limit must be a positive integer");
+        assert_eq!(err.to_string(), "$slice limit must be a non-zero integer");
 
         let projection = doc! { "comments": { "$slice": [1, -1] } };
         let err = parse_projection(&projection).unwrap_err();
-        assert_eq!(err.to_string(), "$slice limit must be a positive integer");
+        assert_eq!(err.to_string(), "$slice with negative limit and non-zero skip is invalid");
     }
 
     #[test]
