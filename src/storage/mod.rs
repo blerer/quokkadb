@@ -1,6 +1,6 @@
 mod append_log;
 mod callback;
-mod catalog;
+pub (crate) mod catalog;
 mod files;
 mod flush_manager;
 pub mod internal_key;

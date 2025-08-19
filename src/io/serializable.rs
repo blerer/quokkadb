@@ -47,6 +47,16 @@ impl Serializable for usize {
     }
 }
 
+impl Serializable for String {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        Ok(reader.read_str()?.to_string())
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_str(self);
+    }
+}
+
 impl<T> Serializable for Option<T>
 where
     T: Serializable,

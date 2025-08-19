@@ -9,12 +9,14 @@ use std::sync::Arc;
 /// Represents the LogicalPlan for MongoDB-like operations
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
+    /// Represents a no-operation plan, used for empty or trivial plans.
+    NoOp,
     /// Represents a collection scan with optional projection, filtering, and sorting.
     CollectionScan {
         collection: u32, // Collection identifier
-        projection: Option<Projection>, // Fields to include
-        filter: Option<Expr>,            // Optional filtering condition
-        sort: Option<Vec<SortField>>,    // Optional sorting fields
+        projection: Option<Arc<Projection>>, // Fields to include
+        filter: Option<Arc<Expr>>,            // Optional filtering condition
+        sort: Option<Arc<Vec<SortField>>>,    // Optional sorting fields
     },
 
     /// Represents a filter operation.
@@ -54,6 +56,7 @@ impl TreeNode for LogicalPlan {
             LogicalPlan::Sort { input, .. } => vec![input.clone()],
             LogicalPlan::Limit { input, .. } => vec![input.clone()],
             LogicalPlan::CollectionScan { .. } => vec![], // Leaf node
+            LogicalPlan::NoOp => vec![], // Leaf node
         }
     }
 
@@ -78,6 +81,7 @@ impl TreeNode for LogicalPlan {
                 limit: *limit,
             }),
             LogicalPlan::CollectionScan { .. } => self, // Leaf nodes remain unchanged
+            LogicalPlan::NoOp => self, // NoOp remains unchanged
         }
     }
 }
@@ -93,11 +97,15 @@ impl Serializable for LogicalPlan {
         let tag = reader.read_u8()?;
         match tag {
             0 => {
+                // NoOp
+                Ok(LogicalPlan::NoOp)
+            }
+            1 => {
                 // CollectionScan
                 let collection = reader.read_varint_u32()?;
-                let projection = Option::<Projection>::read_from(reader)?;
-                let filter = Option::<Expr>::read_from(reader)?;
-                let sort = Option::<Vec<SortField>>::read_from(reader)?;
+                let projection = Option::<Arc<Projection>>::read_from(reader)?;
+                let filter = Option::<Arc<Expr>>::read_from(reader)?;
+                let sort = Option::<Arc<Vec<SortField>>>::read_from(reader)?;
                 Ok(LogicalPlan::CollectionScan {
                     collection,
                     projection,
@@ -105,13 +113,13 @@ impl Serializable for LogicalPlan {
                     sort,
                 })
             }
-            1 => {
+            2 => {
                 // Filter
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let condition = Arc::<Expr>::read_from(reader)?;
                 Ok(LogicalPlan::Filter { input, condition })
             }
-            2 => {
+            3 => {
                 // Projection
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let projection = Arc::<Projection>::read_from(reader)?;
@@ -120,7 +128,7 @@ impl Serializable for LogicalPlan {
                     projection,
                 })
             }
-            3 => {
+            4 => {
                 // Sort
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let sort_fields = Arc::<Vec<SortField>>::read_from(reader)?;
@@ -129,7 +137,7 @@ impl Serializable for LogicalPlan {
                     sort_fields,
                 })
             }
-            4 => {
+            5 => {
                 // Limit
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let skip = Option::<usize>::read_from(reader)?;
@@ -149,25 +157,28 @@ impl Serializable for LogicalPlan {
 
     fn write_to(&self, writer: &mut ByteWriter) {
         match self {
+            LogicalPlan::NoOp => {
+                writer.write_u8(0);
+            }
             LogicalPlan::CollectionScan {
                 collection,
                 projection,
                 filter,
                 sort,
             } => {
-                writer.write_u8(0);
+                writer.write_u8(1);
                 writer.write_varint_u32(*collection);
                 projection.write_to(writer);
                 filter.write_to(writer);
                 sort.write_to(writer);
             }
             LogicalPlan::Filter { input, condition } => {
-                writer.write_u8(1);
+                writer.write_u8(2);
                 input.write_to(writer);
                 condition.write_to(writer);
             }
             LogicalPlan::Projection { input, projection } => {
-                writer.write_u8(2);
+                writer.write_u8(3);
                 input.write_to(writer);
                 projection.write_to(writer);
             }
@@ -175,7 +186,7 @@ impl Serializable for LogicalPlan {
                 input,
                 sort_fields,
             } => {
-                writer.write_u8(3);
+                writer.write_u8(4);
                 input.write_to(writer);
                 sort_fields.write_to(writer);
             }
@@ -184,7 +195,7 @@ impl Serializable for LogicalPlan {
                 skip,
                 limit,
             } => {
-                writer.write_u8(4);
+                writer.write_u8(5);
                 input.write_to(writer);
                 skip.write_to(writer);
                 limit.write_to(writer);
@@ -221,19 +232,19 @@ impl LogicalPlanBuilder {
     }
 
     /// Specifies fields for projection.
-    pub fn project(mut self, projection: Projection) -> Self {
+    pub fn project(mut self, projection: Arc<Projection>) -> Self {
         self.plan = LogicalPlan::Projection {
             input: Arc::new(self.plan),
-            projection: Arc::new(projection),
+            projection,
         };
         self
     }
 
     /// Specifies sorting order.
-    pub fn sort(mut self, sort_fields: Vec<SortField>) -> Self {
+    pub fn sort(mut self, sort_fields: Arc<Vec<SortField>>) -> Self {
         self.plan = LogicalPlan::Sort {
             input: Arc::new(self.plan),
-            sort_fields: Arc::new(sort_fields),
+            sort_fields,
         };
         self
     }
@@ -258,25 +269,24 @@ impl LogicalPlanBuilder {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::expr_fn::{field, proj_field, proj_fields};
+    use crate::query::expr_fn::{eq, field, field_filters, include, placeholder, proj_field, proj_fields, sort_asc};
     use crate::query::{ComparisonOperator, SortOrder};
 
     #[test]
     fn test_logical_plan_serialization_round_trip() {
+        check_serialization_round_trip(LogicalPlan::NoOp);
+
         let plan = LogicalPlan::CollectionScan {
             collection: 32,
-            projection: Some(Projection::Include(proj_fields([
-            ("field1", proj_field()),
-            ("field2", proj_field()),
+            projection: Some(include(proj_fields([
+                ("field1", proj_field()),
+                ("field2", proj_field()),
             ]))),
-            filter: Some(Expr::Comparison {
-                operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(0)),
-            }),
-            sort: Some(vec![SortField {
+            filter: Some(field_filters(field(["a"]), [eq(placeholder(0))])),
+            sort: Some(Arc::new(vec![SortField {
                 field: field(["a"]),
                 order: SortOrder::Ascending,
-            }]),
+            }])),
         };
         check_serialization_round_trip(plan);
 
@@ -285,13 +295,10 @@ mod tests {
                 operator: ComparisonOperator::Eq,
                 value: Arc::new(Expr::Placeholder(0)),
             }))
-            .project(Projection::Include(proj_fields([
+            .project(include(proj_fields([
                 ("a", proj_field()),
             ])))
-            .sort(vec![SortField {
-                field: field(["b"]),
-                order: SortOrder::Descending,
-            }])
+            .sort(Arc::new(vec!(sort_asc(field(["b"])))))
             .limit(Some(10), Some(20))
             .build();
 

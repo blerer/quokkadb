@@ -4,7 +4,7 @@ use crate::obs::metrics::{DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
-use crate::storage::catalog::CollectionMetadata;
+use crate::storage::catalog::{Catalog, CollectionMetadata};
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
 use crate::storage::internal_key::encode_record_key;
@@ -287,7 +287,7 @@ impl StorageEngine {
     }
 
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> Result<u32> {
-        let collection = self.get_collection(name);
+        let collection = self.catalog().get_collection(name);
 
         if let Some(collection) = collection {
             Ok(collection.id)
@@ -316,6 +316,11 @@ impl StorageEngine {
     pub fn get_collection(&self, name: &str) -> Option<Arc<CollectionMetadata>> {
         let lsm_tree = self.lsm_tree.load();
         lsm_tree.catalogue().get_collection(name)
+    }
+
+    pub fn catalog(&self) -> Arc<Catalog> {
+        let lsm_tree = self.lsm_tree.load();
+        lsm_tree.catalogue().clone()
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch) -> Result<()> {

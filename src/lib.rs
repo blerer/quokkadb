@@ -39,7 +39,7 @@ impl QuokkaDB {
         let logger = Arc::new(NoOpLogger::default());
         let mut metric_registry = MetricRegistry::new();
         let storage_engine = StorageEngine::new(logger, &mut metric_registry, options.clone(), path)?;
-        let optimizer = Arc::new(Optimizer::new(vec![])); // Add normalization rules as needed
+        let optimizer = Arc::new(Optimizer::new()); // Add normalization rules as needed
         let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
         let db_impl = Arc::new(DbImpl {
             optimizer,
@@ -83,7 +83,8 @@ impl DbImpl {
         // Checks the statement cache for the physical plan
 
         // If the plan is not cached, optimize it
-        let physical_plan = self.optimizer.optimize(logical_plan);
+        let catalog = self.storage_engine.catalog();
+        let physical_plan = self.optimizer.optimize(logical_plan, catalog);
 
         self.executor.execute_cached(physical_plan, parameters)
     }

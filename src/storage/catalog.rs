@@ -116,27 +116,6 @@ impl CollectionMetadata {
             indexes,
         }
     }
-
-    fn read_indexes_from<B: AsRef<[u8]>>(
-        reader: &ByteReader<B>,
-    ) -> std::io::Result<BTreeMap<String, Arc<IndexMetadata>>> {
-        let size = reader.read_varint_u64()? as usize;
-        let mut indexes = BTreeMap::new();
-        for _ in 0..size {
-            let str = reader.read_str()?.to_string();
-            let index = Arc::new(IndexMetadata::read_from(reader)?);
-            indexes.insert(str, index);
-        }
-        Ok(indexes)
-    }
-
-    fn write_indexes_to(&self, writer: &mut ByteWriter) {
-        writer.write_varint_u32(self.indexes.len() as u32);
-        self.indexes.iter().for_each(|(str, idx)| {
-            writer.write_str(str);
-            idx.write_to(writer)
-        });
-    }
 }
 
 impl Serializable for CollectionMetadata {
@@ -144,7 +123,7 @@ impl Serializable for CollectionMetadata {
         let next_index_id = reader.read_varint_u32()?;
         let id = reader.read_varint_u64()? as u32;
         let name = reader.read_str()?.to_string();
-        let indexes = Self::read_indexes_from(reader)?;
+        let indexes = BTreeMap::<String, Arc<IndexMetadata>>::read_from(reader)?;
 
         Ok(CollectionMetadata {
             next_index_id,
@@ -158,7 +137,7 @@ impl Serializable for CollectionMetadata {
         writer.write_varint_u32(self.next_index_id);
         writer.write_varint_u32(self.id);
         writer.write_str(&self.name);
-        self.write_indexes_to(writer);
+        self.indexes.write_to(writer);
     }
 }
 

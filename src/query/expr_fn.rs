@@ -1,4 +1,4 @@
-use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, ProjectionExpr};
+use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, Projection, ProjectionExpr, SortField, SortOrder};
 use std::sync::Arc;
 
 pub fn field<T, U>(name: T) -> Arc<Expr>
@@ -70,6 +70,13 @@ pub fn lte(bson_value: Arc<Expr>) -> Arc<Expr> {
 pub fn within(bson_value: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Comparison {
         operator: ComparisonOperator::In,
+        value: bson_value,
+    })
+}
+
+pub fn nin(bson_value: Arc<Expr>) -> Arc<Expr> {
+    Arc::new(Expr::Comparison {
+        operator: ComparisonOperator::Nin,
         value: bson_value,
     })
 }
@@ -158,6 +165,21 @@ where
     Arc::new(ProjectionExpr::ArrayElements {
         children: children.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     })
+}
+
+pub fn include(proj_expr: Arc<ProjectionExpr>) -> Arc<Projection> {
+    Arc::new(Projection::Include(proj_expr))
+}
+
+pub fn exclude(proj_expr: Arc<ProjectionExpr>) -> Arc<Projection> {
+    Arc::new(Projection::Exclude(proj_expr))
+}
+
+pub fn sort_asc(field: Arc<Expr>) ->SortField {
+    SortField {
+        field,
+        order: SortOrder::Ascending,
+    }
 }
 
 

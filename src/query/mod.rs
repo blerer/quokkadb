@@ -23,7 +23,7 @@ mod tree_node;
 #[cfg(test)]
 pub(crate) mod expr_fn;
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Expr {
     /// Field reference
     Field(Vec<PathComponent>),
@@ -182,7 +182,18 @@ impl Expr {
             }),
             Expr::AlwaysTrue => Arc::new(Expr::AlwaysFalse),
             Expr::AlwaysFalse => Arc::new(Expr::AlwaysTrue),
-            _ => Arc::new(self.clone()),
+            Expr::Literal(bson) => {
+                if let BsonValue(Bson::Boolean(b)) = bson {
+                    if *b {
+                        Arc::new(Expr::Literal(false.into()))
+                    } else {
+                        Arc::new(Expr::Literal(true.into()))
+                    }
+                } else {
+                    Arc::new(Expr::Not(Arc::new(self.clone())))
+                }
+            }
+            _ => Arc::new(Expr::Not(Arc::new(self.clone())))
         }
     }
 }
@@ -467,6 +478,38 @@ impl ProjectionExpr {
     }
 }
 
+impl TreeNode for ProjectionExpr {
+    type Child = ProjectionExpr;
+
+    fn children(&self) -> Vec<Arc<Self>> {
+        match self {
+            ProjectionExpr::Fields { children } |
+            ProjectionExpr::ArrayElements { children } => {
+                children.values().cloned().collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self>>) -> Arc<Self> {
+        match self.as_ref() {
+            ProjectionExpr::Fields { children: old } => {
+                if old.is_empty() { return self; }
+                assert_eq!(old.len(), children.len(), "child count mismatch");
+                let new_map = old.keys().cloned().zip(children.into_iter()).collect();
+                Arc::new(ProjectionExpr::Fields { children: new_map })
+            }
+            ProjectionExpr::ArrayElements { children: old } => {
+                if old.is_empty() { return self; }
+                assert_eq!(old.len(), children.len(), "child count mismatch");
+                let new_map = old.keys().cloned().zip(children.into_iter()).collect();
+                Arc::new(ProjectionExpr::ArrayElements { children: new_map })
+            }
+            _ => self, // leaves
+        }
+    }
+}
+
 impl Serializable for ProjectionExpr {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
@@ -604,7 +647,7 @@ pub fn make_sort_field(path: Vec<crate::query::PathComponent>, order: SortOrder)
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ComparisonOperator {
     Eq,  // `$eq`
     Ne,  // `$ne`

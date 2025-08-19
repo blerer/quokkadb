@@ -13,6 +13,8 @@ use crate::storage::Direction;
 /// plan describes *how* to get it.
 #[derive(Debug)]
 pub enum PhysicalPlan {
+    /// A no-operation plan that does nothing. This is used when it is possible to determine that the query will do nothing.
+    NoOp,
     /// Scans a collection, optionally over a specific range of primary keys.
     CollectionScan {
         /// The identifier for the collection.
