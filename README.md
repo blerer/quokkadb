@@ -1,3 +1,7 @@
+<p style="text-align: left;">
+  <img src="assets/logo.png" alt="QuokkaDB Logo" width="300"/>
+</p>
+
 # QuokkaDB
 
 A high-performance, document-oriented database engine written in Rust.
@@ -53,14 +57,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get a collection. This will create it if it doesn't exist.
     let collection = db.collection("my_collection");
 
-    // The API for inserting documents is not available in the provided code snippets.
-    // The following is an assumption of how it might work.
-    // let doc_to_insert = doc! {
-    //     "name": "Quokka",
-    //     "continent": "Australia",
-    //     "cuteness_level": 9001,
-    // };
-    // collection.insert_one(doc_to_insert)?;
+    // Insert a document
+    let doc_to_insert = doc! {
+        "name": "Quokka",
+        "continent": "Australia",
+        "cuteness_level": 9001,
+    };
+    collection.insert_one(doc_to_insert)?;
 
     // Find documents
     let filter = doc! { "cuteness_level": { "$gt": 9000 } };
@@ -118,4 +121,4 @@ Contributions are welcome! Please feel free to submit a pull request.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Apache-2.0 License](LICENSE).
