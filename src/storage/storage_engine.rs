@@ -313,11 +313,6 @@ impl StorageEngine {
         }
     }
 
-    pub fn get_collection(&self, name: &str) -> Option<Arc<CollectionMetadata>> {
-        let lsm_tree = self.lsm_tree.load();
-        lsm_tree.catalogue().get_collection(name)
-    }
-
     pub fn catalog(&self) -> Arc<Catalog> {
         let lsm_tree = self.lsm_tree.load();
         lsm_tree.catalogue().clone()
@@ -812,7 +807,8 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanRe
     })
 }
 
-pub struct Writer {
+#[allow(dead_code)]
+struct Writer {
     write_batch: WriteBatch,
     result: Mutex<Option<Result<()>>>,
     condvar: Condvar,
@@ -978,8 +974,6 @@ mod tests {
         let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
 
         let _ = &engine.write(WriteBatch::new(vec![delete_op(col, 4)])).unwrap();
-
-        let snapshot2 = engine.last_visible_seq.load(Ordering::Relaxed);
 
         assert_gauge_eq(registry, "sstable_count", 0);
         assert_gauge_eq(registry, "sstable_count_level_0", 0);

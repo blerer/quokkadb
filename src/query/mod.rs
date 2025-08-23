@@ -672,20 +672,6 @@ impl ComparisonOperator {
             ComparisonOperator::Nin => ComparisonOperator::In,
         }
     }
-
-    /// Converts a `ComparisonOperator` to a MongoDB-style string (`$eq`, `$gt`, etc.)
-    fn to_string(&self) -> String {
-        match self {
-            ComparisonOperator::Eq => "$eq".to_string(),
-            ComparisonOperator::Ne => "$ne".to_string(),
-            ComparisonOperator::Gt => "$gt".to_string(),
-            ComparisonOperator::Gte => "$gte".to_string(),
-            ComparisonOperator::Lt => "$lt".to_string(),
-            ComparisonOperator::Lte => "$lte".to_string(),
-            ComparisonOperator::In => "$in".to_string(),
-            ComparisonOperator::Nin => "$nin".to_string(),
-        }
-    }
 }
 
 impl Serializable for ComparisonOperator {
@@ -988,7 +974,7 @@ mod tests {
     use super::*;
     use crate::io::byte_writer::ByteWriter;
     use crate::io::serializable::check_serialization_round_trip;
-    use bson::{doc, Bson, Document, Regex};
+    use bson::{doc, Bson, Regex};
     use crate::query::expr_fn::*;
 
     #[test]

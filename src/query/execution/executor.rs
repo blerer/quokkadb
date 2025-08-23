@@ -94,7 +94,7 @@ impl QueryExecutor {
     }
 
     /// Executes the given physical plan.
-    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: Parameters) -> Result<QueryOutput> {
+    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: &Parameters) -> Result<QueryOutput> {
         match plan.as_ref() {
             PhysicalPlan::CollectionScan {
                 collection,
@@ -157,13 +157,21 @@ impl QueryExecutor {
                 Ok(iter)
             }
             PhysicalPlan::IndexScan {
-                collection,
-                index,
-                start ,
-                end,
+                collection: _,
+                index: _,
+                start: _,
+                end: _,
                 projection: _,
             } => {
                 todo!()
+            }
+            PhysicalPlan::Union { inputs } => {
+                let mut iter: QueryOutput = Box::new(std::iter::empty());
+                for input in inputs {
+                    let input_iter = self.execute_cached(input.clone(), parameters)?;
+                    iter = Box::new(iter.chain(input_iter));
+                }
+                Ok(iter)
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), &parameters);
@@ -238,15 +246,6 @@ impl QueryExecutor {
         Ok(start)
     }
 
-    fn bind_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<BsonValue>> {
-        let start = match start {
-            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters)),
-            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        Ok(start)
-    }
-
     fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result<Vec<u8>> {
         if let Expr::Placeholder(idx) = expr {
             Ok(parameters.get(*idx).try_into_key()?)
@@ -306,7 +305,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
 
-        let mut point_search_result = executor.execute_cached(point_search_plan, params)?;
+        let mut point_search_result = executor.execute_cached(point_search_plan, &params)?;
         let found_doc1 = point_search_result.next().unwrap()?;
         assert!(point_search_result.next().is_none());
 
@@ -339,7 +338,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
 
-        let scan_results = executor.execute_cached(scan_plan, Parameters::new())?;
+        let scan_results = executor.execute_cached(scan_plan, &Parameters::new())?;
         let mut found_docs: Vec<Document> = scan_results.collect::<Result<Vec<_>>>()?;
 
         // The order of results from scan is based on key order.
@@ -411,7 +410,7 @@ use crate::storage::test_utils::storage_engine;
             key: (*key_expr_non_exist).clone(),
             projection: None,
         });
-        let mut result_non_exist = executor.execute_cached(plan_non_exist, params_non_exist)?;
+        let mut result_non_exist = executor.execute_cached(plan_non_exist, &params_non_exist)?;
         assert!(
             result_non_exist.next().is_none(),
             "PointSearch for non-existent key should be empty"
@@ -432,7 +431,7 @@ use crate::storage::test_utils::storage_engine;
             key: (*key_expr_deleted).clone(),
             projection: None,
         });
-        let mut result_deleted = executor.execute_cached(plan_deleted, params_deleted)?;
+        let mut result_deleted = executor.execute_cached(plan_deleted, &params_deleted)?;
         assert!(
             result_deleted.next().is_none(),
             "PointSearch for deleted key should be empty"
@@ -449,7 +448,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
         let mut result_scan_outside =
-            executor.execute_cached(plan_scan_outside, params_scan_outside)?;
+            executor.execute_cached(plan_scan_outside, &params_scan_outside)?;
         assert!(
             result_scan_outside.next().is_none(),
             "Scan for range outside data should be empty"
@@ -467,7 +466,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
         let mut result_scan_partial =
-            executor.execute_cached(plan_scan_partial, params_scan_partial)?;
+            executor.execute_cached(plan_scan_partial, &params_scan_partial)?;
         let found_doc = result_scan_partial.next().unwrap()?;
         assert_eq!(found_doc, doc2.clone());
         assert!(
@@ -487,7 +486,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
         let mut result_unbounded_start =
-            executor.execute_cached(plan_scan_unbounded_start, params_scan_unbounded_start)?;
+            executor.execute_cached(plan_scan_unbounded_start, &params_scan_unbounded_start)?;
         let found_doc_unbounded_start = result_unbounded_start.next().unwrap()?;
         assert_eq!(found_doc_unbounded_start, doc1.clone());
         assert!(
@@ -507,7 +506,7 @@ use crate::storage::test_utils::storage_engine;
             projection: None,
         });
         let mut result_unbounded_end =
-            executor.execute_cached(plan_scan_unbounded_end, params_scan_unbounded_end)?;
+            executor.execute_cached(plan_scan_unbounded_end, &params_scan_unbounded_end)?;
         let found_doc_unbounded_end = result_unbounded_end.next().unwrap()?;
         assert_eq!(found_doc_unbounded_end, doc3.clone());
         assert!(
@@ -523,7 +522,7 @@ use crate::storage::test_utils::storage_engine;
             direction: Direction::Reverse,
             projection: None,
         });
-        let result_scan_reverse = executor.execute_cached(plan_scan_reverse, Parameters::new())?;
+        let result_scan_reverse = executor.execute_cached(plan_scan_reverse, &Parameters::new())?;
         let found_docs_reverse: Vec<Document> = result_scan_reverse.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_reverse.len(), 3);
         assert_eq!(found_docs_reverse[0], doc3.clone());
@@ -573,7 +572,7 @@ use crate::storage::test_utils::storage_engine;
             skip: None,
             limit: Some(3),
         });
-        let results = executor.execute_cached(limit_plan, Parameters::new())?;
+        let results = executor.execute_cached(limit_plan, &Parameters::new())?;
         let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs.len(), 3);
         assert_eq!(found_docs[0].get_i32("_id").unwrap(), 1);
@@ -586,7 +585,7 @@ use crate::storage::test_utils::storage_engine;
             skip: Some(2),
             limit: None,
         });
-        let results_skip = executor.execute_cached(limit_plan_skip, Parameters::new())?;
+        let results_skip = executor.execute_cached(limit_plan_skip, &Parameters::new())?;
         let found_docs_skip: Vec<Document> = results_skip.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_skip.len(), 3);
         assert_eq!(found_docs_skip[0].get_i32("_id").unwrap(), 3);
@@ -599,7 +598,7 @@ use crate::storage::test_utils::storage_engine;
             skip: Some(1),
             limit: Some(2),
         });
-        let results_both = executor.execute_cached(limit_plan_both, Parameters::new())?;
+        let results_both = executor.execute_cached(limit_plan_both, &Parameters::new())?;
         let found_docs_both: Vec<Document> = results_both.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_both.len(), 2);
         assert_eq!(found_docs_both[0].get_i32("_id").unwrap(), 2);
@@ -611,7 +610,7 @@ use crate::storage::test_utils::storage_engine;
             skip: None,
             limit: Some(10),
         });
-        let results_large = executor.execute_cached(limit_plan_large, Parameters::new())?;
+        let results_large = executor.execute_cached(limit_plan_large, &Parameters::new())?;
         let found_docs_large: Vec<Document> = results_large.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_large.len(), 5);
 
@@ -622,7 +621,7 @@ use crate::storage::test_utils::storage_engine;
             limit: None,
         });
         let results_skip_large =
-            executor.execute_cached(limit_plan_skip_large, Parameters::new())?;
+            executor.execute_cached(limit_plan_skip_large, &Parameters::new())?;
         let found_docs_skip_large: Vec<Document> =
             results_skip_large.collect::<Result<Vec<_>>>()?;
         assert!(found_docs_skip_large.is_empty());
@@ -633,7 +632,7 @@ use crate::storage::test_utils::storage_engine;
             skip: None,
             limit: Some(0),
         });
-        let results_zero = executor.execute_cached(limit_plan_zero, Parameters::new())?;
+        let results_zero = executor.execute_cached(limit_plan_zero, &Parameters::new())?;
         let found_docs_zero: Vec<Document> = results_zero.collect::<Result<Vec<_>>>()?;
         assert!(found_docs_zero.is_empty());
 
@@ -643,7 +642,7 @@ use crate::storage::test_utils::storage_engine;
             skip: Some(3),
             limit: Some(5), // limit is larger than remaining items
         });
-        let results_edge = executor.execute_cached(limit_plan_edge, Parameters::new())?;
+        let results_edge = executor.execute_cached(limit_plan_edge, &Parameters::new())?;
         let found_docs_edge: Vec<Document> = results_edge.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_edge.len(), 2);
         assert_eq!(found_docs_edge[0].get_i32("_id").unwrap(), 4);
@@ -657,7 +656,7 @@ use crate::storage::test_utils::storage_engine;
         plan: Arc<PhysicalPlan>,
         expected_ids: &[i32],
     ) -> Result<()> {
-        let results = executor.execute_cached(plan, Parameters::new())?;
+        let results = executor.execute_cached(plan, &Parameters::new())?;
         let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
         let found_ids: Vec<i32> = found_docs
             .iter()
@@ -770,7 +769,7 @@ use crate::storage::test_utils::storage_engine;
             predicate: filter_expr,
         });
 
-        let results = executor.execute_cached(filter_plan, parameters)?;
+        let results = executor.execute_cached(filter_plan, &parameters)?;
         let mut found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
         found_docs.sort_by_key(|d| d.get_i32("_id").unwrap());
 
@@ -1033,7 +1032,7 @@ use crate::storage::test_utils::storage_engine;
                 projection: Arc::new(projection),
             });
 
-            let results = executor.execute_cached(projection_plan, parameters)?;
+            let results = executor.execute_cached(projection_plan, &parameters)?;
             let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
             assert_eq!(found_docs.len(), 1);
             assert_eq!(

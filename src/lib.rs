@@ -86,6 +86,6 @@ impl DbImpl {
         let catalog = self.storage_engine.catalog();
         let physical_plan = self.optimizer.optimize(logical_plan, catalog);
 
-        self.executor.execute_cached(physical_plan, parameters)
+        self.executor.execute_cached(physical_plan, &parameters)
     }
 }

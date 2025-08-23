@@ -3,8 +3,6 @@ use crate::query::physical_plan::PhysicalPlan;
 use crate::query::tree_node::TreeNode;
 use crate::query::{Expr, Parameters, Projection, SortField};
 use crate::storage::catalog::Catalog;
-use crate::storage::Direction;
-use std::ops::Bound;
 use std::sync::Arc;
 use crate::query::optimizer::normalization_rules;
 
@@ -156,6 +154,7 @@ impl Optimizer {
         let node_cost = self.cost_estimator.estimate_node_cost(plan);
 
         let input_cost: Cost = match plan {
+            PhysicalPlan::Union { inputs } => inputs.iter().map(|input| self.get_plan_cost(input)).sum(),
             PhysicalPlan::Filter { input, .. }
             | PhysicalPlan::Projection { input, .. }
             | PhysicalPlan::InMemorySort { input, .. }
