@@ -1,8 +1,8 @@
-use crate::query::logical_plan::LogicalPlan;
+use crate::query::logical_plan::{transform_up_filter, LogicalPlan};
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::tree_node::TreeNode;
 use crate::query::{Expr, Parameters, Projection, SortField};
-use crate::storage::catalog::Catalog;
+use crate::storage::catalog::{Catalog, IndexMetadata};
 use std::sync::Arc;
 use crate::query::optimizer::normalization_rules;
 
@@ -173,6 +173,20 @@ impl Optimizer {
         node_cost + input_cost
     }
 
+    pub fn enumerate_access_paths(
+        &self,
+        filter: &Option<Arc<Expr>>,
+        indexes: Vec<Arc<IndexMetadata>>,
+    ) -> Vec<Arc<PhysicalPlan>> {
+        // This function is a placeholder for future access path enumeration logic
+        vec![]
+    }
+
+    pub fn sargable_predicate(&self, expr: &Expr, index: &IndexMetadata) -> bool {
+        // This function is a placeholder for future sargable predicate logic
+        false
+    }
+
     pub fn normalize(&self, plan: LogicalPlan) -> Arc<LogicalPlan> {
         let mut current_plan = Arc::new(plan);
         for rule in &self.normalization_rules {
@@ -185,25 +199,13 @@ impl Optimizer {
         use std::cell::RefCell;
 
         let parameters = RefCell::new(Parameters::new());
-        let plan = plan.transform_up(&|node: Arc<LogicalPlan>|
-            match node.as_ref() {
-                LogicalPlan::Filter { input, condition } => {
-                    let expr = condition.clone().transform_up(&|c| {
-                        Optimizer::parametrize_expr(c, &mut parameters.borrow_mut())
-                    });
-                    Arc::new(LogicalPlan::Filter {
-                        input: input.clone(),
-                        condition: expr,
-                    })
-                },
-                _ => node,
-            });
+        let plan = transform_up_filter(plan, &|c| {
+            Optimizer::parametrize_expr(c, &mut parameters.borrow_mut())
+        });
         (plan, parameters.into_inner())
     }
 
     fn parametrize_expr(expr: Arc<Expr>, params: &mut Parameters) -> Arc<Expr> {
-        // This function is a placeholder for future parameterization logic
-        // Currently, it just returns the input expression unchanged
         match expr.as_ref() {
             Expr::Literal(value) => {
                 // If the expression is a literal, we can parameterize it

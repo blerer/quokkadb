@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::query::{Expr, Projection, SortField};
+use crate::query::{Expr, Projection, ProjectionExpr, SortField};
 use crate::query::tree_node::TreeNode;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
@@ -262,6 +262,167 @@ impl LogicalPlanBuilder {
     /// Finalizes the build process and returns the `LogicalPlan`.
     pub fn build(self) -> Arc<LogicalPlan> {
         Arc::new(self.plan)
+    }
+}
+
+/// Transforms the logical plan in a bottom-up way by applying a function to all filter expressions,
+/// including those nested within projection expressions.
+pub fn transform_up_filter<F>(plan: Arc<LogicalPlan>, function: F) -> Arc<LogicalPlan>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    plan.transform_up(&|node: Arc<LogicalPlan>| match node.as_ref() {
+        LogicalPlan::Filter { input, condition } => {
+            let expr = condition.clone().transform_up(&|c| function(c));
+            Arc::new(LogicalPlan::Filter {
+                input: input.clone(),
+                condition: expr,
+            })
+        }
+        LogicalPlan::Projection { input, projection } => {
+            let projection = transform_up_projection(&projection, &function);
+            Arc::new(LogicalPlan::Projection {
+                input: input.clone(),
+                projection,
+            })
+        }
+        LogicalPlan::CollectionScan { collection, projection, filter, sort } => {
+            if filter.is_none() && projection.is_none() {
+                return node;
+            }
+
+            let filter = if let Some(filter) = filter {
+                Some(filter.clone().transform_up(&|c| function(c)))
+            } else {
+                None
+            };
+
+            let projection = if let Some(projection) = projection {
+                Some(transform_up_projection(&projection, &function))
+            } else {
+                None
+            };
+
+            Arc::new(LogicalPlan::CollectionScan {
+                collection: *collection,
+                projection,
+                filter,
+                sort: sort.clone(),
+            })
+        },
+        _ => node,
+    })
+}
+
+fn transform_up_projection<F>(projection: &&Arc<Projection>, function: &F) -> Arc<Projection>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
+{
+    let projection = Arc::new(match projection.as_ref() {
+        Projection::Include(proj_exprs) => {
+            let new_projection = transform_up_proj_expr_filters(&function, &proj_exprs);
+            Projection::Include(new_projection)
+        }
+        Projection::Exclude(proj_exprs) => {
+            let new_projection = transform_up_proj_expr_filters(&function, &proj_exprs);
+            Projection::Exclude(new_projection)
+        }
+    });
+    projection
+}
+
+fn transform_up_proj_expr_filters<F>(function: F, proj_exprs: &Arc<ProjectionExpr>) -> Arc<ProjectionExpr>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    proj_exprs.clone().transform_up(&|c| transform_up_proj_elem_match_filter(c, function.clone()))
+}
+
+fn transform_up_proj_elem_match_filter<F>(
+    proj_expr: Arc<ProjectionExpr>,
+    function: F,
+) -> Arc<ProjectionExpr>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    match proj_expr.as_ref() {
+        ProjectionExpr::ElemMatch { filter } => {
+            let new_expr = filter.clone().transform_up(&|c| function(c));
+            Arc::new(ProjectionExpr::ElemMatch{ filter: new_expr })
+        }
+        _ => proj_expr.clone(),
+    }
+}
+
+/// Transforms the logical plan in a top-down way by applying a function to all filter expressions,
+/// including those nested within projection expressions.
+pub fn transform_down_filter<F>(plan: Arc<LogicalPlan>, function: F) -> Arc<LogicalPlan>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    plan.transform_down(&|node: Arc<LogicalPlan>| {
+        match node.as_ref() {
+            LogicalPlan::Filter { input, condition } => {
+                let expr = condition.clone().transform_down(&function);
+                Arc::new(LogicalPlan::Filter {
+                    input: input.clone(),
+                    condition: expr,
+                })
+            }
+            LogicalPlan::Projection { input, projection } => {
+                let projection = transform_down_projection(&function, &projection);
+                Arc::new(LogicalPlan::Projection {
+                    input: input.clone(),
+                    projection,
+                })
+            }
+            _ => node.clone(),
+        }
+    })
+}
+
+fn transform_down_projection<F>(function: &F, projection: &&Arc<Projection>) -> Arc<Projection>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
+{
+    let projection = Arc::new(match projection.as_ref() {
+        Projection::Include(proj_exprs) => {
+            let new_projection = transform_down_proj_expr_filters(&function, proj_exprs);
+            Projection::Include(new_projection)
+        }
+        Projection::Exclude(proj_exprs) => {
+            let new_projection = transform_down_proj_expr_filters(&function, proj_exprs);
+            Projection::Exclude(new_projection)
+        }
+    });
+    projection
+}
+
+fn transform_down_proj_expr_filters<F>(
+    function: &F,
+    proj_exprs: &Arc<ProjectionExpr>,
+) -> Arc<ProjectionExpr>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    proj_exprs
+        .clone()
+        .transform_down(&|c| transform_down_proj_elem_match_filter(c, function))
+}
+
+fn transform_down_proj_elem_match_filter<F>(
+    proj_expr: Arc<ProjectionExpr>,
+    function: &F,
+) -> Arc<ProjectionExpr>
+where
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+{
+    match proj_expr.as_ref() {
+        ProjectionExpr::ElemMatch { filter } => {
+            let new_expr = filter.clone().transform_down(function);
+            Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
+        }
+        _ => proj_expr.clone(),
     }
 }
 
