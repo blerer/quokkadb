@@ -3,6 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use crate::io::serializable::Serializable;
+use crate::storage::Direction;
 
 /// The `Catalog` maintains the mapping from collection names to their metadata.
 ///
@@ -141,6 +142,32 @@ impl Serializable for CollectionMetadata {
     }
 }
 
+/// Specifies the ordering of an index field.
+#[derive(Debug, PartialEq)]
+pub enum Order {
+    Ascending,
+    Descending,
+}
+
+impl Serializable for Order {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+        let byte = reader.read_u8()?;
+        match byte {
+            0 => Ok(Order::Ascending),
+            1 => Ok(Order::Descending),
+            _ => panic!("Invalid Order byte: {}", byte),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        let byte = match self {
+            Order::Ascending => 0,
+            Order::Descending => 1,
+        };
+        writer.write_u8(byte);
+    }
+}
+
 /// Describes a single index within a collection.
 #[derive(Debug, PartialEq)]
 pub struct IndexMetadata {
@@ -148,18 +175,22 @@ pub struct IndexMetadata {
     id: u32,
     /// Name of the index (e.g., "by_name").
     name: String,
+    /// List of fields and their orderings that comprise the index.
+    fields: Vec<(String, Order)>,
 }
 
 impl Serializable for IndexMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let id = reader.read_varint_u32()?;
         let name = reader.read_str()?.to_string();
-        Ok(IndexMetadata { id, name })
+        let fields = Vec::<(String, Order)>::read_from(reader)?;
+        Ok(IndexMetadata { id, name, fields })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         writer.write_varint_u32(self.id);
         writer.write_str(&self.name);
+        let _ = &self.fields.write_to(writer);
     }
 }
 
@@ -173,6 +204,10 @@ mod tests {
         check_serialization_round_trip(IndexMetadata {
             id: 11,
             name: "by_name".to_string(),
+            fields: vec![
+                ("name".to_string(), Order::Ascending),
+                ("age".to_string(), Order::Descending),
+            ],
         });
     }
 
@@ -186,10 +221,17 @@ mod tests {
             .add_index(IndexMetadata {
                 id: 0,
                 name: "by_name".to_string(),
+                fields: vec![
+                    ("name".to_string(), Order::Ascending),
+                    ("age".to_string(), Order::Descending),
+                ],
             })
             .add_index(IndexMetadata {
                 id: 1,
                 name: "by_price".to_string(),
+                fields: vec![
+                    ("price".to_string(), Order::Ascending),
+                ],
             })
     }
 }

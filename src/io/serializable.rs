@@ -142,6 +142,23 @@ where
     }
 }
 
+impl<S, T> Serializable for (S, T)
+where
+    S: Serializable,
+    T: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+        let s = S::read_from(reader)?;
+        let t = T::read_from(reader)?;
+        Ok((s, t))
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        self.0.write_to(writer);
+        self.1.write_to(writer);
+    }
+}
+
 #[cfg(test)]
 pub fn check_serialization_round_trip<T>(element: T)
 where
