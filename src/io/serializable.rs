@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
+use std::ops::Bound;
 use std::sync::Arc;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
@@ -69,7 +70,7 @@ where
         } else if presence == 0 {
             Ok(None)
         } else {
-            Err(Error::new(ErrorKind::InvalidData, "Invalid option presence byte"))
+            panic!("Invalid option presence byte")
         }
     }
 
@@ -147,7 +148,7 @@ where
     S: Serializable,
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let s = S::read_from(reader)?;
         let t = T::read_from(reader)?;
         Ok((s, t))
@@ -156,6 +157,37 @@ where
     fn write_to(&self, writer: &mut ByteWriter) {
         self.0.write_to(writer);
         self.1.write_to(writer);
+    }
+}
+
+impl<T> Serializable for Bound<T>
+where
+    T: Serializable,
+{
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let bound_type = reader.read_u8()?;
+        match bound_type {
+            0 => Ok(Bound::Unbounded),
+            1 => Ok(Bound::Included(T::read_from(reader)?)),
+            2 => Ok(Bound::Excluded(T::read_from(reader)?)),
+            _ => panic!("Invalid Bound type"),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            Bound::Unbounded => {
+                writer.write_u8(0);
+            }
+            Bound::Included(value) => {
+                writer.write_u8(1);
+                value.write_to(writer);
+            }
+            Bound::Excluded(value) => {
+                writer.write_u8(2);
+                value.write_to(writer);
+            }
+        }
     }
 }
 

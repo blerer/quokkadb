@@ -2,6 +2,7 @@ use crate::query::logical_plan::{transform_down_filter, transform_up_filter, Log
 use crate::query::{ComparisonOperator, Expr, ProjectionExpr};
 use crate::query::optimizer::optimizer::NormalisationRule;
 use crate::query::tree_node::TreeNode;
+use crate::util::interval::Interval;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ pub fn all_normalization_rules() -> Vec<Arc<dyn NormalisationRule>> {
         Arc::new(DeMorganNorToAnd {}),
         Arc::new(PushDownNotExpressions {}),
         Arc::new(SimplifyLogicalOperators {}),
+        Arc::new(CombineComparisonsToInterval {}),
         Arc::new(EliminateRedundantFilter {}),
         Arc::new(PushDownFiltersToScan {}),
     ]
@@ -113,17 +115,40 @@ impl SimplifyLogicalOperators {
             }
         }
 
-        // Apply constant folding, deduplication, and contradiction detection
-        let mut result: Vec<Arc<Expr>> = Vec::new();
-        let mut seen: HashSet<Arc<Expr>> = HashSet::new();
+        // Group FieldFilters by field and collect other expressions.
+        let mut field_filters_map: HashMap<Arc<Expr>, Vec<Arc<Expr>>> = HashMap::new();
+        let mut other_exprs: Vec<Arc<Expr>> = Vec::new();
 
         for e in flattened {
             match e.as_ref() {
                 Expr::AlwaysTrue => continue, // Drop TRUE
                 Expr::AlwaysFalse => return Arc::new(Expr::AlwaysFalse), // A AND FALSE => FALSE
-                _ => {}
+                Expr::FieldFilters { field, filters } => {
+                    field_filters_map
+                        .entry(field.clone())
+                        .or_default()
+                        .extend(filters.clone());
+                }
+                _ => other_exprs.push(e),
             }
+        }
 
+        // Reconstruct expressions, with merged FieldFilters
+        let mut result = other_exprs;
+        for (field, filters) in field_filters_map {
+            if !filters.is_empty() {
+                result.push(Arc::new(Expr::FieldFilters {
+                    field,
+                    filters,
+                }));
+            }
+        }
+
+        // Apply deduplication and contradiction detection
+        let mut final_result: Vec<Arc<Expr>> = Vec::new();
+        let mut seen: HashSet<Arc<Expr>> = HashSet::new();
+
+        for e in result {
             let neg = e.negate();
             if seen.contains(&neg) {
                 // A AND NOT A => FALSE
@@ -132,15 +157,15 @@ impl SimplifyLogicalOperators {
 
             if seen.insert(e.clone()) {
                 // Keep first occurrence only (remove duplicates)
-                result.push(e);
+                final_result.push(e);
             }
         }
         // Sort the result to ensure consistent ordering (important when comparing queries shape
-        result.sort();
-        match result.len() {
+        final_result.sort();
+        match final_result.len() {
             0 => Arc::new(Expr::AlwaysTrue), // AND() == TRUE
-            1 => result.remove(0),
-            _ => Arc::new(Expr::And(result)),
+            1 => final_result.remove(0),
+            _ => Arc::new(Expr::And(final_result)),
         }
     }
 
@@ -221,6 +246,83 @@ impl SimplifyLogicalOperators {
     }
 }
 
+/// Normalization rule to combine multiple range/equality comparisons on the same field
+/// into a single interval expression.
+pub struct CombineComparisonsToInterval;
+
+impl NormalisationRule for CombineComparisonsToInterval {
+    fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
+        transform_up_filter(plan, &|expr| Self::combine_comparisons_to_interval(expr))
+    }
+}
+
+impl CombineComparisonsToInterval {
+    fn combine_comparisons_to_interval(expr: Arc<Expr>) -> Arc<Expr> {
+        if let Expr::FieldFilters { field, filters } = expr.as_ref() {
+            let mut combined_interval: Interval<Arc<Expr>> = Interval::all();
+            let mut other_filters = Vec::new();
+            let mut comparisons_found = false;
+
+            for f in filters.iter() {
+                if let Expr::Comparison { operator, value } = f.as_ref() {
+                    if !matches!(value.as_ref(), Expr::Literal(_)) {
+                        other_filters.push(f.clone());
+                        continue;
+                    }
+
+                    let interval = match operator {
+                        // We convert only the operators that are shape stable. Even if $in, $nin and $ne
+                        // could be converted to a set of intervals, converting them would lead to a combinatorial explosion
+                        // of shapes.
+                        ComparisonOperator::Eq => {
+                            Some(Interval::closed(value.clone(), value.clone()))
+                        }
+                        ComparisonOperator::Gt => Some(Interval::greater_than(value.clone())),
+                        ComparisonOperator::Gte => Some(Interval::at_least(value.clone())),
+                        ComparisonOperator::Lt => Some(Interval::less_than(value.clone())),
+                        ComparisonOperator::Lte => Some(Interval::at_most(value.clone())),
+                        _ => None,
+                    };
+
+                    if let Some(interval) = interval {
+                        comparisons_found = true;
+                        if let Some(intersection) = combined_interval.intersection(&interval) {
+                            combined_interval = intersection;
+                        } else {
+                            // The intersection is empty, which means a contradiction.
+                            return Arc::new(Expr::AlwaysFalse);
+                        }
+                    } else {
+                        other_filters.push(f.clone());
+                    }
+                } else {
+                    other_filters.push(f.clone());
+                }
+            }
+
+            if !comparisons_found {
+                return expr.clone();
+            }
+
+            if combined_interval != Interval::all() {
+                other_filters.push(Arc::new(Expr::Interval(combined_interval)));
+            }
+
+            other_filters.sort();
+            if other_filters.is_empty() {
+                Arc::new(Expr::AlwaysTrue)
+            } else {
+                Arc::new(Expr::FieldFilters {
+                    field: field.clone(),
+                    filters: other_filters,
+                })
+            }
+        } else {
+            expr.clone()
+        }
+    }
+}
+
 /// Normalization rule to eliminate redundant filters.
 /// A filter with an `AlwaysTrue` condition is removed.
 /// A filter with an `AlwaysFalse` condition replaces the subplan with a `NoOp` node.
@@ -249,53 +351,18 @@ impl NormalisationRule for EliminateRedundantFilter {
     }
 }
 
-/// Merges multiple expressions into a single AND expression, combining `FieldFilters` on the same field.
-fn merge_and_clauses(exprs: &[Arc<Expr>]) -> Arc<Expr> {
-
-    // Filter out AlwaysTrue, which is the identity for AND
+/// Builds an AND expression from a list of expressions, removing `AlwaysTrue`.
+fn build_and_clauses(exprs: &[Arc<Expr>]) -> Arc<Expr> {
     let exprs: Vec<_> = exprs
-        .into_iter()
+        .iter()
         .filter(|e| !matches!(e.as_ref(), Expr::AlwaysTrue))
         .cloned()
         .collect();
 
-    if exprs.is_empty() {
-        return Arc::new(Expr::AlwaysTrue);
-    }
-
-    // Group FieldFilters by field
-    let mut field_filters_map: HashMap<Arc<Expr>, Vec<Arc<Expr>>> = HashMap::new();
-    let mut other_exprs = Vec::new();
-
-    for expr in exprs {
-        if let Expr::FieldFilters { field, filters } = expr.as_ref() {
-            field_filters_map
-                .entry(field.clone())
-                .or_default()
-                .extend(filters.clone());
-        } else {
-            other_exprs.push(expr);
-        }
-    }
-
-    // Reconstruct expressions, with merged FieldFilters
-    let mut merged_exprs = other_exprs;
-    for (field, filters) in field_filters_map {
-        if !filters.is_empty() {
-            merged_exprs.push(Arc::new(Expr::FieldFilters {
-                field,
-                filters,
-            }));
-        }
-    }
-
-    // Sort for deterministic plan shape
-    merged_exprs.sort();
-
-    match merged_exprs.len() {
+    match exprs.len() {
         0 => Arc::new(Expr::AlwaysTrue),
-        1 => merged_exprs.into_iter().next().unwrap(),
-        _ => Arc::new(Expr::And(merged_exprs)),
+        1 => exprs.into_iter().next().unwrap(),
+        _ => Arc::new(Expr::And(exprs)),
     }
 }
 
@@ -437,8 +504,8 @@ fn split_pushable(expr: &Arc<Expr>) -> (Arc<Expr>, Arc<Expr>) {
             let (pushable_parts, residual_parts): (Vec<_>, Vec<_>) =
                 conditions.iter().map(split_pushable).unzip();
 
-            let pushable = merge_and_clauses(&pushable_parts);
-            let residual = merge_and_clauses(&residual_parts);
+            let pushable = build_and_clauses(&pushable_parts);
+            let residual = build_and_clauses(&residual_parts);
 
             (pushable, residual)
         }
@@ -521,6 +588,7 @@ mod tests {
     use super::*;
     use crate::query::expr_fn::*;
     use crate::query::logical_plan::LogicalPlanBuilder;
+    use crate::util::interval::Interval;
     use std::sync::Arc;
     use crate::query::PathComponent;
 
@@ -1071,27 +1139,6 @@ mod tests {
     }
 
     #[test]
-    fn test_push_down_merge_field_filters_from_and() {
-        let filter = and([
-            field_filters(field(["a"]), [eq(lit(1))]),
-            field_filters(field(["a"]), [gt(lit(0))]),
-        ]);
-        let plan = LogicalPlanBuilder::scan(123).filter(filter).build();
-
-        let rule = PushDownFiltersToScan {};
-        let normalized_plan = rule.apply(plan);
-
-        let expected_plan = Arc::new(LogicalPlan::CollectionScan {
-                collection: 123,
-                projection: None,
-                filter: Some(field_filters(field(["a"]), [eq(lit(1)), gt(lit(0))])),
-                sort: None,
-        });
-
-        assert_eq!(normalized_plan, expected_plan);
-    }
-
-    #[test]
     fn test_no_push_down_for_non_pushable_exists_and_type() {
         // exists(false) is not pushable
         let filter = field_filters(field(["a"]), [exists(false)]);
@@ -1316,5 +1363,93 @@ mod tests {
         });
 
         assert_eq!(normalized_plan, expected_plan);
+    }
+
+    #[test]
+    fn test_combine_comparisons_to_interval() {
+        // a > 5 AND a < 10  => a in (5, 10)
+        let original = field_filters(field(["a"]), [gt(lit(5)), lt(lit(10))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::open(lit(5), lit(10)))],
+        );
+        check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
+
+        // a >= 5 AND a <= 10 => a in [5, 10]
+        let original = field_filters(field(["a"]), [gte(lit(5)), lte(lit(10))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(lit(5), lit(10)))],
+        );
+        check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
+
+        // a > 5 AND a < 3 => FALSE
+        let original = field_filters(field(["a"]), [gt(lit(5)), lt(lit(3))]);
+        let transformed = Arc::new(Expr::AlwaysFalse);
+        check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
+
+        // a > 5 AND a == 7 => a in [7, 7]
+        let original = field_filters(field(["a"]), [gt(lit(5)), eq(lit(7))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(lit(7), lit(7)))],
+        );
+        check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
+
+        // a > 5 AND a != 7 => remains as is, but a > 5 becomes interval
+        let original = field_filters(field(["a"]), [gt(lit(5)), ne(lit(7))]);
+        let mut filters = vec![
+            ne(lit(7)),
+            interval(Interval::greater_than(lit(5))),
+        ];
+        filters.sort();
+        let transformed = Arc::new(Expr::FieldFilters {
+            field: field(["a"]),
+            filters,
+        });
+        check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
+
+        // No change if no suitable comparisons
+        let original = field_filters(field(["a"]), [ne(lit(5)), nin(lit(vec![1, 2]))]);
+        check_expr_transformation(CombineComparisonsToInterval {}, original.clone(), original);
+    }
+
+    #[test]
+    fn test_merge_field_filters_and_combine_to_interval() {
+        // This test checks the interaction of two rules:
+        // 1. SimplifyLogicalOperators should merge multiple FieldFilters on the same field under an AND.
+        // 2. CombineComparisonsToInterval should then convert the combined comparisons into an Interval.
+        let original_filter = and([
+            field_filters(field(["b"]), [eq(lit(100))]),
+            field_filters(field(["a"]), [lt(lit(10))]),
+            field_filters(field(["a"]), [gte(lit(5))]),
+        ]);
+
+        // We need a plan to apply rules to.
+        let plan = scan_with_filter(original_filter);
+
+        // Apply rules in sequence, as the optimizer would.
+        let plan_after_simplify = SimplifyLogicalOperators {}.apply(plan);
+        let final_plan = CombineComparisonsToInterval {}.apply(plan_after_simplify);
+
+        // Define the expected outcome.
+        // The comparisons on "a" should become a single interval [5, 10).
+        let filter_a = field_filters(
+            field(["a"]),
+            [interval(Interval::closed_open(lit(5), lit(10)))],
+        );
+        // The comparisons on "a" should become a single interval (100, 100).
+        let filter_b = field_filters(
+            field(["b"]),
+            [interval(Interval::closed(lit(100), lit(100)))]);
+
+        // The final expression should be an AND of the two, in canonical (sorted) order.
+        let mut expected_filters = vec![filter_a, filter_b];
+        expected_filters.sort();
+        let expected_filter = and(expected_filters);
+
+        let expected_plan = scan_with_filter(expected_filter);
+
+        assert_eq!(final_plan, expected_plan);
     }
 }

@@ -1,4 +1,8 @@
+use std::cmp::Ordering;
 use std::ops::{Bound, RangeBounds};
+use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
+use crate::io::serializable::Serializable;
 
 /// A struct representing a range with customizable bounds.
 ///
@@ -9,7 +13,7 @@ use std::ops::{Bound, RangeBounds};
 /// - Unbounded (`(..)`)
 ///
 /// This struct can be used in conjunction with types like `BTreeMap` to specify range queries.
-#[derive(Clone)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct Interval<T> {
     start: Bound<T>,
     end: Bound<T>,
@@ -111,6 +115,96 @@ impl<T> Interval<T> {
     }
 }
 
+impl<T: Clone + PartialOrd> Interval<T> {
+    /// Checks if the interval represents a single point (e.g., `[a, a]`).
+    ///
+    /// An interval is a point if its start and end bounds are inclusive and equal.
+    pub fn is_point(&self) -> bool {
+        match (&self.start, &self.end) {
+            (Bound::Included(s), Bound::Included(e)) => s == e,
+            _ => false,
+        }
+    }
+
+    /// Computes the intersection of two intervals.
+    ///
+    /// Returns `None` if the intervals do not overlap.
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        use std::cmp::Ordering;
+
+        let new_start = match (&self.start, &other.start) {
+            (s, Bound::Unbounded) => s.clone(),
+            (Bound::Unbounded, s) => s.clone(),
+            (Bound::Included(v1), Bound::Included(v2)) => {
+                if v1 >= v2 {
+                    Bound::Included(v1.clone())
+                } else {
+                    Bound::Included(v2.clone())
+                }
+            }
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => {
+                if v1 >= v2 {
+                    Bound::Excluded(v1.clone())
+                } else {
+                    Bound::Excluded(v2.clone())
+                }
+            }
+            (Bound::Included(v1), Bound::Excluded(v2)) => match v1.partial_cmp(v2) {
+                Some(Ordering::Greater) => Bound::Included(v1.clone()),
+                _ => Bound::Excluded(v2.clone()),
+            },
+            (Bound::Excluded(v1), Bound::Included(v2)) => match v2.partial_cmp(v1) {
+                Some(Ordering::Greater) => Bound::Included(v2.clone()),
+                _ => Bound::Excluded(v1.clone()),
+            },
+        };
+
+        let new_end = match (&self.end, &other.end) {
+            (e, Bound::Unbounded) => e.clone(),
+            (Bound::Unbounded, e) => e.clone(),
+            (Bound::Included(v1), Bound::Included(v2)) => {
+                if v1 <= v2 {
+                    Bound::Included(v1.clone())
+                } else {
+                    Bound::Included(v2.clone())
+                }
+            }
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => {
+                if v1 <= v2 {
+                    Bound::Excluded(v1.clone())
+                } else {
+                    Bound::Excluded(v2.clone())
+                }
+            }
+            (Bound::Included(v1), Bound::Excluded(v2)) => match v1.partial_cmp(v2) {
+                Some(Ordering::Less) => Bound::Included(v1.clone()),
+                _ => Bound::Excluded(v2.clone()),
+            },
+            (Bound::Excluded(v1), Bound::Included(v2)) => match v2.partial_cmp(v1) {
+                Some(Ordering::Less) => Bound::Included(v2.clone()),
+                _ => Bound::Excluded(v1.clone()),
+            },
+        };
+
+        let is_valid = match (&new_start, &new_end) {
+            (Bound::Included(s), Bound::Included(e)) => s <= e,
+            (Bound::Included(s), Bound::Excluded(e)) => s < e,
+            (Bound::Excluded(s), Bound::Included(e)) => s < e,
+            (Bound::Excluded(s), Bound::Excluded(e)) => s < e,
+            _ => true, // At least one bound is Unbounded, so the interval is valid.
+        };
+
+        if is_valid {
+            Some(Self {
+                start: new_start,
+                end: new_end,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 impl<T> RangeBounds<T> for Interval<T> {
     fn start_bound(&self) -> Bound<&T> {
         match &self.start {
@@ -126,6 +220,55 @@ impl<T> RangeBounds<T> for Interval<T> {
             Bound::Excluded(val) => Bound::Excluded(val),
             Bound::Unbounded => Bound::Unbounded,
         }
+    }
+}
+
+impl<T: Serializable> Serializable for Interval<T> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
+    where
+        Self: Sized
+    {
+        let start = Bound::<T>::read_from(reader)?;
+        let end = Bound::<T>::read_from(reader)?;
+        Ok(Self { start, end })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        self.start.write_to(writer);
+        self.end.write_to(writer);
+    }
+}
+
+impl<T: Ord> PartialOrd for Interval<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Ord> Ord for Interval<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let start_cmp = match (&self.start, &other.start) {
+            (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+            (Bound::Unbounded, _) => Ordering::Less,
+            (_, Bound::Unbounded) => Ordering::Greater,
+            (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
+            (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Less),
+            (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Greater),
+        };
+
+        start_cmp.then_with(|| {
+            // reverse for end
+            match (&other.end, &self.end) {
+                (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+                (Bound::Unbounded, _) => Ordering::Greater,
+                (_, Bound::Unbounded) => Ordering::Less,
+                (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
+                (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
+                (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Greater),
+                (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Less),
+            }
+        })
     }
 }
 
@@ -233,5 +376,64 @@ mod tests {
             let values: Vec<_> = map.range(range).map(|(_, v)| *v).collect();
             assert_eq!(values, expected);
         }
+    }
+
+    #[test]
+    fn test_is_point() {
+        assert!(Interval::closed(5, 5).is_point());
+        assert!(!Interval::open(5, 5).is_point());
+        assert!(!Interval::closed_open(5, 5).is_point());
+        assert!(!Interval::open_closed(5, 5).is_point());
+        assert!(!Interval::closed(5, 6).is_point());
+        let unbounded: Interval<i32> = Interval::all();
+        assert!(!unbounded.is_point());
+    }
+
+    #[test]
+    fn test_intersection() {
+        // Overlapping intervals
+        let r1 = Interval::closed(1, 5); // [1, 5]
+        let r2 = Interval::closed(3, 7); // [3, 7]
+        let intersection = r1.intersection(&r2).unwrap();
+        assert_eq!(intersection.start_bound(), Bound::Included(&3));
+        assert_eq!(intersection.end_bound(), Bound::Included(&5));
+
+        // Non-overlapping intervals
+        let r3 = Interval::closed(1, 2); // [1, 2]
+        let r4 = Interval::closed(3, 4); // [3, 4]
+        assert!(r3.intersection(&r4).is_none());
+
+        // Touching intervals
+        let r5 = Interval::closed_open(1, 3); // [1, 3)
+        let r6 = Interval::closed(3, 5); // [3, 5]
+        assert!(r5.intersection(&r6).is_none()); // empty intersection
+
+        let r7 = Interval::closed(1, 3); // [1, 3]
+        let r8 = Interval::closed(3, 5); // [3, 5]
+        let intersection2 = r7.intersection(&r8).unwrap(); // point intersection [3, 3]
+        assert_eq!(intersection2.start_bound(), Bound::Included(&3));
+        assert_eq!(intersection2.end_bound(), Bound::Included(&3));
+        assert!(intersection2.is_point());
+
+        // One interval containing another
+        let r9 = Interval::closed(1, 10); // [1, 10]
+        let r10 = Interval::open(3, 7); // (3, 7)
+        let intersection3 = r9.intersection(&r10).unwrap();
+        assert_eq!(intersection3.start_bound(), Bound::Excluded(&3));
+        assert_eq!(intersection3.end_bound(), Bound::Excluded(&7));
+
+        // Unbounded intervals
+        let r11 = Interval::at_least(5); // [5, +inf)
+        let r12 = Interval::less_than(10); // (-inf, 10)
+        let intersection4 = r11.intersection(&r12).unwrap(); // [5, 10)
+        assert_eq!(intersection4.start_bound(), Bound::Included(&5));
+        assert_eq!(intersection4.end_bound(), Bound::Excluded(&10));
+
+        // All interval
+        let r13: Interval<i32> = Interval::all();
+        let r14 = Interval::open_closed(3, 8); // (3, 8]
+        let intersection5 = r13.intersection(&r14).unwrap();
+        assert_eq!(intersection5.start_bound(), Bound::Excluded(&3));
+        assert_eq!(intersection5.end_bound(), Bound::Included(&8));
     }
 }

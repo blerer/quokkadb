@@ -12,6 +12,7 @@ use crate::io::serializable::Serializable;
 use crate::query::tree_node::TreeNode;
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
+use crate::util::interval::Interval;
 
 pub(crate) mod execution;
 pub (crate) mod optimizer;
@@ -66,6 +67,8 @@ pub enum Expr {
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
+    /// Represents an interval for range queries
+    Interval(Interval<Arc<Expr>>),
 }
 
 impl TreeNode for Expr {
@@ -199,7 +202,7 @@ impl Expr {
 }
 
 impl Serializable for Expr {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
             1 => {
@@ -266,6 +269,10 @@ impl Serializable for Expr {
             16 => {
                 let predicates = Vec::<Arc<Expr>>::read_from(reader)?;
                 Ok(Expr::ElemMatch(predicates))
+            }
+            17 => {
+                let interval = Interval::<Arc<Expr>>::read_from(reader)?;
+                Ok(Expr::Interval(interval))
             }
             _ => panic!("Unknown Expr tag: {}", tag),
         }
@@ -347,6 +354,10 @@ impl Serializable for Expr {
             }
             Expr::Literal(_) => {
                 panic!("LogicalPlans should never be serialized before parametrization.");
+            }
+            Expr::Interval(interval) => {
+                writer.write_u8(17);
+                interval.write_to(writer);
             }
         }
     }
@@ -640,7 +651,7 @@ impl Serializable for SortField {
 }
 
 #[cfg(test)]
-pub fn make_sort_field(path: Vec<crate::query::PathComponent>, order: SortOrder) -> SortField {
+pub fn make_sort_field(path: Vec<PathComponent>, order: SortOrder) -> SortField {
     SortField {
         field: Arc::new(Expr::Field(path)),
         order,
@@ -676,7 +687,7 @@ impl ComparisonOperator {
 
 impl Serializable for ComparisonOperator {
 
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
             0 => Ok(ComparisonOperator::Eq),

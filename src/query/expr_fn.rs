@@ -1,5 +1,6 @@
 use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, Projection, ProjectionExpr, SortField, SortOrder};
 use std::sync::Arc;
+use crate::util::interval::Interval;
 
 pub fn field<T, U>(name: T) -> Arc<Expr>
 where
@@ -129,6 +130,11 @@ where
 
 pub fn not(predicate: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Not(predicate))
+}
+
+pub fn interval(interval: Interval<Arc<Expr>>) -> Arc<Expr>
+{
+    Arc::new(Expr::Interval(interval))
 }
 
 pub fn proj_field() -> Arc<ProjectionExpr> {
