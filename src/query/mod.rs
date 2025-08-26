@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
@@ -45,6 +45,8 @@ pub enum Expr {
         operator: ComparisonOperator, // `$eq`, `$ne`, `$gt`, `$lt`, etc.
         value: Arc<Expr>,              // The literal value
     },
+    /// Represents an interval for range queries
+    Interval(Interval<Arc<Expr>>),
     And(Vec<Arc<Expr>>),
     Or(Vec<Arc<Expr>>),
     Not(Arc<Expr>),
@@ -67,8 +69,6 @@ pub enum Expr {
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
-    /// Represents an interval for range queries
-    Interval(Interval<Arc<Expr>>),
 }
 
 impl TreeNode for Expr {
@@ -892,9 +892,18 @@ impl From<bool> for BsonValue {
     }
 }
 
+impl<T> From<HashSet<T>> for BsonValue
+where
+    T: Into<Bson>// Ensure each element can be converted into `Bson`
+{
+    fn from(values: HashSet<T>) -> Self {
+        BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
+    }
+}
+
 impl<T> From<Vec<T>> for BsonValue
 where
-    T: Into<Bson>, // Ensure each element can be converted into `Bson`
+    T: Into<Bson>// Ensure each element can be converted into `Bson`
 {
     fn from(values: Vec<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
@@ -941,6 +950,10 @@ impl<'a> Ord for BsonValueRef<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
         bson_utils::cmp_bson(&self.0, &other.0)
     }
+}
+
+impl From<BsonValueRef<'_>> for Bson {
+    fn from(value: BsonValueRef) -> Self { value.to_owned().to_bson() }
 }
 
 #[macro_export]

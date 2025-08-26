@@ -11,7 +11,7 @@ use crate::util::interval::Interval;
 use bson::oid::ObjectId;
 use bson::{doc, Bson, Document, RawDocument};
 use std::io::Cursor;
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
@@ -98,12 +98,12 @@ impl QueryExecutor {
         match plan.as_ref() {
             PhysicalPlan::CollectionScan {
                 collection,
-                start,
-                end,
+                range,
                 direction,
+                filter,
                 projection: _, // Projection pushdown is not yet supported at this level
             } => {
-                let range = Self::bind_key_range_parameters(start, end, &parameters)?;
+                let range = Self::bind_key_range_parameters(range, &parameters)?;
 
                 Ok(Box::new(self.storage_engine.range_scan(
                     *collection,
@@ -136,6 +136,7 @@ impl QueryExecutor {
                 collection,
                 index,
                 key,
+                filter,
                 projection: _,
             } => {
                 let key = Self::bind_key_parameter(key, &parameters)?;
@@ -159,8 +160,8 @@ impl QueryExecutor {
             PhysicalPlan::IndexScan {
                 collection: _,
                 index: _,
-                start: _,
-                end: _,
+                range: _,
+                filter: _,
                 projection: _,
             } => {
                 todo!()
@@ -230,14 +231,14 @@ impl QueryExecutor {
         }
     }
 
-    fn bind_key_range_parameters(start: &Bound<Expr>, end: &Bound<Expr>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
-        let start = Self::bind_key_bound_parameter(start, &parameters)?;
-        let end = Self::bind_key_bound_parameter(end, &parameters)?;
+    fn bind_key_range_parameters(range: &Interval<Arc<Expr>>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
+        let start = Self::bind_key_bound_parameter(range.start_bound(), &parameters)?;
+        let end = Self::bind_key_bound_parameter(range.end_bound(), &parameters)?;
         let range = Interval::new(start, end);
         Ok(range)
     }
 
-    fn bind_key_bound_parameter(start: &Bound<Expr>, parameters: &Parameters) -> Result<Bound<Vec<u8>>> {
+    fn bind_key_bound_parameter(start: Bound<&Arc<Expr>>, parameters: &Parameters) -> Result<Bound<Vec<u8>>> {
         let start = match start {
             Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters).try_into_key()?),
             Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters).try_into_key()?),
@@ -301,7 +302,8 @@ use crate::storage::test_utils::storage_engine;
         let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
             index: 0, // primary key
-            key: (*key_expr).clone(),
+            key: key_expr.clone(),
+            filter: None,
             projection: None,
         });
 
@@ -332,9 +334,9 @@ use crate::storage::test_utils::storage_engine;
         // 5. CollectionScan
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
+            range: Interval::all(),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
 
@@ -407,7 +409,8 @@ use crate::storage::test_utils::storage_engine;
         let plan_non_exist = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
             index: 0, // primary key
-            key: (*key_expr_non_exist).clone(),
+            key: key_expr_non_exist.clone(),
+            filter: None,
             projection: None,
         });
         let mut result_non_exist = executor.execute_cached(plan_non_exist, &params_non_exist)?;
@@ -428,7 +431,8 @@ use crate::storage::test_utils::storage_engine;
         let plan_deleted = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
             index: 0, // primary key
-            key: (*key_expr_deleted).clone(),
+            key: key_expr_deleted.clone(),
+            filter: None,
             projection: None,
         });
         let mut result_deleted = executor.execute_cached(plan_deleted, &params_deleted)?;
@@ -442,9 +446,9 @@ use crate::storage::test_utils::storage_engine;
         let start_outside = params_scan_outside.collect_parameter(BsonValue(Bson::Int32(100)));
         let plan_scan_outside = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Included((*start_outside).clone()),
-            end: Bound::Unbounded,
+            range: Interval::at_least(start_outside.clone()),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
         let mut result_scan_outside =
@@ -460,9 +464,9 @@ use crate::storage::test_utils::storage_engine;
         let end_partial = params_scan_partial.collect_parameter(BsonValue(Bson::Int32(25)));
         let plan_scan_partial = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Included((*start_partial).clone()),
-            end: Bound::Excluded((*end_partial).clone()),
+            range: Interval::closed_open(start_partial.clone(), end_partial.clone()),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
         let mut result_scan_partial =
@@ -480,9 +484,9 @@ use crate::storage::test_utils::storage_engine;
             params_scan_unbounded_start.collect_parameter(BsonValue(Bson::Int32(20)));
         let plan_scan_unbounded_start = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Excluded((*end_unbounded_start).clone()),
+            range: Interval::less_than(end_unbounded_start.clone()),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
         let mut result_unbounded_start =
@@ -500,9 +504,9 @@ use crate::storage::test_utils::storage_engine;
             params_scan_unbounded_end.collect_parameter(BsonValue(Bson::Int32(20)));
         let plan_scan_unbounded_end = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Excluded((*start_unbounded_end).clone()),
-            end: Bound::Unbounded,
+            range: Interval::greater_than(start_unbounded_end.clone()),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
         let mut result_unbounded_end =
@@ -517,9 +521,9 @@ use crate::storage::test_utils::storage_engine;
         // 8. CollectionScan with full range in reverse
         let plan_scan_reverse = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
+            range: Interval::all(),
             direction: Direction::Reverse,
+            filter: None,
             projection: None,
         });
         let result_scan_reverse = executor.execute_cached(plan_scan_reverse, &Parameters::new())?;
@@ -558,9 +562,9 @@ use crate::storage::test_utils::storage_engine;
         // 3. Create a base scan plan to feed the limit plan
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
+            range: Interval::all(),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
 
@@ -699,9 +703,9 @@ use crate::storage::test_utils::storage_engine;
 
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
+            range: Interval::all(),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
 
@@ -758,9 +762,9 @@ use crate::storage::test_utils::storage_engine;
     ) -> Result<()> {
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
+            range: Interval::all(),
             direction: Direction::Forward,
+            filter: None,
             projection: None,
         });
 
@@ -1021,9 +1025,9 @@ use crate::storage::test_utils::storage_engine;
         ) -> Result<()> {
             let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
                 collection: collection_id,
-                start: Bound::Unbounded,
-                end: Bound::Unbounded,
+                range: Interval::all(),
                 direction: Direction::Forward,
+                filter: None,
                 projection: None,
             });
 

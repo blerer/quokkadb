@@ -115,6 +115,69 @@ impl<T> Interval<T> {
     }
 }
 
+impl<T: Clone + Ord> Interval<T> {
+    /// Computes the union of two intervals.
+    ///
+    /// Returns `Some(Interval)` if the union results in a single continuous interval.
+    /// Returns `None` if the intervals are disjoint.
+    pub fn union(&self, other: &Self) -> Option<Self> {
+        let (lower, upper) = if self <= other {
+            (self, other)
+        } else {
+            (other, self)
+        };
+
+        // Check for disjointness. True if lower.end < upper.start.
+        let disjoint = match (&lower.end, &upper.start) {
+            (Bound::Included(v1), Bound::Included(v2)) => v1 < v2,
+            (Bound::Included(v1), Bound::Excluded(v2)) => v1 < v2,
+            (Bound::Excluded(v1), Bound::Included(v2)) => v1 < v2,
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => v1 <= v2,
+            (Bound::Unbounded, _) => false, // Unbounded end can't be disjoint from what's after.
+            (_, Bound::Unbounded) => {
+                // Should not happen if `lower` is correctly chosen, as it has a bounded start.
+                // The only case is if both starts are unbounded, then they are not disjoint.
+                false
+            }
+        };
+
+        if disjoint {
+            return None;
+        }
+
+        // They overlap or are adjacent. Compute union.
+        // Start bound of the union is the start bound of the lower interval.
+        let new_start = lower.start.clone();
+
+        // End bound of the union is the maximum of the two end bounds.
+        let new_end = match (&lower.end, &upper.end) {
+            (Bound::Unbounded, _) | (_, Bound::Unbounded) => Bound::Unbounded,
+            (Bound::Included(v1), Bound::Included(v2)) => {
+                Bound::Included(v1.max(v2).clone())
+            }
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => {
+                Bound::Excluded(v1.max(v2).clone())
+            }
+            (Bound::Included(v1), Bound::Excluded(v2)) => {
+                match v1.cmp(v2) {
+                    Ordering::Less => Bound::Excluded(v2.clone()),
+                    // if v1 >= v2, included bound is outer bound
+                    _ => Bound::Included(v1.clone()),
+                }
+            }
+            (Bound::Excluded(v1), Bound::Included(v2)) => {
+                match v1.cmp(v2) {
+                    Ordering::Greater => Bound::Excluded(v1.clone()),
+                    // if v2 >= v1, included bound is outer bound
+                    _ => Bound::Included(v2.clone()),
+                }
+            }
+        };
+
+        Some(Interval::new(new_start, new_end))
+    }
+}
+
 impl<T: Clone + PartialOrd> Interval<T> {
     /// Checks if the interval represents a single point (e.g., `[a, a]`).
     ///
@@ -435,5 +498,44 @@ mod tests {
         let intersection5 = r13.intersection(&r14).unwrap();
         assert_eq!(intersection5.start_bound(), Bound::Excluded(&3));
         assert_eq!(intersection5.end_bound(), Bound::Included(&8));
+    }
+
+    #[test]
+    fn test_union() {
+        // Overlapping intervals
+        let r1 = Interval::closed(1, 5); // [1, 5]
+        let r2 = Interval::closed(3, 7); // [3, 7]
+        let union = r1.union(&r2).unwrap();
+        assert_eq!(union, Interval::closed(1, 7));
+
+        // Adjacent intervals
+        let r3 = Interval::closed_open(1, 3); // [1, 3)
+        let r4 = Interval::at_least(3); // [3, +inf)
+        let union2 = r3.union(&r4).unwrap();
+        assert_eq!(union2, Interval::at_least(1));
+
+        // One interval containing another
+        let r5 = Interval::closed(1, 10); // [1, 10]
+        let r6 = Interval::open(3, 7); // (3, 7)
+        let union3 = r5.union(&r6).unwrap();
+        assert_eq!(union3, r5);
+
+        // Disjoint intervals
+        let r7 = Interval::at_most(2); // (-inf, 2]
+        let r8 = Interval::greater_than(3); // (3, +inf)
+        assert!(r7.union(&r8).is_none());
+
+        // Disjoint with open bound
+        let r9 = Interval::less_than(3); // (-inf, 3)
+        let r10 = Interval::at_least(3); // [3, +inf)
+        let union4 = r9.union(&r10).unwrap();
+        let all: Interval<i32> = Interval::all();
+        assert_eq!(union4, all);
+
+        // Mixed bounds at same point
+        let r11 = Interval::open_closed(1, 5); // (1, 5]
+        let r12 = Interval::closed_open(5, 10); // [5, 10)
+        let union5 = r11.union(&r12).unwrap();
+        assert_eq!(union5, Interval::open(1, 10));
     }
 }

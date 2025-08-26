@@ -3,7 +3,6 @@ use crate::io::byte_writer::ByteWriter;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use crate::io::serializable::Serializable;
-use crate::storage::Direction;
 
 /// The `Catalog` maintains the mapping from collection names to their metadata.
 ///
@@ -172,11 +171,11 @@ impl Serializable for Order {
 #[derive(Debug, PartialEq)]
 pub struct IndexMetadata {
     /// Unique identifier for the index.
-    id: u32,
+    pub id: u32,
     /// Name of the index (e.g., "by_name").
-    name: String,
+    pub name: String,
     /// List of fields and their orderings that comprise the index.
-    fields: Vec<(String, Order)>,
+    pub fields: Vec<(String, Order)>,
 }
 
 impl Serializable for IndexMetadata {

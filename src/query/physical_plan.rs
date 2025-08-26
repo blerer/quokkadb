@@ -1,9 +1,9 @@
 use crate::query::Expr;
-use std::ops::Bound;
 use std::sync::Arc;
 use crate::query::Projection;
 use crate::query::SortField;
 use crate::storage::Direction;
+use crate::util::interval::Interval;
 
 /// Represents a physical plan that can be executed by the query engine.
 ///
@@ -19,12 +19,12 @@ pub enum PhysicalPlan {
     CollectionScan {
         /// The identifier for the collection.
         collection: u32,
-        /// The start bound of the range for the scan on the user primary key.
-        start: Bound<Expr>,
-        /// The end bound of the range for the scan on the user primary key.
-        end: Bound<Expr>,
+        /// The range for the scan on the user primary key.
+        range: Interval<Arc<Expr>>,
         /// The direction in which the scan must be performed
         direction: Direction,
+        /// An optional filter to apply at the binary level after scanning.
+        filter: Option<Arc<Expr>>,
         /// An optional list of fields to project. If `None`, all fields are returned.
         projection: Option<Arc<Projection>>,
     },
@@ -36,7 +36,9 @@ pub enum PhysicalPlan {
         /// The identifier for the index.
         index: u32,
         /// The user key to search for.
-        key: Expr,
+        key: Arc<Expr>,
+        /// An optional filter to apply at the binary level after scanning.
+        filter: Option<Arc<Expr>>,
         /// An optional list of fields to project. If `None`, all fields are returned.
         projection: Option<Arc<Projection>>,
     },
@@ -47,10 +49,10 @@ pub enum PhysicalPlan {
         collection: u32,
         /// The identifier for the index.
         index: u32,
-        /// The start bound of the range for the scan on the index.
-        start: Bound<Expr>,
-        /// The end bound of the range for the scan on the index.
-        end: Bound<Expr>,
+        /// The  range for the scan on the index.
+        range: Interval<Arc<Expr>>,
+        /// An optional filter to apply at the binary level after scanning.
+        filter: Option<Arc<Expr>>,
         /// An optional list of fields to project. If `None`, all fields are returned.
         projection: Option<Arc<Projection>>,
     },
@@ -60,7 +62,6 @@ pub enum PhysicalPlan {
         /// The input plans to union together.
         inputs: Vec<Arc<PhysicalPlan>>,
     },
-
 
     /// Inserts a document into a collection. This is a terminal operator.
     InsertOne {

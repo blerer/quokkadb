@@ -1,10 +1,11 @@
 use crate::query::logical_plan::{transform_up_filter, LogicalPlan};
 use crate::query::physical_plan::PhysicalPlan;
-use crate::query::tree_node::TreeNode;
-use crate::query::{Expr, Parameters, Projection, SortField};
+use crate::query::{format_path, ComparisonOperator, Expr, Parameters};
 use crate::storage::catalog::{Catalog, IndexMetadata};
+use std::collections::HashMap;
 use std::sync::Arc;
 use crate::query::optimizer::normalization_rules;
+use crate::query::optimizer::normalization_rules::NormalisationRule;
 
 pub type Cost = f64;
 
@@ -29,123 +30,19 @@ impl CostEstimator {
 }
 
 pub struct Optimizer {
-    normalization_rules: Vec<Arc<dyn NormalisationRule>>,
+    normalization_rules: Arc<dyn NormalisationRule>,
     cost_estimator: CostEstimator,
 }
 
 impl Optimizer {
     pub fn new() -> Self {
         Self {
-            normalization_rules: normalization_rules::all_normalization_rules(),
+            normalization_rules: Arc::new(normalization_rules::all_normalization_rules()),
             cost_estimator: CostEstimator {},
         }
     }
 
     pub fn optimize(&self, plan: Arc<LogicalPlan>, catalog: Arc<Catalog>) -> Arc<PhysicalPlan> {
-        self.optimize_node(plan, catalog)
-    }
-
-    fn optimize_node(&self, plan: Arc<LogicalPlan>, catalog: Arc<Catalog>) -> Arc<PhysicalPlan> {
-        match plan.as_ref() {
-            LogicalPlan::NoOp => Arc::new(PhysicalPlan::NoOp),
-            LogicalPlan::CollectionScan {
-                collection,
-                projection,
-                filter,
-                sort,
-            } => {
-                let scan_plan = self.plan_scan(*collection, projection, filter, &catalog);
-                if let Some(sort_fields) = sort {
-                    self.plan_sort(scan_plan, sort_fields.clone())
-                } else {
-                    scan_plan
-                }
-            }
-            LogicalPlan::Filter { input, condition } => {
-                let optimized_input = self.optimize_node(input.clone(), catalog);
-                Arc::new(PhysicalPlan::Filter {
-                    input: optimized_input,
-                    predicate: condition.clone(),
-                })
-            }
-            LogicalPlan::Projection { input, projection } => {
-                let optimized_input = self.optimize_node(input.clone(), catalog);
-                Arc::new(PhysicalPlan::Projection {
-                    input: optimized_input,
-                    projection: projection.clone(),
-                })
-            }
-            LogicalPlan::Sort {
-                input,
-                sort_fields,
-            } => {
-                let optimized_input = self.optimize_node(input.clone(), catalog);
-                self.plan_sort(optimized_input, sort_fields.clone())
-            }
-            LogicalPlan::Limit { input, skip, limit } => {
-                // Heuristic optimization: transform Sort + Limit into TopKHeapSort
-                if let LogicalPlan::Sort {
-                    input: sort_input,
-                    sort_fields,
-                } = input.as_ref()
-                {
-                    if let Some(k) = limit {
-                        let total_limit = k + skip.unwrap_or(0);
-                        let optimized_input = self.optimize_node(sort_input.clone(), catalog);
-
-                        let top_k_plan = Arc::new(PhysicalPlan::TopKHeapSort {
-                            input: optimized_input,
-                            sort_fields: sort_fields.clone(),
-                            k: total_limit,
-                        });
-
-                        // Re-apply Limit on top of TopK to handle skip
-                        return Arc::new(PhysicalPlan::Limit {
-                            input: top_k_plan,
-                            skip: *skip,
-                            limit: *limit,
-                        });
-                    }
-                }
-
-                // Default behavior
-                let optimized_input = self.optimize_node(input.clone(), catalog);
-                Arc::new(PhysicalPlan::Limit {
-                    input: optimized_input,
-                    skip: *skip,
-                    limit: *limit,
-                })
-            }
-        }
-    }
-
-    /// Chooses the best physical sort operator based on cost.
-    fn plan_sort(&self, input: Arc<PhysicalPlan>, sort_fields: Arc<Vec<SortField>>) -> Arc<PhysicalPlan> {
-        let in_memory = Arc::new(PhysicalPlan::InMemorySort {
-            input: input.clone(),
-            sort_fields: sort_fields.clone(),
-        });
-        let external = Arc::new(PhysicalPlan::ExternalMergeSort {
-            input,
-            sort_fields,
-            max_in_memory_rows: 100_000,
-        });
-
-        if self.get_plan_cost(&in_memory) <= self.get_plan_cost(&external) {
-            in_memory
-        } else {
-            external
-        }
-    }
-
-    /// Determines the physical access path for a scan.
-    fn plan_scan(
-        &self,
-        collection: u32,
-        projection: &Option<Arc<Projection>>,
-        filter: &Option<Arc<Expr>>,
-        _catalog: &Arc<Catalog>,
-    ) -> Arc<PhysicalPlan> {
         todo!()
     }
 
@@ -173,26 +70,123 @@ impl Optimizer {
         node_cost + input_cost
     }
 
-    pub fn enumerate_access_paths(
+    /// Analyzes an expression to find sargable filters based on available indexes and the primary key.
+    pub fn find_sargable_filters(
         &self,
-        filter: &Option<Arc<Expr>>,
+        expr: &Expr,
         indexes: Vec<Arc<IndexMetadata>>,
-    ) -> Vec<Arc<PhysicalPlan>> {
-        // This function is a placeholder for future access path enumeration logic
-        vec![]
-    }
+    ) -> Vec<SargableFilter> {
 
-    pub fn sargable_predicate(&self, expr: &Expr, index: &IndexMetadata) -> bool {
-        // This function is a placeholder for future sargable predicate logic
-        false
+        // Flatten the expression into a list of conjuncts
+        let mut conjuncts = Vec::new();
+        if let Expr::And(conditions) = expr {
+            for cond in conditions {
+                conjuncts.push(cond.as_ref());
+            }
+        } else {
+            conjuncts.push(expr);
+        }
+
+        // Map field names to their corresponding filter expressions
+        let field_filters_map: HashMap<String, &Expr> = conjuncts
+            .iter()
+            .filter_map(|e| {
+                if let Expr::FieldFilters { field, .. } = e {
+                    if let Expr::Field(path) = field.as_ref() {
+                        return Some((format_path(path), *e));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        let mut sargable_filters = Vec::new();
+
+        // Handle primary key separately
+        if let Some(Expr::FieldFilters { field, filters }) =
+            field_filters_map.get("_id").map(|e| *e)
+        {
+            let (sargable_exprs, residual_exprs): (Vec<_>, Vec<_>) =
+                filters.iter().cloned().partition(|f| is_sargable_leaf(f));
+
+            if !sargable_exprs.is_empty() {
+                let residual = if residual_exprs.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(Expr::FieldFilters {
+                        field: field.clone(),
+                        filters: residual_exprs,
+                    }))
+                };
+
+                for sargable_expr in sargable_exprs {
+                    let (kind, expr) = get_filter_kind_and_expr(sargable_expr);
+                    sargable_filters.push(SargableFilter {
+                        field_name: "_id".to_string(),
+                        access_kind: AccessKind::PrimaryKey,
+                        filter_kind: kind,
+                        expr,
+                        residual: residual.clone(),
+                    });
+                }
+            }
+        }
+
+        // Handle other indexes
+        for index in indexes {
+            let mut matched_prefix_len = 0;
+            for (field_name, _) in &index.fields {
+                if field_filters_map.contains_key(field_name) {
+                    matched_prefix_len += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if matched_prefix_len > 0 {
+                for i in 0..matched_prefix_len {
+                    let (field_name, _) = &index.fields[i];
+                    if let Some(Expr::FieldFilters { field, filters }) =
+                        field_filters_map.get(field_name).map(|e| *e)
+                    {
+                        let (sargable_exprs, residual_exprs): (Vec<_>, Vec<_>) =
+                            filters.iter().cloned().partition(|f| is_sargable_leaf(f));
+
+                        if sargable_exprs.is_empty() {
+                            // If a field in the prefix has no sargable filter, we can't use the index
+                            // for subsequent fields in the key.
+                            break;
+                        }
+
+                        let residual = if residual_exprs.is_empty() {
+                            None
+                        } else {
+                            Some(Arc::new(Expr::FieldFilters {
+                                field: field.clone(),
+                                filters: residual_exprs,
+                            }))
+                        };
+
+                        for sargable_expr in sargable_exprs {
+                            let (kind, expr) = get_filter_kind_and_expr(sargable_expr);
+                            sargable_filters.push(SargableFilter {
+                                field_name: field_name.clone(),
+                                access_kind: AccessKind::Index(index.clone()),
+                                filter_kind: kind,
+                                expr,
+                                residual: residual.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        sargable_filters
     }
 
     pub fn normalize(&self, plan: LogicalPlan) -> Arc<LogicalPlan> {
-        let mut current_plan = Arc::new(plan);
-        for rule in &self.normalization_rules {
-            current_plan = rule.apply(current_plan);
-        }
-        current_plan
+        let current_plan = Arc::new(plan);
+        self.normalization_rules.apply(current_plan)
     }
 
     pub fn parametrize(&self, plan: Arc<LogicalPlan>) -> (Arc<LogicalPlan>, Parameters) {
@@ -216,8 +210,56 @@ impl Optimizer {
     }
 }
 
-pub trait NormalisationRule {
-    fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan>;
+/// Returns true if an expression is sargable (can be used with an index).
+fn is_sargable_leaf(expr: &Arc<Expr>) -> bool {
+    match expr.as_ref() {
+        // $eq, $gte, $gte, $lt, and $lte have been converted into interval expressions during normalization.
+        // So we only need to check for intervals, $in and $exists here.
+        Expr::Comparison { operator, value } => {
+            matches!(value.as_ref(), Expr::Placeholder(_)) && matches!(operator, ComparisonOperator::In)
+        }
+        Expr::Interval(_) => true,
+        Expr::Exists(true) => true,
+        _ => false,
+    }
+}
+
+/// Extracts the `FilterKind` and the expression itself from a sargable expression.
+/// Panics if the expression is not a sargable leaf.
+fn get_filter_kind_and_expr(expr: Arc<Expr>) -> (FilterKind, Arc<Expr>) {
+    match expr.as_ref() {
+        Expr::Comparison { operator, .. } => match operator {
+            ComparisonOperator::Eq => (FilterKind::Eq, expr),
+            ComparisonOperator::In => (FilterKind::In, expr),
+            _ => unreachable!(), // Should be filtered by is_sargable_leaf
+        },
+        Expr::Interval(_) => (FilterKind::Range, expr),
+        Expr::Exists(true) => (FilterKind::Exists, expr),
+        _ => unreachable!(), // Should be filtered by is_sargable_leaf
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct SargableFilter {
+    field_name: String,
+    access_kind: AccessKind,
+    filter_kind: FilterKind,
+    expr: Arc<Expr>,
+    residual: Option<Arc<Expr>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum AccessKind {
+    PrimaryKey,
+    Index(Arc<IndexMetadata>),
+}
+
+#[derive(Debug, PartialEq)]
+enum FilterKind {
+    Eq,
+    Range,
+    In,
+    Exists,
 }
 
 #[cfg(test)]
@@ -318,5 +360,170 @@ mod tests {
 
         // Check plan
         assert_eq!(parametrized_plan, plan_clone);
+    }
+
+    use crate::query::expr_fn::{exists, interval, ne};
+    use crate::storage::catalog::{IndexMetadata, Order};
+    use crate::util::interval::Interval;
+
+    fn make_index(id: u32, name: &str, fields: Vec<(&str, Order)>) -> Arc<IndexMetadata> {
+        Arc::new(IndexMetadata {
+            id,
+            name: name.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|(s, o)| (s.to_string(), o))
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn test_sargable_primary_key() {
+        let optimizer = Optimizer::new();
+        let filter = field_filters(
+            field(["_id"]),
+            vec![interval(Interval::closed(lit(1), lit(1)))],
+        );
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![]);
+
+        assert_eq!(sargable.len(), 1);
+        assert_eq!(
+            sargable[0],
+            SargableFilter {
+                field_name: "_id".to_string(),
+                access_kind: AccessKind::PrimaryKey,
+                filter_kind: FilterKind::Range,
+                expr: interval(Interval::closed(lit(1), lit(1))),
+                residual: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_sargable_single_field_index() {
+        let optimizer = Optimizer::new();
+        let index_a = make_index(1, "index_a", vec![("a", Order::Ascending)]);
+        let filter = field_filters(field(["a"]), vec![exists(true)]);
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![index_a.clone()]);
+        assert_eq!(sargable.len(), 1);
+        assert_eq!(
+            sargable[0],
+            SargableFilter {
+                field_name: "a".to_string(),
+                access_kind: AccessKind::Index(index_a),
+                filter_kind: FilterKind::Exists,
+                expr: exists(true),
+                residual: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_sargable_compound_index_prefix() {
+        let optimizer = Optimizer::new();
+        let index_b_c =
+            make_index(1, "index_b_c", vec![("b", Order::Ascending), ("c", Order::Ascending)]);
+        let filter = and(vec![
+            field_filters(
+                field(["b"]),
+                vec![interval(Interval::closed(lit(1), lit(1)))],
+            ),
+            field_filters(field(["d"]), vec![exists(true)]), // non-indexed part
+        ]);
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![index_b_c.clone()]);
+        assert_eq!(sargable.len(), 1);
+        assert_eq!(
+            sargable[0],
+            SargableFilter {
+                field_name: "b".to_string(),
+                access_kind: AccessKind::Index(index_b_c),
+                filter_kind: FilterKind::Range,
+                expr: interval(Interval::closed(lit(1), lit(1))),
+                residual: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_sargable_compound_index_full() {
+        let optimizer = Optimizer::new();
+        let index_b_c =
+            make_index(1, "index_b_c", vec![("b", Order::Ascending), ("c", Order::Ascending)]);
+        let filter = and(vec![
+            field_filters(
+                field(["b"]),
+                vec![interval(Interval::closed(lit(1), lit(1)))],
+            ),
+            field_filters(field(["c"]), vec![exists(true)]),
+        ]);
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![index_b_c.clone()]);
+        assert_eq!(sargable.len(), 2);
+
+        assert_eq!(
+            sargable[0],
+            SargableFilter {
+                field_name: "b".to_string(),
+                access_kind: AccessKind::Index(index_b_c.clone()),
+                filter_kind: FilterKind::Range,
+                expr: interval(Interval::closed(lit(1), lit(1))),
+                residual: None,
+            }
+        );
+        assert_eq!(
+            sargable[1],
+            SargableFilter {
+                field_name: "c".to_string(),
+                access_kind: AccessKind::Index(index_b_c),
+                filter_kind: FilterKind::Exists,
+                expr: exists(true),
+                residual: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_sargable_with_residual() {
+        let optimizer = Optimizer::new();
+        let index_a = make_index(1, "index_a", vec![("a", Order::Ascending)]);
+        let filter = field_filters(
+            field(["a"]),
+            vec![interval(Interval::closed(lit(1), lit(1))), ne(lit(5))],
+        );
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![index_a.clone()]);
+        assert_eq!(sargable.len(), 1);
+        assert_eq!(
+            sargable[0],
+            SargableFilter {
+                field_name: "a".to_string(),
+                access_kind: AccessKind::Index(index_a),
+                filter_kind: FilterKind::Range,
+                expr: interval(Interval::closed(lit(1), lit(1))),
+                residual: Some(field_filters(field(["a"]), vec![ne(lit(5))])),
+            }
+        );
+    }
+
+    #[test]
+    fn test_sargable_none_if_not_sargable() {
+        let optimizer = Optimizer::new();
+        let index_a = make_index(1, "index_a", vec![("a", Order::Ascending)]);
+        let filter = field_filters(field(["a"]), vec![ne(lit(5))]);
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![index_a]);
+        assert!(sargable.is_empty());
+    }
+
+    #[test]
+    fn test_sargable_none_if_not_indexed() {
+        let optimizer = Optimizer::new();
+        let filter = field_filters(field(["a"]), vec![interval(Interval::closed(lit(1), lit(1)))]);
+
+        let sargable = optimizer.find_sargable_filters(&filter, vec![]);
+        assert!(sargable.is_empty());
     }
 }
