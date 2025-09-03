@@ -602,7 +602,7 @@ impl Serializable for Projection {
 }
 
 /// Represents the sort order for a field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SortOrder {
     Ascending,
     Descending,
@@ -631,7 +631,7 @@ impl Serializable for SortOrder {
 }
 
 /// Represents a sorting instruction for a query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct SortField {
     pub field: Arc<Expr>,
     pub order: SortOrder,
