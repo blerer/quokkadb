@@ -313,13 +313,13 @@ mod tests {
 
         assert_eq!(
             Some(Arc::new(CollectionMetadata::new(10, "docs"))),
-            tree.catalog.get_collection(&"docs".to_string())
+            tree.catalog.get_collection_by_name(&"docs".to_string())
         );
 
         let tree = tree.apply(&ManifestEdit::DropCollection {
             name: "docs".to_string(),
         });
-        assert_eq!(None, tree.catalog.get_collection(&"docs".to_string()));
+        assert_eq!(None, tree.catalog.get_collection_by_name(&"docs".to_string()));
     }
 
     #[test]

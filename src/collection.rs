@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::query::logical_plan::LogicalPlan;
+use crate::query::logical_plan::LogicalPlanBuilder;
 use crate::query::parser;
 use bson::Document;
 use std::sync::Arc;
@@ -67,45 +67,25 @@ impl Query {
 
         let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
 
-        let mut plan = LogicalPlan::CollectionScan {
-            collection: collection_id,
-            filter: None,
-            projection: None,
-            sort: None,
-        };
-
         let conditions = parser::parse_conditions(&self.filter)?;
 
-        plan = LogicalPlan::Filter {
-            input: Arc::new(plan),
-            condition: conditions,
-        };
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
 
         if let Some(projection) = &self.projection {
             let projection = parser::parse_projection(&projection)?;
-            plan = LogicalPlan::Projection {
-                input: Arc::new(plan),
-                projection: Arc::new(projection),
-            };
+            builder = builder.project(Arc::new(projection));
         }
 
         if self.limit.is_some() || self.skip.is_some() {
-            plan = LogicalPlan::Limit {
-                input: Arc::new(plan),
-                limit: self.limit.clone(),
-                skip: self.skip.clone(),
-            };
+            builder = builder.limit(self.skip, self.limit);
         }
 
         if let Some(sort) = &self.sort {
             let sort = parser::parse_sort(&sort)?;
-            plan = LogicalPlan::Sort {
-                input: Arc::new(plan),
-                sort_fields: Arc::new(sort),
-            };
+            builder = builder.sort(Arc::new(sort));
         }
 
-        self.db_impl.execute_plan(plan)
+        self.db_impl.execute_plan(builder.build())
     }
 }
 

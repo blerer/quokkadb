@@ -1,10 +1,11 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::query::{Expr, Projection, ProjectionExpr, SortField};
+use crate::query::{Expr, Limit, Projection, ProjectionExpr, SortField};
 use crate::query::tree_node::TreeNode;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
+use crate::util::murmur_hash64::murmur_hash64a;
 
 /// Represents the LogicalPlan for MongoDB-like operations
 #[derive(Debug, Clone, PartialEq)]
@@ -40,8 +41,7 @@ pub enum LogicalPlan {
     /// Represents limit and skip combined into a single node.
     Limit {
         input: Arc<LogicalPlan>,
-        skip: Option<usize>,  // Number of rows to skip
-        limit: Option<usize>, // Maximum number of rows to return
+        limit: Limit,
     },
 }
 
@@ -75,10 +75,9 @@ impl TreeNode for LogicalPlan {
                 input: Self::get_first(children),
                 sort_fields: sort_fields.clone(),
             }),
-            LogicalPlan::Limit { skip, limit, .. } => Arc::new(LogicalPlan::Limit {
+            LogicalPlan::Limit { limit, .. } => Arc::new(LogicalPlan::Limit {
                 input: Self::get_first(children),
-                skip: *skip,
-                limit: *limit,
+                limit: limit.clone(),
             }),
             LogicalPlan::CollectionScan { .. } => self, // Leaf nodes remain unchanged
             LogicalPlan::NoOp => self, // NoOp remains unchanged
@@ -86,9 +85,21 @@ impl TreeNode for LogicalPlan {
     }
 }
 
+// Seed for MurmurHash64
+const HASH_SEED: u64 = 20250309;
+
 impl LogicalPlan {
     fn get_first(children: Vec<Arc<LogicalPlan>>) -> Arc<LogicalPlan> {
         children.into_iter().next().unwrap()
+    }
+
+    pub fn compute_hash(&self) -> u64 {
+        const HASH_SEED: u64 = 20250309;
+
+        let mut writer = ByteWriter::new();
+        self.write_to(&mut writer);
+        let bytes = writer.take_buffer();
+        murmur_hash64a(&bytes, HASH_SEED)
     }
 }
 
@@ -140,11 +151,12 @@ impl Serializable for LogicalPlan {
             5 => {
                 // Limit
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
-                let skip = Option::<usize>::read_from(reader)?;
-                let limit = Option::<usize>::read_from(reader)?;
+                let limit = Limit {
+                    skip: Option::<usize>::read_from(reader)?,
+                    limit: Option::<usize>::read_from(reader)?,
+                };
                 Ok(LogicalPlan::Limit {
                     input,
-                    skip,
                     limit,
                 })
             }
@@ -192,12 +204,10 @@ impl Serializable for LogicalPlan {
             }
             LogicalPlan::Limit {
                 input,
-                skip,
                 limit,
             } => {
                 writer.write_u8(5);
                 input.write_to(writer);
-                skip.write_to(writer);
                 limit.write_to(writer);
             }
         }
@@ -206,62 +216,77 @@ impl Serializable for LogicalPlan {
 
 /// A builder for constructing `LogicalPlan` instances.
 pub struct LogicalPlanBuilder {
-    plan: LogicalPlan,
+    plan: Arc<LogicalPlan>,
 }
 
 impl LogicalPlanBuilder {
     /// Starts with a `TableScan` plan.
     pub fn scan(collection: u32) -> Self {
         Self {
-            plan: LogicalPlan::CollectionScan {
+            plan: Arc::new(LogicalPlan::CollectionScan {
                 collection,
                 projection: None,
                 filter: None,
                 sort: None,
-            },
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn scan_with_filters_and_projections(
+        collection: u32,
+        filter: Option<Arc<Expr>>,
+        projection: Option<Arc<Expr>>,
+        sort: Option<Arc<Expr>>) -> Self {
+        Self {
+            plan: Arc::new(LogicalPlan::CollectionScan {
+                collection,
+                projection: None,
+                filter,
+                sort: None,
+            }),
         }
     }
 
     /// Adds a filter condition.
     pub fn filter(mut self, condition: Arc<Expr>) -> Self {
-        self.plan = LogicalPlan::Filter {
-            input: Arc::new(self.plan),
+        self.plan = Arc::new(LogicalPlan::Filter {
+            input: self.plan,
             condition,
-        };
+        });
         self
     }
 
     /// Specifies fields for projection.
     pub fn project(mut self, projection: Arc<Projection>) -> Self {
-        self.plan = LogicalPlan::Projection {
-            input: Arc::new(self.plan),
+        self.plan = Arc::new(LogicalPlan::Projection {
+            input: self.plan,
             projection,
-        };
+        });
         self
     }
 
     /// Specifies sorting order.
     pub fn sort(mut self, sort_fields: Arc<Vec<SortField>>) -> Self {
-        self.plan = LogicalPlan::Sort {
-            input: Arc::new(self.plan),
+        self.plan = Arc::new(LogicalPlan::Sort {
+            input: self.plan,
             sort_fields,
-        };
+        });
         self
     }
 
     /// Adds a limit and/or skip operation.
     pub fn limit(mut self, skip: Option<usize>, limit: Option<usize>) -> Self {
-        self.plan = LogicalPlan::Limit {
-            input: Arc::new(self.plan),
-            skip,
-            limit,
-        };
+        self.plan = Arc::new(LogicalPlan::Limit {
+            input: self.plan,
+            limit: Limit { skip, limit }
+        });
         self
     }
 
     /// Finalizes the build process and returns the `LogicalPlan`.
     pub fn build(self) -> Arc<LogicalPlan> {
-        Arc::new(self.plan)
+        self.plan.clone()
     }
 }
 
@@ -314,7 +339,7 @@ where
     })
 }
 
-fn transform_up_projection<F>(projection: &&Arc<Projection>, function: &F) -> Arc<Projection>
+fn transform_up_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc<Projection>
 where
     F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
 {
@@ -370,18 +395,42 @@ where
                 })
             }
             LogicalPlan::Projection { input, projection } => {
-                let projection = transform_down_projection(&function, &projection);
+                let projection = transform_down_projection(&projection, &function);
                 Arc::new(LogicalPlan::Projection {
                     input: input.clone(),
                     projection,
                 })
             }
+            LogicalPlan::CollectionScan { collection, projection, filter, sort } => {
+                if filter.is_none() && projection.is_none() {
+                    return node;
+                }
+
+                let filter = if let Some(filter) = filter {
+                    Some(filter.clone().transform_down(&|c| function(c)))
+                } else {
+                    None
+                };
+
+                let projection = if let Some(projection) = projection {
+                    Some(transform_down_projection(&projection, &function))
+                } else {
+                    None
+                };
+
+                Arc::new(LogicalPlan::CollectionScan {
+                    collection: *collection,
+                    projection,
+                    filter,
+                    sort: sort.clone(),
+                })
+            },
             _ => node.clone(),
         }
     })
 }
 
-fn transform_down_projection<F>(function: &F, projection: &&Arc<Projection>) -> Arc<Projection>
+fn transform_down_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc<Projection>
 where
     F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
 {
@@ -430,7 +479,7 @@ where
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::expr_fn::{eq, field, field_filters, include, placeholder, proj_field, proj_fields, sort_asc};
+    use crate::query::expr_fn::{elem_match, eq, field, field_filters, include, lit, placeholder, proj_elem_match, proj_field, proj_fields, sort_asc};
     use crate::query::{ComparisonOperator, SortOrder};
 
     #[test]
@@ -464,5 +513,45 @@ mod tests {
             .build();
 
         check_serialization_round_trip(plan_arc.as_ref().clone());
+    }
+
+    #[test]
+    fn test_transform_up_and_transform_down_filter() {
+        // The expression to find and replace.
+        let original = lit(10);
+        // The expression to replace with.
+        let transformed = lit("replaced");
+
+        // Transformation closure for bottom-up traversal.
+        let transformation = |expr: Arc<Expr>| -> Arc<Expr> {
+            if *expr == *original {
+                transformed.clone()
+            } else {
+                expr
+            }
+        };
+
+        // Test with LogicalPlan::Filter
+        let plan = LogicalPlanBuilder::scan_with_filters_and_projections(123,
+                                                                         Some(eq(original.clone())),
+                                                                         None,
+                                                                         None)
+            .filter(elem_match([eq(original.clone())]))
+            .project(include(proj_elem_match(eq(original.clone()))))
+            .build();
+
+        let transformed_up = transform_up_filter(plan.clone(), transformation.clone());
+        let transformed_down = transform_down_filter(plan.clone(), transformation.clone());
+
+        let expected = LogicalPlanBuilder::scan_with_filters_and_projections(123,
+                                                                                  Some(eq(transformed.clone())),
+                                                                                  None,
+                                                                                  None)
+            .filter(elem_match([eq(transformed.clone())]))
+            .project(include(proj_elem_match(eq(transformed.clone()))))
+            .build();
+
+        assert_eq!(transformed_up, expected);
+        assert_eq!(transformed_down, expected);
     }
 }

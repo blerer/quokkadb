@@ -11,7 +11,7 @@ use crate::util::interval::Interval;
 /// to execute a query. It is generated from a `LogicalPlan` by the optimizer.
 /// Unlike the logical plan, which describes *what* data is needed, the physical
 /// plan describes *how* to get it.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PhysicalPlan {
     /// A no-operation plan that does nothing. This is used when it is possible to determine that the query will do nothing.
     NoOp,
@@ -33,8 +33,6 @@ pub enum PhysicalPlan {
     PointSearch {
         /// The identifier for the collection.
         collection: u32,
-        /// The identifier for the index.
-        index: u32,
         /// The user key to search for.
         key: Arc<Expr>,
         /// An optional filter to apply at the binary level after scanning.

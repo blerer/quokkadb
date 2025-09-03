@@ -134,13 +134,12 @@ impl QueryExecutor {
             }
             PhysicalPlan::PointSearch {
                 collection,
-                index,
                 key,
                 filter,
                 projection: _,
             } => {
                 let key = Self::bind_key_parameter(key, &parameters)?;
-                let result = self.storage_engine.read(*collection, *index, &key, None)?;
+                let result = self.storage_engine.read(*collection, 0, &key, None)?;
                 let iter: QueryOutput = match result {
                     Some((k, v)) => {
                         let op = extract_operation_type(&k);
@@ -301,7 +300,6 @@ use crate::storage::test_utils::storage_engine;
         let key_expr = params.collect_parameter(BsonValue(inserted_id1.clone()));
         let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
-            index: 0, // primary key
             key: key_expr.clone(),
             filter: None,
             projection: None,
@@ -408,7 +406,6 @@ use crate::storage::test_utils::storage_engine;
         let key_expr_non_exist = params_non_exist.collect_parameter(BsonValue(Bson::Int32(99)));
         let plan_non_exist = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
-            index: 0, // primary key
             key: key_expr_non_exist.clone(),
             filter: None,
             projection: None,
@@ -430,7 +427,6 @@ use crate::storage::test_utils::storage_engine;
         let key_expr_deleted = params_deleted.collect_parameter(BsonValue(Bson::Int32(40)));
         let plan_deleted = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
-            index: 0, // primary key
             key: key_expr_deleted.clone(),
             filter: None,
             projection: None,

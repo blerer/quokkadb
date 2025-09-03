@@ -115,6 +115,24 @@ impl<T> Interval<T> {
     }
 }
 
+impl<T: Clone> Interval<T> {
+
+    pub fn start_bound_value(&self) -> Option<T> {
+        Self::bound_value(self.start_bound())
+    }
+
+    pub fn end_bound_value(&self) -> Option<T> {
+        Self::bound_value(self.end_bound())
+    }
+
+    fn bound_value(b: Bound<&T>) -> Option<T> {
+        match b {
+            Bound::Included(v) | Bound::Excluded(v) => Some(v.clone()),
+            Bound::Unbounded => None,
+        }
+    }
+}
+
 impl<T: Clone + Ord> Interval<T> {
     /// Computes the union of two intervals.
     ///

@@ -1,8 +1,9 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use bson::{Bson, Document};
 use crate::error;
@@ -93,6 +94,16 @@ impl TreeNode for Expr {
             Expr::Not(expr) => vec![expr.clone()],
             Expr::Nor(elements) => elements.iter().cloned().collect(),
             Expr::ElemMatch(predicates) => predicates.iter().cloned().collect(),
+            Expr::Interval(interval) => {
+                let mut children = Vec::new();
+                if let Some(child) = interval.start_bound_value() {
+                    children.push(child);
+                }
+                if let Some(child) = interval.end_bound_value() {
+                    children.push(child);
+                }
+                children
+            }
             _ => vec![], // Leaf nodes have no children
         }
     }
@@ -117,6 +128,22 @@ impl TreeNode for Expr {
             Expr::Not(_) => Arc::new(Expr::Not(Self::get_first(children))),
             Expr::Nor(_) => Arc::new(Expr::Nor(children)),
             Expr::ElemMatch { .. } => Arc::new(Expr::ElemMatch(children)),
+            Expr::Interval(interval) => {
+
+                let mut iter = children.into_iter();
+
+                let start_bound = match interval.start_bound() {
+                    Bound::Included(..) => Bound::Included(iter.next().unwrap()),
+                    Bound::Excluded(..) => Bound::Excluded(iter.next().unwrap()),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                let end_bound = match interval.end_bound() {
+                    Bound::Included(..) => Bound::Included(iter.next().unwrap()),
+                    Bound::Excluded(..) => Bound::Excluded(iter.next().unwrap()),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                Arc::new(Expr::Interval(Interval::new(start_bound, end_bound)))
+            },
             _ => self, // No changes needed for leaf nodes
         }
     }
@@ -602,7 +629,7 @@ impl Serializable for Projection {
 }
 
 /// Represents the sort order for a field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SortOrder {
     Ascending,
     Descending,
@@ -631,10 +658,21 @@ impl Serializable for SortOrder {
 }
 
 /// Represents a sorting instruction for a query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct SortField {
     pub field: Arc<Expr>,
     pub order: SortOrder,
+}
+
+impl SortField {
+
+    pub fn asc(field: Arc<Expr>) -> SortField {
+        SortField { field, order: SortOrder::Ascending }
+    }
+
+    pub fn desc(field: Arc<Expr>) -> SortField {
+        SortField { field, order: SortOrder::Descending }
+    }
 }
 
 impl Serializable for SortField {
@@ -823,6 +861,26 @@ pub fn format_path(path: &[PathComponent]) -> String {
         .join(".")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Limit {
+    pub skip: Option<usize>,  // Number of rows to skip
+    pub limit: Option<usize>, // Maximum number of rows to return
+}
+
+impl Serializable for Limit {
+
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let skip = Option::<usize>::read_from(reader)?;
+        let limit = Option::<usize>::read_from(reader)?;
+        Ok(Limit { skip, limit })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        self.skip.write_to(writer);
+        self.limit.write_to(writer);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BsonValue(pub Bson);
 
@@ -892,11 +950,11 @@ impl From<bool> for BsonValue {
     }
 }
 
-impl<T> From<HashSet<T>> for BsonValue
+impl<T> From<BTreeSet<T>> for BsonValue
 where
     T: Into<Bson>// Ensure each element can be converted into `Bson`
 {
-    fn from(values: HashSet<T>) -> Self {
+    fn from(values: BTreeSet<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
     }
 }

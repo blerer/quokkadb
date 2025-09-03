@@ -287,7 +287,7 @@ impl StorageEngine {
     }
 
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> Result<u32> {
-        let collection = self.catalog().get_collection(name);
+        let collection = self.catalog().get_collection_by_name(name);
 
         if let Some(collection) = collection {
             Ok(collection.id)
@@ -298,7 +298,7 @@ impl StorageEngine {
             // We need first to check that the collection has not been created concurrently
             let lsm_tree = self.lsm_tree.load();
             let catalogue = lsm_tree.catalogue();
-            let collection = catalogue.get_collection(name);
+            let collection = catalogue.get_collection_by_name(name);
             if collection.is_none() {
                 let id = catalogue.next_collection_id;
                 let edit = ManifestEdit::CreateCollection {

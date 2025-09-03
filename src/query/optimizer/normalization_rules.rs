@@ -55,7 +55,7 @@ use crate::query::logical_plan::{transform_down_filter, transform_up_filter, Log
 use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr};
 use crate::query::tree_node::TreeNode;
 use crate::util::interval::Interval;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -632,7 +632,7 @@ fn coalesce_in_disjunctions(left: &Arc<Expr>, right: &Arc<Expr>) -> Option<Arc<E
         panic!("IN values must be arrays");
     };
 
-    let mut combined: HashSet<BsonValueRef> = left_arr.into_iter().map(|e| BsonValueRef(e)).collect();
+    let mut combined: BTreeSet<BsonValueRef> = left_arr.into_iter().map(|e| BsonValueRef(e)).collect();
     combined.extend(right_arr.into_iter().map(|e| BsonValueRef(e)));
 
     Some(Arc::new(Expr::Comparison {

@@ -73,7 +73,7 @@ impl DbImpl {
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
     }
 
-    pub fn execute_plan(&self, logical_plan: LogicalPlan) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
+    pub fn execute_plan(&self, logical_plan: Arc<LogicalPlan>) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
 
         // First, normalize the logical plan
         let normalized_plan = self.optimizer.normalize(logical_plan);

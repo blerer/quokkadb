@@ -182,10 +182,7 @@ pub fn exclude(proj_expr: Arc<ProjectionExpr>) -> Arc<Projection> {
 }
 
 pub fn sort_asc(field: Arc<Expr>) ->SortField {
-    SortField {
-        field,
-        order: SortOrder::Ascending,
-    }
+    SortField::asc(field)
 }
 
 

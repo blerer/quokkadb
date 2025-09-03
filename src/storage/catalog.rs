@@ -1,6 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use crate::io::serializable::Serializable;
 
@@ -13,8 +13,10 @@ use crate::io::serializable::Serializable;
 pub struct Catalog {
     /// The next collection id (the first 10 are reserved for internal collections)
     pub next_collection_id: u32,
-    /// Mapping from collection name to its metadata.
-    pub collections: BTreeMap<String, Arc<CollectionMetadata>>,
+    /// Mapping from collection id to its metadata.
+    collections: BTreeMap<u32, Arc<CollectionMetadata>>,
+    /// Mapping from id to name
+    id_by_name: HashMap<String, u32>,
 }
 
 impl Serializable for Catalog {
@@ -22,22 +24,26 @@ impl Serializable for Catalog {
         let next_collection_id = reader.read_varint_u32()?;
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
+        let mut id_by_name = HashMap::new();
         for _ in 0..size {
-            let str = reader.read_str()?.to_string();
+            let id = reader.read_varint_u32()?;
             let collection = Arc::new(CollectionMetadata::read_from(reader)?);
-            collections.insert(str, collection);
+            let name = collection.name.clone();
+            collections.insert(id, collection);
+            id_by_name.insert(name, id);
         }
         Ok(Catalog {
             next_collection_id,
             collections,
+            id_by_name,
         })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         writer.write_varint_u32(self.next_collection_id);
         writer.write_varint_u32(self.collections.len() as u32);
-        self.collections.iter().for_each(|(str, col)| {
-            writer.write_str(str);
+        self.collections.iter().for_each(|(id, col)| {
+            writer.write_varint_u32(*id);
             col.write_to(writer)
         });
     }
@@ -48,32 +54,43 @@ impl Catalog {
         Catalog {
             next_collection_id: 10,
             collections: BTreeMap::new(),
+            id_by_name: HashMap::new(),
         }
     }
+    pub fn get_collection_by_name(&self, name: &str) -> Option<Arc<CollectionMetadata>> {
+        self.id_by_name
+            .get(name)
+            .and_then(|id| self.collections.get(id).cloned())
+    }
 
-    pub fn get_collection(&self, name: &str) -> Option<Arc<CollectionMetadata>> {
-        self.collections.get(name).cloned()
+    pub fn get_collection_by_id(&self, id: &u32) -> Option<Arc<CollectionMetadata>> {
+        self.collections.get(id).cloned()
     }
 
     pub fn add_collection(&self, name: &str, id: u32) -> Self {
         assert_eq!(self.next_collection_id, id);
         let mut collections = self.collections.clone();
         collections.insert(
-            name.to_string(),
+            id,
             Arc::new(CollectionMetadata::new(id, name)),
         );
+        let mut id_by_name = self.id_by_name.clone();
+        id_by_name.insert(name.to_string(), id);
         Catalog {
             next_collection_id: id + 1,
             collections,
+            id_by_name,
         }
     }
 
     pub fn drop_collection(&self, name: &str) -> Self {
+        let mut id_by_name = self.id_by_name.clone();
         let mut collections = self.collections.clone();
-        collections.remove(name);
+        id_by_name.remove(name).and_then(|id| collections.remove(&id));
         Catalog {
             next_collection_id: self.next_collection_id,
             collections,
+            id_by_name,
         }
     }
 }
