@@ -105,30 +105,44 @@ impl QueryExecutor {
             } => {
                 let range = Self::bind_key_range_parameters(range, &parameters)?;
 
+                // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
+                let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+
                 Ok(Box::new(self.storage_engine.range_scan(
                     *collection,
                     0, // This is table scan so index is 0
                     &range,
                     None,
                     direction.clone(),
-                )?.filter_map(|res| {
-                    match res {
+                )?.filter_map(move |res| {
+                    let doc = match res {
                         Ok((k, v)) => {
                             let op = extract_operation_type(&k);
                             match op {
-                                OperationType::Delete => None,
+                                OperationType::Delete => return None,
                                 OperationType::Put => {
                                     // Deserialize the value into a Document
                                     let doc = Document::from_reader(Cursor::new(v));
                                     match doc {
-                                        Err(e) => Some(Err(e.into())),
-                                        Ok(doc) => Some(Ok(doc))
+                                        Err(e) => return Some(Err(e.into())),
+                                        Ok(doc) => doc
                                     }
                                 },
                                 _ => panic!("Unexpected operation type: {:?}", op),
                             }
                         }
-                        Err(e) => Some(Err(e.into())),
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                    match &filter {
+                        Some(filter) => {
+                            if filter(&doc) {
+                                Some(Ok(doc))
+                            } else {
+                                None
+                            }
+                        },
+                        None => Some(Ok(doc))
                     }
                 })))
             }
@@ -164,14 +178,6 @@ impl QueryExecutor {
                 projection: _,
             } => {
                 todo!()
-            }
-            PhysicalPlan::Union { inputs } => {
-                let mut iter: QueryOutput = Box::new(std::iter::empty());
-                for input in inputs {
-                    let input_iter = self.execute_cached(input.clone(), parameters)?;
-                    iter = Box::new(iter.chain(input_iter));
-                }
-                Ok(iter)
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), &parameters);
@@ -266,15 +272,14 @@ impl QueryExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::error::Result;
-use crate::query::{make_sort_field, SortOrder};
-use crate::query::{BsonValue, Expr, Parameters, Projection, ProjectionExpr};
-use crate::storage::test_utils::storage_engine;
+    use crate::error::Result;
+    use crate::query::{make_sort_field, SortOrder};
+    use crate::query::{BsonValue, Expr, Parameters, Projection, ProjectionExpr};
+    use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
-    use std::ops::Bound;
     use std::sync::Arc;
-    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, gte, has_type, lt, lte, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice};
+    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, has_type, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice, interval, point, greater_than, less_than, at_most, at_least};
 
     #[test]
     fn test_execution_roundtrip() -> Result<()> {
@@ -813,13 +818,17 @@ use crate::storage::test_utils::storage_engine;
         // $eq
         let mut params = Parameters::new();
         let p = params.collect_parameter("a".into());
-        let filter = field_filters(field(["name"]), [eq(p)]);
+        let filter = field_filters(
+            field(["name"]), [interval(point(&p))]
+        );
         run_filter_test(&executor, collection_id, filter, params, &[2, 4])?;
 
         // $gt
         let mut params = Parameters::new();
         let p = params.collect_parameter(15.0.into());
-        let filter = field_filters(field(["value"]), [gt(p)]);
+        let filter = field_filters(
+            field(["value"]), [interval(greater_than(&p))]
+        );
         run_filter_test(&executor, collection_id, filter, params, &[2, 3])?;
 
         // $in
@@ -879,8 +888,8 @@ use crate::storage::test_utils::storage_engine;
         let filter = field_filters(field(["items"]),
                                    [elem_match(
                                        vec![
-                                           field_filters(field(["k"]), [eq(p_k)]),
-                                           field_filters(field(["v"]), [eq(p_v)])
+                                           field_filters(field(["k"]), [interval(point(&p_k))]),
+                                           field_filters(field(["v"]), [interval(point(&p_v))])
                                        ]
                                    )]);
         run_filter_test(&executor, collection_id, filter, params, &[1])?;
@@ -889,8 +898,8 @@ use crate::storage::test_utils::storage_engine;
         let mut params = Parameters::new();
         let p_name = params.collect_parameter("a".into());
         let p_val = params.collect_parameter(10.0.into());
-        let f1 = field_filters(field(["name"]), [eq(p_name)]);
-        let f2 = field_filters(field(["value"]), [eq(p_val)]);
+        let f1 = field_filters(field(["name"]), [interval(point(&p_name))]);
+        let f2 = field_filters(field(["value"]), [interval(point(&p_val))]);
         let filter = and(vec![f1, f2]);
         run_filter_test(&executor, collection_id, filter, params, &[4])?;
 
@@ -898,15 +907,15 @@ use crate::storage::test_utils::storage_engine;
         let mut params = Parameters::new();
         let p_name = params.collect_parameter("b".into());
         let p_val = params.collect_parameter(5.0.into());
-        let f1 = field_filters(field(["name"]), [eq(p_name)]);
-        let f2 = field_filters(field(["value"]), [eq(p_val)]);
+        let f1 = field_filters(field(["name"]), [interval(point(&p_name))]);
+        let f2 = field_filters(field(["value"]), [interval(point(&p_val))]);
         let filter = or(vec![f1, f2]);
         run_filter_test(&executor, collection_id, filter, params, &[3, 5])?;
 
         // $not (top-level)
         let mut params = Parameters::new();
         let p = params.collect_parameter("a".into());
-        let inner_filter = field_filters(field(["name"]), [eq(p)]);
+        let inner_filter = field_filters(field(["name"]), [interval(point(&p))]);
         let filter = not(inner_filter);
         run_filter_test(&executor, collection_id, filter, params, &[1, 3, 5, 6])?;
 
@@ -914,27 +923,27 @@ use crate::storage::test_utils::storage_engine;
         let mut params = Parameters::new();
         let p_name1 = params.collect_parameter("a".into());
         let p_name2 = params.collect_parameter("b".into());
-        let f1 = field_filters(field(["name"]), [eq(p_name1)]);
-        let f2 = field_filters(field(["name"]), [eq(p_name2)]);
+        let f1 = field_filters(field(["name"]), [interval(point(&p_name1))]);
+        let f2 = field_filters(field(["name"]), [interval(point(&p_name2))]);
         let filter = nor(vec![f1, f2]);
         run_filter_test(&executor, collection_id, filter, params, &[1, 5, 6])?;
 
         // $lt
         let mut params = Parameters::new();
         let p = params.collect_parameter(15.0.into());
-        let filter = field_filters(field(["value"]), [lt(p)]);
-        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5])?;
+        let filter = field_filters(field(["value"]), [interval(less_than(&p))]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5, 6])?; // Also match Null
 
         // $lte
         let mut params = Parameters::new();
         let p = params.collect_parameter(10.0.into());
-        let filter = field_filters(field(["value"]), [lte(p)]);
-        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5])?;
+        let filter = field_filters(field(["value"]), [interval(at_most(&p))]);
+        run_filter_test(&executor, collection_id, filter, params, &[1, 4, 5, 6])?;
 
         // $gte
         let mut params = Parameters::new();
         let p = params.collect_parameter(20.0.into());
-        let filter = field_filters(field(["value"]), [gte(p)]);
+        let filter = field_filters(field(["value"]), [interval(at_least(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[2, 3])?;
 
         // $ne
@@ -955,29 +964,29 @@ use crate::storage::test_utils::storage_engine;
         let p2 = params.collect_parameter("b".into());
         let p3 = params.collect_parameter(10.0.into());
         let f1 = or(vec![
-            field_filters(field(["name"]), [eq(p1)]),
-            field_filters(field(["name"]), [eq(p2)]),
+            field_filters(field(["name"]), [interval(point(&p1))]),
+            field_filters(field(["name"]), [interval(point(&p2))]),
         ]);
-        let f2 = field_filters(field(["value"]), [eq(p3)]);
+        let f2 = field_filters(field(["value"]), [interval(point(&p3))]);
         let filter = and(vec![f1, f2]);
         run_filter_test(&executor, collection_id, filter, params, &[4])?;
 
         // Complex/nested field path
         let mut params = Parameters::new();
         let p = params.collect_parameter(5.into());
-        let filter = field_filters(field(["nested", "val"]), [eq(p)]);
+        let filter = field_filters(field(["nested", "val"]), [interval(point(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[2])?;
 
         // Null check: field is null
         let mut params = Parameters::new();
         let p = params.collect_parameter(BsonValue(Bson::Null));
-        let filter = field_filters(field(["value"]), [eq(p)]);
+        let filter = field_filters(field(["value"]), [interval(point(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[6])?;
 
         // Null check: field does not exist (should not match null)
         let mut params = Parameters::new();
         let p = params.collect_parameter(BsonValue(Bson::Null));
-        let filter = field_filters(field(["tags"]), [eq(p)]);
+        let filter = field_filters(field(["tags"]), [interval(point(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[5])?;
 
         Ok(())
@@ -1095,7 +1104,7 @@ use crate::storage::test_utils::storage_engine;
         // Case 5: ElemMatch projection
         let mut params_5 = Parameters::new();
         let p_5 = params_5.collect_parameter("a".into());
-        let filter_5 = field_filters(field(["tag"]), [eq(p_5)]);
+        let filter_5 = field_filters(field(["tag"]), [interval(point(&p_5))]);
         let proj_expr_5 = proj_fields(vec![("array_doc", proj_elem_match(filter_5))]);
         run_projection_test(
             &executor,
@@ -1114,7 +1123,7 @@ use crate::storage::test_utils::storage_engine;
         let mut params_6 = Parameters::new();
         let p_6 = params_6.collect_parameter(25.into());
         // Filter for elements > 25. The field for FieldFilters is empty path, meaning the element itself.
-        let filter_6 = gt(p_6);
+        let filter_6 = interval(greater_than(&p_6));
         let proj_expr_6 = proj_fields(vec![(
             "array_scalar",
             Arc::new(ProjectionExpr::PositionalField { filter: filter_6 }),
@@ -1143,7 +1152,7 @@ use crate::storage::test_utils::storage_engine;
         // Case 8: ElemMatch with no matches
         let mut params_8 = Parameters::new();
         let p_8 = params_8.collect_parameter("z".into()); // No element has tag "z"
-        let filter_8 = field_filters(field(["tag"]), [eq(p_8)]);
+        let filter_8 = field_filters(field(["tag"]), [interval(point(&p_8))]);
         let proj_expr_8 = proj_fields(vec![("array_doc", proj_elem_match(filter_8))]);
         run_projection_test(
             &executor,
@@ -1157,7 +1166,7 @@ use crate::storage::test_utils::storage_engine;
         let mut params_9 = Parameters::new();
         let p_9 = params_9.collect_parameter("a".into());
         // Filter for elements where tag is "a". This matches two elements.
-        let filter_9 = field_filters(field(["tag"]), [eq(p_9)]);
+        let filter_9 = field_filters(field(["tag"]), [interval(point(&p_9))]);
         let proj_expr_9 = proj_fields(vec![(
             "array_doc",
             Arc::new(ProjectionExpr::PositionalField { filter: filter_9 }),

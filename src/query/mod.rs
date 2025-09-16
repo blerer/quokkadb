@@ -104,6 +104,9 @@ impl TreeNode for Expr {
                 }
                 children
             }
+            Expr::Type { bson_type, .. } => vec![bson_type.clone()],
+            Expr::Size { size, .. } => vec![size.clone()],
+            Expr::All(values) => vec![values.clone()],
             _ => vec![], // Leaf nodes have no children
         }
     }
@@ -144,6 +147,18 @@ impl TreeNode for Expr {
                 };
                 Arc::new(Expr::Interval(Interval::new(start_bound, end_bound)))
             },
+            Expr::Type { negated, .. } => Arc::new(Expr::Type {
+                bson_type: Self::get_first(children),
+                negated: *negated,
+            }),
+            Expr::Size { negated, .. } => Arc::new(Expr::Size {
+                size: Self::get_first(children),
+                negated: *negated,
+            }),
+            Expr::All(..) => {
+                assert_eq!(children.len(), 1, "All operator should have exactly one child");
+                Arc::new(Expr::All(Self::get_first(children)))
+            }
             _ => self, // No changes needed for leaf nodes
         }
     }

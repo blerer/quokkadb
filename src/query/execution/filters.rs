@@ -1,8 +1,10 @@
 use crate::query::{get_path_value, BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters};
 use bson::{Bson, Document};
 use std::collections::HashSet;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use bson::spec::ElementType;
+use crate::util::interval::Interval;
 
 /// Converts a numeric BSON type code to an `ElementType`.
 fn get_element_type_from_code(code: u8) -> Option<ElementType> {
@@ -31,27 +33,23 @@ fn get_element_type_from_code(code: u8) -> Option<ElementType> {
     }
 }
 
-/// Checks if a BSON value's type matches the specified type.
-/// The type can be specified as a string alias or a numeric type code.
-fn check_bson_type(value: BsonValueRef, type_spec: &BsonValue) -> bool {
-    let type_spec_bson = &type_spec.0;
-    let value_type = value.0.element_type();
+pub fn to_type_filter(type_spec: &Bson) -> Box<dyn Fn(ElementType) -> bool + Send + Sync> {
 
     // Handle "number" alias, which matches multiple numeric types
-    if let Bson::String(s) = type_spec_bson {
+    if let Bson::String(s) = type_spec {
         if s == "number" {
-            return matches!(
-                value_type,
-                ElementType::Double
-                    | ElementType::Int32
-                    | ElementType::Int64
-                    | ElementType::Decimal128
-            );
+            return Box::new(move |value_type|
+                matches!(value_type,
+                    ElementType::Double
+                        | ElementType::Int32
+                        | ElementType::Int64
+                        | ElementType::Decimal128
+            ));
         }
     }
 
     // Get the expected BSON element type from the type specifier
-    let expected_type = match type_spec_bson {
+    let expected_type = match type_spec {
         Bson::Int32(i) => u8::try_from(*i).ok().and_then(get_element_type_from_code),
         Bson::Int64(i) => u8::try_from(*i).ok().and_then(get_element_type_from_code),
         Bson::Double(f) => {
@@ -89,8 +87,8 @@ fn check_bson_type(value: BsonValueRef, type_spec: &BsonValue) -> bool {
     };
 
     match expected_type {
-        Some(et) => value_type == et,
-        None => false, // Invalid type specifier results in no match
+        Some(et) => Box::new(move |value_type| value_type == et),
+        None => Box::new(move |value_type| false), // Invalid type specifier results in no match
     }
 }
 
@@ -113,33 +111,14 @@ fn compare_value(
         Some(v) => v,
         None => {
             return match operator {
-                ComparisonOperator::Eq => comparison_value.0.as_null().is_some(),
                 ComparisonOperator::Ne => !comparison_value.0.as_null().is_some(),
                 _ => false,
             };
         }
     };
 
-    // For comparison operators, null should never match
     match operator {
-        ComparisonOperator::Gt
-        | ComparisonOperator::Gte
-        | ComparisonOperator::Lt
-        | ComparisonOperator::Lte => {
-            if document_value.0.as_null().is_some() {
-                return false;
-            }
-        }
-        _ => {}
-    }
-
-    match operator {
-        ComparisonOperator::Eq => document_value == comparison_value,
         ComparisonOperator::Ne => document_value != comparison_value,
-        ComparisonOperator::Gt => document_value > comparison_value,
-        ComparisonOperator::Gte => document_value >= comparison_value,
-        ComparisonOperator::Lt => document_value < comparison_value,
-        ComparisonOperator::Lte => document_value <= comparison_value,
         ComparisonOperator::In => {
             if let BsonValueRef(Bson::Array(array)) = comparison_value {
                 array.iter().any(|item| BsonValueRef(item) == document_value)
@@ -154,6 +133,7 @@ fn compare_value(
                 true
             }
         }
+        _ => unreachable!("Unsupported operator in compare_value: {:?}", operator),
     }
 }
 
@@ -187,9 +167,25 @@ pub fn to_value_filter(
             let operator = *operator;
             let comparison_value = match value.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-                _ => panic!("Comparison value must be a placeholder"),
+                _ => panic!("Comparison value must be a placeholder but was {:?}", value),
             };
             Box::new(move |field_value| compare_value(operator, comparison_value.as_ref(), field_value))
+        }
+        Expr::Interval(interval) => {
+
+            let start = resolve_bound(interval.start_bound(), parameters);
+            let end = resolve_bound(interval.end_bound(), parameters);
+            let interval = Interval::new(start, end);
+
+            Box::new(move |field_value| {
+                match field_value {
+                    // Arrays are compared element-wise. $eq: null matches if any element is null or if the whole field is missing
+                    Some(BsonValueRef(Bson::Array(array))) => array.iter().any(|val| contains(&interval, BsonValueRef(&val))),
+                    Some(val) => contains(&interval, val),
+                    // $eq: null matches also missing fields so we need to check for point intervals with null bounds
+                    None => interval.is_point() && interval.start_bound_value().and_then(|v| v.0.as_null()).is_some(), //
+                }
+            })
         }
         // Implements the `$exists` filter as:
         // - `$exists: true` matches documents where the field is present.
@@ -205,7 +201,7 @@ pub fn to_value_filter(
         // - If the array element is a document, all document-level filters must match.
         // - If the array element is a scalar, all value-level filters must match.
         Expr::ElemMatch(filters) => {
-            let is_doc_filter = matches!(filters.first().map(|f| f.as_ref()), Some(Expr::FieldFilters { .. }));
+            let is_doc_filter = matches!(filters.first().map(|f| f.as_ref()), Some(Expr::FieldFilters { .. }) | Some(Expr::And(_)) | Some(Expr::Or(_)) | Some(Expr::Not(_)));
 
             if is_doc_filter {
                 let elem_filters: Vec<_> = to_filters(filters, parameters);
@@ -238,10 +234,12 @@ pub fn to_value_filter(
                 _ => panic!("$type value must be a placeholder"),
             };
             let negated = *negated;
+            // Precompute the type filter function
+            let type_filter = to_type_filter(&type_spec.0);
 
             Box::new(move |field_value| {
                 let result = if let Some(field_value) = field_value {
-                    check_bson_type(field_value, &type_spec)
+                    type_filter(field_value.0.element_type())
                 } else {
                     false
                 };
@@ -302,6 +300,30 @@ pub fn to_value_filter(
     }
 }
 
+fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool
+{
+    (match interval.start_bound() {
+        Bound::Included(start) => start.as_ref() <= item,
+        Bound::Excluded(start) => start.as_ref() < item,
+        Bound::Unbounded => true,
+    }) && (match interval.end_bound() {
+        Bound::Included(end) => item <= end.as_ref(),
+        Bound::Excluded(end) => item < end.as_ref(),
+        Bound::Unbounded => true,
+    })
+}
+
+fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) ->Bound<BsonValue> {
+    let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
+        Expr::Placeholder(idx) => parameters.get(*idx).clone(),
+        _ => panic!("Interval bound must be a placeholder"),
+    };
+    match bound {
+        Bound::Included(expr) => Bound::Included(get_value(expr)),
+        Bound::Excluded(expr) => Bound::Excluded(get_value(expr)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
 
 fn elem_match_array<F>(field_value: Option<BsonValueRef>, matcher: F,) -> bool
 where
@@ -334,8 +356,6 @@ pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Docume
             let children_filters = to_filters(children, parameters);
             Box::new(move |doc: &Document| !children_filters.iter().any(|f| f(doc)))
         }
-        Expr::AlwaysTrue => Box::new(|_| true),
-        Expr::AlwaysFalse => Box::new(|_| false),
         Expr::FieldFilters { field, filters } => {
             let path = match field.as_ref() {
                 Expr::Field(path) => path.clone(),
@@ -371,48 +391,56 @@ mod tests {
     use bson::{doc, Bson, Decimal128};
 
     #[test]
-    fn test_check_bson_type_by_string_alias() {
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::String("hello".to_string())),
-            &BsonValue::from("string")
+    fn test_to_type_filter_with_string_alias() {
+
+        let filter = to_type_filter(&Bson::from("string"));
+
+        assert!(matches_type_spec(
+            &Bson::String("hello".to_string()),
+            &Bson::from("string")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Int32(1)),
-            &BsonValue::from("int")
+        assert!(matches_type_spec(
+            &Bson::Int32(1),
+            &Bson::from("int")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Int64(1)),
-            &BsonValue::from("long")
+        assert!(matches_type_spec(
+            &Bson::Int64(1),
+            &Bson::from("long")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Double(1.0)),
-            &BsonValue::from("double")
+        assert!(matches_type_spec(
+            &Bson::Double(1.0),
+            &Bson::from("double")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Array(vec![])),
-            &BsonValue::from("array")
+        assert!(matches_type_spec(
+            &Bson::Array(vec![]),
+            &Bson::from("array")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Document(doc! {})),
-            &BsonValue::from("object")
+        assert!(matches_type_spec(
+            &Bson::Document(doc! {}),
+            &Bson::from("object")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Boolean(true)),
-            &BsonValue::from("bool")
+        assert!(matches_type_spec(
+            &Bson::Boolean(true),
+            &Bson::from("bool")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Null),
-            &BsonValue::from("null")
+        assert!(matches_type_spec(
+            &Bson::Null,
+            &Bson::from("null")
         ));
-        assert!(check_bson_type(
-            BsonValueRef(&Bson::Decimal128(Decimal128::from_str("1").unwrap())),
-            &BsonValue::from("decimal")
+        assert!(matches_type_spec(
+            &Bson::Decimal128(Decimal128::from_str("1").unwrap()),
+            &Bson::from("decimal")
         ));
 
-        assert!(!check_bson_type(
-            BsonValueRef(&Bson::String("hello".to_string())),
-            &BsonValue::from("int")
+        assert!(!matches_type_spec(
+            &Bson::String("hello".to_string()),
+            &Bson::from("int")
         ));
+    }
+
+    fn matches_type_spec(value: &Bson, type_spec: &Bson) -> bool {
+        let type_filter = to_type_filter(type_spec);
+        type_filter(value.element_type())
     }
 
     #[test]
@@ -420,36 +448,30 @@ mod tests {
         let s = Bson::String("hello".to_string());
 
         // String is type 2
-        assert!(check_bson_type(BsonValueRef(&s), &BsonValue::from(2)));
-        assert!(check_bson_type(
-            BsonValueRef(&s),
-            &BsonValue::from(2i64)
-        ));
-        assert!(check_bson_type(
-            BsonValueRef(&s),
-            &BsonValue(Bson::Double(2.0))
-        ));
+        assert!(matches_type_spec(&Bson::from(&s), &Bson::from(2)));
+        assert!(matches_type_spec(&Bson::from(&s), &Bson::from(2i64)));
+        assert!(matches_type_spec(&Bson::from(&s), &Bson::Double(2.0)));
 
         // Int32 is type 16
-        assert!(check_bson_type(BsonValueRef(&Bson::Int32(1)), &BsonValue::from(16)));
+        assert!(matches_type_spec(&Bson::Int32(1), &Bson::from(16)));
         // Int64 is type 18
-        assert!(check_bson_type(BsonValueRef(&Bson::Int64(1)), &BsonValue::from(18)));
+        assert!(matches_type_spec(&Bson::Int64(1), &Bson::from(18)));
         // Double is type 1
-        assert!(check_bson_type(BsonValueRef(&Bson::Double(1.0)), &BsonValue::from(1)));
+        assert!(matches_type_spec(&Bson::Double(1.0), &Bson::from(1)));
 
         // Mismatch
-        assert!(!check_bson_type(BsonValueRef(&Bson::Int32(1)), &BsonValue::from(1)));
+        assert!(!matches_type_spec(&Bson::Int32(1), &Bson::from(1)));
     }
 
     #[test]
     fn test_check_bson_type_for_number_alias() {
-        let number_spec = BsonValue::from("number");
+        let number_spec = Bson::from("number");
 
-        assert!(check_bson_type(BsonValueRef(&Bson::Int32(1)), &number_spec));
-        assert!(check_bson_type(BsonValueRef(&Bson::Int64(1)), &number_spec));
-        assert!(check_bson_type(BsonValueRef(&Bson::Double(1.0)), &number_spec));
-        assert!(check_bson_type(BsonValueRef(&Bson::Decimal128(Decimal128::from_str("1").unwrap())), &number_spec));
-        assert!(!check_bson_type(BsonValueRef(&Bson::String("hello".to_string())), &number_spec));
+        assert!(matches_type_spec(&Bson::Int32(1), &number_spec));
+        assert!(matches_type_spec(&Bson::Int64(1), &number_spec));
+        assert!(matches_type_spec(&Bson::Double(1.0), &number_spec));
+        assert!(matches_type_spec(&Bson::Decimal128(Decimal128::from_str("1").unwrap()), &number_spec));
+        assert!(!matches_type_spec(&Bson::String("hello".to_string()), &number_spec));
     }
 
     #[test]
@@ -457,19 +479,19 @@ mod tests {
         let i32 = Bson::Int32(1);
 
         // Invalid string
-        assert!(!check_bson_type(
-            BsonValueRef(&i32),
-            &BsonValue::from("not-a-type")
+        assert!(!matches_type_spec(
+            &Bson::from(&i32),
+            &Bson::from("not-a-type")
         ));
         // Invalid number code
-        assert!(!check_bson_type(
-            BsonValueRef(&i32),
-            &BsonValue::from(12345)
+        assert!(!matches_type_spec(
+            &Bson::from(&i32),
+            &Bson::from(12345)
         ));
         // Invalid spec type
-        assert!(!check_bson_type(
-            BsonValueRef(&i32),
-            &BsonValue::from(true)
+        assert!(!matches_type_spec(
+            &Bson::from(&i32),
+            &Bson::from(true)
         ));
     }
 }

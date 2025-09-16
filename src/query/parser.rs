@@ -1,11 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
 use crate::Error;
 use bson::{Bson, Document};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+static SCALAR_OPERATIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        HashSet::from([
+            "$eq", "$ne", "$gt", "$gte", "$lt", "$lte",
+            "$in", "$nin", "$exists", "$type", "$size", "$all",
+            "$elemMatch"])
+    });
+
 
 /// Parses a BSON `Document` representing a query filter into an `Expr`.
 pub fn parse_conditions(doc: &Document) -> Result<Arc<Expr>, Error> {
@@ -148,13 +156,24 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                     }
                 }
                 "$elemMatch" => {
-                    if let Bson::Document(_) = value {
-                        let sub_condition = parse_predicates(value)?;
-                        predicates.push(Arc::new(Expr::ElemMatch(sub_condition)))
+                    if let Bson::Document(doc) = value {
+                        let is_operator_only = doc.iter().all(|(k, _)| SCALAR_OPERATIONS.contains(k.as_str()));
+
+                        if is_operator_only {
+                            // Scalar array case: operators only
+                            let sub_preds = parse_predicates(value)?; // Vec<Arc<Expr>>
+                            predicates.push(Arc::new(Expr::ElemMatch(sub_preds)));
+                        } else {
+                            // Array of documents case: fields and nested conditions
+                            let nested = parse_conditions(doc)?; // Arc<Expr>
+                            let sub_preds = match nested.as_ref() {
+                                Expr::And(children) => children.clone(), // flatten top-level AND
+                                _ => vec![nested],                       // preserve OR/NOT/etc. as a single subexpr
+                            };
+                            predicates.push(Arc::new(Expr::ElemMatch(sub_preds)));
+                        }
                     } else {
-                        return Err(Error::InvalidRequest(
-                            "$elemMatch must be a document".to_string(),
-                        ));
+                        return Err(Error::InvalidRequest("$elemMatch must be a document".to_string()));
                     }
                 }
                 _ => return Err(Error::InvalidRequest(format!("Unknown operator: {}", key))),
@@ -938,4 +957,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_conditions_with_elem_match_on_documents() {
+        use bson::doc;
+
+        let filter = doc! {
+        "items": { "$elemMatch": { "product": "xyz", "score": { "$gte": 8 } } }
+    };
+
+        let parsed = parse_conditions(&filter).unwrap();
+        let expected = field_filters(
+            field(["items"]),
+            [elem_match([
+                field_filters(field(["product"]), [eq(lit("xyz"))]),
+                field_filters(field(["score"]), [gte(lit(8))]),
+            ])],
+        );
+
+        assert_eq!(expected, parsed);
+    }
+
+    #[test]
+    fn test_parse_conditions_elem_match_invalid_non_document() {
+        let filter = doc! { "a": { "$elemMatch": 1 } };
+        let err = parse_conditions(&filter).unwrap_err();
+        assert_eq!(err.to_string(), "$elemMatch must be a document");
+    }
+
+    #[test]
+    fn test_parse_conditions_elem_match_with_or() {
+        let filter = doc! {
+        "a": { "$elemMatch": { "$or": [ { "x": 1 }, { "y": 2 } ] } }
+    };
+        let parsed = parse_conditions(&filter).unwrap();
+        let expected = field_filters(
+            field(["a"]),
+            [elem_match([
+                or([
+                    field_filters(field(["x"]), [eq(lit(1))]),
+                    field_filters(field(["y"]), [eq(lit(2))]),
+                ])
+            ])]
+        );
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_conditions_elem_match_with_explicit_and_flattened() {
+        let filter = doc! {
+        "a": { "$elemMatch": { "$and": [ { "x": 1 }, { "y": { "$gt": 2 } } ] } }
+    };
+        let parsed = parse_conditions(&filter).unwrap();
+        let expected = field_filters(
+            field(["a"]),
+            [elem_match([
+                field_filters(field(["x"]), [eq(lit(1))]),
+                field_filters(field(["y"]), [gt(lit(2))]),
+            ])]
+        );
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_conditions_nested_elem_match() {
+        let filter = doc! {
+        "a": { "$elemMatch": { "b": { "$elemMatch": { "$gt": 5 } } } }
+    };
+        let parsed = parse_conditions(&filter).unwrap();
+        let expected = field_filters(
+            field(["a"]),
+            [elem_match([
+                field_filters(field(["b"]), [elem_match([gt(lit(5))])])
+            ])]
+        );
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_conditions_elem_match_empty_document() {
+        let filter = doc! { "a": { "$elemMatch": {} } };
+        let parsed = parse_conditions(&filter).unwrap();
+        let expected = field_filters(
+            field(["a"]),
+            [elem_match(Vec::<Arc<Expr>>::new())],
+        );
+        assert_eq!(parsed, expected);
+    }
 }

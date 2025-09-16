@@ -766,7 +766,7 @@ mod tests {
                 continue;
             }
 
-            let mut op_and_sequences = operations_and_sequences_for(col, i);
+            let op_and_sequences = operations_and_sequences_for(col, i);
 
             if op_and_sequences.is_empty() {
                 panic!("No operations found for index {}", i);

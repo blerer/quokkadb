@@ -1,8 +1,9 @@
 use crate::error::Error;
-use crate::query::logical_plan::LogicalPlanBuilder;
+use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::parser;
-use bson::Document;
+use bson::{to_vec, Document};
 use std::sync::Arc;
+use serde::Serialize;
 use crate::DbImpl;
 
 pub struct Collection {
@@ -11,8 +12,43 @@ pub struct Collection {
 }
 
 impl Collection {
-    pub fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
+    pub(crate) fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
         Collection { db_impl, collection }
+    }
+
+    pub fn insert_one(
+        &self,
+        document: impl Serialize,
+    ) -> Result<Document> {
+
+        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+
+        let plan = LogicalPlan::InsertOne {
+            collection: collection_id,
+            document: to_vec(&document)?,
+        };
+
+        self.db_impl.execute_write(plan)
+    }
+
+    pub fn insert_many(
+        &self,
+        documents: impl IntoIterator<Item = impl Serialize>,
+    ) -> Result<Document> {
+
+        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+
+        let mut serialized = Vec::new();
+        for doc in documents {
+            serialized.push(to_vec(&doc)?);
+        }
+
+        let plan = LogicalPlan::InsertMany {
+            collection: collection_id,
+            documents: serialized,
+        };
+
+        self.db_impl.execute_write(plan)
     }
 
     pub fn find(&self, filter: Document) -> Query {
@@ -31,7 +67,7 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn new(db_impl: Arc<DbImpl>, collection: String, filter: Document) -> Query {
+    fn new(db_impl: Arc<DbImpl>, collection: String, filter: Document) -> Query {
         Query {
             db_impl,
             collection,
@@ -65,19 +101,19 @@ impl Query {
 
     pub fn execute(&self) -> Result<Box<dyn Iterator<Item=Result<Document>>>> {
 
-        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+        let collection_id = self.db_impl.get_collection_id(&self.collection);
+
+        if collection_id.is_none() {
+            return Ok(Box::new(std::iter::empty()));
+        }
 
         let conditions = parser::parse_conditions(&self.filter)?;
 
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+        let mut builder = LogicalPlanBuilder::scan(collection_id.unwrap()).filter(conditions);
 
         if let Some(projection) = &self.projection {
             let projection = parser::parse_projection(&projection)?;
             builder = builder.project(Arc::new(projection));
-        }
-
-        if self.limit.is_some() || self.skip.is_some() {
-            builder = builder.limit(self.skip, self.limit);
         }
 
         if let Some(sort) = &self.sort {
@@ -85,7 +121,11 @@ impl Query {
             builder = builder.sort(Arc::new(sort));
         }
 
-        self.db_impl.execute_plan(builder.build())
+        if self.limit.is_some() || self.skip.is_some() {
+            builder = builder.limit(self.skip, self.limit);
+        }
+
+        self.db_impl.execute_query(builder.build())
     }
 }
 

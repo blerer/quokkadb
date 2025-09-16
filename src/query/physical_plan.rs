@@ -55,12 +55,6 @@ pub enum PhysicalPlan {
         projection: Option<Arc<Projection>>,
     },
 
-    /// Unions multiple input plans together.
-    Union {
-        /// The input plans to union together.
-        inputs: Vec<Arc<PhysicalPlan>>,
-    },
-
     /// Inserts a document into a collection. This is a terminal operator.
     InsertOne {
         /// The identifier for the collection.

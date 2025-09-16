@@ -1,4 +1,4 @@
-use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, Projection, ProjectionExpr, SortField, SortOrder};
+use crate::query::{BsonValue, ComparisonOperator, Expr, PathComponent, Projection, ProjectionExpr, SortField};
 use std::sync::Arc;
 use crate::util::interval::Interval;
 
@@ -135,6 +135,31 @@ pub fn not(predicate: Arc<Expr>) -> Arc<Expr> {
 pub fn interval(interval: Interval<Arc<Expr>>) -> Arc<Expr>
 {
     Arc::new(Expr::Interval(interval))
+}
+
+pub fn point(point: &Arc<Expr>) -> Interval<Arc<Expr>>
+{
+    Interval::closed(point.clone(), point.clone())
+}
+
+pub fn greater_than(bound: &Arc<Expr>) -> Interval<Arc<Expr>>
+{
+    Interval::greater_than(bound.clone())
+}
+
+pub fn at_least(bound: &Arc<Expr>) -> Interval<Arc<Expr>>
+{
+    Interval::at_least(bound.clone())
+}
+
+pub fn less_than(bound: &Arc<Expr>) -> Interval<Arc<Expr>>
+{
+    Interval::less_than(bound.clone())
+}
+
+pub fn at_most(bound: &Arc<Expr>) -> Interval<Arc<Expr>>
+{
+    Interval::at_most(bound.clone())
 }
 
 pub fn proj_field() -> Arc<ProjectionExpr> {
