@@ -2,6 +2,7 @@ use crate::query::Expr;
 use std::sync::Arc;
 use crate::query::Projection;
 use crate::query::SortField;
+use crate::query::update::UpdateExpr;
 use crate::storage::Direction;
 use crate::util::interval::Interval;
 
@@ -69,6 +70,26 @@ pub enum PhysicalPlan {
         collection: u32,
         /// The documents to be inserted.
         documents: Vec<Vec<u8>>,
+    },
+
+    /// Updates a single document in a collection.
+    UpdateOne {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to update.
+        query: Arc<PhysicalPlan>,
+        /// The update expression defining the modifications.
+        update: UpdateExpr,
+    },
+
+    /// Updates multiple documents in a collection.
+    UpdateMany {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the documents to update.
+        query: Arc<PhysicalPlan>,
+        /// The update expression defining the modifications.
+        update: UpdateExpr,
     },
 
     /// Filters rows from its input based on a predicate.

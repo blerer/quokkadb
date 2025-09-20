@@ -3,10 +3,18 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use crate::io::ZeroCopy;
 use bson::{to_vec, Bson};
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind};
 use bson::spec::BinarySubtype;
 
-pub fn prepend_field(doc: &mut Vec<u8>, key: &str, value: &Bson) -> Result<()> {
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BsonArithmeticError {
+    LhsNotNumeric,
+    RhsNotNumeric,
+    LhsNotInteger,
+    Overflow,
+}
+
+pub fn prepend_field(doc: &mut Vec<u8>, key: &str, value: &Bson) -> std::io::Result<()> {
     let raw_field = make_raw_bson_element(key, value)?;
     // Prepend the field to the raw BSON data
     prepend_raw_bson_field(doc, &raw_field)?;
@@ -19,7 +27,7 @@ fn invalid_data(message: &str) -> Error {
 
 /// Build the raw bytes that make up a **single BSON element**
 /// (`<type-byte><cstring key><value bytes>`), given a key and a `Bson` value.
-pub fn make_raw_bson_element(key: &str, value: &Bson) -> Result<Vec<u8>> {
+pub fn make_raw_bson_element(key: &str, value: &Bson) -> std::io::Result<Vec<u8>> {
 
     // Serialize a 1-field document and slice away the outer framing:
     // [i32 size][element …][0x00 terminator]
@@ -38,7 +46,7 @@ pub fn make_raw_bson_element(key: &str, value: &Bson) -> Result<Vec<u8>> {
 /// * `field` – a complete BSON element (`type-byte || cstring key || value`)
 ///
 /// Returns `Ok(())` on success, or an error if the input is not valid.
-pub fn prepend_raw_bson_field(doc: &mut Vec<u8>, field: &[u8]) -> Result<()> {
+pub fn prepend_raw_bson_field(doc: &mut Vec<u8>, field: &[u8]) -> std::io::Result<()> {
 
     if doc.len() < 5 || *doc.last().unwrap() != 0 {
         return Err(invalid_data("invalid BSON document"));
@@ -260,16 +268,151 @@ pub fn bson_hash<H: Hasher>(bson: &Bson, state: &mut H) {
         _ => (),
     }
 }
+
+pub fn add_numeric(existing: Option<&Bson>, amount: &Bson) -> Result<Bson, BsonArithmeticError> {
+    use bson::Bson::*;
+    use BsonArithmeticError::*;
+
+    enum Num {
+        I64(i64),
+        F64(f64),
+    }
+
+    let amt = match amount {
+        Int32(n) => Num::I64(*n as i64),
+        Int64(n) => Num::I64(*n),
+        Double(f) => Num::F64(*f),
+        _ => return Err(RhsNotNumeric),
+    };
+
+    match existing {
+        None => Ok(amount.clone()),
+        Some(Int32(a)) => match amt {
+            Num::I64(b) => {
+                let sum = (*a as i64).checked_add(b).ok_or(Overflow)?;
+                if sum >= i32::MIN as i64 && sum <= i32::MAX as i64 {
+                    Ok(Int32(sum as i32))
+                } else {
+                    Ok(Int64(sum))
+                }
+            }
+            Num::F64(b) => Ok(Double((*a as f64) + b)),
+        },
+        Some(Int64(a)) => match amt {
+            Num::I64(b) => {
+                let sum = (*a).checked_add(b).ok_or(Overflow)?;
+                Ok(Int64(sum))
+            }
+            Num::F64(b) => Ok(Double((*a as f64) + b)),
+        },
+        Some(Double(a)) => match amt {
+            Num::I64(b) => Ok(Double(*a + (b as f64))),
+            Num::F64(b) => Ok(Double(*a + b)),
+        },
+        Some(_) => Err(LhsNotNumeric),
+    }
+}
+
+pub fn multiply_numeric(
+    existing: Option<&Bson>,
+    factor: &Bson,
+) -> Result<Bson, BsonArithmeticError> {
+    use bson::Bson::*;
+    use BsonArithmeticError::*;
+
+    enum Num {
+        I64(i64),
+        F64(f64),
+    }
+
+    let fact = match factor {
+        Int32(n) => Num::I64(*n as i64),
+        Int64(n) => Num::I64(*n),
+        Double(f) => Num::F64(*f),
+        _ => return Err(RhsNotNumeric),
+    };
+
+    match existing {
+        None => Ok(match factor {
+            Int32(_) => Int32(0),
+            Int64(_) => Int64(0),
+            Double(_) => Double(0.0),
+            _ => unreachable!(),
+        }),
+        Some(Int32(a)) => match fact {
+            Num::I64(b) => {
+                let prod = (*a as i64).checked_mul(b).ok_or(Overflow)?;
+                if prod >= i32::MIN as i64 && prod <= i32::MAX as i64 {
+                    Ok(Int32(prod as i32))
+                } else {
+                    Ok(Int64(prod))
+                }
+            }
+            Num::F64(b) => Ok(Double((*a as f64) * b)),
+        },
+        Some(Int64(a)) => match fact {
+            Num::I64(b) => {
+                let prod = (*a).checked_mul(b).ok_or(Overflow)?;
+                Ok(Int64(prod))
+            }
+            Num::F64(b) => Ok(Double((*a as f64) * b)),
+        },
+        Some(Double(a)) => match fact {
+            Num::I64(b) => Ok(Double(*a * (b as f64))),
+            Num::F64(b) => Ok(Double(*a * b)),
+        },
+        Some(_) => Err(LhsNotNumeric),
+    }
+}
+
+pub fn perform_bitwise_op(
+    existing: Option<&Bson>,
+    and: Option<i64>,
+    or: Option<i64>,
+    xor: Option<i64>,
+) -> Result<Bson, BsonArithmeticError> {
+    use BsonArithmeticError::*;
+    if and.is_none() && or.is_none() && xor.is_none() {
+        return Ok(existing.cloned().unwrap_or(Bson::Int64(0)));
+    }
+
+    let mut num = match existing {
+        None => 0i64,
+        Some(Bson::Int32(i)) => *i as i64,
+        Some(Bson::Int64(i)) => *i,
+        Some(_) => return Err(LhsNotInteger),
+    };
+
+    if let Some(val) = and {
+        num &= val;
+    }
+    if let Some(val) = or {
+        num |= val;
+    }
+    if let Some(val) = xor {
+        num ^= val;
+    }
+
+    if matches!(existing, Some(Bson::Int64(_))) {
+        return Ok(Bson::Int64(num));
+    }
+
+    if num >= i32::MIN as i64 && num <= i32::MAX as i64 {
+        Ok(Bson::Int32(num as i32))
+    } else {
+        Ok(Bson::Int64(num))
+    }
+}
 fn subtype_code(s: BinarySubtype) -> u8 { s.into() } // From<BinarySubtype> for u8 exists
 
 /// Trait for converting BSON values into sortable byte keys
 pub trait BsonKey {
-    fn try_into_key(&self) -> Result<Vec<u8>>;
+    fn try_into_key(&self) -> std::io::Result<Vec<u8>>;
 }
 
 /// Implement `BsonKey` for `Bson`
 impl BsonKey for Bson {
-    fn try_into_key(&self) -> Result<Vec<u8>> {
+    fn try_into_key(&self) -> std::io::Result<Vec<u8>> {
         let mut key = Vec::new();
 
         match self {
@@ -735,6 +878,158 @@ mod tests {
             let t1 = DateTime::from_millis(1_000);
             let t2 = DateTime::from_millis(2_000);
             assert_eq!(bson_utils::cmp_bson(&Bson::DateTime(t1), &Bson::DateTime(t2)), Less);
+        }
+    }
+
+    mod arithmetic {
+        use crate::util::bson_utils::{
+            add_numeric, multiply_numeric, perform_bitwise_op, BsonArithmeticError,
+        };
+        use bson::Bson;
+
+        #[test]
+        fn test_add_numeric() {
+            // Basic addition
+            assert_eq!(
+                add_numeric(Some(&Bson::Int32(5)), &Bson::Int32(10)).unwrap(),
+                Bson::Int32(15)
+            );
+            assert_eq!(
+                add_numeric(Some(&Bson::Int64(100)), &Bson::Int32(-20)).unwrap(),
+                Bson::Int64(80)
+            );
+            assert_eq!(
+                add_numeric(Some(&Bson::Double(3.5)), &Bson::Int32(2)).unwrap(),
+                Bson::Double(5.5)
+            );
+
+            // Type promotion
+            assert_eq!(
+                add_numeric(Some(&Bson::Int32(i32::MAX)), &Bson::Int32(1)).unwrap(),
+                Bson::Int64(i32::MAX as i64 + 1)
+            );
+            assert_eq!(
+                add_numeric(Some(&Bson::Int32(10)), &Bson::Double(2.5)).unwrap(),
+                Bson::Double(12.5)
+            );
+
+            // Missing value
+            assert_eq!(add_numeric(None, &Bson::Int64(42)).unwrap(), Bson::Int64(42));
+
+            // Error cases
+            assert_eq!(
+                add_numeric(Some(&Bson::String("text".into())), &Bson::Int32(1)),
+                Err(BsonArithmeticError::LhsNotNumeric)
+            );
+            assert_eq!(
+                add_numeric(Some(&Bson::Int32(1)), &Bson::String("text".into())),
+                Err(BsonArithmeticError::RhsNotNumeric)
+            );
+        }
+
+        #[test]
+        fn test_multiply_numeric() {
+            // Basic multiplication
+            assert_eq!(
+                multiply_numeric(Some(&Bson::Int32(5)), &Bson::Int32(10)).unwrap(),
+                Bson::Int32(50)
+            );
+            assert_eq!(
+                multiply_numeric(Some(&Bson::Int64(10)), &Bson::Double(2.5)).unwrap(),
+                Bson::Double(25.0)
+            );
+
+            // Type promotion
+            assert_eq!(
+                multiply_numeric(Some(&Bson::Int32(i32::MAX)), &Bson::Int32(2)).unwrap(),
+                Bson::Int64(i32::MAX as i64 * 2)
+            );
+
+            // Missing value (defaults to 0)
+            assert_eq!(
+                multiply_numeric(None, &Bson::Int32(100)).unwrap(),
+                Bson::Int32(0)
+            );
+            assert_eq!(
+                multiply_numeric(None, &Bson::Int64(100)).unwrap(),
+                Bson::Int64(0)
+            );
+            assert_eq!(
+                multiply_numeric(None, &Bson::Double(100.0)).unwrap(),
+                Bson::Double(0.0)
+            );
+
+            // Error cases
+            assert_eq!(
+                multiply_numeric(Some(&Bson::String("text".into())), &Bson::Int32(1)),
+                Err(BsonArithmeticError::LhsNotNumeric)
+            );
+            assert_eq!(
+                multiply_numeric(Some(&Bson::Int32(1)), &Bson::String("text".into())),
+                Err(BsonArithmeticError::RhsNotNumeric)
+            );
+        }
+
+        #[test]
+        fn test_perform_bitwise_op() {
+            // AND
+            assert_eq!(
+                perform_bitwise_op(Some(&Bson::Int32(0b1100)), Some(0b1010), None, None).unwrap(),
+                Bson::Int32(0b1000)
+            );
+
+            // OR
+            assert_eq!(
+                perform_bitwise_op(Some(&Bson::Int32(0b1000)), None, Some(0b0011), None).unwrap(),
+                Bson::Int32(0b1011)
+            );
+
+            // XOR
+            assert_eq!(
+                perform_bitwise_op(Some(&Bson::Int32(0b1011)), None, None, Some(0b1100)).unwrap(),
+                Bson::Int32(0b0111)
+            );
+
+            // Combined
+            assert_eq!(
+                perform_bitwise_op(
+                    Some(&Bson::Int32(0b11110000)),
+                    Some(0b11001100),
+                    Some(0b00000011),
+                    Some(0b10101010),
+                )
+                .unwrap(),
+                Bson::Int32(((0b11110000 & 0b11001100) | 0b00000011) ^ 0b10101010)
+            );
+
+            // Missing value (defaults to 0)
+            assert_eq!(
+                perform_bitwise_op(None, None, Some(0b1010), None).unwrap(),
+                Bson::Int32(0b1010)
+            );
+
+            // Type promotion
+            let large_num = i32::MAX as i64 + 10;
+            assert_eq!(
+                perform_bitwise_op(Some(&Bson::Int64(large_num)), Some(1), None, None).unwrap(),
+                Bson::Int64(large_num & 1)
+            );
+            assert_eq!(
+                perform_bitwise_op(
+                    Some(&Bson::Int32(i32::MAX - 1)),
+                    Some(i32::MAX as i64),
+                    None,
+                    None,
+                )
+                .unwrap(),
+                Bson::Int32(i32::MAX - 1)
+            );
+
+            // Error case
+            assert_eq!(
+                perform_bitwise_op(Some(&Bson::Double(1.0)), Some(1), None, None),
+                Err(BsonArithmeticError::LhsNotInteger)
+            );
         }
     }
 }

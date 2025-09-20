@@ -88,7 +88,7 @@ pub fn to_type_filter(type_spec: &Bson) -> Box<dyn Fn(ElementType) -> bool + Sen
 
     match expected_type {
         Some(et) => Box::new(move |value_type| value_type == et),
-        None => Box::new(move |value_type| false), // Invalid type specifier results in no match
+        None => Box::new(move |_value_type| false), // Invalid type specifier results in no match
     }
 }
 
@@ -387,13 +387,10 @@ fn to_filters(children: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn
 mod tests {
     use super::*;
     use std::str::FromStr;
-    use crate::query::{BsonValue, BsonValueRef};
     use bson::{doc, Bson, Decimal128};
 
     #[test]
     fn test_to_type_filter_with_string_alias() {
-
-        let filter = to_type_filter(&Bson::from("string"));
 
         assert!(matches_type_spec(
             &Bson::String("hello".to_string()),

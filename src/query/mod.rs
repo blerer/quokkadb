@@ -20,10 +20,12 @@ pub (crate) mod optimizer;
 pub(crate) mod parser;
 pub(crate) mod logical_plan;
 pub(crate) mod physical_plan;
+pub(crate) mod update;
 mod tree_node;
-
 #[cfg(test)]
 pub(crate) mod expr_fn;
+#[cfg(test)]
+mod update_fn;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Expr {
@@ -980,6 +982,18 @@ where
 {
     fn from(values: Vec<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
+    }
+}
+
+impl From<Document> for BsonValue {
+    fn from(value: Document) -> Self {
+        BsonValue(Bson::Document(value))
+    }
+}
+
+impl From<Bson> for BsonValue {
+    fn from(value: Bson) -> Self {
+        BsonValue(value)
     }
 }
 

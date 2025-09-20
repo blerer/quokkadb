@@ -629,7 +629,7 @@ impl StorageEngine {
 
                         self.delete_obsolete_log_files(oldest_log_number)?;
                     }
-                    SSTableOperation::Compaction { added, removed } => {}
+                    SSTableOperation::Compaction { added: _, removed: _ } => {}
                 }
                 Ok(())
             }
@@ -677,7 +677,7 @@ impl StorageEngine {
         Ok(new_tree)
     }
 
-    fn handle_write_error(&self, error: &Error, writers: &Vec<Arc<Writer>>) {
+    fn handle_write_error(&self, _error: &Error, _writers: &Vec<Arc<Writer>>) {
         todo!()
     }
 
