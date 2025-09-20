@@ -20,10 +20,12 @@ pub (crate) mod optimizer;
 pub(crate) mod parser;
 pub(crate) mod logical_plan;
 pub(crate) mod physical_plan;
+pub(crate) mod update;
 mod tree_node;
-
 #[cfg(test)]
 pub(crate) mod expr_fn;
+#[cfg(test)]
+mod update_fn;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Expr {
@@ -983,6 +985,18 @@ where
     }
 }
 
+impl From<Document> for BsonValue {
+    fn from(value: Document) -> Self {
+        BsonValue(Bson::Document(value))
+    }
+}
+
+impl From<Bson> for BsonValue {
+    fn from(value: Bson) -> Self {
+        BsonValue(value)
+    }
+}
+
 impl BsonKey for BsonValue {
 
     fn try_into_key(&self) -> Result<Vec<u8>> {
@@ -996,6 +1010,10 @@ pub struct BsonValueRef<'a>(pub &'a Bson);
 impl<'a> BsonValueRef<'a> {
     pub fn to_owned(&self) -> BsonValue {
         BsonValue(self.0.clone())
+    }
+
+    pub fn to_owned_bson(&self) -> Bson {
+        self.0.clone()
     }
 }
 
@@ -1047,6 +1065,12 @@ impl Parameters {
         }
     }
 
+    pub fn empty() -> Self {
+        Self {
+            parameters: Vec::with_capacity(0),
+        }
+    }
+
     pub fn collect_parameter(&mut self, value: BsonValue) -> Arc<Expr> {
         let idx = self.parameters.len() as u32;
         self.parameters.push(value);
@@ -1059,10 +1083,6 @@ impl Parameters {
             panic!("Parameter index {} out of bounds", index);
         }
         param.unwrap()
-    }
-
-    pub fn len(&self) -> usize {
-        self.parameters.len()
     }
 }
 

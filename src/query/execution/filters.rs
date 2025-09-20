@@ -88,7 +88,7 @@ pub fn to_type_filter(type_spec: &Bson) -> Box<dyn Fn(ElementType) -> bool + Sen
 
     match expected_type {
         Some(et) => Box::new(move |value_type| value_type == et),
-        None => Box::new(move |value_type| false), // Invalid type specifier results in no match
+        None => Box::new(move |_value_type| false), // Invalid type specifier results in no match
     }
 }
 
@@ -118,6 +118,11 @@ fn compare_value(
     };
 
     match operator {
+        ComparisonOperator::Eq => document_value == comparison_value,
+        ComparisonOperator::Gt => document_value > comparison_value,
+        ComparisonOperator::Gte => document_value >= comparison_value,
+        ComparisonOperator::Lt => document_value < comparison_value,
+        ComparisonOperator::Lte => document_value <= comparison_value,
         ComparisonOperator::Ne => document_value != comparison_value,
         ComparisonOperator::In => {
             if let BsonValueRef(Bson::Array(array)) = comparison_value {
@@ -133,7 +138,6 @@ fn compare_value(
                 true
             }
         }
-        _ => unreachable!("Unsupported operator in compare_value: {:?}", operator),
     }
 }
 
@@ -167,7 +171,8 @@ pub fn to_value_filter(
             let operator = *operator;
             let comparison_value = match value.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-                _ => panic!("Comparison value must be a placeholder but was {:?}", value),
+                Expr::Literal(val) => val.clone(),
+                _ => panic!("Comparison value must be a placeholder or a literal but was {:?}", value),
             };
             Box::new(move |field_value| compare_value(operator, comparison_value.as_ref(), field_value))
         }
@@ -295,6 +300,18 @@ pub fn to_value_filter(
         Expr::Not(child) => {
             let inner = to_value_filter(child.clone(), parameters);
             Box::new(move |field_value| !inner(field_value))
+        },
+        Expr::And(children) => {
+            let filters = to_value_filters(children, parameters);
+            Box::new(move |field_value| filters.iter().all(|f| f(field_value)))
+        }
+        Expr::Or(children) => {
+            let filters = to_value_filters(children, parameters);
+            Box::new(move |field_value| filters.iter().any(|f| f(field_value)))
+        }
+        Expr::Nor(children) => {
+            let filters = to_value_filters(children, parameters);
+            Box::new(move |field_value| !filters.iter().any(|f| f(field_value)))
         }
         _ => panic!("Unsupported value filter: {:?}", filter),
     }
@@ -387,13 +404,10 @@ fn to_filters(children: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn
 mod tests {
     use super::*;
     use std::str::FromStr;
-    use crate::query::{BsonValue, BsonValueRef};
     use bson::{doc, Bson, Decimal128};
 
     #[test]
     fn test_to_type_filter_with_string_alias() {
-
-        let filter = to_type_filter(&Bson::from("string"));
 
         assert!(matches_type_spec(
             &Bson::String("hello".to_string()),

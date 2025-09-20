@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{BsonValue, Expr, Parameters};
-use crate::query::execution::{filters, projections, sorts};
+use crate::query::execution::{filters, projections, sorts, updates};
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
@@ -27,7 +27,7 @@ impl QueryExecutor {
         Self { storage_engine }
     }
 
-    pub fn execute_direct(&self, plan: PhysicalPlan) -> Result<QueryOutput> {
+    pub fn execute_direct(&self, plan: PhysicalPlan, parameters: Option<Parameters>) -> Result<QueryOutput> {
         match plan {
             PhysicalPlan::InsertMany {
                 collection,
@@ -66,6 +66,56 @@ impl QueryExecutor {
 
                 let result = doc! { "inserted_id": id };
 
+                Ok(Box::new(std::iter::once(Ok(result))))
+            }
+            PhysicalPlan::UpdateOne { collection, query, update } => {
+                let parameters = parameters.expect("Parameters must be provided for UpdateOne");
+
+                let mut iter = self.execute_cached(query, &parameters)?;
+
+                let updater = updates::to_updater(&update)?;
+
+                if let Some(doc) = iter.next() {
+                    let new_doc =  updater(doc?)?;
+
+                    let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+
+                    let operation = Operation::new_put(collection, 0, user_key, bson::to_vec(&new_doc)?);
+                    self.storage_engine.write(WriteBatch::new(vec!(operation)))?;
+
+                    let result = doc! { "matched_count": 1, "modified_count": 1 };
+                    Ok(Box::new(std::iter::once(Ok(result))))
+                } else {
+                    let result = doc! { "matched_count": 0, "modified_count": 0 };
+                    Ok(Box::new(std::iter::once(Ok(result))))
+                }
+            }
+            PhysicalPlan::UpdateMany { collection, query, update } => {
+                let parameters = parameters.expect("Parameters must be provided for UpdateMany");
+
+                let iter = self.execute_cached(query, &parameters)?;
+
+                let updater = updates::to_updater(&update)?;
+
+                let mut operations = Vec::new();
+                let mut matched_count = 0;
+                let mut modified_count = 0;
+
+                for doc in iter {
+                    matched_count += 1;
+                    let new_doc = updater(doc?)?;
+
+                    let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+
+                    operations.push(Operation::new_put(collection, 0, user_key, bson::to_vec(&new_doc)?));
+                    modified_count += 1;
+                }
+
+                if !operations.is_empty() {
+                    self.storage_engine.write(WriteBatch::new(operations))?;
+                }
+
+                let result = doc! { "matched_count": matched_count, "modified_count": modified_count };
                 Ok(Box::new(std::iter::once(Ok(result))))
             }
             _ => {
@@ -152,6 +202,9 @@ impl QueryExecutor {
                 filter,
                 projection: _,
             } => {
+                // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
+                let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+
                 let key = Self::bind_key_parameter(key, &parameters)?;
                 let result = self.storage_engine.read(*collection, 0, &key, None)?;
                 let iter: QueryOutput = match result {
@@ -160,9 +213,25 @@ impl QueryExecutor {
                         match op {
                             OperationType::Delete => Box::new(std::iter::empty()),
                             OperationType::Put => {
-                                Box::new(std::iter::once(Document::from_reader(Cursor::new(v))
-                                    .map_err(|e| e.into())))
-                            }
+                                let result = Document::from_reader(Cursor::new(v));
+
+                                if result.is_err() {
+                                    return Ok(Box::new(std::iter::once(result.map_err(|e| e.into()))));
+                                }
+
+                                let doc = result?;
+
+                                match &filter {
+                                    Some(filter) => {
+                                        if filter(&doc) {
+                                            Box::new(std::iter::once(Ok(doc)))
+                                        } else {
+                                            Box::new(std::iter::empty())
+                                        }
+                                    },
+                                    None =>  Box::new(std::iter::once(Ok(doc)))
+                                }
+                             }
                             _ => panic!("Unexpected operation type: {:?}", op),
                         }
                     }
@@ -279,7 +348,7 @@ mod tests {
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::sync::Arc;
-    use crate::query::expr_fn::{all, and, elem_match, eq, exists, field, field_filters, gt, has_type, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice, interval, point, greater_than, less_than, at_most, at_least};
+    use crate::query::expr_fn::{all, and, elem_match, exists, field, field_filters, has_type, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice, interval, point, greater_than, less_than, at_most, at_least};
 
     #[test]
     fn test_execution_roundtrip() -> Result<()> {
@@ -295,7 +364,7 @@ mod tests {
             collection: collection_id,
             document: doc1_bytes,
         };
-        let mut insert_one_result = executor.execute_direct(insert_one_plan)?;
+        let mut insert_one_result = executor.execute_direct(insert_one_plan, None)?;
         let result_doc = insert_one_result.next().unwrap()?;
         assert!(insert_one_result.next().is_none());
         let inserted_id1 = result_doc.get("inserted_id").unwrap().clone();
@@ -326,7 +395,7 @@ mod tests {
             documents: vec![bson::to_vec(&doc2)?, bson::to_vec(&doc3)?],
         };
 
-        let mut insert_many_result = executor.execute_direct(insert_many_plan)?;
+        let mut insert_many_result = executor.execute_direct(insert_many_plan, None)?;
         let result_doc_many = insert_many_result.next().unwrap()?;
         assert!(insert_many_result.next().is_none());
         let inserted_ids = result_doc_many.get_array("inserted_ids").unwrap();
@@ -397,7 +466,7 @@ mod tests {
                 collection: collection_id,
                 document: doc_bytes,
             };
-            let mut result = executor.execute_direct(insert_plan)?;
+            let mut result = executor.execute_direct(insert_plan, None)?;
             let result_doc = result.next().unwrap()?;
             assert_eq!(
                 doc.get("_id").unwrap(),
@@ -556,7 +625,7 @@ mod tests {
             };
             // We use execute_direct for inserts which returns a result document.
             // We need to consume it.
-            let mut result = executor.execute_direct(insert_plan)?;
+            let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?;
         }
 
@@ -691,7 +760,7 @@ mod tests {
                 collection: collection_id,
                 document: bson::to_vec(doc)?,
             };
-            let mut result = executor.execute_direct(insert_plan)?;
+            let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?; // consume result
         }
 
@@ -811,7 +880,7 @@ mod tests {
                 collection: collection_id,
                 document: bson::to_vec(doc)?,
             };
-            let mut result = executor.execute_direct(insert_plan)?;
+            let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?; // consume result
         }
 
@@ -1017,7 +1086,7 @@ mod tests {
             collection: collection_id,
             document: bson::to_vec(&test_doc)?,
         };
-        let mut result = executor.execute_direct(insert_plan)?;
+        let mut result = executor.execute_direct(insert_plan, None)?;
         result.next().unwrap()?; // consume result
 
         // Helper to run a projection and check the result

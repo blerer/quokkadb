@@ -554,7 +554,7 @@ impl Optimizer {
             .expect("The collection should exists");
 
         // Handle indexes
-        for index in metadata.indexes.values() {
+        for _index in metadata.indexes.values() {
 
             todo!("Implement the logic for index candidates")
 

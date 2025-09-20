@@ -10,7 +10,7 @@ mod storage;
 mod util;
 
 use crate::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::sync::Arc;
 use bson::Document;
 use crate::collection::Collection;
@@ -20,6 +20,7 @@ use crate::options::options::Options;
 use query::execution::executor::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use crate::query::optimizer::optimizer::Optimizer;
+use crate::query::Parameters;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::storage::storage_engine::StorageEngine;
 
@@ -88,27 +89,35 @@ impl DbImpl {
     }
 
     pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<Document> {
-        let physical_plan = match logical_plan {
+        let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne { collection, document } => {
-                PhysicalPlan::InsertOne {
-                    collection,
-                    document,
-                }
+                (PhysicalPlan::InsertOne { collection, document, }, None)
             }
             LogicalPlan::InsertMany { collection, documents } => {
-                PhysicalPlan::InsertMany {
-                    collection,
-                    documents,
-                }
+                (PhysicalPlan::InsertMany { collection, documents, }, None)
+            }
+            LogicalPlan::UpdateOne { collection, query, update} => {
+                let (parameters, query) = self.optimize_query(query);
+                (PhysicalPlan::UpdateOne { collection, query, update, }, Some(parameters))
+            }
+            LogicalPlan::UpdateMany { collection, query, update} => {
+                let (parameters, query) = self.optimize_query(query);
+                (PhysicalPlan::UpdateMany { collection, query, update, }, Some(parameters))
             }
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
 
-        self.executor.execute_direct(physical_plan)?.next().unwrap()
+        self.executor.execute_direct(physical_plan, parameters)?.next().unwrap()
     }
 
     pub fn execute_query(&self, logical_plan: Arc<LogicalPlan>) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
 
+        let (parameters, physical_plan) = self.optimize_query(logical_plan);
+
+        self.executor.execute_cached(physical_plan, &parameters)
+    }
+
+    fn optimize_query(&self, logical_plan: Arc<LogicalPlan>) -> (Parameters, Arc<PhysicalPlan>) {
         // First, normalize the logical plan
         let normalized_plan = self.optimizer.normalize(logical_plan);
         // Then, parametrize the plan to collect parameters
@@ -119,7 +128,6 @@ impl DbImpl {
         // If the plan is not cached, optimize it
         let catalog = self.storage_engine.catalog();
         let physical_plan = self.optimizer.optimize(logical_plan, catalog);
-
-        self.executor.execute_cached(physical_plan, &parameters)
+        (parameters, physical_plan)
     }
 }

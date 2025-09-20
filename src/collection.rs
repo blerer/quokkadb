@@ -51,6 +51,38 @@ impl Collection {
         self.db_impl.execute_write(plan)
     }
 
+    pub fn update_one(&self, filter: Document, update: Document) -> Result<Document> {
+        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let query = LogicalPlanBuilder::scan(collection_id).filter(conditions).build();
+        let update = parser::parse_update(&update, None)?;
+
+        let plan = LogicalPlan::UpdateOne {
+            collection: collection_id,
+            query,
+            update,
+        };
+
+        self.db_impl.execute_write(plan)
+    }
+
+    pub fn update_many(&self, filter: Document, update: Document) -> Result<Document> {
+        let collection_id = self.db_impl.create_collection_if_not_exists(&self.collection)?;
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let query = LogicalPlanBuilder::scan(collection_id).filter(conditions).build();
+        let update = parser::parse_update(&update, None)?;
+
+        let plan = LogicalPlan::UpdateMany {
+            collection: collection_id,
+            query,
+            update,
+        };
+
+        self.db_impl.execute_write(plan)
+    }
+
     pub fn find(&self, filter: Document) -> Query {
         Query::new(self.db_impl.clone(), self.collection.clone(), filter)
     }

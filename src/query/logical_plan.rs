@@ -3,8 +3,9 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::query::{Expr, Limit, Projection, ProjectionExpr, SortField};
 use crate::query::tree_node::TreeNode;
-use std::io::{Error, ErrorKind, Read, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
+use crate::query::update::UpdateExpr;
 use crate::util::murmur_hash64::murmur_hash64a;
 
 /// Represents the LogicalPlan for MongoDB-like operations
@@ -21,6 +22,18 @@ pub enum LogicalPlan {
     InsertMany {
         collection: u32, // Collection identifier
         documents: Vec<Vec<u8>>, // The documents to be inserted.
+    },
+    /// Represents an update operation for a single document. This is a terminal operator.
+    UpdateOne {
+        collection: u32, // Collection identifier
+        query: Arc<LogicalPlan>, // Filter to match the document to update
+        update: UpdateExpr, // Update operations
+    },
+    /// Represents an update operation for multiple documents. This is a terminal operator.
+    UpdateMany {
+        collection: u32, // Collection identifier
+        query: Arc<LogicalPlan>, // Filter to match documents to update
+        update: UpdateExpr, // Update operations
     },
     /// Represents a collection scan with optional projection, filtering, and sorting. This is a terminal operator.
     CollectionScan {
@@ -61,6 +74,8 @@ impl TreeNode for LogicalPlan {
     /// Return references to the children of the current node
     fn children(&self) -> Vec<Arc<Self::Child>> {
         match self {
+            LogicalPlan::UpdateOne { query, .. } => vec![query.clone()],
+            LogicalPlan::UpdateMany { query, .. } => vec![query.clone()],
             LogicalPlan::Filter { input, .. } => vec![input.clone()],
             LogicalPlan::Projection { input, .. } => vec![input.clone()],
             LogicalPlan::Sort { input, .. } => vec![input.clone()],
@@ -72,6 +87,16 @@ impl TreeNode for LogicalPlan {
     /// Create a new node with updated children
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self::Child>>) -> Arc<Self> {
         match self.as_ref() {
+            LogicalPlan::UpdateOne { collection, update, .. } => Arc::new(LogicalPlan::UpdateOne {
+                collection: *collection,
+                query: Self::get_first(children),
+                update: update.clone(),
+            }),
+            LogicalPlan::UpdateMany { collection, update, .. } => Arc::new(LogicalPlan::UpdateMany {
+                collection: *collection,
+                query: Self::get_first(children),
+                update: update.clone(),
+            }),
             LogicalPlan::Filter { condition, .. } => Arc::new(LogicalPlan::Filter {
                 input: Self::get_first(children),
                 condition: condition.clone(),
@@ -168,23 +193,6 @@ impl Serializable for LogicalPlan {
                     limit,
                 })
             }
-            6 => {
-                // InsertOne
-                let collection = reader.read_varint_u32()?;
-                let document = reader.read_length_prefixed_slice()?.to_vec();
-                Ok(LogicalPlan::InsertOne { collection, document })
-            },
-            7 => {
-                // InsertMany
-                let collection = reader.read_varint_u32()?;
-                let num_documents = reader.read_varint_u32()? as usize;
-                let mut documents = Vec::with_capacity(num_documents);
-                for _ in 0..num_documents {
-                    let document = reader.read_length_prefixed_slice()?;
-                    documents.push(document.to_vec());
-                }
-                Ok(LogicalPlan::InsertMany { collection, documents })
-            },
             _ => Err(Error::new(
                 ErrorKind::InvalidData,
                 "Invalid tag for LogicalPlan",
@@ -235,19 +243,11 @@ impl Serializable for LogicalPlan {
                 input.write_to(writer);
                 limit.write_to(writer);
             }
-            LogicalPlan::InsertOne { collection, document } => {
-                writer.write_u8(6);
-                writer.write_varint_u32(*collection);
-                writer.write_length_prefixed_slice(document);
-            },
-            LogicalPlan::InsertMany { collection, documents } => {
-                writer.write_u8(7);
-                writer.write_varint_u32(*collection);
-                writer.write_varint_u32(documents.len() as u32);
-                for doc in documents {
-                    writer.write_length_prefixed_slice(doc);
-                }
-            },
+            _ => {
+                // For the other variants, serialization is not implemented as serialization is
+                // only required for caching query statements.
+                unimplemented!("Serialization for this LogicalPlan variant is not implemented");
+            }
         }
     }
 }
@@ -515,7 +515,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use bson::{doc, to_vec};
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
     use crate::query::expr_fn::{elem_match, eq, field, field_filters, include, lit, placeholder, proj_elem_match, proj_field, proj_fields, sort_asc};
@@ -552,22 +551,6 @@ mod tests {
             .build();
 
         check_serialization_round_trip(plan_arc.as_ref().clone());
-    }
-
-    #[test]
-    fn test_insert_serialization_round_trip() {
-        let insert_one_plan = LogicalPlan::InsertOne {
-            collection: 1,
-            document: to_vec(&doc! { "x": 1, "y": 2 }).unwrap(),
-        };
-        check_serialization_round_trip(insert_one_plan);
-
-        let insert_many_plan = LogicalPlan::InsertMany {
-            collection: 2,
-            documents: vec![to_vec(&doc! { "x": 1, "y": 2 }).unwrap(),
-                            to_vec(&doc! { "x": 3, "y": 4 }).unwrap(),],
-        };
-        check_serialization_round_trip(insert_many_plan);
     }
 
     #[test]
