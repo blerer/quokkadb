@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
+use crate::query::{format_path, Projection, ProjectionExpr, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
@@ -463,10 +463,26 @@ fn parse_array_filters(filters: &[Document]) -> Result<Vec<ArrayFilter>, Error> 
             ))
         })?;
 
-        let predicate = parse_conditions(predicate_doc)?;
+        let components = parse_field_path(identifier)?;
+
+        let identifier = if let PathComponent::FieldName(s) = &components[0] {
+            s.to_string()
+        } else {
+            return Err(Error::InvalidRequest(
+                "Array filter identifier must be a field name".to_string(),
+            ));
+        };
+
+        let predicate =  if components.len() > 1 {
+            let field = format_path(&components[1..]);
+            let doc = &Document::from_iter(vec![(field, predicate_doc_bson.clone())]);
+            parse_conditions(doc)
+        } else {
+            parse_conditions(predicate_doc)
+        }?;
 
         parsed_filters.push(ArrayFilter {
-            identifier: identifier.clone(),
+            identifier,
             predicate,
         });
     }

@@ -1084,6 +1084,10 @@ impl Parameters {
         }
         param.unwrap()
     }
+
+    pub fn len(&self) -> usize {
+        self.parameters.len()
+    }
 }
 
 #[cfg(test)]
