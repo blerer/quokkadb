@@ -1,6 +1,6 @@
 use crate::query::expr_fn::lit;
 use crate::query::update::{
-    ArrayFilter, CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec,
+    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec,
     UpdateExpr, UpdateOp, UpdatePathComponent,
 };
 use crate::query::{BsonValue, Expr};
@@ -10,14 +10,17 @@ use std::sync::Arc;
 pub fn update<O>(ops: O) -> UpdateExpr
 where
     O: IntoIterator<Item = UpdateOp> {
-    UpdateExpr { ops: ops.into_iter().collect(), array_filters: vec![] }
+    UpdateExpr { ops: ops.into_iter().collect(), array_filters: BTreeMap::new()  }
 }
 
 pub fn update_with_filters<O, F>(ops: O, array_filters: F) -> UpdateExpr
 where
     O: IntoIterator<Item = UpdateOp>,
-    F: IntoIterator<Item = ArrayFilter> {
-    UpdateExpr { ops: ops.into_iter().collect(), array_filters: array_filters.into_iter().collect() }
+    F: IntoIterator<Item = (String, Arc<Expr>)>, {
+    UpdateExpr {
+        ops: ops.into_iter().collect(),
+        array_filters: array_filters.into_iter().map(|e| (e.0.to_string(), e.1.clone())).collect()
+    }
 }
 
 pub fn set<T>(path: T, value: impl Into<BsonValue>) -> UpdateOp
@@ -177,20 +180,12 @@ where
     UpdateOp::Bit { path: path.into_iter().collect(), and, or, xor }
 }
 
-pub fn array_filter(identifier: &str, predicate: Arc<Expr>) -> ArrayFilter {
-    ArrayFilter { identifier: identifier.to_string(), predicate }
-}
-
 pub fn field_name(name: &str) -> UpdatePathComponent {
     UpdatePathComponent::FieldName(name.to_string())
 }
 
 pub fn filter(identifier: &str) -> UpdatePathComponent {
     UpdatePathComponent::Filtered(identifier.to_string())
-}
-
-pub fn first() -> UpdatePathComponent {
-    UpdatePathComponent::FirstMatch
 }
 
 pub fn all() -> UpdatePathComponent {

@@ -61,9 +61,6 @@ fn build_projector(
             })
         }
         ProjectionExpr::Field => Ok(Projector::Field),
-        ProjectionExpr::PositionalField { filter } => Ok(Projector::PositionalField {
-            filter: to_element_filter(filter.clone(), parameters),
-        }),
         ProjectionExpr::Slice { skip, limit } => Ok(Projector::Slice {
             skip: *skip,
             limit: *limit,
@@ -71,7 +68,6 @@ fn build_projector(
         ProjectionExpr::ElemMatch { filter } => Ok(Projector::ElemMatch {
             filter: to_element_filter(filter.clone(), parameters),
         }),
-        ProjectionExpr::PositionalFieldRef => panic!("PositionalFieldRef should not appear in execution plan"),
     }
 }
 

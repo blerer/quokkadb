@@ -11,8 +11,6 @@ pub enum UpdatePathComponent {
     FieldName(String),
     /// An array index (e.g., "0" in "array.0").
     ArrayElement(usize),
-    /// The first positional operator (`$`).
-    FirstMatch,
     /// The all positional operator (`$[]`).
     AllElements,
     /// The filtered positional operator (`$[<identifier>]`).
@@ -24,7 +22,6 @@ impl fmt::Display for UpdatePathComponent {
         match self {
             UpdatePathComponent::FieldName(name) => write!(f, "{}", name),
             UpdatePathComponent::ArrayElement(index) => write!(f, "{}", index),
-            UpdatePathComponent::FirstMatch => write!(f, "$"),
             UpdatePathComponent::AllElements => write!(f, "$[]"),
             UpdatePathComponent::Filtered(id) => write!(f, "$[{}]", id),
         }
@@ -141,16 +138,7 @@ pub struct UpdateExpr {
     /// The list of update operations to perform.
     pub ops: Vec<UpdateOp>,
     /// `$arrayFilters`: Conditions for filtered positional operators (`$[<identifier>]`).
-    pub array_filters: Vec<ArrayFilter>,
-}
-
-/// A filter for a positional array update, used with `arrayFilters`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArrayFilter {
-    /// The identifier, e.g., "x" in `$[x]`.
-    pub identifier: String,
-    /// The query predicate that elements bound to the identifier must satisfy.
-    pub predicate: Arc<Expr>,
+    pub array_filters: BTreeMap<String, Arc<Expr>>,
 }
 
 fn validate_pull_criterion_expr(expr: &Expr) -> Result<(), Error> {
@@ -321,18 +309,8 @@ impl UpdateExpr {
             ));
         }
 
-        let mut defined_identifiers = HashSet::new();
-        for f in &self.array_filters {
-            if !defined_identifiers.insert(f.identifier.as_str()) {
-                return Err(Error::InvalidRequest(format!(
-                    "Found multiple array filters with the same name '{}'",
-                    f.identifier
-                )));
-            }
-        }
-
         for used_id in &used_identifiers {
-            if !defined_identifiers.contains(used_id) {
+            if !self.array_filters.contains_key(*used_id) {
                 return Err(Error::InvalidRequest(format!(
                     "No array filter found for identifier '{}' in path",
                     used_id
@@ -340,9 +318,9 @@ impl UpdateExpr {
             }
         }
 
-        for defined_id in &defined_identifiers {
-            if !used_identifiers.contains(defined_id) {
-                 return Err(Error::InvalidRequest(format!(
+        for defined_id in self.array_filters.keys() {
+            if !used_identifiers.contains(defined_id.as_str()) {
+                return Err(Error::InvalidRequest(format!(
                     "The array filter for identifier '{}' was not used in the update",
                     defined_id
                 )));

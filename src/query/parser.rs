@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
-use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
+use crate::query::{format_path, Projection, ProjectionExpr, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
 use crate::query::update::{
-    ArrayFilter, CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec,
+    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec,
     UpdateExpr, UpdateOp, UpdatePathComponent,
 };
 use crate::Error;
-use bson::{Bson, Document};
+use bson::{doc, Bson, Document};
 use std::sync::{Arc, LazyLock};
 
 static SCALAR_OPERATIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -255,8 +255,11 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
         let field = parse_field(key)?;
         match value {
             Bson::Int32(1) | Bson::Int64(1) => match field {
-                Expr::PositionalField(path) => {
-                    include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::PositionalFieldRef))?;
+                Expr::PositionalField(_) => {
+                    return Err(Error::InvalidRequest(format!(
+                        "The positional operator '$' is not supported: {}",
+                        key
+                    )));
                 }
                 Expr::Field(path) => {
                     include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;
@@ -446,8 +449,8 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
     Ok(fields)
 }
 
-fn parse_array_filters(filters: &[Document]) -> Result<Vec<ArrayFilter>, Error> {
-    let mut parsed_filters = Vec::with_capacity(filters.len());
+fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr>>, Error> {
+    let mut parsed_filters = BTreeMap::new();
     for filter_doc in filters {
         if filter_doc.len() != 1 {
             return Err(Error::InvalidRequest(
@@ -463,12 +466,30 @@ fn parse_array_filters(filters: &[Document]) -> Result<Vec<ArrayFilter>, Error> 
             ))
         })?;
 
-        let predicate = parse_conditions(predicate_doc)?;
+        let components = parse_field_path(identifier)?;
 
-        parsed_filters.push(ArrayFilter {
-            identifier: identifier.clone(),
-            predicate,
-        });
+        let identifier = if let PathComponent::FieldName(s) = &components[0] {
+            s.to_string()
+        } else {
+            return Err(Error::InvalidRequest(
+                "Array filter identifier must be a field name".to_string(),
+            ));
+        };
+
+        let predicate = if components.len() > 1 {
+            let field = format_path(&components[1..]);
+            let doc = doc! { field: predicate_doc_bson.clone() };
+            parse_conditions(&doc)
+        } else {
+            parse_conditions(predicate_doc)
+        }?;
+
+        if parsed_filters.insert(identifier.clone(), predicate).is_some() {
+            return Err(Error::InvalidRequest(format!(
+                "Found multiple array filters with the same name '{}'",
+                identifier
+            )));
+        }
     }
     Ok(parsed_filters)
 }
@@ -721,7 +742,7 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
     let parsed_array_filters = if let Some(filters) = array_filters {
         parse_array_filters(&filters)?
     } else {
-        vec![]
+        BTreeMap::new()
     };
 
     let update_expr = UpdateExpr { ops, array_filters: parsed_array_filters };
@@ -735,7 +756,9 @@ fn parse_update_path(path: &str) -> Result<Vec<UpdatePathComponent>, Error> {
 
 fn parse_update_path_component(component: &str) -> Result<UpdatePathComponent, Error> {
     if component == "$" {
-        Ok(UpdatePathComponent::FirstMatch)
+        return Err(Error::InvalidRequest(
+            "The positional operator '$' is not supported.".to_string(),
+        ));
     } else if component == "$[]" {
         Ok(UpdatePathComponent::AllElements)
     } else if component.starts_with("$[") && component.ends_with(']') {
@@ -854,7 +877,7 @@ mod tests {
     use crate::query::expr_fn::*;
     use bson::{doc, Bson};
     use crate::query::update_fn;
-    use crate::query::update_fn::{array_filter, by_fields_sort, field_name, filter, first, inc, pull_eq, pull_matches, push_each_spec, push_single, push_spec, set, unset, update, update_with_filters};
+    use crate::query::update_fn::{by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec, push_single, push_spec, set, unset, update};
 
     #[cfg(test)]
     mod bson_type_parsing {
@@ -1411,12 +1434,11 @@ mod tests {
         #[test]
         fn test_parse_projection_positional() {
             let projection = doc! { "a.$": 1 };
-            let parsed = parse_projection(&projection).unwrap();
-            let expected = Projection::Include(proj_fields([
-                ("_id", proj_field()),
-                ("a", proj_positional_field()),
-            ]));
-            assert_eq!(parsed, expected);
+            let err = parse_projection(&projection).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "The positional operator '$' is not supported: a.$"
+            );
         }
 
         #[test]
@@ -1540,15 +1562,22 @@ mod tests {
         fn test_parse_update_positional_operators() {
             let update_doc = doc! {
                 "$set": {
-                    "grades.$": 80,
+                    "grades.$": 80
+                }
+            };
+            let err = parse_update(&update_doc, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "The positional operator '$' is not supported."
+            );
+
+            let update_doc = doc! {
+                "$set": {
                     "grades.$[]": 85
                 }
             };
             let parsed = parse_update(&update_doc, None).unwrap();
-            let expected = update([
-                set([field_name("grades"), first()], 80),
-                set([field_name("grades"), update_fn::all()], 85),
-            ]);
+            let expected = update([set([field_name("grades"), update_fn::all()], 85)]);
             assert_eq!(parsed, expected);
         }
 
@@ -1571,10 +1600,13 @@ mod tests {
             let update_doc = doc! { "$set": { "grades.$[elem].mean": 100 } };
             let array_filters = Some(vec![doc! { "elem": { "grade": { "$gte": 85 } } }]);
             let parsed = parse_update(&update_doc, array_filters).unwrap();
-            let expected = update_with_filters(
-                [set([field_name("grades"), filter("elem"), field_name("mean")], 100)],
-                [array_filter("elem", field_filters(field(["grade"]), [gte(lit(85))]))],
-            );
+            let expected_ops =
+                vec![set([field_name("grades"), filter("elem"), field_name("mean")], 100)];
+            let expected_filters = BTreeMap::from([(
+                "elem".to_string(),
+                field_filters(field(["grade"]), [gte(lit(85))]),
+            )]);
+            let expected = UpdateExpr { ops: expected_ops, array_filters: expected_filters };
             assert_eq!(parsed, expected);
         }
 
@@ -1615,6 +1647,93 @@ mod tests {
                 err.to_string(),
                 "Filter for identifier 'elem' must be a document"
             );
+        }
+
+        #[cfg(test)]
+        mod array_filters_parsing {
+            use super::*;
+
+            #[test]
+            fn test_parse_array_filters_simple() {
+                let filters = vec![doc! { "elem": { "grade": { "$gte": 85 } } }];
+                let parsed = parse_array_filters(&filters).unwrap();
+                let expected = BTreeMap::from([(
+                    "elem".to_string(),
+                    field_filters(field(["grade"]), [gte(lit(85))]),
+                )]);
+                assert_eq!(parsed, expected);
+            }
+
+            #[test]
+            fn test_parse_array_filters_with_path_in_identifier() {
+                let filters = vec![doc! { "elem.grade": { "$gte": 85 } }];
+                let parsed = parse_array_filters(&filters).unwrap();
+                let expected = BTreeMap::from([(
+                    "elem".to_string(),
+                    field_filters(field(["grade"]), [gte(lit(85))]),
+                )]);
+                assert_eq!(parsed, expected);
+            }
+
+            #[test]
+            fn test_parse_array_filters_multiple_filters() {
+                let filters = vec![
+                    doc! { "elem": { "grade": { "$gte": 85 } } },
+                    doc! { "item.price": { "$lt": 100 } },
+                ];
+                let parsed = parse_array_filters(&filters).unwrap();
+                let expected = BTreeMap::from([
+                    (
+                        "elem".to_string(),
+                        field_filters(field(["grade"]), [gte(lit(85))]),
+                    ),
+                    (
+                        "item".to_string(),
+                        field_filters(field(["price"]), [lt(lit(100))]),
+                    ),
+                ]);
+                assert_eq!(parsed, expected);
+            }
+
+            #[test]
+            fn test_parse_array_filters_duplicate_identifier_error() {
+                let filters = vec![
+                    doc! { "elem": { "grade": { "$gte": 85 } } },
+                    doc! { "elem": { "grade": { "$lt": 95 } } },
+                ];
+                let err = parse_array_filters(&filters).unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    "Found multiple array filters with the same name 'elem'"
+                );
+            }
+
+            #[test]
+            fn test_parse_array_filters_error_multiple_keys() {
+                let filters = vec![doc! { "elem": { "g": 1 }, "elem2": { "h": 2 } }];
+                let err = parse_array_filters(&filters).unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    "Each array filter must be a document with a single key"
+                );
+            }
+
+            #[test]
+            fn test_parse_array_filters_error_not_a_document() {
+                let filters = vec![doc! { "elem": "not a doc" }];
+                let err = parse_array_filters(&filters).unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    "Filter for identifier 'elem' must be a document"
+                );
+            }
+
+            #[test]
+            fn test_parse_array_filters_error_numeric_identifier() {
+                let filters = vec![doc! { "0.grade": { "$gte": 85 } }];
+                let err = parse_array_filters(&filters).unwrap_err();
+                assert_eq!(err.to_string(), "Array filter identifier must be a field name");
+            }
         }
     }
 }

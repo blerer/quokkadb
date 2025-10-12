@@ -343,7 +343,7 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::query::{make_sort_field, SortOrder};
-    use crate::query::{BsonValue, Expr, Parameters, Projection, ProjectionExpr};
+    use crate::query::{BsonValue, Expr, Parameters, Projection};
     use crate::storage::test_utils::storage_engine;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
@@ -1188,24 +1188,7 @@ mod tests {
             },
         )?;
 
-        // Case 6: PositionalField ($) projection
-        let mut params_6 = Parameters::new();
-        let p_6 = params_6.collect_parameter(25.into());
-        // Filter for elements > 25. The field for FieldFilters is empty path, meaning the element itself.
-        let filter_6 = interval(greater_than(&p_6));
-        let proj_expr_6 = proj_fields(vec![(
-            "array_scalar",
-            Arc::new(ProjectionExpr::PositionalField { filter: filter_6 }),
-        )]);
-        run_projection_test(
-            &executor,
-            collection_id,
-            Projection::Include(proj_expr_6),
-            params_6,
-            doc! { "array_scalar": [30] },
-        )?;
-
-        // Case 7: ArrayElements projection (non-standard, returns a document)
+        // Case 6: ArrayElements projection (non-standard, returns a document)
         let proj_expr_7 = proj_fields(vec![(
             "array_scalar",
             proj_array_elements(vec![(1, proj_field()), (3, proj_field())]),
@@ -1218,7 +1201,7 @@ mod tests {
             doc! { "array_scalar": doc! { "1": 20, "3": 40 } },
         )?;
 
-        // Case 8: ElemMatch with no matches
+        // Case 7: ElemMatch with no matches
         let mut params_8 = Parameters::new();
         let p_8 = params_8.collect_parameter("z".into()); // No element has tag "z"
         let filter_8 = field_filters(field(["tag"]), [interval(point(&p_8))]);
@@ -1231,24 +1214,7 @@ mod tests {
             doc! { "array_doc": []}, // Expect empty array since no matches
         )?;
 
-        // Case 9: PositionalField ($) with multiple matches (should return first)
-        let mut params_9 = Parameters::new();
-        let p_9 = params_9.collect_parameter("a".into());
-        // Filter for elements where tag is "a". This matches two elements.
-        let filter_9 = field_filters(field(["tag"]), [interval(point(&p_9))]);
-        let proj_expr_9 = proj_fields(vec![(
-            "array_doc",
-            Arc::new(ProjectionExpr::PositionalField { filter: filter_9 }),
-        )]);
-        run_projection_test(
-            &executor,
-            collection_id,
-            Projection::Include(proj_expr_9),
-            params_9,
-            doc! { "array_doc": [ doc!{ "val": 10, "tag": "a" } ] },
-        )?;
-
-        // Case 10: Projection on a non-existent field
+        // Case 8: Projection on a non-existent field
         let proj_expr_10 = proj_fields(vec![("non_existent", proj_field())]);
         run_projection_test(
             &executor,
@@ -1258,7 +1224,7 @@ mod tests {
             doc! {}, // Expect an empty document
         )?;
 
-        // Case 11: Array projection on a non-array field
+        // Case 9: Array projection on a non-array field
         let proj_expr_11 = proj_fields(vec![("scalar", proj_slice(None, 2))]);
         run_projection_test(
             &executor,
@@ -1268,7 +1234,7 @@ mod tests {
             doc! {}, // Field should be omitted
         )?;
 
-        // Case 12: Slice with only negative limit (last N elements)
+        // Case 10: Slice with only negative limit (last N elements)
         let proj_expr_12 = proj_fields(vec![("array_scalar", proj_slice(None, -2))]);
         run_projection_test(
             &executor,
@@ -1278,7 +1244,7 @@ mod tests {
             doc! { "array_scalar": [40, 50] },
         )?;
 
-        // Case 13: Slice with zero skip and negative limit
+        // Case 11: Slice with zero skip and negative limit
         let proj_expr_13 = proj_fields(vec![("array_scalar", proj_slice(Some(0), -2))]);
         run_projection_test(
             &executor,

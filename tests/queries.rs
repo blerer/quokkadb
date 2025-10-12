@@ -1,4 +1,4 @@
-use bson::{doc, Bson, Document};
+use bson::{doc, Document};
 use quokkadb::QuokkaDB;
 use std::collections::{BTreeSet, HashSet};
 use std::iter::FromIterator;
@@ -36,6 +36,12 @@ fn get_ids(results: &[Document]) -> HashSet<i32> {
         .collect()
 }
 
+fn assert_ids(results: &[Document], expected_ids: &[i32]) {
+    assert_eq!(results.len(), expected_ids.len());
+    let expected_ids_set: HashSet<i32> = expected_ids.iter().cloned().collect();
+    assert_eq!(get_ids(results), expected_ids_set);
+}
+
 #[test]
 fn test_simple_equality() {
     let (_dir, db) = setup_db_with_data();
@@ -47,8 +53,7 @@ fn test_simple_equality() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 4);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![1, 2, 5, 7]));
+    assert_ids(&results, &[1, 2, 5, 7]);
 }
 
 #[test]
@@ -62,8 +67,7 @@ fn test_comparison_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![3, 7]));
+    assert_ids(&results, &[3, 7]);
 }
 
 #[test]
@@ -77,8 +81,7 @@ fn test_logical_and() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![1]));
+    assert_ids(&results, &[1]);
 }
 
 #[test]
@@ -92,8 +95,7 @@ fn test_logical_or() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 5);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![1, 2, 5, 7, 8]));
+    assert_ids(&results, &[1, 2, 5, 7, 8]);
 }
 
 #[test]
@@ -106,8 +108,7 @@ fn test_logical_nor() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![6, 8]));
+    assert_ids(&results, &[6, 8]);
 }
 
 #[test]
@@ -121,8 +122,7 @@ fn test_logical_not() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 4);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![1, 5, 6, 8]));
+    assert_ids(&results, &[1, 5, 6, 8]);
 }
 
 #[test]
@@ -136,8 +136,7 @@ fn test_nested_field_query() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![2, 3]));
+    assert_ids(&results, &[2, 3]);
 }
 
 #[test]
@@ -151,8 +150,7 @@ fn test_exists_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 3);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![6, 7, 8]));
+    assert_ids(&results, &[6, 7, 8]);
 }
 
 #[test]
@@ -166,7 +164,7 @@ fn test_type_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 10);
+    assert_ids(&results, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 }
 
 #[test]
@@ -180,8 +178,7 @@ fn test_array_all_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 4);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![1, 2, 3, 4]));
+    assert_ids(&results, &[1, 2, 3, 4]);
 }
 
 #[test]
@@ -195,8 +192,7 @@ fn test_array_size_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![3]));
+    assert_ids(&results, &[3]);
 }
 
 #[test]
@@ -210,8 +206,7 @@ fn test_array_elem_match_operator() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![7, 8]));
+    assert_ids(&results, &[7, 8]);
 }
 
 #[test]
@@ -314,19 +309,16 @@ fn test_projection_positional() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let results: Vec<Document> = collection
+    let result = collection
         .find(doc! { "dim_cm": 14 })
         .projection(doc! { "dim_cm.$": 1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+        .execute();
 
-    assert_eq!(results.len(), 1);
-    let doc = &results[0];
-    let dim_cm = doc.get_array("dim_cm").unwrap();
-    assert_eq!(dim_cm.len(), 1);
-    assert_eq!(dim_cm[0], Bson::Int32(14));
+    assert!(result.is_err());
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "The positional operator '$' is not supported: dim_cm.$"
+    );
 }
 
 #[test]
@@ -409,8 +401,7 @@ fn test_elem_match_on_documents() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![7, 8]));
+    assert_ids(&results, &[7, 8]);
 }
 
 #[test]
@@ -425,8 +416,7 @@ fn test_elem_match_with_or() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![6, 8]));
+    assert_ids(&results, &[6, 8]);
 }
 
 #[test]
@@ -441,8 +431,7 @@ fn test_elem_match_with_explicit_and() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![8]));
+    assert_ids(&results, &[8]);
 }
 
 #[test]
@@ -457,8 +446,7 @@ fn test_nested_elem_match() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![9]));
+    assert_ids(&results, &[9]);
 }
 
 #[test]
@@ -473,8 +461,7 @@ fn test_elem_match_empty_document() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results.len(), 3);
-    assert_eq!(get_ids(&results), HashSet::from_iter(vec![6, 7, 8]));
+    assert_ids(&results, &[6, 7, 8]);
 
     // Find documents where 'tags' array is not empty (doc 6 has empty 'tags' array)
     let results_tags: Vec<Document> = collection
@@ -484,9 +471,5 @@ fn test_elem_match_empty_document() {
         .map(Result::unwrap)
         .collect();
 
-    assert_eq!(results_tags.len(), 7);
-    assert_eq!(
-        get_ids(&results_tags),
-        HashSet::from_iter(vec![1, 2, 3, 4, 5, 7, 8])
-    );
+    assert_ids(&results_tags, &[1, 2, 3, 4, 5, 7, 8]);
 }

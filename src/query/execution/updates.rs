@@ -9,24 +9,30 @@ use crate::util::bson_utils::{
 };
 use bson::{Bson, Document};
 use std::cmp::PartialEq;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use crate::query::execution::filters;
 use crate::query::execution::updates::Mode::{CreateIfMissing, Get};
 
 pub fn to_updater(
     update: &UpdateExpr,
 ) -> Result<Box<dyn Fn(Document) -> Result<Document> + Send + Sync>> {
+
+    let array_filters = Arc::new(to_value_filters(&update.array_filters));
+
     let mut operations: Vec<Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync>> = vec![];
     for op in &update.ops {
         match op {
             UpdateOp::Set { path, value } => {
-
-                validate_non_empty_path(&path)?;
-
                 let value_bson = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
                     _ => panic!("Non-literal value in $set after validation"),
                 };
-                operations.push(Box::new(to_set_operation(path, value_bson)));
+                operations.push(Box::new(to_set_operation(
+                    path.clone(),
+                    value_bson,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Unset { path } => {
                 // Unset with an empty path is a no-op
@@ -72,35 +78,55 @@ pub fn to_updater(
                         sort: spec.sort.clone(),
                     }
                 };
-                operations.push(Box::new(to_push_operation(path.clone(), spec_bson)));
+                operations.push(Box::new(to_push_operation(
+                    path.clone(),
+                    spec_bson,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Inc { path, amount } => {
                 let amount_bson = match amount.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
                     _ => panic!("Non-literal value in $inc after validation"),
                 };
-                operations.push(Box::new(to_inc_operation(path, amount_bson)));
+                operations.push(Box::new(to_inc_operation(
+                    path.clone(),
+                    amount_bson,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Min { path, value } => {
                 let new_value = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
                     _ => panic!("Non-literal value in $min after validation"),
                 };
-                operations.push(Box::new(to_min_operation(path, new_value)));
+                operations.push(Box::new(to_min_operation(
+                    path.clone(),
+                    new_value,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Max { path, value } => {
                 let new_value = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
                     _ => panic!("Non-literal value in $max after validation"),
                 };
-                operations.push(Box::new(to_max_operation(path, new_value)));
+                operations.push(Box::new(to_max_operation(
+                    path.clone(),
+                    new_value,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Mul { path, factor } => {
                 let factor_bson = match factor.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
                     _ => panic!("Non-literal value in $mul after validation"),
                 };
-                operations.push(Box::new(to_mul_operation(path, factor_bson)));
+                operations.push(Box::new(to_mul_operation(
+                    path.clone(),
+                    factor_bson,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::Pull { path, criterion } => {
                 operations.push(Box::new(to_pull_operation(path.clone(), criterion.clone())));
@@ -120,15 +146,23 @@ pub fn to_updater(
             }
             UpdateOp::Bit { path, and, or, xor } => {
                 let (and, or, xor) = (*and, *or, *xor);
-                operations.push(Box::new(to_bit_operation(path, and, or, xor)));
+                operations.push(Box::new(to_bit_operation(
+                    path.clone(),
+                    and,
+                    or,
+                    xor,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::CurrentDate { path, type_hint } => {
                 let type_hint = type_hint.clone();
-                operations.push(Box::new(to_current_date_operation(path, type_hint)));
+                operations.push(Box::new(to_current_date_operation(
+                    path.clone(),
+                    type_hint,
+                    array_filters.clone(),
+                )));
             }
             UpdateOp::AddToSet { path, values } => {
-
-                validate_non_empty_path(path)?;
 
                 let values_to_add = match values {
                     EachOrSingle::Single(expr) => {
@@ -150,8 +184,11 @@ pub fn to_updater(
                     }
                 };
                 let values_to_add = dedup_values(&values_to_add);
-                operations
-                    .push(Box::new(to_add_to_set_operation(path.clone(), values_to_add)));
+                operations.push(Box::new(to_add_to_set_operation(
+                    path.clone(),
+                    values_to_add,
+                    array_filters.clone(),
+                )));
             }
         }
     }
@@ -164,22 +201,33 @@ pub fn to_updater(
     }))
 }
 
-fn to_set_operation(path: &UpdatePath, value_bson: Bson) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
-    to_field_level_operation(
-        path.clone(),
-        move |_| Ok(value_bson.clone()),
-    )
+fn to_value_filters(array_filters: &BTreeMap<String, Arc<Expr>>) -> BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
+    let mut filters_map: BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> = BTreeMap::new();
+    let params = Parameters::new();
+    for (identifier, expr) in array_filters {
+        let filter_fn = filters::to_value_filter(expr.clone(), &params);
+        filters_map.insert(identifier.clone(), filter_fn);
+    }
+    filters_map
+}
+
+fn to_set_operation(
+    path: UpdatePath,
+    value_bson: Bson,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
+) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
+    to_field_level_operation(path, move |_| Ok(value_bson.clone()), array_filters)
 }
 
 /// The $currentDate operation sets the value of a field to the current date or timestamp.
 /// If the field does not exist, it will be created.
 fn to_current_date_operation(
-    path: &UpdatePath,
-    type_hint: CurrentDateType
+    path: UpdatePath,
+    type_hint: CurrentDateType,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
-
     to_field_level_operation(
-        path.clone(),
+        path,
         move |_| {
             let value = match type_hint {
                 CurrentDateType::Date => Bson::DateTime(bson::DateTime::now()),
@@ -187,9 +235,7 @@ fn to_current_date_operation(
                     let now = std::time::SystemTime::now();
                     let since_epoch = now
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|e| {
-                            Error::InvalidRequest(format!("System time error: {}", e))
-                        })?;
+                        .map_err(|e| Error::InvalidRequest(format!("System time error: {}", e)))?;
                     Bson::Timestamp(bson::Timestamp {
                         time: since_epoch.as_secs() as u32,
                         increment: 0,
@@ -198,30 +244,34 @@ fn to_current_date_operation(
             };
             Ok(value)
         },
+        array_filters,
     )
 }
 
 /// The $mul operation multiplies the value of the field by a specified factor.
 /// If the field does not exist, it is set to 0.
-fn to_mul_operation(path: &UpdatePath, factor_bson: Bson) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
+fn to_mul_operation(
+    path: UpdatePath,
+    factor_bson: Bson,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
+) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
     to_field_level_operation(
-        path.clone(),
+        path,
         move |existing| {
             multiply_numeric(existing, &factor_bson).map_err(|e| match e {
-                BsonArithmeticError::LhsNotNumeric => Error::InvalidRequest(
-                    "Cannot $mul non-numeric field".to_string(),
-                ),
-                BsonArithmeticError::RhsNotNumeric => Error::InvalidRequest(
-                    "Invalid $mul factor; must be a number".to_string(),
-                ),
+                BsonArithmeticError::LhsNotNumeric => {
+                    Error::InvalidRequest("Cannot $mul non-numeric field".to_string())
+                }
+                BsonArithmeticError::RhsNotNumeric => {
+                    Error::InvalidRequest("Invalid $mul factor; must be a number".to_string())
+                }
                 BsonArithmeticError::Overflow => {
                     Error::InvalidRequest("integer overflow in $mul".to_string())
                 }
-                _ => {
-                    Error::InvalidRequest("Unexpected arithmetic error in $mul".to_string())
-                }
+                _ => Error::InvalidRequest("Unexpected arithmetic error in $mul".to_string()),
             })
         },
+        array_filters,
     )
 }
 
@@ -230,24 +280,23 @@ fn to_mul_operation(path: &UpdatePath, factor_bson: Bson) -> impl Fn(&mut Docume
 /// If the field does not exist, it is treated as if it were set to 0.
 /// If the existing field value is not an integer, an error is returned.
 fn to_bit_operation(
-    path: &UpdatePath,
+    path: UpdatePath,
     and: Option<i64>,
     or: Option<i64>,
-    xor: Option<i64>
+    xor: Option<i64>,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
-
     to_field_level_operation(
-        path.clone(),
+        path,
         move |existing| {
             perform_bitwise_op(existing, and, or, xor).map_err(|e| match e {
-                BsonArithmeticError::LhsNotInteger => Error::InvalidRequest(
-                    "Cannot apply $bit to a non-integer field".to_string(),
-                ),
-                _ => Error::InvalidRequest(
-                    "Unexpected arithmetic error in $bit".to_string(),
-                ),
+                BsonArithmeticError::LhsNotInteger => {
+                    Error::InvalidRequest("Cannot apply $bit to a non-integer field".to_string())
+                }
+                _ => Error::InvalidRequest("Unexpected arithmetic error in $bit".to_string()),
             })
         },
+        array_filters,
     )
 }
 
@@ -255,40 +304,50 @@ fn to_bit_operation(
 /// value is greater than the current value of the field. If the field does not exist,
 /// the $max operation sets the field to the specified value.
 /// If the existing value is equal to the specified value, no change is made.
-fn to_max_operation(path: &UpdatePath, new_value: Bson) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
+fn to_max_operation(
+    path: UpdatePath,
+    new_value: Bson,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
+) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
     to_field_level_operation(
-        path.clone(),
+        path,
         move |existing| {
             if let Some(existing_bson) = existing {
-                Ok(BsonValueRef(existing_bson).max(BsonValueRef(&new_value)).to_owned_bson())
+                Ok(BsonValueRef(existing_bson)
+                    .max(BsonValueRef(&new_value))
+                    .to_owned_bson())
             } else {
                 Ok(new_value.clone())
             }
         },
+        array_filters,
     )
 }
 
 /// The $inc operation increments the value of the field by a specified amount.
 /// If the field does not exist, it is set to the amount.
-fn to_inc_operation(path: &UpdatePath, amount_bson: Bson) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
+fn to_inc_operation(
+    path: UpdatePath,
+    amount_bson: Bson,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
+) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
     to_field_level_operation(
-        path.clone(),
+        path,
         move |existing| {
             add_numeric(existing, &amount_bson).map_err(|e| match e {
-                BsonArithmeticError::LhsNotNumeric => Error::InvalidRequest(
-                    "Cannot $inc non-numeric field".to_string(),
-                ),
-                BsonArithmeticError::RhsNotNumeric => Error::InvalidRequest(
-                    "Invalid $inc amount; must be a number".to_string(),
-                ),
+                BsonArithmeticError::LhsNotNumeric => {
+                    Error::InvalidRequest("Cannot $inc non-numeric field".to_string())
+                }
+                BsonArithmeticError::RhsNotNumeric => {
+                    Error::InvalidRequest("Invalid $inc amount; must be a number".to_string())
+                }
                 BsonArithmeticError::Overflow => {
                     Error::InvalidRequest("integer overflow in $inc".to_string())
                 }
-                _ => {
-                    Error::InvalidRequest("Unexpected arithmetic error in $inc".to_string())
-                }
+                _ => Error::InvalidRequest("Unexpected arithmetic error in $inc".to_string()),
             })
         },
+        array_filters,
     )
 }
 
@@ -296,19 +355,22 @@ fn to_inc_operation(path: &UpdatePath, amount_bson: Bson) -> impl Fn(&mut Docume
 /// value is less than the current value of the field. If the field does not exist,
 /// the $min operation sets the field to the specified value.
 fn to_min_operation(
-    path: &UpdatePath,
-    new_value: Bson
+    path: UpdatePath,
+    new_value: Bson,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + Sized {
-
     to_field_level_operation(
-        path.clone(),
+        path,
         move |existing| {
             if let Some(existing_bson) = existing {
-                Ok(BsonValueRef(existing_bson).min(BsonValueRef(&new_value)).to_owned_bson())
+                Ok(BsonValueRef(existing_bson)
+                    .min(BsonValueRef(&new_value))
+                    .to_owned_bson())
             } else {
                 Ok(new_value.clone())
             }
         },
+        array_filters,
     )
 }
 
@@ -327,21 +389,32 @@ fn to_min_operation(
 fn to_field_level_operation<F>(
     path: UpdatePath,
     mutator: F,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync + 'static
 where
     F: Fn(Option<&Bson>) -> Result<Bson> + Send + Sync + 'static,
 {
+    let mutator = Arc::new(mutator);
     move |doc: &mut Document| {
+        validate_non_empty_path(&path)?;
 
         let parent_path = &path[..path.len() - 1];
-        let root_component = BsonComponent::Document(doc);
+        let last_component = path.last().unwrap();
 
-        let parent_component = traverse(root_component, parent_path, CreateIfMissing)?.ok_or_else(
-            || Error::InvalidRequest("Failed to traverse to parent for update".to_string()),
-        )?;
-
-        let last_component = &path[path.len() - 1];
-        apply_mutation(parent_component, last_component, &mutator)
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            parent_path,
+            CreateIfMissing,
+            &array_filters,
+            &|parent_component| {
+                apply_mutation(
+                    parent_component,
+                    last_component,
+                    mutator.as_ref(),
+                    &array_filters,
+                )
+            },
+        )
     }
 }
 
@@ -357,6 +430,7 @@ fn apply_mutation<F>(
     parent: BsonComponent,
     last_component: &UpdatePathComponent,
     mutator: &F,
+    array_filters: &BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>,
 ) -> Result<()>
 where
     F: Fn(Option<&Bson>) -> Result<Bson>,
@@ -416,6 +490,24 @@ where
             new_arr[*idx] = new_val;
             parent[index] = Bson::Array(new_arr);
         }
+        (BsonComponent::Array(arr), UpdatePathComponent::AllElements) => {
+            for i in 0..arr.len() {
+                arr[i] = mutator(Some(&arr[i]))?;
+            }
+        }
+        (BsonComponent::Array(arr), UpdatePathComponent::Filtered(identifier)) => {
+            let filter = array_filters.get(identifier).ok_or_else(|| {
+                Error::InvalidRequest(format!(
+                    "No array filter found for identifier '{}'",
+                    identifier
+                ))
+            })?;
+            for i in 0..arr.len() {
+                if filter(Some(BsonValueRef(&arr[i]))) {
+                    arr[i] = mutator(Some(&arr[i]))?;
+                }
+            }
+        }
         (c, p) => {
             return Err(Error::InvalidRequest(format!(
                 "Invalid path for update: cannot use {:?} on {:?}",
@@ -429,25 +521,36 @@ where
 
 fn to_unset_operation(path: UpdatePath) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
     move |doc: &mut Document| {
-        let parent_path = &path[..path.len() - 1];
-        let root_component = BsonComponent::Document(doc);
-        if let Some(parent_component) = traverse(root_component, parent_path, Get)? {
-            let last_component = &path[path.len() - 1];
-            match (parent_component, last_component) {
-                (BsonComponent::Document(doc), UpdatePathComponent::FieldName(name)) => {
-                    doc.remove(name);
-                }
-                (BsonComponent::Array(arr), UpdatePathComponent::ArrayElement(index)) => {
-                    if *index < arr.len() {
-                        arr[*index] = Bson::Null;
-                    }
-                }
-                (BsonComponent::Document(_), UpdatePathComponent::ArrayElement(..)) => {}
-                (BsonComponent::Array(_), UpdatePathComponent::FieldName(..)) => {}
-                _ => {} // Missing* variants mean nothing to unset
-            }
+        if path.is_empty() {
+            return Ok(()); // Unsetting the root is a no-op
         }
-        Ok(())
+
+        let parent_path = &path[..path.len() - 1];
+        let last_component = &path[path.len() - 1];
+        let empty_filters = BTreeMap::new();
+
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            parent_path,
+            Get,
+            &empty_filters,
+            &|parent_component| {
+                match (parent_component, last_component) {
+                    (BsonComponent::Document(doc), UpdatePathComponent::FieldName(name)) => {
+                        doc.remove(name);
+                    }
+                    (BsonComponent::Array(arr), UpdatePathComponent::ArrayElement(index)) => {
+                        if *index < arr.len() {
+                            arr[*index] = Bson::Null;
+                        }
+                    }
+                    (BsonComponent::Document(_), UpdatePathComponent::ArrayElement(..)) => {} // No-op
+                    (BsonComponent::Array(_), UpdatePathComponent::FieldName(..)) => {} // No-op
+                    _ => {} // Missing* variants mean nothing to unset
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -469,7 +572,9 @@ fn to_rename_operation(
 
         let value_to_move = {
             let root_component_for_from = BsonComponent::Document(doc);
-            let from_parent_component = traverse(root_component_for_from, from_parent_path, Get)?;
+            // Rename does not support positional operators, so we use an empty filter map.
+            let from_parent_component =
+                traverse(root_component_for_from, from_parent_path, Get)?;
 
             if let Some(parent) = from_parent_component {
                 match (parent, from_last_component) {
@@ -483,9 +588,9 @@ fn to_rename_operation(
                         )));
                     }
                     (BsonComponent::Array(_), _) => {
-                        return Err(Error::InvalidRequest(format!(
+                        return Err(Error::InvalidRequest(
                             "the source for $rename must be a document field, not inside an array"
-                        )));
+                                .to_string()));
                     }
                     // Path doesn't fully exist, so it's a no-op.
                     (BsonComponent::MissingField { .. }, _) => None,
@@ -509,6 +614,7 @@ fn to_rename_operation(
             }
 
             let root_component_for_to_set = BsonComponent::Document(doc);
+            // Rename does not support positional operators, so we use an empty filter map.
             let to_parent_component = traverse(
                 root_component_for_to_set,
                 to_parent_path,
@@ -519,7 +625,13 @@ fn to_rename_operation(
             })?;
 
             // Use the generic field mutator for the set part of the rename.
-            apply_mutation(to_parent_component, to_last_component, &|_| Ok(value.clone()))?;
+            let empty_filters = BTreeMap::new();
+            apply_mutation(
+                to_parent_component,
+                to_last_component,
+                &|_| Ok(value.clone()),
+                &empty_filters,
+            )?;
         }
 
         Ok(())
@@ -544,71 +656,70 @@ fn to_array_modifier_operation<F>(
     path: UpdatePath,
     mutator: F,
     op_name: &'static str,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync + 'static>
 where
     F: Fn(&mut Vec<Bson>) -> Result<()> + Send + Sync + 'static,
 {
+    let mutator = Arc::new(mutator);
     Box::new(move |doc: &mut Document| {
-        if path.is_empty() {
-            return Err(Error::InvalidRequest(format!(
-                "Update path for {} cannot be empty",
-                op_name
-            )));
-        }
+        validate_non_empty_path(&path)?;
+
         let last_component = path.last().unwrap();
         let parent_path = &path[..path.len() - 1];
 
-        let root_component = BsonComponent::Document(doc);
-        let parent_component = traverse(root_component, parent_path, CreateIfMissing)?.ok_or_else(
-            || Error::InvalidRequest(format!("Failed to traverse to parent for {}", op_name)),
-        )?;
-
-        match (parent_component, last_component) {
-            (BsonComponent::Document(doc), UpdatePathComponent::FieldName(name)) => {
-                match doc.get_mut(name) {
-                    Some(Bson::Array(arr)) => mutator(arr),
-                    Some(_) => Err(Error::InvalidRequest(format!(
-                        "Cannot {} to non-array field: {}",
-                        op_name, name
-                    ))),
-                    None => {
-                        let mut arr = vec![];
-                        mutator(&mut arr)?;
-                        doc.insert(name.clone(), Bson::Array(arr));
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            parent_path,
+            CreateIfMissing,
+            &array_filters,
+            &|parent_component| match (parent_component, last_component) {
+                (BsonComponent::Document(doc), UpdatePathComponent::FieldName(name)) => {
+                    match doc.get_mut(name) {
+                        Some(Bson::Array(arr)) => mutator(arr),
+                        Some(_) => Err(Error::InvalidRequest(format!(
+                            "Cannot {} to non-array field: {}",
+                            op_name, name
+                        ))),
+                        None => {
+                            let mut arr = vec![];
+                            mutator(&mut arr)?;
+                            doc.insert(name.clone(), Bson::Array(arr));
+                            Ok(())
+                        }
+                    }
+                }
+                (BsonComponent::Array(arr), UpdatePathComponent::ArrayElement(idx)) => {
+                    if *idx < arr.len() {
+                        match &mut arr[*idx] {
+                            Bson::Array(sub_arr) => mutator(sub_arr),
+                            Bson::Null => {
+                                let mut sub_arr = vec![];
+                                mutator(&mut sub_arr)?;
+                                arr[*idx] = Bson::Array(sub_arr);
+                                Ok(())
+                            }
+                            _ => Err(Error::InvalidRequest(format!(
+                                "Cannot {} to non-array element at index {}",
+                                op_name, *idx
+                            ))),
+                        }
+                    } else {
+                        while arr.len() < *idx {
+                            arr.push(Bson::Null);
+                        }
+                        let mut sub_arr = vec![];
+                        mutator(&mut sub_arr)?;
+                        arr.push(Bson::Array(sub_arr));
                         Ok(())
                     }
                 }
-            }
-            (BsonComponent::Array(arr), UpdatePathComponent::ArrayElement(idx)) => {
-                if *idx < arr.len() {
-                    match &mut arr[*idx] {
-                        Bson::Array(sub_arr) => mutator(sub_arr),
-                        Bson::Null => {
-                            let mut sub_arr = vec![];
-                            mutator(&mut sub_arr)?;
-                            arr[*idx] = Bson::Array(sub_arr);
-                            Ok(())
-                        }
-                        _ => Err(Error::InvalidRequest(format!(
-                            "Cannot {} to non-array element at index {}",
-                            op_name, *idx
-                        ))),
-                    }
-                } else {
-                    while arr.len() < *idx {
-                        arr.push(Bson::Null);
-                    }
-                    let mut sub_arr = vec![];
-                    mutator(&mut sub_arr)?;
-                    arr.push(Bson::Array(sub_arr));
-                    Ok(())
-                }
-            }
-            (component, path_comp) => Err(Error::InvalidRequest(format!(
-                "Invalid path for {}: cannot use {:?} on {:?}",
-                op_name, path_comp, component
-            ))),
-        }
+                (component, path_comp) => Err(Error::InvalidRequest(format!(
+                    "Invalid path for {}: cannot use {:?} on {:?}",
+                    op_name, path_comp, component
+                ))),
+            },
+        )
     })
 }
 
@@ -619,6 +730,7 @@ where
 fn to_push_operation(
     path: UpdatePath,
     spec: PushSpec<Bson>,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync> {
     let values_to_add = match spec.values.clone() {
         EachOrSingle::Single(v) => vec![v],
@@ -640,7 +752,7 @@ fn to_push_operation(
         Ok(())
     };
 
-    to_array_modifier_operation(path, mutator, "$push")
+    to_array_modifier_operation(path, mutator, "$push", array_filters)
 }
 
 fn to_push_fn(values: Vec<Bson>, position: Option<i32>) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> {
@@ -732,35 +844,6 @@ fn to_slice_fn(slice: Option<i32>) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> 
     }
 }
 
-/// Retrieves a mutable reference to an array at a specific path within a document.
-///
-/// This function traverses the document according to the `path`. Unlike other helpers in
-/// this module, it operates in a strict "get" mode: it will **not** create any missing
-/// documents or arrays along the path.
-///
-/// - If the path successfully resolves to an array, it returns `Ok(Some(&mut Vec<Bson>))`.
-/// - If the path does not exist at any point, it returns `Ok(None)`.
-/// - If the path resolves to a BSON type that is not an array, it returns an `Err`.
-///
-/// This makes it suitable for operators like `$pull` and `$pop`, which are no-ops if the
-/// target array doesn't exist and should fail if the target is not an array.
-fn get_array_mut<'a>(
-    doc: &'a mut Document,
-    path: &UpdatePath,
-) -> Result<Option<&'a mut Vec<Bson>>> {
-    let root_component = BsonComponent::Document(doc);
-    if let Some(target_component) = traverse(root_component, path, Get)? {
-        match target_component {
-            BsonComponent::Array(arr) => Ok(Some(arr)),
-            _ => Err(Error::InvalidRequest(format!(
-                "Cannot perform array operation on non-array at path: {:?}",
-                path
-            ))),
-        }
-    } else {
-        Ok(None)
-    }
-}
 
 /// The $pull operation removes all instances of a value or values that match a specified condition
 /// from an existing array. If the target field does not exist or is not an array, the operation
@@ -771,7 +854,6 @@ fn to_pull_operation(
     path: UpdatePath,
     criterion: PullCriterion,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
-
     let filter: Box<dyn Fn(&Bson) -> bool + Send + Sync> = match criterion {
         PullCriterion::Equals(expr) => {
             let val_to_remove = match expr.as_ref() {
@@ -787,10 +869,28 @@ fn to_pull_operation(
     };
 
     move |doc: &mut Document| {
-        if let Some(arr) = get_array_mut(doc, &path)? {
+        let pull_mutator = |arr: &mut Vec<Bson>| {
             arr.retain(|item| !filter(item));
-        }
-        Ok(())
+            Ok(())
+        };
+        let mutator = Arc::new(pull_mutator);
+
+        // $pull does not support arrayFilters.
+        let empty_filters = BTreeMap::new();
+
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            &path,
+            Get,
+            &empty_filters,
+            &|component| match component {
+                BsonComponent::Array(arr) => mutator(arr),
+                _ => Err(Error::InvalidRequest(format!(
+                    "Cannot $pull from non-array field at path: {:?}",
+                    path
+                ))),
+            },
+        )
     }
 }
 
@@ -804,10 +904,28 @@ fn to_pull_all_operation(
     values: Vec<BsonValue>,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
     move |doc: &mut Document| {
-        if let Some(arr) = get_array_mut(doc, &path)? {
+        let pull_all_mutator = |arr: &mut Vec<Bson>| {
             arr.retain(|item| !values.contains(&BsonValue::from(item.clone())));
-        }
-        Ok(())
+            Ok(())
+        };
+        let mutator = Arc::new(pull_all_mutator);
+
+        // $pullAll does not support arrayFilters.
+        let empty_filters = BTreeMap::new();
+
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            &path,
+            Get,
+            &empty_filters,
+            &|component| match component {
+                BsonComponent::Array(arr) => mutator(arr),
+                _ => Err(Error::InvalidRequest(format!(
+                    "Cannot $pullAll from non-array field at path: {:?}",
+                    path
+                ))),
+            },
+        )
     }
 }
 
@@ -818,7 +936,7 @@ fn to_pop_operation(
     from: PopFrom,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
     move |doc: &mut Document| {
-        if let Some(arr) = get_array_mut(doc, &path)? {
+        let pop_mutator = |arr: &mut Vec<Bson>| {
             if !arr.is_empty() {
                 match from {
                     PopFrom::First => {
@@ -829,8 +947,26 @@ fn to_pop_operation(
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        };
+        let mutator = Arc::new(pop_mutator);
+
+        // $pop does not support arrayFilters.
+        let empty_filters = BTreeMap::new();
+
+        traverse_and_apply(
+            BsonComponent::Document(doc),
+            &path,
+            Get,
+            &empty_filters,
+            &|component| match component {
+                BsonComponent::Array(arr) => mutator(arr),
+                _ => Err(Error::InvalidRequest(format!(
+                    "Cannot $pop from non-array field at path: {:?}",
+                    path
+                ))),
+            },
+        )
     }
 }
 
@@ -843,12 +979,13 @@ fn to_pop_operation(
 fn to_add_to_set_operation(
     path: UpdatePath,
     values: Vec<BsonValue>,
+    array_filters: Arc<BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>>,
 ) -> Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync> {
     let mutator = move |arr: &mut Vec<Bson>| {
         push_unique(arr, &values);
         Ok(())
     };
-    to_array_modifier_operation(path, mutator, "$addToSet")
+    to_array_modifier_operation(path, mutator, "$addToSet", array_filters)
 }
 
 fn push_unique(arr: &mut Vec<Bson>, values: &[BsonValue]) {
@@ -907,7 +1044,7 @@ impl<'a> BsonComponent<'a> {
                                 name
                             ))),
                         }
-                    } else if mode == Mode::Get {
+                    } else if mode == Get {
                         Ok(None)
                     } else {
                         Ok(Some(BsonComponent::MissingField {
@@ -916,8 +1053,13 @@ impl<'a> BsonComponent<'a> {
                         }))
                     }
                 }
-                c => Err(Error::InvalidRequest(format!(
-                    "Cannot index document with non-field component: {}",
+                UpdatePathComponent::ArrayElement(index) => Err(Error::InvalidRequest(format!(
+                    "Cannot use array index {} to index into a document",
+                    index
+                ))),
+                c @ UpdatePathComponent::AllElements
+                | c @ UpdatePathComponent::Filtered(_) => Err(Error::InvalidRequest(format!(
+                    "Cannot apply positional operator ('{}') to a document",
                     c
                 ))),
             },
@@ -932,7 +1074,7 @@ impl<'a> BsonComponent<'a> {
                                 index
                             ))),
                         }
-                    } else if mode == Mode::Get {
+                    } else if mode == Get {
                         Ok(None)
                     } else {
                         Ok(Some(BsonComponent::MissingArrayElement {
@@ -941,8 +1083,12 @@ impl<'a> BsonComponent<'a> {
                         }))
                     }
                 }
+                UpdatePathComponent::FieldName(name) => Err(Error::InvalidRequest(format!(
+                    "Cannot use field name '{}' to index into an array",
+                    name
+                ))),
                 c => Err(Error::InvalidRequest(format!(
-                    "Cannot index array with non-array component: {}",
+                    "Invalid operator '{}' on an array in this context",
                     c
                 ))),
             },
@@ -974,10 +1120,10 @@ impl<'a> BsonComponent<'a> {
                         index: *index,
                     }))
                 }
-                c => Err(Error::InvalidRequest(format!(
-                    "Positional operators not supported in this context: {}",
-                    c
-                ))),
+                UpdatePathComponent::AllElements | UpdatePathComponent::Filtered(_) => {
+                    // Positional operator on a path that does not exist is a no-op.
+                    Ok(None)
+                }
             },
             BsonComponent::MissingArrayElement { parent, index } => {
                 while parent.len() <= index {
@@ -1007,7 +1153,7 @@ impl<'a> BsonComponent<'a> {
                         }))
                     }
                     c => Err(Error::InvalidRequest(format!(
-                        "Positional operators not supported in this context: {}",
+                        "Cannot use positional operator in this context: {}",
                         c
                     ))),
                 }
@@ -1016,12 +1162,131 @@ impl<'a> BsonComponent<'a> {
     }
 }
 
+/// A recursive traversal function that applies a given closure (`applier`) to all BSON
+/// components targeted by a path. This function is the core of the update logic, capable
+/// of handling positional operators that cause a path to branch and target multiple locations.
+///
+/// - For standard path components, it traverses one level deeper.
+/// - For `$[]` (AllElements), it iterates over the entire array, recursively calling itself
+///   for each element.
+/// - For `$[<identifier>]` (Filtered), it uses the `array_filters` map to find the matching
+///   filter, iterates over the array, and recursively calls itself only for elements that
+///   match the filter.
+///
+/// If the path is fully resolved, it executes the `applier` on the final component(s).
+fn traverse_and_apply<'a, F>(
+    component: BsonComponent<'a>,
+    path: &[UpdatePathComponent],
+    mode: Mode,
+    array_filters: &BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>>,
+    applier: &F,
+) -> Result<()>
+where
+    F: Fn(BsonComponent) -> Result<()>,
+{
+    if path.is_empty() {
+        return applier(component);
+    }
+
+    let current_pc = &path[0];
+    let rest_path = &path[1..];
+
+    // Positional operators cause path branching.
+    match component {
+        BsonComponent::Array(arr) => {
+            match current_pc {
+                UpdatePathComponent::AllElements => {
+                    for i in 0..arr.len() {
+                        let mut temp_array = std::mem::take(arr);
+                        let elem_comp = match BsonComponent::Array(&mut temp_array)
+                            .step(&UpdatePathComponent::ArrayElement(i), mode)?
+                        {
+                            Some(comp) => comp,
+                            None => {
+                                *arr = temp_array;
+                                continue;
+                            }
+                        };
+                        traverse_and_apply(elem_comp, rest_path, mode, array_filters, applier)?;
+                        *arr = temp_array;
+                    }
+                    return Ok(());
+                }
+                UpdatePathComponent::Filtered(identifier) => {
+                    let filter = array_filters.get(identifier).ok_or_else(|| {
+                        Error::InvalidRequest(format!(
+                            "No array filter found for identifier '{}'",
+                            identifier
+                        ))
+                    })?;
+                    let mut indices_to_update = Vec::new();
+                    for (i, item) in arr.iter().enumerate() {
+                        if filter(Some(BsonValueRef(item))) {
+                            indices_to_update.push(i);
+                        }
+                    }
+                    for i in indices_to_update {
+                        let mut temp_array = std::mem::take(arr);
+                        let elem_comp = match BsonComponent::Array(&mut temp_array)
+                            .step(&UpdatePathComponent::ArrayElement(i), mode)?
+                        {
+                            Some(comp) => comp,
+                            None => {
+                                *arr = temp_array;
+                                continue;
+                            }
+                        };
+                        traverse_and_apply(elem_comp, rest_path, mode, array_filters, applier)?;
+                        *arr = temp_array;
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    // Not a positional operator, treat as a standard step on an array.
+                    if let Some(next_component) = BsonComponent::Array(arr).step(current_pc, mode)?
+                    {
+                        traverse_and_apply(
+                            next_component,
+                            rest_path,
+                            mode,
+                            array_filters,
+                            applier,
+                        )?;
+                    }
+                }
+            }
+        }
+        component => {
+            // Standard, non-branching traversal step.
+            if let Some(next_component) = component.step(current_pc, mode)? {
+                traverse_and_apply(next_component, rest_path, mode, array_filters, applier)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Traverses a document to a single target location.
+/// This is a simplified, non-branching version of `traverse_and_apply` for operations
+/// like `$rename` that do not support positional operators.
 fn traverse<'a>(
     mut component: BsonComponent<'a>,
     path: &[UpdatePathComponent],
     mode: Mode,
 ) -> Result<Option<BsonComponent<'a>>> {
     for path_component in path {
+        // Positional operators are not supported in this traversal mode.
+        if matches!(
+            path_component,
+            UpdatePathComponent::AllElements
+                | UpdatePathComponent::Filtered(_)
+        ) {
+            return Err(Error::InvalidRequest(format!(
+                "Positional operator {} not supported in this context",
+                path_component
+            )));
+        }
         component = match component.step(path_component, mode)? {
             Some(c) => c,
             None => return Ok(None),
@@ -1680,7 +1945,7 @@ mod tests {
     // -----------------------------
     // Positional operators: $[] and $[id] with arrayFilters
     // -----------------------------
-    use crate::query::update_fn::{all, update_with_filters, array_filter, filter};
+    use crate::query::update_fn::{all, update_with_filters, filter};
 
     #[test]
     fn test_positional_all_elements_set_field() {
@@ -1703,7 +1968,10 @@ mod tests {
             [field("grades"), filter("elem"), field("mean")],
             100,
         )];
-        let filters = vec![array_filter("elem", ef::field_filters(ef::field(["elem", "grade"]), [ef::gte(ef::lit(85))]))];
+        let filters = [(
+            "elem".to_string(),
+            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))])
+        )];
         let update_expr = Arc::new(update_with_filters(ops, filters));
         let updater = to_updater(&update_expr).unwrap();
 
@@ -1711,5 +1979,142 @@ mod tests {
         let updated = updater(doc).unwrap();
         assert_eq!(updated, doc! { "grades": [ { "grade": 90, "mean": 100 }, { "grade": 80, "mean": 60 } ] });
     }
-}
 
+    #[test]
+    fn test_positional_inc_on_scalar_array() {
+        // $inc: { "scores.$[]": 5 }
+        let update_expr = update([inc([field("scores"), all()], 5)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let doc = doc! { "scores": [10, 20, 30] };
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, doc! { "scores": [15, 25, 35] });
+    }
+
+    #[test]
+    fn test_positional_unset_field() {
+        // $unset: { "items.$[].b": "" }
+        let update_expr = update([unset([field("items"), all(), field("b")])]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let doc = doc! { "items": [ { "a": 1, "b": 2 }, { "a": 3, "b": 4 } ] };
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, doc! { "items": [ { "a": 1 }, { "a": 3 } ] });
+    }
+
+    #[test]
+    fn test_positional_push_to_nested_array() {
+        // $push: { "grades.$[].scores": 100 }
+        use crate::query::update_fn::push_single;
+        let update_expr = update([push_single([field("grades"), all(), field("scores")], 100)]);
+        let updater = to_updater(&update_expr).unwrap();
+        let doc = doc! { "grades": [ { "scores": [70] }, { "scores": [80] } ] };
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, doc! { "grades": [ { "scores": [70, 100] }, { "scores": [80, 100] } ] });
+    }
+
+    #[test]
+    fn test_nested_positional_operators_set() {
+        // $set: { "schools.$[].classes.$[].students.$[].passed": true }
+        let update_expr = update([set(
+            [field("schools"), all(), field("classes"), all(), field("students"), all(), field("passed")],
+            true
+        )]);
+        let updater = to_updater(&update_expr).unwrap();
+        let doc = doc! {
+            "schools": [
+                { "classes": [
+                    { "students": [ {"name": "A"}, {"name": "B"} ] },
+                    { "students": [ {"name": "C"} ] }
+                ] },
+                { "classes": [
+                    { "students": [ {"name": "D"} ] }
+                ] }
+            ]
+        };
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, doc! {
+            "schools": [
+                { "classes": [
+                    { "students": [ {"name": "A", "passed": true}, {"name": "B", "passed": true} ] },
+                    { "students": [ {"name": "C", "passed": true} ] }
+                ] },
+                { "classes": [
+                    { "students": [ {"name": "D", "passed": true} ] }
+                ] }
+            ]
+        });
+    }
+
+    #[test]
+    fn test_positional_on_empty_array_is_noop() {
+        let update_expr = update([set([field("grades"), all(), field("score")], 100)]);
+        let updater = to_updater(&update_expr).unwrap();
+        let doc = doc! { "grades": [] };
+        let original_doc = doc.clone();
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, original_doc);
+    }
+
+    #[test]
+    fn test_positional_on_missing_field_is_noop() {
+        let update_expr = update([set([field("grades"), all(), field("score")], 100)]);
+        let updater = to_updater(&update_expr).unwrap();
+        let doc = doc! { "name": "test" };
+        let original_doc = doc.clone();
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, original_doc);
+    }
+
+    #[test]
+    fn test_positional_on_non_array_field_errors() {
+        let update_expr = update([set([field("grades"), all(), field("score")], 100)]);
+        let updater = to_updater(&update_expr).unwrap();
+        let doc = doc! { "grades": { "not": "an array" } };
+        let result = updater(doc);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cannot apply positional operator ('$[]') to a document"
+        );
+    }
+
+    #[test]
+    fn test_filtered_positional_on_heterogeneous_array() {
+        // only update documents where grade is >= 85
+        let ops = [set([field("grades"), filter("elem"), field("mean")], 100)];
+        let filters = [(
+            "elem".to_string(),
+            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))])
+        )];
+        let update_expr = Arc::new(update_with_filters(ops, filters));
+        let updater = to_updater(&update_expr).unwrap();
+
+        let doc = doc! { "grades": [
+            { "grade": 90, "mean": 70 },
+            "not a document",
+            { "grade": 80, "mean": 60 },
+            Bson::Null
+        ]};
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, doc! { "grades": [
+            { "grade": 90, "mean": 100 },
+            "not a document",
+            { "grade": 80, "mean": 60 },
+            Bson::Null
+        ]});
+    }
+
+    #[test]
+    fn test_filtered_positional_with_no_matches_is_noop() {
+        let ops = [set([field("grades"), filter("elem"), field("mean")], 100)];
+        let filters = [("elem".to_string(), ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(95))]))];
+        let update_expr = Arc::new(update_with_filters(ops, filters));
+        let updater = to_updater(&update_expr).unwrap();
+
+        let doc = doc! { "grades": [ { "grade": 90, "mean": 70 }, { "grade": 80, "mean": 60 } ] };
+        let original_doc = doc.clone();
+        let updated = updater(doc).unwrap();
+        assert_eq!(updated, original_doc);
+    }
+}

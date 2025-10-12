@@ -412,11 +412,6 @@ pub enum ProjectionExpr {
     Fields { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
     ArrayElements { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
     Field,
-    /// Positional field reference (e.g. "array.$")
-    /// This is used in queries to refer to the first matching element in an array.
-    PositionalFieldRef,
-    /// Positional field reference associated to the query filter to which it is corresponding
-    PositionalField { filter: Arc<Expr> },
     Slice { skip: Option<i32>, limit: i32 },
     ElemMatch { filter: Arc<Expr>, },
 }
@@ -572,10 +567,8 @@ impl Serializable for ProjectionExpr {
             0 => Ok(ProjectionExpr::Fields { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
             1 => Ok(ProjectionExpr::ArrayElements { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
             2 => Ok(ProjectionExpr::Field),
-            3 => Ok(ProjectionExpr::PositionalFieldRef),
-            4 => Ok(ProjectionExpr::PositionalField { filter: Arc::<Expr>::read_from(reader)? }),
-            5 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
-            6 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
+            3 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
+            4 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
             _ => panic!("Invalid tag for ProjectionExpr: {}", tag),
         }
     }
@@ -593,20 +586,13 @@ impl Serializable for ProjectionExpr {
             ProjectionExpr::Field => {
                 writer.write_u8(2);
             },
-            ProjectionExpr::PositionalFieldRef => {
-                writer.write_u8(3);
-            },
-            ProjectionExpr::PositionalField { filter } => {
-                writer.write_u8(4);
-                filter.write_to(writer);
-            },
             ProjectionExpr::Slice { skip, limit } => {
-                writer.write_u8(5);
+                writer.write_u8(3);
                 skip.write_to(writer);
                 writer.write_varint_i32(*limit);
             },
             ProjectionExpr::ElemMatch { filter } => {
-                writer.write_u8(6);
+                writer.write_u8(4);
                 filter.write_to(writer);
             },
         }
@@ -1084,6 +1070,11 @@ impl Parameters {
         }
         param.unwrap()
     }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.parameters.len()
+    }
 }
 
 #[cfg(test)]
@@ -1428,7 +1419,6 @@ mod tests {
     fn test_projection_serialization_round_trip() {
         // Simple ProjectionExpr
         check_serialization_round_trip(proj_field());
-        check_serialization_round_trip(proj_positional_field());
         check_serialization_round_trip(proj_slice(Some(5), 10));
         check_serialization_round_trip(proj_slice(None, 20));
         let elem_match_expr = proj_elem_match(eq(placeholder(0)));

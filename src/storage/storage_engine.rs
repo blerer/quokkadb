@@ -4,7 +4,7 @@ use crate::obs::metrics::{DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
-use crate::storage::catalog::{Catalog, CollectionMetadata};
+use crate::storage::catalog::Catalog;
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
 use crate::storage::internal_key::encode_record_key;

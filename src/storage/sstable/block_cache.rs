@@ -15,7 +15,6 @@ use crate::{error, event, info};
 /// Block Cache (LRU, retrieves blocks using the shared file provided as a get parameter)
 pub struct BlockCache {
     logger: Arc<dyn LoggerAndTracer>,
-    metrics: Metrics,
     cache: Cache<(String, u64), Result<Arc<[u8]>, Arc<Error>>>, // Key = (file_path, block_handle)
 }
 
@@ -54,7 +53,6 @@ impl BlockCache {
 
         Arc::new(Self {
             logger,
-            metrics,
             cache,
         })
     }
