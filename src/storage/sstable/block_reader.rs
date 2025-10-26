@@ -54,17 +54,11 @@ impl<W: EntryReader + 'static> BlockReader<W> {
     }
 
     pub fn scan_forward_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-        match bound {
-            InternalKeyBound::Bounded(internal_key) => BlockEntryIterator::new_from_key(self, internal_key),
-            InternalKeyBound::Unbounded => self.scan_all_forward(),
-        }
+        BlockEntryIterator::new_from_key(self, bound.as_bytes())
     }
 
     pub fn scan_reverse_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-        match bound {
-            InternalKeyBound::Bounded(internal_key) => ReverseBlockEntryIterator::new_from_key(self, internal_key),
-            InternalKeyBound::Unbounded => self.scan_all_reverse(),
-        }
+        ReverseBlockEntryIterator::new_from_key(self, bound.as_bytes())
     }
 
     pub fn scan_all_forward(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {

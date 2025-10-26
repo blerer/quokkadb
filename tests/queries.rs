@@ -1,6 +1,6 @@
 use bson::{doc, Document};
 use quokkadb::QuokkaDB;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use tempfile::TempDir;
 use quokkadb::obs::logger::{LogLevel, StdoutLogger};
@@ -29,7 +29,7 @@ fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     (dir, db)
 }
 
-fn get_ids(results: &[Document]) -> HashSet<i32> {
+fn get_ids(results: &[Document]) -> Vec<i32> {
     results
         .iter()
         .map(|d| d.get_i32("_id").unwrap())
@@ -38,7 +38,7 @@ fn get_ids(results: &[Document]) -> HashSet<i32> {
 
 fn assert_ids(results: &[Document], expected_ids: &[i32]) {
     assert_eq!(results.len(), expected_ids.len());
-    let expected_ids_set: HashSet<i32> = expected_ids.iter().cloned().collect();
+    let expected_ids_set: Vec<i32> = expected_ids.iter().cloned().collect();
     assert_eq!(get_ids(results), expected_ids_set);
 }
 
@@ -472,4 +472,126 @@ fn test_elem_match_empty_document() {
         .collect();
 
     assert_ids(&results_tags, &[1, 2, 3, 4, 5, 7, 8]);
+}
+
+#[test]
+fn test_multi_collection_queries() {
+    let (_dir, db) = setup_db_with_data(); // This sets up collection "test" with sample data
+
+    // Create and populate a second collection
+    let collection2 = db.collection("test2");
+    let collection2_data = vec![
+        doc! { "_id": 101, "item": "widget", "status": "A" },
+        doc! { "_id": 102, "item": "gadget", "status": "B" },
+    ];
+    collection2.insert_many(collection2_data).unwrap();
+
+    // Query the first collection
+    let collection1 = db.collection("test");
+    let results1: Vec<Document> = collection1
+        .find(doc! { "status": "A" })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    // Assert results from first collection are correct and don't include data from the second
+    assert_ids(&results1, &[1, 2, 5, 7]);
+
+    // Query the second collection
+    let results2: Vec<Document> = collection2
+        .find(doc! { "status": "A" })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    // Assert results from second collection are correct
+    assert_ids(&results2, &[101]);
+}
+
+#[test]
+fn test_id_point_query() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": 5 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert_ids(&results, &[5]);
+}
+
+#[test]
+fn test_id_range_queries() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // $gt
+    let gt_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$gt": 8 } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&gt_results, &[9, 10]);
+
+    // $gte
+    let gte_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$gte": 8 } })
+        .sort(doc! { "_id": -1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&gte_results, &[10, 9, 8]);
+
+    // $lt
+    let lt_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$lt": 3 } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&lt_results, &[1, 2]);
+
+    // $lte
+    let lte_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$lte": 3 } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&lte_results, &[1, 2, 3]);
+
+    // combined
+    let combined_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$gt": 3, "$lte": 6 } })
+        .sort(doc! { "_id": -1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&combined_results, &[6, 5, 4]);
+}
+
+#[test]
+fn test_id_in_query() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [1, 5, 9, 11] } })
+        .sort(doc! { "_id": -1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    let ids: Vec<i32> = results
+        .iter()
+        .map(|d| d.get_i32("_id").unwrap())
+        .collect();
+    assert_eq!(ids, vec![9, 5, 1]);
 }

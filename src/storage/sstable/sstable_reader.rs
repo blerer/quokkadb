@@ -207,7 +207,7 @@ impl SSTableReader {
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
         let internal_key = encode_internal_key(record_key, snapshot, OperationType::Delete);
-        let bound = InternalKeyBound::Bounded(internal_key);
+        let bound = InternalKeyBound(internal_key);
         let mut block_handles = index_reader.scan_forward_from(&bound)?;
 
         let block_handle = block_handles.next();

@@ -1,6 +1,6 @@
 use crate::options::options::Options;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, InternalKeyBound, InternalKeyRange};
+use crate::storage::internal_key::{encode_internal_key, InternalKeyRange};
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
@@ -10,7 +10,7 @@ use crossbeam_skiplist::SkipMap;
 use std::io::Result;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::ops::{Bound, Bound::Unbounded};
+use std::ops::Bound;
 use std::rc::Rc;
 use crate::storage::Direction;
 use crate::storage::iterators::{ForwardIterator, ReverseIterator};
@@ -73,15 +73,8 @@ impl Memtable {
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> {
 
-        let start = match range.start_bound() {
-            InternalKeyBound::Unbounded => Unbounded,
-            InternalKeyBound::Bounded(internal_key) => Bound::Included(internal_key.clone()),
-        };
-
-        let end = match range.end_bound() {
-            InternalKeyBound::Unbounded => Unbounded,
-            InternalKeyBound::Bounded(internal_key) => Bound::Included(internal_key.clone()),
-        };
+        let start = Bound::Included(range.start_bound().as_bytes().to_vec());
+        let end = Bound::Included(range.end_bound().as_bytes().to_vec());
 
         let interval = Interval::new(start, end);
         let range = self.skiplist.range(interval);

@@ -115,7 +115,6 @@ impl StorageEngine {
                                     }
                                 }
                                 Ok((seq, batch)) => {
-                                    assert_eq!(last_seq_nbr, seq + 1);
                                     lsm_tree.memtable.write(seq, &batch);
                                     last_seq_nbr = seq;
                                     if is_last_wal_file {
