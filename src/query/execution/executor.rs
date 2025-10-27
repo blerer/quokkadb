@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::query::execution::{filters, projections, sorts, updates};
+use crate::storage::Direction;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::StorageEngine;
@@ -247,6 +248,69 @@ impl QueryExecutor {
                 projection: _,
             } => {
                 todo!()
+            }
+            PhysicalPlan::MultiPointSearch {
+                collection,
+                keys,
+                direction,
+                filter,
+                projection: _,
+            } => {
+                let filter = filter
+                    .clone()
+                    .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+
+                let keys_values = Self::bind_parameter(keys, &parameters);
+                let keys_array = if let BsonValue(Bson::Array(arr)) = keys_values {
+                    arr
+                } else {
+                    panic!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
+                };
+
+                let mut keys_as_bson_values: Vec<BsonValue> =
+                    keys_array.into_iter().map(BsonValue).collect();
+
+                // Sort keys to ensure consistent order for storage engine lookups
+                keys_as_bson_values.sort();
+
+                let key_iterator: Box<dyn Iterator<Item = BsonValue>> =
+                    if *direction == Direction::Reverse {
+                        Box::new(keys_as_bson_values.into_iter().rev())
+                    } else {
+                        Box::new(keys_as_bson_values.into_iter())
+                    };
+
+                let storage_engine = self.storage_engine.clone();
+                let collection = *collection;
+
+                let iter = key_iterator.filter_map(move |key| match key.try_into_key() {
+                    Ok(storage_key) => {
+                        match storage_engine.read(collection, 0, &storage_key, None) {
+                            Ok(Some((k, v))) => {
+                                let op = extract_operation_type(&k);
+                                if op == OperationType::Put {
+                                    match Document::from_reader(Cursor::new(v)) {
+                                        Ok(doc) => {
+                                            if filter.as_ref().map_or(true, |f| f(&doc)) {
+                                                Some(Ok(doc))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        Err(e) => Some(Err(e.into())),
+                                    }
+                                } else {
+                                    None // Deleted
+                                }
+                            }
+                            Ok(None) => None, // Not found
+                            Err(e) => Some(Err(e.into())),
+                        }
+                    }
+                    Err(e) => Some(Err(e.into())),
+                });
+
+                Ok(Box::new(iter))
             }
             PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), &parameters);
@@ -1253,6 +1317,100 @@ mod tests {
             Parameters::new(),
             doc! { "array_scalar": [40, 50] },
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multipoint_search_execution() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_multipoint")?;
+
+        // 2. Insert test data
+        let docs = vec![
+            doc! { "_id": 1, "name": "a", "value": 10 },
+            doc! { "_id": 2, "name": "b", "value": 20 },
+            doc! { "_id": 3, "name": "c", "value": 10 },
+            doc! { "_id": 4, "name": "d", "value": 20 },
+            doc! { "_id": 5, "name": "e", "value": 10 },
+        ];
+        for doc in &docs {
+            let insert_plan = PhysicalPlan::InsertOne {
+                collection: collection_id,
+                document: bson::to_vec(doc)?,
+            };
+            let mut result = executor.execute_direct(insert_plan, None)?;
+            result.next().unwrap()?; // consume result
+        }
+
+        // --- Test Cases ---
+
+        // Case 1: Forward direction, some keys don't exist
+        let mut params1 = Parameters::new();
+        let keys1 = params1.collect_parameter(BsonValue(Bson::Array(vec![
+            Bson::Int32(5),
+            Bson::Int32(1),
+            Bson::Int32(99), // non-existent
+            Bson::Int32(3),
+        ])));
+        let plan1 = Arc::new(PhysicalPlan::MultiPointSearch {
+            collection: collection_id,
+            keys: keys1,
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        });
+
+        let results1 = executor.execute_cached(plan1, &params1)?;
+        let found_docs1: Vec<Document> = results1.collect::<Result<_>>()?;
+        let found_ids1: Vec<i32> = found_docs1.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(found_ids1, vec![1, 3, 5]);
+
+        // Case 2: Reverse direction
+        let mut params2 = Parameters::new();
+        let keys2 = params2.collect_parameter(BsonValue(Bson::Array(vec![
+            Bson::Int32(5),
+            Bson::Int32(1),
+            Bson::Int32(3),
+        ])));
+        let plan2 = Arc::new(PhysicalPlan::MultiPointSearch {
+            collection: collection_id,
+            keys: keys2,
+            direction: Direction::Reverse,
+            filter: None,
+            projection: None,
+        });
+
+        let results2 = executor.execute_cached(plan2, &params2)?;
+        let found_docs2: Vec<Document> = results2.collect::<Result<_>>()?;
+        let found_ids2: Vec<i32> = found_docs2.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(found_ids2, vec![5, 3, 1]);
+
+        // Case 3: With residual filter
+        let mut params3 = Parameters::new();
+        let keys3 = params3.collect_parameter(BsonValue(Bson::Array(vec![
+            Bson::Int32(1),
+            Bson::Int32(2),
+            Bson::Int32(3),
+            Bson::Int32(4),
+        ])));
+        let p_val = params3.collect_parameter(10.into());
+        let filter3 = field_filters(field(["value"]), [interval(point(&p_val))]);
+
+        let plan3 = Arc::new(PhysicalPlan::MultiPointSearch {
+            collection: collection_id,
+            keys: keys3,
+            direction: Direction::Forward,
+            filter: Some(filter3),
+            projection: None,
+        });
+
+        let results3 = executor.execute_cached(plan3, &params3)?;
+        let found_docs3: Vec<Document> = results3.collect::<Result<_>>()?;
+        let found_ids3: Vec<i32> = found_docs3.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(found_ids3, vec![1, 3]);
 
         Ok(())
     }

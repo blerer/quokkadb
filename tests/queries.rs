@@ -582,7 +582,7 @@ fn test_id_in_query() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
     let results: Vec<Document> = collection
-        .find(doc! { "_id": { "$in": [1, 5, 9, 11] } })
+        .find(doc! { "_id": { "$in": [9, 1, 11, 5] } })
         .sort(doc! { "_id": -1 })
         .execute()
         .unwrap()
@@ -594,4 +594,45 @@ fn test_id_in_query() {
         .map(|d| d.get_i32("_id").unwrap())
         .collect();
     assert_eq!(ids, vec![9, 5, 1]);
+}
+
+#[test]
+fn test_id_in_query_with_other_filters() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [4, 1, 3, 2] }, "status": "A" })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert_ids(&results, &[1, 2]);
+}
+
+#[test]
+fn test_id_in_with_range_queries() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // $in with $gt
+    let gt_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [9, 1, 11, 5, 2], "$gt": 3 } })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&gt_results, &[5, 9]);
+
+    // $in with $lte
+    let lte_results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [9, 1, 5, 2], "$lte": 5 } })
+        .sort(doc! { "_id": -1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&lte_results, &[5, 2, 1]);
 }

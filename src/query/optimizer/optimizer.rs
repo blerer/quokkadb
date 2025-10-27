@@ -26,6 +26,7 @@ impl CostEstimator {
             PhysicalPlan::CollectionScan { .. } => 1000.0,
             PhysicalPlan::IndexScan { .. } => 100.0,
             PhysicalPlan::PointSearch { .. } => 1.0,
+            PhysicalPlan::MultiPointSearch { .. } => 10.0,
             PhysicalPlan::Filter { .. } => 1.0,
             PhysicalPlan::Projection { .. } => 0.5,
             PhysicalPlan::InMemorySort { .. } => 500.0,
@@ -495,13 +496,21 @@ impl Optimizer {
                 let residual = compute_residual_filter(expr.clone(), &primary_key);
 
                 match sargable.as_ref() {
-                    Expr::Comparison { operator, .. } => match operator {
+                    Expr::Comparison { operator, value } => match operator {
                         ComparisonOperator::In => {
-                            todo!("Implement $in on primary key")
-                        },
+                            let residual = compute_residual_filter(expr.clone(), &primary_key);
+                            let candidate = self.create_multipoint_search_candidate(
+                                collection,
+                                value.clone(),
+                                residual,
+                                req,
+                            );
+                            // This is likely the best plan, so we can just return it.
+                            return vec![candidate];
+                        }
                         _ => unreachable!(), // Should be filtered by is_sargable_leaf
                     },
-                    Expr::Interval(interval ) => {
+                    Expr::Interval(interval) => {
                         if interval.is_point() {
                             // Point search
                             let key = interval.start_bound_value().unwrap().clone();
@@ -641,6 +650,43 @@ impl Optimizer {
             plan,
         };
         candidate
+    }
+
+    fn create_multipoint_search_candidate(
+        &self,
+        collection: u32,
+        keys: Arc<Expr>,
+        residual: Option<Arc<Expr>>,
+        req: &ReqProps,
+    ) -> Candidate {
+        let primary_key = Expr::Field(vec!["_id".into()]);
+
+        let (direction, sort_field) = if matches!(req.order.as_deref().and_then(|fields| fields.first()),
+            Some(sort_field) if sort_field.field.as_ref() == &primary_key && sort_field.order == SortOrder::Descending
+                            ) {
+            (Direction::Reverse, Some(SortField::desc(Arc::new(primary_key))))
+        } else {
+            (Direction::Forward, Some(SortField::asc(Arc::new(primary_key))))
+        };
+
+        let plan = Arc::new(PhysicalPlan::MultiPointSearch {
+            collection,
+            keys,
+            direction,
+            filter: residual,
+            projection: None,
+        });
+
+        let provides = Provides {
+            order: sort_field.map(|sf| vec![sf]),
+            limit: None,
+        };
+
+        Candidate {
+            provides,
+            cost: self.cost_estimator.estimate_node_cost(&plan),
+            plan,
+        }
     }
 
     fn implement_sort_node(&self,
@@ -885,8 +931,9 @@ mod parametrize_test {
 mod optimizer_tests {
     use crate::obs::logger::test_instance;
     use super::*;
-    use crate::query::expr_fn::{and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field, proj_fields};
+    use crate::query::expr_fn::{and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field, proj_fields, within};
     use crate::query::logical_plan::LogicalPlanBuilder;
+    use bson::Bson;
 
     const COLLECTION: u32 = 10;
 
@@ -1164,6 +1211,69 @@ mod optimizer_tests {
             input: Arc::new(full_scan_plan()),
             sort_fields,
             k: 10,
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_optimize_pk_multipoint_search() {
+        let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
+        let filters = field_filters(field(["_id"]), vec![within(lit(values))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+
+        let output = PhysicalPlan::MultiPointSearch {
+            collection: COLLECTION,
+            keys: placeholder(0),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_optimize_pk_multipoint_search_desc() {
+        let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
+        let filters = field_filters(field(["_id"]), vec![within(lit(values))]);
+        let sort_fields = Arc::new(vec![SortField::desc(field(["_id"]))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .sort(sort_fields)
+            .build();
+
+        let output = PhysicalPlan::MultiPointSearch {
+            collection: COLLECTION,
+            keys: placeholder(0),
+            direction: Direction::Reverse,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_optimize_pk_multipoint_search_with_residual() {
+        let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
+        let filters = and(vec![
+            field_filters(field(["_id"]), vec![within(lit(values))]),
+            field_filters(field(["a"]), vec![gt(lit(10))]),
+        ]);
+        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+
+        let residual_filter = field_filters(
+            field(["a"]),
+            [interval(Interval::greater_than(placeholder(1)))],
+        );
+
+        let output = PhysicalPlan::MultiPointSearch {
+            collection: COLLECTION,
+            keys: placeholder(0),
+            direction: Direction::Forward,
+            filter: Some(residual_filter),
+            projection: None,
         };
 
         check_optimization(input, output);

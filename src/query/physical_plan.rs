@@ -56,6 +56,21 @@ pub enum PhysicalPlan {
         projection: Option<Arc<Projection>>,
     },
 
+    /// Performs a lookup on the primary key for a list of keys.
+    /// This is an efficient implementation for `$in` queries on `_id`.
+    MultiPointSearch {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The placeholder for the array of user keys to search for.
+        keys: Arc<Expr>,
+        /// The direction in which the keys should be processed.
+        direction: Direction,
+        /// An optional filter to apply at the binary level after scanning (for residuals).
+        filter: Option<Arc<Expr>>,
+        /// An optional list of fields to project. If `None`, all fields are returned.
+        projection: Option<Arc<Projection>>,
+    },
+
     /// Inserts a document into a collection. This is a terminal operator.
     InsertOne {
         /// The identifier for the collection.
