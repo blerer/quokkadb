@@ -6,15 +6,20 @@
 
 A high-performance, document-oriented database engine written in Rust.
 
+> **Disclaimer**  
+> QuokkaDB provides a Mongo-like document API and BSON data model for developer familiarity.  
+> It is **not a drop-in replacement for MongoDB**, does **not reuse any MongoDB source code**,  
+> and is **not affiliated with, endorsed by, or associated with MongoDB, Inc.**
+
 ## Introduction
 
-QuokkaDB is a modern database built from the ground up in Rust, designed for performance, reliability, and ease of use. It uses a Log-Structured Merge-Tree (LSM-Tree) storage engine, making it highly efficient for write-heavy workloads. Documents are stored in BSON format, providing a rich and flexible data model.
+QuokkaDB is a modern database built from the ground up in Rust, designed for performance, reliability, and ease of use. It uses a Log-Structured Merge-Tree (LSM-Tree) storage engine, making it highly efficient for write-heavy workloads. Documents are stored in BSON format (a binary JSON encoding originally defined as an open specification), providing a rich and flexible data model.
 
 ## Features
 
 - **Document-Oriented**: Store and query flexible BSON documents.
 - **LSM-Tree Storage Engine**: Optimized for high write throughput, with Memtables, SSTables, and a Write-Ahead Log (WAL) for durability.
-- **Rich Query API**: Fluent API for finding documents, with support for projections, sorting, skipping, and limiting results.
+- **Rich Query API**: Fluent API inspired by common document databases, supporting projections, sorting, skipping, and limiting results.
 - **Query Optimization**: A cost-based query optimizer with a set of normalization rules to ensure efficient query execution.
 - **Pluggable Compression**: Supports Snappy, LZ4, and no-op compression for SSTable blocks to save space.
 - **Configurable**: Fine-tune performance with options for cache sizes, block sizes, and more.
@@ -28,7 +33,7 @@ QuokkaDB is a work in progress and not yet ready for production use. The future 
 - **Compaction**: Implementing LSM-Tree compaction.
 - **Update & Delete**: Adding full support for update and delete operations.
 - **Indexing**: Introducing secondary indexing capabilities.
-- **Transactions**: Implementing support for ACID transactions.
+- **Transactions**: Planned lightweight atomic batch writes with snapshot isolation.
 
 ## Usage
 
