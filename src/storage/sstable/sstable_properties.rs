@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(sstable_properties.min_sequence, 1);
         assert_eq!(sstable_properties.max_sequence, 5);
         assert_eq!(sstable_properties.num_entries, 3);
-        assert_eq!(sstable_properties.raw_key_size, 108, "Raw key size should be 108 (35 + 36 + 37)");
+        assert_eq!(sstable_properties.raw_key_size, 90, "Raw key size should be 90 (29 + 30 + 31)");
         assert_eq!(sstable_properties.raw_value_size, 115, "Raw value size should be 115 (50 + 40 + 25)");
     }
 

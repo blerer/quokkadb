@@ -309,4 +309,84 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_u64_byte_order_is_preserved() {
+        let mut values = vec![
+            0u64,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            (1 << 21) - 1,
+            1 << 21,
+            (1 << 28) - 1,
+            1 << 28,
+            (1 << 35) - 1,
+            1 << 35,
+            (1 << 42) - 1,
+            1 << 42,
+            (1 << 49) - 1,
+            1 << 49,
+            (1 << 56) - 1,
+            1 << 56,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        values.sort_unstable();
+
+        let encoded_values: Vec<Vec<u8>> = values
+            .iter()
+            .map(|&value| {
+                let mut buffer = Vec::new();
+                write_u64(value, &mut buffer);
+                buffer
+            })
+            .collect();
+
+        let mut sorted_encoded_values = encoded_values.clone();
+        sorted_encoded_values.sort();
+
+        assert_eq!(
+            encoded_values, sorted_encoded_values,
+            "Byte order is not preserved for u64"
+        );
+    }
+
+    #[test]
+    fn test_u32_byte_order_is_preserved() {
+        let mut values = vec![
+            0u32,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            (1 << 21) - 1,
+            1 << 21,
+            (1 << 28) - 1,
+            1 << 28,
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+        values.sort_unstable();
+
+        let encoded_values: Vec<Vec<u8>> = values
+            .iter()
+            .map(|&value| {
+                let mut buffer = Vec::new();
+                write_u32(value, &mut buffer);
+                buffer
+            })
+            .collect();
+
+        let mut sorted_encoded_values = encoded_values.clone();
+        sorted_encoded_values.sort();
+
+        assert_eq!(
+            encoded_values, sorted_encoded_values,
+            "Byte order is not preserved for u32"
+        );
+    }
 }

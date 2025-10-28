@@ -1,4 +1,4 @@
-use crate::io::ZeroCopy;
+use crate::io::{varint, ZeroCopy};
 use crate::storage::operation::OperationType;
 use std::convert::TryFrom;
 use std::ops::{Bound, RangeBounds, Bound::Unbounded};
@@ -9,7 +9,7 @@ use crate::util::bson_utils::BsonKey;
 use bson::Bson;
 
 /// The key used by the storage internally are called internal key and are composed of
-/// the collection ID (4 bytes big-endian), the index ID (4 bytes big-endian), the user key,
+/// the collection ID (varint-encoded u32), the index ID (varint-encoded u32), the user key,
 /// the sequence number (7 bytes big-endian) and the operation type (1 byte).
 /// The part including the collection ID, the index ID and the user key is called the record key.
 
@@ -18,8 +18,7 @@ pub const MAX_SEQUENCE_NUMBER: u64 = (1 << 56) - 1;
 
 /// Encodes an internal key into raw bytes that sort correctly.
 ///
-///  The internal key
-/// Format: `[collection (u32)][index (u32)][user_key][!sequence_number (big-endian u56)][operation_type (u8)]`
+/// The internal key format is: `[collection (varint u32)][index (varint u32)][user_key][!sequence_number (big-endian u56)][operation_type (u8)]`
 pub fn encode_internal_key(
     record_key: &[u8],
     sequence_number: u64,
@@ -46,25 +45,38 @@ pub fn encode_internal_key(
 }
 
 fn append_record_key(key: &mut Vec<u8>, collection: u32, index: u32, user_key: &[u8]) {
-    // Append collection (big-endian)
-    key.extend_from_slice(&collection.to_be_bytes());
+    // Append collection (varint-encoded)
+    varint::write_u32(collection, key);
 
-    // Append index (big-endian)
-    key.extend_from_slice(&index.to_be_bytes());
+    // Append index (varint-encoded)
+    varint::write_u32(index, key);
 
     // Append user_key
     key.extend_from_slice(user_key);
 }
 
 pub fn encode_record_key(collection: u32, index: u32, user_key: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(4 + 4 + user_key.len());
+    let mut key = Vec::with_capacity(
+        varint::compute_u32_vint_size(collection)
+            + varint::compute_u32_vint_size(index)
+            + user_key.len(),
+    );
     append_record_key(&mut key, collection, index, user_key);
     key
 }
 
+/// Decodes a record key into its components.
+pub fn decode_record_key(record_key: &[u8]) -> (u32, u32, &[u8]) {
+    let (collection, offset) = varint::read_u32(record_key, 0);
+    let (index, offset) = varint::read_u32(record_key, offset);
+    (collection, index, &record_key[offset..])
+}
+
 /// Extracts the record key from an internal key.
 pub fn extract_record_key(internal_key: &[u8]) -> &[u8] {
-    assert!(internal_key.len() >= 16, "Invalid internal key length");
+    // An internal key must have at least the MVCC suffix (8 bytes), a 1-byte collection ID,
+    // and a 1-byte index ID.
+    assert!(internal_key.len() >= 10, "Invalid internal key length");
     &internal_key[..internal_key.len() - 8]
 }
 
@@ -132,7 +144,7 @@ impl InternalKeyRange {
 /// Encode a range over record keys (collection/index/user_key only).
 ///
 /// This function builds a byte range for the record-key prefix:
-/// `[collection (u32 BE)][index (u32 BE)][user_key bytes …]`.
+/// `[collection (varint u32)][index (varint u32)][user_key bytes …]`.
 ///
 /// - Unbounded bounds are tightened to the target `(collection, index)` by encoding the
 ///   user key with `Bson::MinKey` (for the start) and `Bson::MaxKey` (for the end).
@@ -169,7 +181,7 @@ where
 ///
 /// Internal-key format:
 /// `[record_key ...][!sequence (big-endian u56)][operation_type (u8)]`, where
-/// `record_key = [collection (u32 BE)][index (u32 BE)][user_key …]`.
+/// `record_key = [collection (varint u32)][index (varint u32)][user_key …]`.
 ///
 /// Important behavior and rationale:
 /// - Unbounded user-key bounds are tightened using `Bson::MinKey` / `Bson::MaxKey`
@@ -294,7 +306,28 @@ mod tests {
 
         assert_eq!(extract_sequence_number(&encoded), seq);
         assert_eq!(extract_operation_type(&encoded), op_type);
-        assert_eq!(extract_record_key(&encoded), record_key);
+        assert_eq!(extract_record_key(&encoded), record_key.as_slice());
+
+        let (decoded_collection, decoded_index, decoded_user_key) =
+            decode_record_key(&record_key);
+        assert_eq!(decoded_collection, collection);
+        assert_eq!(decoded_index, index);
+        assert_eq!(decoded_user_key, user_key.as_slice());
+    }
+
+    #[test]
+    fn test_record_key_encoding_decoding_large_ids() {
+        let collection = u32::MAX;
+        let index = 16_384; // 3 bytes varint
+        let user_key = Bson::Int64(12345).try_into_key().unwrap();
+
+        let record_key = encode_record_key(collection, index, &user_key);
+        let (decoded_collection, decoded_index, decoded_user_key) =
+            decode_record_key(&record_key);
+
+        assert_eq!(decoded_collection, collection);
+        assert_eq!(decoded_index, index);
+        assert_eq!(decoded_user_key, user_key.as_slice());
     }
 
     #[test]
