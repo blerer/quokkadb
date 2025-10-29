@@ -15,7 +15,7 @@ use std::{
         mpsc::{sync_channel, Receiver, SyncSender},
         Arc, Condvar, Mutex,
     },
-    thread::{self, JoinHandle},
+    thread::self,
     time::Duration,
 };
 use crate::{error, event, info};
@@ -33,17 +33,17 @@ pub enum FlushTask {
     ///
     /// - `sst_file`: The target SSTable file for the flush.
     /// - `memtable`: The memtable to be flushed.
-    /// - `callback`: Optional callback to be called with the result of the flush operation.
+    /// - `callback`: the callback to be called with the result of the flush operation.
     Flush {
         sst_file: DbFile,
         memtable: Arc<Memtable>,
-        callback: Option<Arc<dyn Callback<Result<SSTableOperation>>>>,
+        callback: Arc<Callback<Result<SSTableOperation>>>,
     },
     /// Notify when all previously scheduled flushes are complete.
     ///
-    /// - `callback`: Optional callback to be called when the sync is complete.
+    /// - `callback`: the callback to be called when the sync is complete.
     Sync {
-        callback: Option<Arc<dyn Callback<Result<()>>>>,
+        callback: Arc<Callback<Result<()>>>,
     },
 }
 
@@ -57,7 +57,6 @@ pub enum FlushTask {
 /// In test builds, the flush thread can be paused and resumed for deterministic testing.
 pub struct FlushManager {
     sender: SyncSender<FlushTask>,
-    thread: Option<JoinHandle<()>>,
     sync_control: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
@@ -90,7 +89,7 @@ impl FlushManager {
 
         let sync_control_for_thread = sync_control.clone();
 
-        let thread = {
+        let _thread = {
             thread::Builder::new()
                 .name("flush_manager".to_string())
                 .spawn(move || {
@@ -106,9 +105,7 @@ impl FlushManager {
                     match task {
                         FlushTask::Sync { callback } => {
                             event!(log, "flush_sync start");
-                            if let Some(cb) = callback {
-                                let _ = cb.call(Ok(()));
-                            }
+                            callback.call(Ok(()));
                             event!(log, "flush_sync done");
                         }
                         FlushTask::Flush { sst_file, memtable, callback } => {
@@ -130,15 +127,12 @@ impl FlushManager {
                                         log_number: memtable.log_number,
                                         flushed: Arc::new(sst),
                                     };
-                                    if let Some(callback) = callback {
-                                        let _ = callback.call(Ok(operation));
-                                    }
+                                    callback.call(Ok(operation));
                                 }
                                 Err(e) => {
                                     error!(log, "Flush failed: {}", e);
-                                    if let Some(callback) = callback {
-                                        let _ = callback.call(Err(e));
-                                    }
+                                    callback.call(Err(e));
+
                                     thread::sleep(Duration::from_secs(1));
                                 }
                             }
@@ -152,7 +146,6 @@ impl FlushManager {
 
         Ok(Self {
             sender,
-            thread: Some(thread),
             sync_control,
         })
     }

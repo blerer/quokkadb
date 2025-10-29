@@ -16,6 +16,8 @@ use std::ops::RangeBounds;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Represents the state of the LSM tree, including the manifest, active memtable,
+/// and immutable memtables waiting to be flushed to disk.
 pub struct LsmTree {
     pub manifest: Arc<ManifestState>,
     pub memtable: Arc<Memtable>,

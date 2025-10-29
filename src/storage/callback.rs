@@ -4,8 +4,51 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use crate::error;
 
-pub trait Callback<T>: Sync + Send {
-    fn call(&self, value: T);
+pub enum Callback<T> {
+    Async(AsyncCallback<T>),
+    Blocking(BlockingCallback<T>),
+}
+
+impl<T> Callback<T> {
+    pub fn new_async<F>(logger: Arc<dyn LoggerAndTracer>, f: F) -> Arc<Self>
+    where
+        F: Fn(T) -> Result<()> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        Arc::new(Callback::Async(AsyncCallback::new(logger, f)))
+    }
+
+    pub fn new_blocking(f: Box<dyn Fn(T) -> Result<()> + Send + Sync>) -> Arc<Self> {
+        Arc::new(Callback::Blocking(BlockingCallback::new(f)))
+    }
+
+    pub fn call(&self, value: T)
+    where
+        T: Send + 'static,
+    {
+        match self {
+            Callback::Async(async_cb) => {
+                async_cb.call(value);
+            }
+            Callback::Blocking(blocking_cb) => {
+                blocking_cb.call(value);
+            }
+        }
+    }
+
+    pub fn is_blocking(&self) -> bool {
+        matches!(self, Callback::Blocking(_))
+    }
+
+    pub fn await_blocking(&self) -> Result<()> {
+        match self {
+            Callback::Blocking(blocking_cb) => blocking_cb.await_blocking(),
+            _ => Err(Error::new(
+                ErrorKind::Other,
+                "Unsupported await_blocking call to an async callback",
+            )),
+        }
+    }
 }
 
 pub struct AsyncCallback<T> {
@@ -33,27 +76,16 @@ impl<T: Send + 'static> AsyncCallback<T> {
 
 use std::marker::PhantomData;
 
-pub struct BlockingCallback<T, F> {
+pub struct BlockingCallback<T> {
     sender: SyncSender<Result<()>>,
     receiver: Arc<Mutex<Option<Receiver<Result<()>>>>>,
-    fun: F,
+    fun: Box<dyn Fn(T) -> Result<()> + Send + Sync>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: Send + Sync, F: Fn(T) -> Result<()> + Send + Sync + 'static> Callback<T>
-    for BlockingCallback<T, F>
+impl<T> BlockingCallback<T>
 {
-    fn call(&self, value: T) {
-        let result = (self.fun)(value);
-        self.sender.send(result).unwrap();
-    }
-}
-
-impl<T, F> BlockingCallback<T, F>
-where
-    F: Fn(T) -> Result<()> + Send + Sync + 'static,
-{
-    pub fn new(f: F) -> Self {
+    pub fn new(f: Box<dyn Fn(T) -> Result<()> + Send + Sync>) -> Self {
         let (sender, receiver): (SyncSender<Result<()>>, Receiver<Result<()>>) = sync_channel(1);
 
         Self {
@@ -62,6 +94,11 @@ where
             fun: f,
             _phantom: PhantomData,
         }
+    }
+
+    fn call(&self, value: T) {
+        let result = (self.fun)(value);
+        self.sender.send(result).unwrap();
     }
 
     pub fn await_blocking(&self) -> Result<()> {

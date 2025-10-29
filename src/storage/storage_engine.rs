@@ -3,7 +3,7 @@ use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
-use crate::storage::callback::{AsyncCallback, BlockingCallback, Callback};
+use crate::storage::callback::Callback;
 use crate::storage::catalog::Catalog;
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
@@ -28,7 +28,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
-
 pub(crate) struct StorageEngine {
     logger: Arc<dyn LoggerAndTracer>,
     db_dir: PathBuf,
@@ -42,7 +41,7 @@ pub(crate) struct StorageEngine {
     last_visible_seq: AtomicU64,
     sst_cache: Arc<SSTableCache>,
     flush_manager: FlushManager,
-    async_callback: OnceLock<Arc<AsyncCallback<Result<SSTableOperation>>>>,
+    async_callback: OnceLock<Arc<Callback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
 }
 
@@ -318,7 +317,6 @@ impl StorageEngine {
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch) -> Result<()> {
-        event!(self.logger, "write start, batch_size={}", batch.len());
 
         if self.error_mode.load(Ordering::Relaxed) {
             return Err(Error::new(
@@ -355,6 +353,7 @@ impl StorageEngine {
     }
 
     fn perform_writes(self: &Arc<Self>) {
+
         // Only a single leader should reach that point at a given time as queue locking logic will
         // block other writers until the leader as empty the queue.
         self.perform_wal_and_memtable_rotation_if_needed();
@@ -366,6 +365,12 @@ impl StorageEngine {
         for writer in queue.drain(..) {
             writers.push(writer);
         }
+
+        debug!(self.logger, "Thread {:?} will perform the write for {:?} writers",
+                std::thread::current().id(), writers.len(),
+            );
+        event!(self.logger, "write start, writers_size={}", writers.len());
+
         // We want to acquire the lock on the wal before we release the one on
         // the queue, to avoid a race condition where the next leader thread that just entered
         // the queue, on lock release, take the wal on them first.
@@ -399,6 +404,10 @@ impl StorageEngine {
         let mut with_results = Vec::with_capacity(with_sequence.len());
 
         for (writer, seq) in with_sequence {
+            event!(self.logger,
+                "memtable_write start, seq={}, memtable={}, batch_size={}",
+                seq, lsm_tree.memtable.log_number, writer.batch().len());
+
             lsm_tree.memtable.write(seq, writer.batch());
             with_results.push((writer, Ok(())));
             let compare = self.last_visible_seq.compare_exchange(
@@ -407,7 +416,12 @@ impl StorageEngine {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             );
-            if compare.is_err() {}
+            if compare.is_err() {
+                panic!("Last visible sequence number out of order");
+            }
+            event!(self.logger,
+                "memtable_write done, seq={}, memtable={}",
+                seq, lsm_tree.memtable.log_number);
         }
 
         drop(memtable_write_lock);
@@ -415,6 +429,7 @@ impl StorageEngine {
         for (writer, result) in with_results {
             writer.done(result);
         }
+        event!(self.logger, "write done");
     }
 
     pub fn read(
@@ -497,35 +512,36 @@ impl StorageEngine {
         Ok(with_sequence)
     }
 
+    pub fn shutdown(self: &Arc<Self>) {
+        info!(self.logger, "Shutting down storage engine");
+        let shutdown = self.flush();
+        if let Err(e) = shutdown {
+            error!(self.logger, "An error occurred during storage engine shutdown flush: {}", e);
+        } else {
+            info!(self.logger, "Storage engine flush completed successfully");
+        }
+    }
+
     pub fn flush(self: &Arc<Self>) -> Result<()> {
         info!(self.logger, "Flush requested");
         event!(self.logger, "requested_flush start");
 
-        // TODO: Handle the case where the engine is in error mode
-
-        let lsm_tree = self.lsm_tree.load();
-
-        if lsm_tree.memtable.size() == 0 {
-            info!(self.logger, "Memtable is empty, no flush needed, syncing with the FlushManager");
-            self.wait_for_pending_flushes()?;
-            return Ok(());
+        if self.error_mode.load(Ordering::Relaxed) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "The database is in error mode dues to a previous write error",
+            ));
         }
 
-        let engine = self.clone();
-        let callback = Arc::new(BlockingCallback::new(move |result| {
-            engine.update_lsm_tree_sstables(result)
-        }));
-
-        self.perform_wal_and_memtable_rotation(&callback.clone())?;
-        callback.await_blocking()?;
+        self.perform_wal_and_memtable_rotation(true)?;
         event!(self.logger, "requested_flush completed");
         Ok(())
     }
 
     fn wait_for_pending_flushes(self: &Arc<Self>) -> Result<()> {
         event!(self.logger, "flush_sync start");
-        let callback = Arc::new(BlockingCallback::new(|result| { result }));
-        self.flush_manager.enqueue(FlushTask::Sync { callback: Some(callback.clone()) })?;
+        let callback = Callback::new_blocking(Box::new(|result| { result }));
+        self.flush_manager.enqueue(FlushTask::Sync { callback: callback.clone() })?;
         callback.await_blocking()?;
         event!(self.logger, "flush_sync end");
         Ok(())
@@ -536,7 +552,7 @@ impl StorageEngine {
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
             info!(self.logger, "Memtable size exceeded: size={}, limit={}", memtable_size, write_buffer_size);
-            match self.perform_wal_and_memtable_rotation(self.get_async_callback()) {
+            match self.perform_wal_and_memtable_rotation(false) {
                 Err(error) => {
                     error!(self.logger, "An error occurred during wal and memtable rotation: {}", error);
                 }
@@ -545,18 +561,16 @@ impl StorageEngine {
         }
     }
 
-    fn get_async_callback(self: &Arc<Self>) -> &Arc<AsyncCallback<Result<SSTableOperation>>> {
+    fn get_async_callback(self: &Arc<Self>) -> &Arc<Callback<Result<SSTableOperation>>> {
         self.async_callback.get_or_init(|| {
             let engine = self.clone();
-            Arc::new(AsyncCallback::new(self.logger.clone(), move |result| {
+            Callback::new_async(self.logger.clone(), move |result| {
                 engine.update_lsm_tree_sstables(result)
-            }))
+            })
         })
     }
 
-    fn perform_wal_and_memtable_rotation<C>(self: &Arc<Self>, callback: &Arc<C>) -> Result<()>
-    where
-        C: Callback<Result<SSTableOperation>> + 'static,
+    fn perform_wal_and_memtable_rotation(self: &Arc<Self>, force_flush: bool) -> Result<()>
     {
         // Rotate the write-ahead log file and the memtable
         // (through applying a WalRotation edit to the LSM tree and replacing it atomically)
@@ -566,36 +580,76 @@ impl StorageEngine {
         // the LSM tree. The order into which locks are acquired is important to avoid deadlocks
         // with the writes. The wal lock must always be acquired before the manifest one.
         let mut manifest = self.manifest.lock().unwrap();
-        let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
-        wal.rotate(new_log_number)?;
 
-        drop(wal); // let release the write-ahead log as it is not needed
-
-        let edit = ManifestEdit::WalRotation {
-            log_number: new_log_number,
-        };
         let lsm_tree = self.lsm_tree.load();
-        let lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
 
-        drop(manifest); // We do not need the manifest lock to schedule the flush.
+        if !force_flush && lsm_tree.memtable.size() < self.options.db.file_write_buffer_size.to_bytes() {
+            // No need to rotate
+            return Ok(());
+        }
 
-        // We just pushed the memtable to the back of the immutable queue,
-        // and any followed up update to the lsm tree would not modify our version of the tree,
-        // therefore we can safely retrieve the back memtable.
-        let memtable = lsm_tree.imm_memtables.back().unwrap().clone();
-        self.schedule_flush(memtable, callback)
+        if force_flush && lsm_tree.memtable.size() == 0 {
+
+            // No need to perform a flush as the memtable is empty, we can just wait
+            // for pending flushes before continuing. At this point, we do not really care if
+            // another race with the sync so we can release the locks before performing the sync
+            drop(wal);
+            drop(manifest);
+
+            self.wait_for_pending_flushes()
+
+        } else {
+
+            let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
+            wal.rotate(new_log_number)?;
+
+            let edit = ManifestEdit::WalRotation {
+                log_number: new_log_number,
+            };
+            let lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
+
+            drop(wal); // we can now release the wal lock and allow writes to it
+
+            // We want to put the task within the flush queue, while still holding the lock,
+            // to ensure ordering with other flushes.
+
+            // We just pushed the memtable to the back of the immutable queue.
+            let memtable = lsm_tree.imm_memtables.back().unwrap().clone();
+
+            let callback = if force_flush {
+                let engine = self.clone();
+                Callback::new_blocking(Box::new(move |result| {
+                    engine.update_lsm_tree_sstables(result)
+                }))
+            } else {
+                self.get_async_callback().clone()
+            };
+
+            self.schedule_flush(memtable, callback.clone())?;
+
+            // Once the flush task within the flush manager queue, we can release
+            // the manifest lock to schedule the flush.
+            drop(manifest);
+
+            if callback.is_blocking() {
+                callback.await_blocking()
+            } else {
+                Ok(())
+            }
+        }
     }
 
-    fn schedule_flush<C>(self: &Arc<Self>, memtable: Arc<Memtable>, callback: &Arc<C>) -> Result<()>
-    where
-        C: Callback<Result<SSTableOperation>> + 'static,
+    fn schedule_flush(self: &Arc<Self>,
+                      memtable: Arc<Memtable>,
+                      callback: Arc<Callback<Result<SSTableOperation>>>
+    ) -> Result<()>
     {
         let sst_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
 
         let flush_task = FlushTask::Flush {
             sst_file: DbFile::new_sst(sst_number),
             memtable,
-            callback: Some(callback.clone()),
+            callback: callback.clone(),
         };
         self.flush_manager.enqueue(flush_task)
     }
@@ -611,6 +665,11 @@ impl StorageEngine {
                         log_number,
                         flushed,
                     } => {
+                        event!(self.logger,
+                            "manifest_update_after_flush started, log_number={}, sst={}",
+                            log_number,
+                            flushed,
+                        );
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
                         let mut manifest = self.manifest.lock().unwrap();
@@ -668,7 +727,7 @@ impl StorageEngine {
             let edit = ManifestEdit::ManifestRotation {
                 manifest_number: new_manifest_number,
             };
-            new_tree = Arc::new(lsm_tree.apply(&edit));
+            new_tree = Arc::new(new_tree.apply(&edit));
         }
 
         self.lsm_tree.store(new_tree.clone());
@@ -676,8 +735,13 @@ impl StorageEngine {
         Ok(new_tree)
     }
 
-    fn handle_write_error(&self, _error: &Error, _writers: &Vec<Arc<Writer>>) {
-        todo!()
+    fn handle_write_error(&self, error: &Error, writers: &Vec<Arc<Writer>>) {
+        self.error_mode.store(true, Ordering::Relaxed);
+        error!(self.logger, "A write error occurred: {}", error);
+        for writer in writers {
+            writer.done(Err(Error::new(error.kind(), error.to_string())));
+        }
+        event!(self.logger, "write done");
     }
 
     fn add_metrics(metric_registry: &mut MetricRegistry, options: &Options, lsm_tree: Arc<ArcSwap<LsmTree>>) {
@@ -737,12 +801,6 @@ impl StorageEngine {
         );
     }
 
-}
-
-impl Callback<Result<SSTableOperation>> for AsyncCallback<Result<SSTableOperation>> {
-    fn call(&self, value: Result<SSTableOperation>) {
-        self.call(value);
-    }
 }
 
 /// The result of scanning the database directory at startup.
@@ -880,14 +938,12 @@ impl Iterator for RangeScanIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::test_instance;
+    use crate::obs::logger::{test_instance, NoOpLogger};
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
     use crate::options::storage_quantity::StorageQuantity;
     use crate::options::storage_quantity::StorageUnit::Mebibytes;
     use crate::storage::operation::Operation;
-    use crate::storage::test_utils::{
-        assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, user_key,
-    };
+    use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key};
     use bson::{doc, to_vec};
     use std::path::Path;
     use tempfile::tempdir;
@@ -1340,5 +1396,205 @@ mod tests {
         // Flush the active memtable as well.
         engine.flush().unwrap();
         assert_gauge_eq(registry, "sstable_count_level_0", 2);
+    }
+
+    #[test]
+    fn test_manifest_rotation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
+        // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
+        options.db.max_manifest_file_size =
+            StorageQuantity::new(5, crate::options::storage_quantity::StorageUnit::Kibibytes);
+
+        let engine =
+            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+
+        let col = 1;
+        let idx = 0;
+
+        assert_counter_eq(registry, "manifest_rewrite", 0);
+
+        let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
+        assert!(initial_manifest_path
+            .to_string_lossy()
+            .contains("MANIFEST-000001"));
+
+        // Each flush generates two edits (WalRotation, Flush), consuming space in the manifest.
+        // The initial manifest is ~4KiB. Each pair of edits for a flush is ~40 bytes.
+        // We need to cross the 5KiB threshold, so we need ~30 flushes.
+        for i in 0..30 {
+            engine
+                .write(WriteBatch::new(vec![put_op(col, i, i as u32)]))
+                .unwrap();
+            engine.flush().unwrap();
+        }
+
+        // A new manifest should have been created.
+        assert_counter_eq(registry, "manifest_rewrite", 1);
+        let current_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
+        assert_ne!(current_manifest_path, initial_manifest_path);
+
+        // Verify data is readable after rotation.
+        for i in 0..30 {
+            let (_key, val) = engine
+                .read(col, idx, &user_key(i), None)
+                .unwrap()
+                .unwrap();
+            let (_expected_key, expected_val) = put_rec(col, i, i as u32, (i + 1) as u64);
+            assert_eq!(val, expected_val);
+        }
+
+        // Verify recovery after rotation.
+        let db_path = path.to_path_buf();
+        drop(engine);
+
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            Arc::new(options),
+            &db_path,
+        )
+        .unwrap();
+
+        // Verify data is readable after restart.
+        for i in 0..30 {
+            let (_key, val) = engine_restarted
+                .read(col, idx, &user_key(i), None)
+                .unwrap()
+                .unwrap();
+            let (_expected_key, expected_val) = put_rec(col, i, i as u32, (i + 1) as u64);
+            assert_eq!(val, expected_val);
+        }
+    }
+
+    #[test]
+    fn test_obsolete_wal_deletion() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let registry = &mut MetricRegistry::default();
+        let options = Options::lightweight();
+
+        let engine =
+            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+
+        let col = 10;
+        let idx = 0;
+
+        // The first WAL file should be 000002.log.
+        let wal_path_1 = path.join("000002.log");
+        assert!(wal_path_1.exists());
+
+        // Write some data, which goes into the first WAL.
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+            .unwrap();
+
+        // Flush will rotate the WAL, flush the memtable, and then delete the old WAL.
+        engine.flush().unwrap();
+
+        // The old WAL (000002.log) should now be deleted.
+        assert!(!wal_path_1.exists());
+
+        // A new WAL should have been created (000003.log).
+        let wal_path_2 = path.join("000003.log");
+        assert!(wal_path_2.exists());
+
+        // Write more data, which goes into the second WAL.
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 2, 2)]))
+            .unwrap();
+
+        // Flush again.
+        engine.flush().unwrap();
+
+        // The second WAL (000003.log) should now be deleted.
+        assert!(!wal_path_2.exists());
+
+        // And a third one should exist (000005.log).
+        let wal_path_3 = path.join("000005.log");
+        assert!(wal_path_3.exists());
+
+        // Data should still be readable from SSTables.
+        let (_key, val1) = engine
+            .read(col, idx, &user_key(1), None)
+            .unwrap()
+            .unwrap();
+        let (_expected_key, expected_val1) = put_rec(col, 1, 1, 1);
+        assert_eq!(val1, expected_val1);
+
+        let (_key, val2) = engine
+            .read(col, idx, &user_key(2), None)
+            .unwrap()
+            .unwrap();
+        let (_expected_key, expected_val2) = put_rec(col, 2, 2, 2);
+        assert_eq!(val2, expected_val2);
+    }
+
+    #[test]
+    fn test_concurrent_writes_simple() {
+        test_concurrent_writes(false);
+    }
+
+    #[test]
+    fn test_concurrent_writes_with_concurrent_flushes() {
+        test_concurrent_writes(true);
+    }
+
+    fn test_concurrent_writes(with_concurrent_flushes: bool) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            Arc::new(NoOpLogger::default()), // Disabling traces as RustRover cannot handle this amount of logging when running the tests
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+            .unwrap();
+
+        let num_threads = 5;
+        let writes_per_thread = 200;
+        let col = 10;
+        let idx = 0;
+
+        std::thread::scope(|s| {
+            for i in 0..num_threads {
+                let engine_clone = engine.clone();
+                s.spawn(move || {
+                    for j in 0..writes_per_thread {
+                        let key = i * writes_per_thread + j;
+                        let value = key as u32;
+                        let op = put_op(col, key, value);
+                        engine_clone.write(WriteBatch::new(vec![op])).unwrap();
+                        if  with_concurrent_flushes && j == 100 {
+                            // Occasionally flush to increase concurrency complexity
+                            engine_clone.flush().unwrap();
+                        }
+                    }
+                });
+            }
+        });
+
+        for flush in [false, true] {
+
+            if flush {
+                engine.flush().unwrap();
+            }
+
+            // Verification
+            for i in 0..num_threads {
+                for j in 0..writes_per_thread {
+                    let key = i * writes_per_thread + j;
+                    let value = key as u32;
+                    let (_record_key, record_value) =
+                        engine.read(col, idx, &user_key(key), None).unwrap().unwrap();
+                    let expected_value = to_vec(&document(key, value)).unwrap();
+                    assert_eq!(record_value, expected_value, "Record value does not match expected value for key {}", key);
+                }
+            }
+        }
     }
 }

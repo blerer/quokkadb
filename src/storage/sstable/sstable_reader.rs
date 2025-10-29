@@ -210,35 +210,27 @@ impl SSTableReader {
         let bound = InternalKeyBound(internal_key);
         let mut block_handles = index_reader.scan_forward_from(&bound)?;
 
-        let block_handle = block_handles.next();
-
-        match block_handle {
-            Some(block_handle) => {
-                let (_key, block_handle) = block_handle?;
-                let data_block = self.get_block(&block_handle)?;
-                let data_reader = BlockReader::new(data_block, DataEntryReader)?;
-                event!(self.logger, "scanning_data_block key={:?}", &record_key);
-                let mut iter = data_reader.scan_forward_from(&bound)?;
-                while let Some(result) = iter.next() {
-                    let (key, value) = result?;
-                    let current_record_key = extract_record_key(&key);
-                    match current_record_key.cmp(record_key) {
-                        Ordering::Less => panic!("Unexpected lower key"), // Should never happen, otherwise I did screw up the logic and need to fix it.
-                        Ordering::Greater => return Ok(None),
-                        Ordering::Equal => {
-                            if extract_sequence_number(&key) <= snapshot {
-                                return Ok(Some((key, value)));
-                            }
+        while let Some(block_handle) = block_handles.next() {
+            let (_key, block_handle) = block_handle?;
+            let data_block = self.get_block(&block_handle)?;
+            let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+            event!(self.logger, "scanning_data_block key={:?}", &record_key);
+            let mut iter = data_reader.scan_forward_from(&bound)?;
+            while let Some(result) = iter.next() {
+                let (key, value) = result?;
+                let current_record_key = extract_record_key(&key);
+                match current_record_key.cmp(record_key) {
+                    Ordering::Less => panic!("Unexpected lower key"), // Should never happen, otherwise I did screw up the logic and need to fix it.
+                    Ordering::Greater => return Ok(None),
+                    Ordering::Equal => {
+                        if extract_sequence_number(&key) <= snapshot {
+                            return Ok(Some((key, value)));
                         }
                     }
                 }
-                Ok(None)
-            }
-            None => {
-                event!(self.logger, "read index_miss key={:?}", &record_key);
-                Ok(None)
             }
         }
+        Ok(None)
     }
 
     pub fn range_scan(
@@ -332,7 +324,6 @@ impl Iterator for SSTableRangeScanIterator {
         loop {
             if self.current_data_block_iter.is_none() {
                 // Attempt to load the next data block iterator from the index_iter
-                println!("Loading next data block from index_iter");
                 match self.index_iter.next() {
                     Some(Ok((_index_key, handle))) => {
                         let data_block = match self.block_loader.load_block(&handle) {
@@ -633,6 +624,37 @@ mod tests {
         assert_search_eq(&reader, &record_key(col,7), 11, entries.get(9));
         assert_search_eq(&reader, &record_key(col,7), 10, entries.get(10));
         assert_search_eq(&reader, &record_key(col,8), 12, None);
+    }
+
+    #[test]
+    fn test_search_through_multiple_blocks() {
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Options::lightweight();
+        let mut metric_registry = MetricRegistry::new();
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+
+        let sst_file = DbFile::new_sst(12);
+
+        let col = 32;
+
+        let len = 1000i32;
+        let mut writer = SSTableWriter::new(&path, &sst_file, &options, len as usize).unwrap();
+
+        for i in 0..len {
+            let entry = put_rec(col, i, i as u32, i as u64);
+            writer.add(&entry.0, &entry.1).unwrap();
+        }
+
+        let _sst = writer.finish().unwrap();
+
+        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+
+        for i in 0..1000 {
+            let entry = put_rec(col, i, i as u32, i as u64);
+            assert_search_eq(&reader, &record_key(col, i), MAX_SEQUENCE_NUMBER, Some(&entry));
+        }
     }
 
     #[test]

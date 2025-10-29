@@ -131,3 +131,9 @@ impl DbImpl {
         (parameters, physical_plan)
     }
 }
+
+impl Drop for DbImpl {
+    fn drop(&mut self) {
+        self.storage_engine.shutdown();
+    }
+}

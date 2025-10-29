@@ -3,6 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::util::interval::Interval;
 use std::cmp::Ordering;
+use std::fmt;
 use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -447,6 +448,22 @@ impl SSTableMetadata {
             max_sequence_number: max_seq,
             size,
         }
+    }
+}
+
+impl fmt::Display for SSTableMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SSTableMetadata {{ number: {}, level: {}, min_key: {:x?}, max_key: {:x?}, min_sequence_number: {}, max_sequence_number: {}, size: {} }}",
+            self.number,
+            self.level,
+            self.min_key,
+            self.max_key,
+            self.min_sequence_number,
+            self.max_sequence_number,
+            self.size
+        )
     }
 }
 

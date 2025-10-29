@@ -48,7 +48,7 @@ pub fn delete_op(collection: u32, user_key_val: i32) -> Operation {
     Operation::new_delete(collection, 0, user_key(user_key_val))
 }
 
-fn document(user_key: i32, version: u32) -> Document {
+pub fn document(user_key: i32, version: u32) -> Document {
     doc! {
             "id": user_key,
             "version": version,
