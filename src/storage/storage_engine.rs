@@ -58,6 +58,8 @@ impl StorageEngine {
             &options.db,
         ));
 
+        info!(logger, "Starting storage engine at {}", db_dir.to_string_lossy());
+
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
 
@@ -65,6 +67,7 @@ impl StorageEngine {
         // Otherwise, it is the first time that we start this database and need to create a
         // new manifest and wal.
         if let Some(manifest_path) = manifest_path {
+
             let manifest_state = Manifest::rebuild_manifest_state(&manifest_path)?;
             let mut last_seq_nbr = manifest_state.lsm.last_sequence_number;
 
@@ -74,18 +77,70 @@ impl StorageEngine {
 
             let mut reusable_wal = None;
 
+            let original_current_log_number = manifest_state.lsm.current_log_number;
+
+            let mut manifest =
+                Manifest::load_from(logger.clone(), metric_registry, &options.db, manifest_path)?;
+
             let next_file_number = manifest_state.lsm.next_file_number;
 
             let mut lsm_tree = LsmTree::from(manifest_state);
 
-            let mut rotated_log_files = VecDeque::new();
+            // If a file with a higher number that the next_file number has been detected we need to update
+            // the Lsm tree in-memory and on-disk (MANIFEST file)
+            let next_file_number =
+                AtomicU64::new(if next_file_number < scan_results.next_file_number {
+
+                    info!(logger,
+                        "Files with higher numbers have been detected. Updating next_file_number to {}",
+                        scan_results.next_file_number);
+
+                    let edit = ManifestEdit::FilesDetectedOnRestart {
+                        next_file_number: scan_results.next_file_number,
+                    };
+                    manifest.append_edit(&edit)?;
+                    lsm_tree.apply(&edit);
+                    scan_results.next_file_number
+                } else {
+                    next_file_number
+                });
+
+            // We will keep track of the rotated log files while replaying the wal files.
+            let mut rotated_log_files =
+                VecDeque::from_iter(scan_results.obsolete_wal_files.iter().rev().cloned());
+
+            let mut previous = None;
 
             while let Some((log_number, wal_path)) = wal_files_iter.next() {
-                // We need to re-associate write-ahead log files and memtables
+
+                info!(logger, "Replaying operations from {}", wal_path.to_string_lossy());
+
+                // The initial memtable will be associated with the oldest_log_number. For
+                // the following , we need to re-associate the wal log number and the memtable
+                // one by doing a wal rotations.
                 if log_number != &lsm_tree.memtable.log_number {
-                    lsm_tree = lsm_tree.apply(&ManifestEdit::WalRotation {
+                    let edit = ManifestEdit::WalRotation {
                         log_number: *log_number,
-                    })
+                    };
+                    rotated_log_files.push_back(previous.clone().unwrap());
+
+                    lsm_tree = lsm_tree.apply(&edit);
+
+                    // If the log number is higher than the original current log number,
+                    // we need to update the manifest file to reflect that, as we are
+                    // replaying wal files that were not recorded in the manifest.
+                    if log_number > &original_current_log_number {
+                        manifest.append_edit(&edit)?;
+                    }
+
+                    lsm_tree = Self::flush_replayed_data(
+                        &logger,
+                        &options,
+                        &db_dir,
+                        &mut manifest,
+                        &mut lsm_tree,
+                        &next_file_number
+                    )?;
                 }
 
                 let rs = WriteAheadLog::replay(wal_path);
@@ -93,6 +148,7 @@ impl StorageEngine {
 
                 match rs {
                     Ok(iter) => {
+                        let mut count = 0;
                         for rs in iter {
                             match rs {
                                 Err(e) => {
@@ -114,17 +170,17 @@ impl StorageEngine {
                                     }
                                 }
                                 Ok((seq, batch)) => {
+                                    count += 1;
                                     lsm_tree.memtable.write(seq, &batch);
                                     last_seq_nbr = seq;
                                     if is_last_wal_file {
                                         reusable_wal = Some(wal_path)
-                                    } else {
-                                        rotated_log_files
-                                            .push_back((*log_number, wal_path.clone()));
                                     }
                                 }
                             }
                         }
+                        previous = Some((*log_number, wal_path.clone()));
+                        info!(logger, "{} operations replayed from {}", count, wal_path.to_string_lossy());
                     }
                     Err(e) => {
                         // We are here because the file could not be read or its header is corrupted.
@@ -159,23 +215,6 @@ impl StorageEngine {
                 }
             }
 
-            let mut manifest =
-                Manifest::load_from(logger.clone(), metric_registry, &options.db, manifest_path)?;
-
-            // If a file with a higher number that the next_file number has been detected we need to update
-            // the Lsm tree in-memory and on-disk (MANIFEST file)
-            let next_file_number =
-                AtomicU64::new(if next_file_number < scan_results.next_file_number {
-                    let edit = ManifestEdit::FilesDetectedOnRestart {
-                        next_file_number: scan_results.next_file_number,
-                    };
-                    manifest.append_edit(&edit)?;
-                    lsm_tree.apply(&edit);
-                    scan_results.next_file_number
-                } else {
-                    next_file_number
-                });
-
             // If the last wal file can be reused, either because it was fine or because it has been
             // corrected by truncation, we will reuse it. If not, it should have been marked as corrupted,
             // and we need to create a new one and update the Lsm tree.
@@ -188,7 +227,11 @@ impl StorageEngine {
                     rotated_log_files,
                 )?
             } else {
+
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+
+                info!(logger, "Latest wal was corrupted. Starting from a clean wal file: {}", log_number);
+
                 let wal = WriteAheadLog::new_after_corruption(
                     logger.clone(),
                     metric_registry,
@@ -200,6 +243,29 @@ impl StorageEngine {
                 let edit = ManifestEdit::WalRotation { log_number };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
+
+                // If the corrupted wal contained some data we need to flush them to disk otherwise
+                // we can just drop the memtable.
+                if lsm_tree.imm_memtables[0].size() > 0 {
+                    lsm_tree = Self::flush_replayed_data(
+                        &logger,
+                        &options,
+                        &db_dir,
+                        &mut manifest,
+                        &mut lsm_tree,
+                        &next_file_number
+                    )?;
+                } else {
+
+                    info!(logger, "Ignoring empty memtable: {}", lsm_tree.imm_memtables[0].log_number);
+
+                    // Drop the empty memtable
+                    let edit = ManifestEdit::IgnoringEmptyMemtable {
+                        oldest_log_number: lsm_tree.imm_memtables[0].log_number,
+                    };
+                    lsm_tree = lsm_tree.apply(&edit);
+                    manifest.append_edit(&edit)?;
+                }
                 wal
             };
 
@@ -213,6 +279,8 @@ impl StorageEngine {
 
             let lsm_tree = Arc::new(ArcSwap::new(Arc::new(lsm_tree)));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
+
+            info!(logger, "Storage engine started",);
 
             Ok(Arc::new(StorageEngine {
                 logger,
@@ -265,6 +333,8 @@ impl StorageEngine {
             let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
+            info!(logger, "Storage engine started");
+
             Ok(Arc::new(StorageEngine {
                 logger,
                 db_dir: db_dir.to_path_buf(),
@@ -284,7 +354,41 @@ impl StorageEngine {
         }
     }
 
+    fn flush_replayed_data(
+        logger: &Arc<dyn LoggerAndTracer>,
+        options: &Arc<Options>,
+        db_dir: &&Path,
+        manifest: &mut Manifest,
+        lsm_tree: &mut LsmTree,
+        next_file_number: &AtomicU64
+    ) -> Result<LsmTree> {
+
+        info!(logger, "Flushing data from {}", lsm_tree.imm_memtables[0].log_number);
+
+        // Flush the current memtable to a sst file before processing the next
+        // wal file.
+        let sst_file = DbFile::new_sst(
+            next_file_number.fetch_add(1, Ordering::Relaxed)
+        );
+        let sst = Arc::new(
+            lsm_tree.imm_memtables[0].flush(&db_dir, &sst_file, &options)?);
+
+        let edit = ManifestEdit::Flush {
+            oldest_log_number: lsm_tree.imm_memtables[0].log_number,
+            sst,
+        };
+        let lsm_tree = lsm_tree.apply(&edit);
+        manifest.append_edit(&edit)?;
+        Ok(lsm_tree)
+    }
+
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> Result<u32> {
+        if self.error_mode.load(Ordering::Relaxed) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "The database is in error mode dues to a previous write error",
+            ));
+        }
         let collection = self.catalog().get_collection_by_name(name);
 
         if let Some(collection) = collection {
@@ -512,14 +616,11 @@ impl StorageEngine {
         Ok(with_sequence)
     }
 
-    pub fn shutdown(self: &Arc<Self>) {
+    pub fn shutdown(self: &Arc<Self>) -> Result<()> {
         info!(self.logger, "Shutting down storage engine");
-        let shutdown = self.flush();
-        if let Err(e) = shutdown {
-            error!(self.logger, "An error occurred during storage engine shutdown flush: {}", e);
-        } else {
-            info!(self.logger, "Storage engine flush completed successfully");
-        }
+        self.flush()?;
+        info!(self.logger, "Storage engine flush completed successfully");
+        Ok(())
     }
 
     pub fn flush(self: &Arc<Self>) -> Result<()> {
@@ -601,11 +702,17 @@ impl StorageEngine {
         } else {
 
             let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
-            wal.rotate(new_log_number)?;
+            let rs = wal.rotate(new_log_number);
+            if rs .is_err() {
+                error!(self.logger, "An error occurred during wal rotation: {}", rs.as_ref().err().unwrap());
+                self.error_mode.store(true, Ordering::Relaxed);
+                rs?;
+            }
 
             let edit = ManifestEdit::WalRotation {
                 log_number: new_log_number,
             };
+
             let lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
 
             drop(wal); // we can now release the wal lock and allow writes to it
@@ -616,10 +723,14 @@ impl StorageEngine {
             // We just pushed the memtable to the back of the immutable queue.
             let memtable = lsm_tree.imm_memtables.back().unwrap().clone();
 
+            let engine = self.clone();
             let callback = if force_flush {
-                let engine = self.clone();
                 Callback::new_blocking(Box::new(move |result| {
-                    engine.update_lsm_tree_sstables(result)
+                    let rs = engine.update_lsm_tree_sstables(result);
+                    if rs.is_err() {
+                        engine.error_mode.store(true, Ordering::Relaxed);
+                    }
+                    rs
                 }))
             } else {
                 self.get_async_callback().clone()
@@ -703,6 +814,7 @@ impl StorageEngine {
             .drain_obsolete_logs(oldest_log_number)?;
 
         for obsolete in obsolete_log_files {
+            debug!(self.logger, "Deleting obsolete log file: {}", obsolete.to_string_lossy());
             remove_file(obsolete)?;
         }
         sync_dir(&self.db_dir)?;
@@ -715,15 +827,29 @@ impl StorageEngine {
         manifest: &mut MutexGuard<Manifest>,
         edit: &ManifestEdit,
     ) -> Result<Arc<LsmTree>> {
-        manifest.append_edit(&edit)?;
+        let rs = manifest.append_edit(&edit);
+
+        if rs.is_err() {
+            error!(self.logger, "An error occurred during manifest update: {}", rs.as_ref().err().unwrap());
+            self.error_mode.store(true, Ordering::Relaxed);
+            rs?;
+        }
+
         let mut new_tree = Arc::new(lsm_tree.apply(&edit));
 
         if manifest.should_rotate() {
             let new_manifest_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
-            manifest.rotate(
+            let rs = manifest.rotate(
                 new_manifest_number,
                 &ManifestEdit::Snapshot(new_tree.manifest.clone()),
-            )?;
+            );
+
+            if rs.is_err() {
+                error!(self.logger, "An error occurred during manifest rotation: {}", rs.as_ref().err().unwrap());
+                self.error_mode.store(true, Ordering::Relaxed);
+                rs?;
+            }
+
             let edit = ManifestEdit::ManifestRotation {
                 manifest_number: new_manifest_number,
             };
@@ -801,6 +927,30 @@ impl StorageEngine {
         );
     }
 
+    #[cfg(test)]
+    pub fn wal_return_error_on_write(&self, value: bool) {
+        self.write_ahead_log.lock().unwrap().return_error_on_append(value);
+    }
+
+    #[cfg(test)]
+    pub fn manifest_return_error_on_write(&self, value: bool) {
+        self.manifest.lock().unwrap().return_error_on_append(value);
+    }
+
+    #[cfg(test)]
+    pub fn wal_return_error_on_rotate(&self, value: bool) {
+        self.write_ahead_log.lock().unwrap().return_error_on_rotate(value);
+    }
+
+    #[cfg(test)]
+    pub fn manifest_return_error_on_rotate(&self, value: bool) {
+        self.manifest.lock().unwrap().return_error_on_rotate(value);
+    }
+
+    #[cfg(test)]
+    pub fn lsm_tree(&self) -> Arc<LsmTree> {
+        self.lsm_tree.load_full()
+    }
 }
 
 /// The result of scanning the database directory at startup.
@@ -812,6 +962,9 @@ struct StartupScanResult {
     /// WAL files to be replayed, sorted by file ID in ascending order.
     /// Each entry is a tuple of (file_number, full_path).
     wal_files: Vec<(u64, PathBuf)>,
+
+    /// WAL files that are obsolete and can be deleted.
+    obsolete_wal_files: Vec<(u64, PathBuf)>,
 
     /// The next unused file number. This is computed as one greater
     /// than the highest file number seen among MANIFEST, WAL, and SST files.
@@ -841,6 +994,7 @@ struct StartupScanResult {
 /// Returns an error if the directory can't be read.
 fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanResult> {
     let mut wal_files = Vec::new();
+    let mut obsolete_wal_files = Vec::new();
     let mut max_file_num = 0;
 
     for entry in fs::read_dir(dir)? {
@@ -850,8 +1004,12 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanRe
         if let Some(db_file) = DbFile::new(&path) {
             max_file_num = max_file_num.max(db_file.number);
 
-            if db_file.file_type == FileType::WriteAheadLog && db_file.number >= oldest_log_number {
-                wal_files.push((db_file.number, path.clone()));
+            if db_file.file_type == FileType::WriteAheadLog {
+                if db_file.number >= oldest_log_number {
+                    wal_files.push((db_file.number, path.clone()));
+                } else {
+                    obsolete_wal_files.push((db_file.number, path.clone()));
+                }
             }
         }
     }
@@ -860,6 +1018,7 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanRe
 
     Ok(StartupScanResult {
         wal_files,
+        obsolete_wal_files,
         next_file_number: max_file_num + 1,
     })
 }
@@ -940,11 +1099,13 @@ mod tests {
     use super::*;
     use crate::obs::logger::{test_instance, NoOpLogger};
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
-    use crate::options::storage_quantity::StorageQuantity;
+    use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::options::storage_quantity::StorageUnit::Mebibytes;
     use crate::storage::operation::Operation;
     use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key};
     use bson::{doc, to_vec};
+    use std::fs::{self, OpenOptions};
+    use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -971,9 +1132,13 @@ mod tests {
 
             let result = scan_db_directory(base, 3).expect("scan should succeed");
 
-            // Only logs ≥ 3 should be returned
+            // Only logs ≥ 3 should be returned as wal_files
             assert_eq!(result.wal_files.len(), 1);
             assert_eq!(result.wal_files[0].0, 5);
+
+            // Obsolete logs < 3 should be returned as obsolete_wal_files
+            assert_eq!(result.obsolete_wal_files.len(), 1);
+            assert_eq!(result.obsolete_wal_files[0].0, 2);
 
             // Next file number should be 10
             assert_eq!(result.next_file_number, 10);
@@ -1296,7 +1461,7 @@ mod tests {
             .unwrap();
 
         // Verify that one immutable memtable now exists.
-        assert_eq!(engine.lsm_tree.load().imm_memtables.len(), 1);
+        assert_eq!(engine.lsm_tree().imm_memtables.len(), 1);
 
         // --- Verification: Read from both active and immutable memtables ---
         // Read from what is now the immutable memtable.
@@ -1379,7 +1544,7 @@ mod tests {
         engine.wait_for_pending_flushes().unwrap();
 
         // The immutable memtable should now be flushed to an SSTable.
-        assert_eq!(engine.lsm_tree.load().imm_memtables.len(), 0);
+        assert_eq!(engine.lsm_tree().imm_memtables.len(), 0);
         assert_gauge_eq(registry, "sstable_count_level_0", 1);
         assert_counter_eq(registry, "flush_count", 1);
 
@@ -1396,6 +1561,78 @@ mod tests {
         // Flush the active memtable as well.
         engine.flush().unwrap();
         assert_gauge_eq(registry, "sstable_count_level_0", 2);
+    }
+
+    #[test]
+    fn test_replay_with_multiple_wals() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+
+        let col = 10;
+        let idx = 0;
+
+        let val_1mb_string = "a".repeat(1024 * 1024);
+        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+
+        {
+            let old_engine = StorageEngine::new(
+                test_instance(),
+                registry,
+                Arc::new(options.clone()),
+                &path,
+            ).unwrap();
+
+            // Pause the flush manager to keep immutable memtables around.
+            old_engine.flush_manager.pause();
+
+            // Write enough data to trigger 2 memtable rotations.
+            // We write four ~1MB values to fill up the 4MB memtable.
+            for i in 1..=11 {
+                old_engine
+                    .write(WriteBatch::new(vec![Operation::new_put(
+                        col,
+                        idx,
+                        user_key(i),
+                        val_1mb.clone(),
+                    )]))
+                    .unwrap();
+            }
+
+            // Verify that two immutable memtables now exists.
+            assert_eq!(old_engine.lsm_tree().imm_memtables.len(), 2);
+
+            assert!(path.join("000002.log").exists());
+            assert!(path.join("000003.log").exists());
+            // The next WAL should be 000005.log as the flush will be blocked after the sstable number is assigned.
+            assert!(path.join("000005.log").exists());
+        }
+
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        ).unwrap();
+
+        let new_wal_path = path.join("000006.sst");
+        assert!(new_wal_path.exists());
+        let new_sst_path = path.join("000007.sst");
+        assert!(new_sst_path.exists());
+
+        // --- Verification ---
+        for i in 1..=11 {
+            assert_eq!(
+                engine
+                    .read(col, idx, &user_key(i), None)
+                    .unwrap()
+                    .unwrap()
+                    .1,
+                val_1mb
+            );
+        }
     }
 
     #[test]
@@ -1468,6 +1705,51 @@ mod tests {
             let (_expected_key, expected_val) = put_rec(col, i, i as u32, (i + 1) as u64);
             assert_eq!(val, expected_val);
         }
+    }
+
+    #[test]
+    fn test_manifest_rotation_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
+        // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
+        options.db.max_manifest_file_size =
+            StorageQuantity::new(5, StorageUnit::Kibibytes);
+
+        let engine =
+            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+
+        let col = 1;
+
+        assert_counter_eq(registry, "manifest_rewrite", 0);
+
+        let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
+        assert!(initial_manifest_path
+            .to_string_lossy()
+            .contains("MANIFEST-000001"));
+
+        engine.manifest_return_error_on_rotate(true);
+
+        // Each flush generates two edits (WalRotation, Flush), consuming space in the manifest.
+        // The initial manifest is ~4KiB. Each pair of edits for a flush is ~40 bytes.
+        // We need to cross the 5KiB threshold, so we need ~30 flushes.
+        for i in 0..30 {
+            engine
+                .write(WriteBatch::new(vec![put_op(col, i, i as u32)]))
+                .unwrap();
+            let rs = engine.flush();
+            if rs.is_err() {
+                assert_eq!(
+                    rs.err().unwrap().to_string(),
+                    "Injected error on rotate",
+                );
+                break;
+            }
+        }
+
+        check_error_mode(engine, col);
     }
 
     #[test]
@@ -1596,5 +1878,688 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_shutdown_and_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
+        let options = Arc::new(options);
+
+        let col = 10;
+        let idx = 0;
+
+        // --- First run ---
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                registry,
+                options.clone(),
+                &db_path,
+            )
+            .unwrap();
+
+            // Write some data and flush it to an SSTable.
+            engine.write(WriteBatch::new(vec![put_op(col, 1, 1)])).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col, 2, 1)])).unwrap();
+            engine.flush().unwrap();
+
+            // Write more data that will remain in the memtable.
+            engine.write(WriteBatch::new(vec![put_op(col, 3, 1)])).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col, 2, 2)])).unwrap(); // Update flushed key
+
+            // Gracefully shut down the engine. This should flush the memtable.
+            engine.shutdown().unwrap();
+        }
+
+        // --- Second run (restart) ---
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        )
+        .unwrap();
+
+        // Verify all data is present and correct after restart.
+        let (_key1, val1) = engine_restarted.read(col, idx, &user_key(1), None).unwrap().unwrap();
+        let (_, expected_val1) = put_rec(col, 1, 1, 1);
+        assert_eq!(val1, expected_val1);
+
+        let (_key2, val2) = engine_restarted.read(col, idx, &user_key(2), None).unwrap().unwrap();
+        let (_, expected_val2) = put_rec(col, 2, 2, 4);
+        assert_eq!(val2, expected_val2);
+
+        let (_key3, val3) = engine_restarted.read(col, idx, &user_key(3), None).unwrap().unwrap();
+        let (_, expected_val3) = put_rec(col, 3, 1, 3);
+        assert_eq!(val3, expected_val3);
+
+        assert!(engine_restarted.read(col, idx, &user_key(4), None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_wal_replay_on_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
+        let options = Arc::new(options);
+
+        let col = 10;
+        let idx = 0;
+
+        // --- First run (simulating a crash) ---
+        {
+            let engine =
+                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+
+            // Write some data and flush it to an SSTable.
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+                .unwrap(); // seq 1
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 2, 1)]))
+                .unwrap(); // seq 2
+            engine.flush().unwrap(); // Flushes memtable, rotates WAL.
+
+            // Data in SSTable: {1:1, 2:1}
+
+            // Write more data that will remain in the memtable and WAL.
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 3, 1)]))
+                .unwrap(); // seq 3
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 2, 2)]))
+                .unwrap(); // seq 4, updates a flushed key
+
+            // Simulate a crash by just dropping the engine without calling shutdown.
+            // The memtable content is lost, but the WAL records should persist.
+            drop(engine);
+        }
+
+        // --- Second run (restart and replay) ---
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        )
+        .unwrap();
+
+        // The WAL should be replayed, restoring the memtable state.
+        // Verify all data is present and correct after restart.
+
+        // From SSTable
+        let (_key1, val1) = engine_restarted
+            .read(col, idx, &user_key(1), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val1) = put_rec(col, 1, 1, 1);
+        assert_eq!(val1, expected_val1);
+
+        // From WAL replay (update)
+        let (_key2, val2) = engine_restarted
+            .read(col, idx, &user_key(2), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val2) = put_rec(col, 2, 2, 4);
+        assert_eq!(val2, expected_val2);
+
+        // From WAL replay (new key)
+        let (_key3, val3) = engine_restarted
+            .read(col, idx, &user_key(3), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val3) = put_rec(col, 3, 1, 3);
+        assert_eq!(val3, expected_val3);
+
+        assert!(engine_restarted
+        .read(col, idx, &user_key(4), None)
+        .unwrap()
+        .is_none());
+        }
+
+    #[test]
+    fn test_wal_replay_with_last_log_partially_written() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
+        let options = Arc::new(options);
+
+        let col = 10;
+        let idx = 0;
+
+        let wal_path;
+        // --- First run (simulating a crash) ---
+        {
+            let engine =
+                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+                .unwrap();
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 2, 1)]))
+                .unwrap();
+
+            wal_path = db_path.join("000002.log");
+            drop(engine);
+        }
+
+        // Corrupt the WAL by appending a partial record.
+        let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
+        // Write a record size (4 bytes), but nothing else. This simulates a crash during write.
+        file.write_all(&[0, 0, 1, 0]).unwrap(); // size = 256
+        file.sync_all().unwrap();
+        drop(file);
+
+        // --- Second run (restart and replay) ---
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        )
+            .unwrap();
+
+        // WAL replay should have truncated the file and recovered the valid records.
+        let (_key1, val1) = engine_restarted
+            .read(col, idx, &user_key(1), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val1) = put_rec(col, 1, 1, 1);
+        assert_eq!(val1, expected_val1);
+
+        let (_key2, val2) = engine_restarted
+            .read(col, idx, &user_key(2), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val2) = put_rec(col, 2, 1, 2);
+        assert_eq!(val2, expected_val2);
+
+        // Key 3 should not exist because it was part of the corrupted, truncated segment.
+        assert!(engine_restarted
+            .read(col, idx, &user_key(3), None)
+            .unwrap()
+            .is_none());
+
+        // Writing a new record should work.
+        engine_restarted
+            .write(WriteBatch::new(vec![put_op(col, 3, 1)]))
+            .unwrap();
+        let (_key3, val3) = engine_restarted
+            .read(col, idx, &user_key(3), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val3) = put_rec(col, 3, 1, 3); // next seq is 3
+        assert_eq!(val3, expected_val3);
+    }
+
+    #[test]
+    fn test_wal_replay_with_header_corruption() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
+        let options = Arc::new(options);
+
+        let col = 10;
+        let idx = 0;
+
+        let original_wal_path;
+        // --- First run ---
+        {
+            let engine =
+                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+                .unwrap();
+            original_wal_path = db_path.join("000002.log");
+            drop(engine);
+        }
+
+        // Corrupt the WAL header by overwriting the first few bytes.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&original_wal_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xFF; 16]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // --- Second run (restart) ---
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        )
+            .unwrap();
+
+        // The corrupted WAL should have been renamed.
+        let corrupted_path = db_path.join(format!(
+            "{}.corrupted",
+            original_wal_path.file_name().unwrap().to_str().unwrap()
+        ));
+        assert!(corrupted_path.exists());
+        assert!(!original_wal_path.exists());
+
+        // A new WAL file should be created.
+        let new_wal_path = db_path.join("000003.log");
+        assert!(new_wal_path.exists());
+
+        // The data should be lost.
+        assert!(engine_restarted
+            .read(col, idx, &user_key(1), None)
+            .unwrap()
+            .is_none());
+
+        // The database should be usable.
+        engine_restarted
+            .write(WriteBatch::new(vec![put_op(col, 2, 1)]))
+            .unwrap();
+        assert!(engine_restarted
+            .read(col, idx, &user_key(2), None)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_restart_fails_with_corrupted_old_wal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        // Set a small buffer size to trigger memtable rotation easily.
+        options.db.file_write_buffer_size = StorageQuantity::new(1, StorageUnit::Kibibytes);
+        let options = Arc::new(options);
+
+        let col = 10;
+        let idx = 0;
+
+        let old_wal_path;
+        // --- First run ---
+        {
+            let engine =
+                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+
+            old_wal_path = db_path.join("000002.log");
+            assert!(old_wal_path.exists());
+
+            // Pause the flush manager to keep wal around.
+            engine.flush_manager.pause();
+
+            // Write enough data to trigger memtable rotation, which also rotates the WAL.
+            let large_val = vec![0; 1024];
+            engine
+                .write(WriteBatch::new(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(1),
+                    large_val.clone(),
+                )]))
+                .unwrap();
+            engine
+                .write(WriteBatch::new(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(2),
+                    large_val.clone(),
+                )]))
+                .unwrap();
+
+            // A new WAL should exist now.
+            let new_wal_path = db_path.join("000003.log");
+            assert!(new_wal_path.exists());
+
+            // Simulate crash by dropping the engine.
+            drop(engine);
+        }
+
+        // Corrupt the old WAL file (not the header, but a record in it).
+        let mut file = OpenOptions::new().write(true).open(&old_wal_path).unwrap();
+        file.seek(SeekFrom::Start(4096)).unwrap(); // After header block
+        file.write_all(&[0xFF; 16]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // --- Second run (restart) ---
+        let result = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        );
+
+        // Restart should fail because an old (non-terminal) WAL is corrupted.
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("Corruption at offset"));
+    }
+
+    #[test]
+    fn test_restart_with_stale_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let db_path = path.to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        let col = 10;
+
+        // --- First run ---
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &db_path,
+            )
+            .unwrap();
+
+            // After initialization: MANIFEST-000001, 000002.log are created. Next file is 3.
+            let next_file_num_before = engine.next_file_number.load(Ordering::Relaxed);
+            assert_eq!(next_file_num_before, 3);
+
+            let inserts = vec![
+                put_op(col, 1, 1),
+                put_op(col, 2, 1),
+                put_op(col, 3, 1),
+                put_op(col, 4, 1),
+            ];
+
+            for insert in inserts {
+                let _ = &engine.write(WriteBatch::new(vec![insert])).unwrap();
+            }
+
+            // Simulate crash
+            drop(engine);
+        }
+
+        // --- Create stale files ---
+        // Create files with numbers higher than what the manifest knows.
+        let stale_sst_path = db_path.join("000010.sst");
+        fs::File::create(&stale_sst_path).unwrap();
+
+        let stale_log_path = db_path.join("000012.log");
+        fs::File::create(&stale_log_path).unwrap();
+
+        // --- Second run (restart) ---
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &db_path,
+        )
+        .unwrap();
+
+        // The engine should have detected the "000012.log" file and marked it as corrupted.
+        assert!(db_path.join("000012.log.corrupted").exists());
+        assert!(!stale_log_path.exists());
+
+        // The engine should have detected the stale files and updated its file number counter.
+        // The highest number was set to 12, one sstable has been flushed (000013.st for memtable 2),
+        // and a new wal has been created (000014.log), so the next file number will be 15.
+        let next_file_num_after = engine_restarted.next_file_number.load(Ordering::Relaxed);
+        assert_eq!(next_file_num_after, 15);
+
+        // Verify that new files are created with the correct numbers.
+        // A flush rotates the WAL, so a new WAL file should be created.
+        engine_restarted
+            .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+            .unwrap();
+        engine_restarted.flush().unwrap();
+
+        // Flush rotates WAL to 15.log and creates sstable 16.sst. Next file number is 16.
+        let new_wal_path = db_path.join("000015.log");
+        assert!(new_wal_path.exists());
+        let new_sst_path = db_path.join("000016.sst");
+        assert!(new_sst_path.exists());
+
+        assert_eq!(engine_restarted.next_file_number.load(Ordering::Relaxed), 17);
+    }
+
+    #[test]
+    fn test_error_mode_activation_and_rejection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let registry = &mut MetricRegistry::default();
+        let options = Arc::new(Options::lightweight());
+
+        let engine =
+            StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
+
+        let col = 10;
+
+        // 1. Inject an error into the WAL write path.
+        engine.wal_return_error_on_write(true);
+
+        // 2. Perform a write that is expected to fail.
+        let write_result = engine.write(WriteBatch::new(vec![put_op(col, 1, 1)]));
+        assert!(write_result.is_err());
+        let error = write_result.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(error.to_string().contains("Injected error on append"));
+
+        // 3. Disable error injection to ensure subsequent failures are due to error_mode.
+        engine.wal_return_error_on_write(false);
+        assert!(engine.error_mode.load(Ordering::Relaxed));
+
+        // 4. Verify that subsequent operations are rejected.
+        check_error_mode(engine.clone(), col);
+    }
+
+    #[test]
+    fn test_wal_rotation_on_write_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let mut options = Options::lightweight();
+        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        )
+            .unwrap();
+
+        let col = 10;
+        let idx = 0;
+
+        engine.wal_return_error_on_rotate(true);
+
+        // Write enough data to trigger a memtable rotation.
+        // We write five ~1MB values to fill up the 4MB memtable.
+        let val_1mb_string = "a".repeat(1024 * 1024);
+        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+        for i in 1..=5 {
+            let rs = engine
+                .write(WriteBatch::new(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(i),
+                    val_1mb.clone(),
+                )]));
+
+            if rs.is_err() {
+                assert_eq!(
+                    rs.err().unwrap().to_string(),
+                    "Injected error on rotate",
+                );
+                break;
+            }
+        }
+
+        engine.wal_return_error_on_rotate(false);
+        assert!(engine.error_mode.load(Ordering::Relaxed));
+
+        check_error_mode(engine.clone(), col);
+    }
+
+    #[test]
+    fn test_wal_rotation_on_flush_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let options = Options::lightweight();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        )
+            .unwrap();
+
+        let col = 10;
+
+        engine.wal_return_error_on_rotate(true);
+
+        let inserts = vec![
+            put_op(col, 1, 1),
+            put_op(col, 2, 1),
+            put_op(col, 3, 1),
+            put_op(col, 4, 1),
+        ];
+
+        for insert in inserts {
+            let _ = &engine.write(WriteBatch::new(vec![insert])).unwrap();
+        }
+
+        let rs = engine.flush();
+        if rs.is_err() {
+            assert_eq!(
+                    rs.err().unwrap().to_string(),
+                    "Injected error on rotate",
+                );
+        }
+
+        engine.wal_return_error_on_rotate(false);
+        assert!(engine.error_mode.load(Ordering::Relaxed));
+
+        check_error_mode(engine.clone(), col);
+    }
+
+    #[test]
+    fn test_manifest_write_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let options = Options::lightweight();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        )
+            .unwrap();
+
+        let col = 10;
+
+        engine.manifest_return_error_on_write(true);
+
+        let inserts = vec![
+            put_op(col, 1, 1),
+            put_op(col, 2, 1),
+            put_op(col, 3, 1),
+            put_op(col, 4, 1),
+        ];
+
+        for insert in inserts {
+            let _ = &engine.write(WriteBatch::new(vec![insert])).unwrap();
+        }
+
+        let rs = engine.flush();
+        if rs.is_err() {
+            assert_eq!(
+                    rs.err().unwrap().to_string(),
+                    "Injected error on append",
+                );
+        }
+
+        engine.manifest_return_error_on_write(false);
+        assert!(engine.error_mode.load(Ordering::Relaxed));
+
+        check_error_mode(engine.clone(), col);
+    }
+
+    #[test]
+    fn test_memtable_flush_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let options = Options::lightweight();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(options),
+            &path,
+        )
+            .unwrap();
+
+        let col = 10;
+
+        engine.lsm_tree().memtable.return_error_on_flush(true);
+
+        let inserts = vec![
+            put_op(col, 1, 1),
+            put_op(col, 2, 1),
+            put_op(col, 3, 1),
+            put_op(col, 4, 1),
+        ];
+
+        for insert in inserts {
+            let _ = &engine.write(WriteBatch::new(vec![insert])).unwrap();
+        }
+
+        let rs = engine.flush();
+        if rs.is_err() {
+            assert_eq!(
+                    rs.err().unwrap().to_string(),
+                    "Simulated memtable flush error",
+                );
+        }
+
+        engine.manifest_return_error_on_write(false);
+        assert!(engine.error_mode.load(Ordering::Relaxed));
+
+        check_error_mode(engine.clone(), col);
+    }
+
+    fn check_error_mode(engine: Arc<StorageEngine>, col: u32) {
+        let expected_error_msg = "The database is in error mode dues to a previous write error";
+
+        // Test write
+        let write_result_after_error = engine.write(WriteBatch::new(vec![put_op(col, 2, 2)]));
+        assert!(write_result_after_error.is_err());
+        assert_eq!(
+            write_result_after_error.err().unwrap().to_string(),
+            expected_error_msg
+        );
+
+        // Test flush
+        let flush_result = engine.flush();
+        assert!(flush_result.is_err());
+        assert_eq!(flush_result.err().unwrap().to_string(), expected_error_msg);
+
+        // Test create_collection
+        let create_coll_result = engine.create_collection_if_not_exists("new_collection");
+        assert!(create_coll_result.is_err());
+        assert_eq!(
+            create_coll_result.err().unwrap().to_string(),
+            expected_error_msg
+        );
     }
 }

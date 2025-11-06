@@ -72,6 +72,19 @@ impl LsmTree {
                     imm_memtables: Arc::new(imm_memtables),
                 }
             }
+            ManifestEdit::IgnoringEmptyMemtable {
+                oldest_log_number: _oldest_log_number,
+            } => {
+                let mut imm_memtables: VecDeque<Arc<Memtable>> =
+                    self.imm_memtables.iter().cloned().collect();
+                let _ignored = imm_memtables.pop_front();
+
+                LsmTree {
+                    manifest: Arc::new(self.manifest.apply(edit)),
+                    memtable: self.memtable.clone(),
+                    imm_memtables: Arc::new(imm_memtables),
+                }
+            }
             _ => LsmTree {
                 manifest: Arc::new(self.manifest.apply(edit)),
                 memtable: self.memtable.clone(),

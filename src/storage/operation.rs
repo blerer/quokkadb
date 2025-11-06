@@ -83,9 +83,6 @@ impl Operation {
             self.operation_type,
         )
     }
-    pub fn operation_type(&self) -> OperationType {
-        self.operation_type.clone()
-    }
 
     pub fn user_key(&self) -> &[u8] {
         &self.user_key

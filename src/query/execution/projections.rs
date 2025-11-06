@@ -89,9 +89,6 @@ enum Projector {
         children: Vec<(usize, Projector)>,
     },
     Field,
-    PositionalField {
-        filter:  Box<dyn Fn(BsonValueRef) -> bool + Send + Sync>,
-    },
     Slice {
         skip: Option<i32>,
         limit: i32,
@@ -107,7 +104,6 @@ impl fmt::Display for Projector {
             Projector::Fields { .. } => "Fields",
             Projector::ArrayElements { .. } => "ArrayElements",
             Projector::Field => "Field",
-            Projector::PositionalField { .. } => "PositionalField",
             Projector::Slice { .. } => "Slice",
             Projector::ElemMatch { .. } => "ElemMatch",
         };
@@ -160,18 +156,6 @@ impl Projector {
                 }
             },
             Projector::Field => Some(value.clone()),
-            Projector::PositionalField { filter } => {
-                if let Bson::Array(array) = value {
-                    let filtered = array.iter()
-                        .filter(|b| filter(BsonValueRef(*b)))
-                        .take(1)
-                        .cloned()
-                        .collect::<Vec<Bson>>();
-                    if filtered.is_empty() { None } else { Some(Bson::Array(filtered)) }
-                } else {
-                    None
-                }
-            },
             Projector::Slice { skip, limit } => {
                 if let Bson::Array(array) = value {
 

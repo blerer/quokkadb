@@ -140,11 +140,6 @@ impl Manifest {
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<()> {
-        self.append_log.sync()?;
-        Ok(())
-    }
-
     /// Updates the `CURRENT` file with the new manifest name using an atomic rename.
     fn update_current_file(db_dir: &Path, manifest_filename: &str) -> Result<()> {
         let current_path = db_dir.join("CURRENT");
@@ -217,6 +212,16 @@ impl Manifest {
             ErrorKind::UnexpectedEof,
             format!("Invalid manifest file: {}", manifest_path.display()),
         ))
+    }
+
+    #[cfg(test)]
+    pub fn return_error_on_append(&self, value: bool) {
+        self.append_log.return_error_on_append(value);
+    }
+
+    #[cfg(test)]
+    pub fn return_error_on_rotate(&self, value: bool) {
+        self.append_log.return_error_on_rotate(value);
     }
 }
 
@@ -382,7 +387,6 @@ mod tests {
             manifest.append_edit(&edit).unwrap();
             expected = expected.apply(&edit);
         }
-        manifest.sync().unwrap();
         drop(manifest);
 
         let manifest_path = path.join("MANIFEST-000001");

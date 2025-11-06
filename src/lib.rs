@@ -14,7 +14,7 @@ use std::path::{Path};
 use std::sync::Arc;
 use bson::Document;
 use crate::collection::Collection;
-use crate::obs::logger::{LoggerAndTracer, NoOpLogger};
+use crate::obs::logger::{LoggerAndTracer, NoOpLogger, LogLevel};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use query::execution::executor::QueryExecutor;
@@ -27,7 +27,6 @@ use crate::storage::storage_engine::StorageEngine;
 pub struct QuokkaDB {
     options: Arc<Options>,
     db_impl: Arc<DbImpl>,
-
 }
 
 impl QuokkaDB {
@@ -50,9 +49,10 @@ impl QuokkaDB {
         let options = Arc::new(options);
         let mut metric_registry = MetricRegistry::new();
         let storage_engine = StorageEngine::new(logger.clone(), &mut metric_registry, options.clone(), path)?;
-        let optimizer = Arc::new(Optimizer::new(logger)); // Add normalization rules as needed
+        let optimizer = Arc::new(Optimizer::new(logger.clone())); // Add normalization rules as needed
         let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
         let db_impl = Arc::new(DbImpl {
+            logger,
             optimizer,
             executor,
             storage_engine,
@@ -74,6 +74,7 @@ impl QuokkaDB {
 }
 
 struct DbImpl {
+    logger: Arc<dyn LoggerAndTracer>,
     optimizer: Arc<Optimizer>,
     executor: Arc<QueryExecutor>,
     storage_engine: Arc<StorageEngine>,
@@ -134,6 +135,10 @@ impl DbImpl {
 
 impl Drop for DbImpl {
     fn drop(&mut self) {
-        self.storage_engine.shutdown();
+        if let Err(e) = self.storage_engine.shutdown() {
+            error!(self.logger, "An error occurred during shutdown: {}", e);
+        } else {
+            info!(self.logger, "Quokkadb shutdown completed successfully");
+        }
     }
 }

@@ -232,6 +232,16 @@ impl WriteAheadLog {
 
         Ok(records)
     }
+
+    #[cfg(test)]
+    pub fn return_error_on_append(&self, value: bool) {
+        self.append_log.return_error_on_append(value);
+    }
+
+    #[cfg(test)]
+    pub fn return_error_on_rotate(&self, value: bool) {
+        self.append_log.return_error_on_rotate(value);
+    }
 }
 
 struct WalFileCreator {}

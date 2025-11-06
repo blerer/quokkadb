@@ -68,13 +68,14 @@ impl<T: Send + 'static> AsyncCallback<T> {
     }
 
     pub fn call(&self, value: T) {
-        if let Err(err) = (self.fun)(value) {
+        if let Err(err) = execute_function(&self.fun, value) {
             error!(self.logger, "AsyncCallback function returned an error: {}", err);
         }
     }
 }
 
 use std::marker::PhantomData;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub struct BlockingCallback<T> {
     sender: SyncSender<Result<()>>,
@@ -97,7 +98,7 @@ impl<T> BlockingCallback<T>
     }
 
     fn call(&self, value: T) {
-        let result = (self.fun)(value);
+        let result = execute_function(&self.fun, value);
         self.sender.send(result).unwrap();
     }
 
@@ -115,3 +116,14 @@ impl<T> BlockingCallback<T>
         }
     }
 }
+
+
+fn execute_function<T>(fun: &Box<dyn Fn(T) -> Result<()> + Send + Sync>, value: T) -> Result<()>
+{
+    // If the function panics, catch it and send an IO error instead.
+    // It should not happen normally, but we want to avoid deadlocks and if a panic! happens
+    // the error should be treated like an IO error.
+    catch_unwind(AssertUnwindSafe(|| { fun(value) }))
+        .unwrap_or_else(|_| Err(Error::new(ErrorKind::Other, "BlockingCallback function panicked")))
+}
+

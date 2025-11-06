@@ -259,7 +259,6 @@ impl SSTableReader {
                 };
                 
                 let iter = SSTableRangeScanIterator {
-                    logger: self.logger.clone(),
                     block_loader: self.block_loader.clone(),
                     range: range.clone(), // Pass along for boundary checks
                     direction,
@@ -283,7 +282,6 @@ impl SSTableReader {
                 };
 
                 let iter = SSTableRangeScanIterator {
-                    logger: self.logger.clone(),
                     block_loader: self.block_loader.clone(),
                     range: range.clone(), // Pass along for boundary checks
                     direction,
@@ -308,7 +306,6 @@ impl SSTableReader {
 }
 
 struct SSTableRangeScanIterator {
-    logger: Arc<dyn LoggerAndTracer>,
     block_loader: Arc<BlockLoader>,
     range: Rc<InternalKeyRange>,
     direction: Direction,

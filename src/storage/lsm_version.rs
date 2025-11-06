@@ -68,6 +68,16 @@ impl LsmVersion {
         }
     }
 
+    pub fn with_ignored_empty_memtable(&self, oldest_log_number: u64) -> LsmVersion {
+        LsmVersion {
+            current_log_number: self.current_log_number,
+            oldest_log_number,
+            last_sequence_number: self.last_sequence_number,
+            next_file_number: self.next_file_number,
+            sst_levels: self.sst_levels.clone(),
+        }
+    }
+
     pub fn manifest_rotation(&self, manifest_number: u64) -> LsmVersion {
         // As the increase of the next_file_number, the rotation and the edit are applied
         // together under the manifest lock, we are guaranty that the next_file_number will

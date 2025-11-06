@@ -59,6 +59,10 @@ impl ManifestState {
             },
             ManifestEdit::Snapshot(_) => {
                 panic!("Snapshots should not be applied to an LSMTree");
+            },
+            ManifestEdit::IgnoringEmptyMemtable { oldest_log_number} => ManifestState {
+                lsm: Arc::new(self.lsm.with_ignored_empty_memtable(*oldest_log_number)),
+                catalog: self.catalog.clone(),
             }
         }
     }
@@ -124,6 +128,12 @@ pub enum ManifestEdit {
 
     /// Updates file number tracking based on files detected during recovery.
     FilesDetectedOnRestart { next_file_number: u64 },
+
+    /// On replay if a WAL was corrupted and did not result in any update we need to skip it
+    /// and drop the empty memtable.
+    IgnoringEmptyMemtable {
+        oldest_log_number: u64,
+    },
 }
 
 impl ManifestEdit {
@@ -158,6 +168,9 @@ impl ManifestEdit {
             }
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => {
                 writer.write_u8(6).write_varint_u64(*next_file_number);
+            }
+            ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => {
+                writer.write_u8(7).write_varint_u64(*oldest_log_number);
             }
         }
         writer.take_buffer()
@@ -198,6 +211,10 @@ impl ManifestEdit {
             6 => {
                 let next_file_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::FilesDetectedOnRestart { next_file_number })
+            }
+            7 => {
+                let oldest_log_number = reader.read_varint_u64()?;
+                Ok(ManifestEdit::IgnoringEmptyMemtable { oldest_log_number })
             }
             _ => Err(Error::new(
                 ErrorKind::InvalidData,
@@ -240,6 +257,11 @@ impl fmt::Display for ManifestEdit {
                 f,
                 "FilesDetectedOnRestart {{ next_file_number: {} }}",
                 next_file_number
+            ),
+            ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => write!(
+                f,
+                "IgnoringEmptyMemtable {{ oldest_log_number: {} }}",
+                oldest_log_number
             ),
         }
     }

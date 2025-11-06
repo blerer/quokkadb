@@ -9,6 +9,8 @@ use crate::util::interval::Interval;
 use crossbeam_skiplist::SkipMap;
 use std::io::Result;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ops::Bound;
 use std::rc::Rc;
@@ -19,6 +21,8 @@ pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
     size: AtomicUsize,                   // Current size of the memtable
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
+    #[cfg(test)]
+    return_error_on_flush: AtomicBool,
 }
 
 impl Memtable {
@@ -27,7 +31,14 @@ impl Memtable {
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
             log_number,
+            #[cfg(test)]
+            return_error_on_flush: AtomicBool::new(false),
         }
+    }
+
+    #[cfg(test)]
+    pub fn return_error_on_flush(&self, value: bool) {
+        self.return_error_on_flush.store(value, Ordering::Relaxed);
     }
 
     /// Applies all the WriteBatch operations to the Memtable
@@ -104,6 +115,15 @@ impl Memtable {
         sst_file: &DbFile,
         options: &Options,
     ) -> Result<SSTableMetadata> {
+
+        #[cfg(test)]
+        if self.return_error_on_flush.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Simulated memtable flush error",
+            ));
+        }
+
         let mut writer = SSTableWriter::new(directory, sst_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
