@@ -190,9 +190,15 @@ impl SSTableReader {
     }
 
     /// Read a value by user key and snapshot
-    pub fn read(&self, record_key: &[u8], snapshot: u64) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    pub fn read(&self,
+                record_key: &[u8],
+                snapshot: u64,
+                min_snapshot: Option<u64>
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
-        event!(self.logger, "read start file={}, key={:?}, snapshot={}", &self.filename, &record_key, snapshot);
+        event!(self.logger,
+            "read start file={}, key={:?}, snapshot={}, min_snapshot={}",
+            &self.filename, &record_key, snapshot, min_snapshot.map_or("None".to_string(), |s| s.to_string()));
 
         let filter_block = self.get_block(&self.filter_handle)?;
 
@@ -223,7 +229,13 @@ impl SSTableReader {
                     Ordering::Less => panic!("Unexpected lower key"), // Should never happen, otherwise I did screw up the logic and need to fix it.
                     Ordering::Greater => return Ok(None),
                     Ordering::Equal => {
-                        if extract_sequence_number(&key) <= snapshot {
+                        let seq = extract_sequence_number(&key);
+                        if let Some(min_snapshot) = min_snapshot {
+                            if seq <= min_snapshot {
+                                return Ok(None);
+                            }
+                        }
+                        if seq <= snapshot {
                             return Ok(Some((key, value)));
                         }
                     }
@@ -557,7 +569,7 @@ mod tests {
 
         let mut seq = 15;
         for op in inserts.iter() {
-            let result = reader.read(&encode_record_key(col, 0, op.user_key()), 19).unwrap();
+            let result = reader.read(&encode_record_key(col, 0, op.user_key()), 19, None).unwrap();
             assert_eq!(result, Some((op.internal_key(seq), op.value().to_vec())));
             seq += 1;
         }
@@ -602,25 +614,82 @@ mod tests {
 
         let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
 
-        assert_search_eq(&reader, &record_key(col,0), MAX_SEQUENCE_NUMBER, None);
-        assert_search_eq(&reader, &record_key(col,1), MAX_SEQUENCE_NUMBER, entries.get(0));
-        assert_search_eq(&reader, &record_key(col,2), 2, entries.get(1));
-        assert_search_eq(&reader, &record_key(col,2), MAX_SEQUENCE_NUMBER, entries.get(1));
-        assert_search_eq(&reader, &record_key(col,2), 1, None);
-        assert_search_eq(&reader, &record_key(col,3), 3, entries.get(2));
-        assert_search_eq(&reader, &record_key(col,4), 4, entries.get(3));
-        assert_search_eq(&reader, &record_key(col,4), MAX_SEQUENCE_NUMBER, entries.get(3));
-        assert_search_eq(&reader, &record_key(col,5), MAX_SEQUENCE_NUMBER, entries.get(4));
-        assert_search_eq(&reader, &record_key(col,5), 9, entries.get(4));
-        assert_search_eq(&reader, &record_key(col,5), 8, entries.get(5));
-        assert_search_eq(&reader, &record_key(col,5), 7, entries.get(6));
-        assert_search_eq(&reader, &record_key(col,5), 6, entries.get(7));
-        assert_search_eq(&reader, &record_key(col,5), 5, entries.get(8));
-        assert_search_eq(&reader, &record_key(col,6), MAX_SEQUENCE_NUMBER, None);
-        assert_search_eq(&reader, &record_key(col,7), MAX_SEQUENCE_NUMBER, entries.get(9));
-        assert_search_eq(&reader, &record_key(col,7), 11, entries.get(9));
-        assert_search_eq(&reader, &record_key(col,7), 10, entries.get(10));
-        assert_search_eq(&reader, &record_key(col,8), 12, None);
+        assert_search_eq(&reader, &record_key(col,0), MAX_SEQUENCE_NUMBER, None, None);
+        assert_search_eq(&reader, &record_key(col,1), MAX_SEQUENCE_NUMBER, entries.get(0), None);
+        assert_search_eq(&reader, &record_key(col,2), 2, entries.get(1), None);
+        assert_search_eq(&reader, &record_key(col,2), MAX_SEQUENCE_NUMBER, entries.get(1), None);
+        assert_search_eq(&reader, &record_key(col,2), 1, None, None);
+        assert_search_eq(&reader, &record_key(col,3), 3, entries.get(2), None);
+        assert_search_eq(&reader, &record_key(col,4), 4, entries.get(3), None);
+        assert_search_eq(&reader, &record_key(col,4), MAX_SEQUENCE_NUMBER, entries.get(3), None);
+        assert_search_eq(&reader, &record_key(col,5), MAX_SEQUENCE_NUMBER, entries.get(4), None);
+        assert_search_eq(&reader, &record_key(col,5), 9, entries.get(4), None);
+        assert_search_eq(&reader, &record_key(col,5), 8, entries.get(5), None);
+        assert_search_eq(&reader, &record_key(col,5), 7, entries.get(6), None);
+        assert_search_eq(&reader, &record_key(col,5), 6, entries.get(7), None);
+        assert_search_eq(&reader, &record_key(col,5), 5, entries.get(8), None);
+        assert_search_eq(&reader, &record_key(col,6), MAX_SEQUENCE_NUMBER, None, None);
+        assert_search_eq(&reader, &record_key(col,7), MAX_SEQUENCE_NUMBER, entries.get(9), None);
+        assert_search_eq(&reader, &record_key(col,7), 11, entries.get(9), None);
+        assert_search_eq(&reader, &record_key(col,7), 10, entries.get(10), None);
+        assert_search_eq(&reader, &record_key(col,8), 12, None, None);
+    }
+
+    #[test]
+    fn test_read_with_min_snapshot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Options::lightweight();
+        let mut metric_registry = MetricRegistry::new();
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let sst_file = DbFile::new_sst(12);
+        let col = 32;
+
+        // Key 5 has multiple versions. Note: higher sequence number = smaller internal key.
+        // To write in increasing key order, we must add entries with higher seq numbers first.
+        let entries = vec![
+            put_rec(col, 5, 1, 5), // seq 5
+            put_rec(col, 5, 2, 6), // seq 6
+            put_rec(col, 5, 3, 7), // seq 7
+            delete_rec(col, 5, 8), // seq 8
+        ];
+
+        let mut writer = SSTableWriter::new(&path, &sst_file, &options, entries.len()).unwrap();
+        // Add in decreasing sequence number order, which is increasing internal key order.
+        for entry in entries.iter().rev() {
+            writer.add(&entry.0, &entry.1).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+        let key = record_key(col, 5);
+
+        // snapshot=10, min_snapshot=Some(8): should find nothing (newest is seq=8, which is not > 8)
+        assert_search_eq(&reader, &key, 10, None, Some(8));
+
+        // snapshot=10, min_snapshot=Some(7): should find delete at seq=8
+        assert_search_eq(&reader, &key, 10, Some(&entries[3]), Some(7));
+
+        // snapshot=8, min_snapshot=Some(7): should find delete at seq=8
+        assert_search_eq(&reader, &key, 8, Some(&entries[3]), Some(7));
+
+        // snapshot=7, min_snapshot=Some(7): should find nothing (newest visible is seq=7, which is not > 7)
+        assert_search_eq(&reader, &key, 7, None, Some(7));
+
+        // snapshot=7, min_snapshot=Some(6): should find put at seq=7
+        assert_search_eq(&reader, &key, 7, Some(&entries[2]), Some(6));
+
+        // snapshot=6, min_snapshot=Some(5): should find put at seq=6
+        assert_search_eq(&reader, &key, 6, Some(&entries[1]), Some(5));
+
+        // snapshot=5, min_snapshot=Some(5): should find nothing
+        assert_search_eq(&reader, &key, 5, None, Some(5));
+
+        // snapshot=5, min_snapshot=Some(4): should find put at seq=5
+        assert_search_eq(&reader, &key, 5, Some(&entries[0]), Some(4));
+
+        // snapshot=10, min_snapshot=None: should find delete at seq=8
+        assert_search_eq(&reader, &key, 10, Some(&entries[3]), None);
     }
 
     #[test]
@@ -650,7 +719,7 @@ mod tests {
 
         for i in 0..1000 {
             let entry = put_rec(col, i, i as u32, i as u64);
-            assert_search_eq(&reader, &record_key(col, i), MAX_SEQUENCE_NUMBER, Some(&entry));
+            assert_search_eq(&reader, &record_key(col, i), MAX_SEQUENCE_NUMBER, Some(&entry), None);
         }
     }
 
@@ -842,8 +911,9 @@ mod tests {
         key: &[u8],
         snapshot: u64,
         expected: Option<&(Vec<u8>, Vec<u8>)>,
+        min_snapshot: Option<u64>,
     ) {
-        let result = reader.read(key, snapshot);
+        let result = reader.read(key, snapshot, min_snapshot);
         match (result, expected) {
             (Ok(actual), _exp) => { assert_eq!(actual.as_ref(), expected) }
             (Err(e), _) => panic!("Search returned error: {:?}", e),

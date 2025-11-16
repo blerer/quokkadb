@@ -1,6 +1,6 @@
 use crate::storage::catalog::Catalog;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_record_key_range};
+use crate::storage::internal_key::encode_record_key_range;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
@@ -25,26 +25,27 @@ pub struct LsmTree {
 }
 
 impl LsmTree {
-    pub fn new(current_log_number: u64, next_file_number: u64,) -> Self {
+    pub fn new(current_log_number: u64, next_file_number: u64, next_seq: u64) -> Self {
         LsmTree {
             manifest: Arc::new(ManifestState::new(current_log_number, next_file_number)),
-            memtable: Arc::new(Memtable::new(current_log_number)),
+            memtable: Arc::new(Memtable::new(current_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
 
     pub fn from(manifest_state: ManifestState) -> Self {
         let oldest_log_number = manifest_state.lsm.oldest_log_number;
+        let next_seq = manifest_state.lsm.last_sequence_number + 1;
         LsmTree {
             manifest: Arc::new(manifest_state),
-            memtable: Arc::new(Memtable::new(oldest_log_number)),
+            memtable: Arc::new(Memtable::new(oldest_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
 
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         match edit {
-            ManifestEdit::WalRotation { log_number } => {
+            ManifestEdit::WalRotation { log_number, next_seq } => {
                 // The log was rotated because the memtable was considered as full. The memtable
                 // should be considered as immutable and placed in the queue waiting for being
                 // flushed to disk. A new memtable should be created and associated to the new log.
@@ -54,7 +55,7 @@ impl LsmTree {
 
                 LsmTree {
                     manifest: Arc::new(self.manifest.apply(edit)),
-                    memtable: Arc::new(Memtable::new(*log_number)),
+                    memtable: Arc::new(Memtable::new(*log_number, *next_seq)),
                     imm_memtables: Arc::new(imm_memtables),
                 }
             }
@@ -110,23 +111,41 @@ impl LsmTree {
         db_dir: &Path,
         record_key: &[u8],
         snapshot: u64,
+        min_snapshot: Option<u64>
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
-        if let Some((internal_key, value)) = self.memtable.read(&record_key, snapshot) {
+        let rs = self.memtable.read(&record_key, snapshot, min_snapshot);
+        if let Some((internal_key, value)) = rs {
             return Ok(Some((internal_key, value)))
+        }
+
+        if let Some(min_snapshot) = min_snapshot {
+            if self.memtable.min_seq >= min_snapshot {
+                return Ok(None);
+            }
         }
 
         // Iterate from newest to oldest
         for imm_memtable in self.imm_memtables.iter().rev() {
-            if let Some((internal_key, value)) = imm_memtable.read(&record_key, snapshot) {
+            if let Some((internal_key, value)) = imm_memtable.read(
+                &record_key,
+                snapshot,
+                min_snapshot
+            ) {
                 return Ok(Some((internal_key, value)))
+            }
+
+            if let Some(min_snapshot) = min_snapshot {
+                if imm_memtable.min_seq >= min_snapshot {
+                    return Ok(None);
+                }
             }
         }
 
-        for sst in self.manifest.find(&record_key, snapshot) {
+        for sst in self.manifest.find(&record_key, snapshot, min_snapshot) {
             let file = db_dir.join(DbFile::new_sst(sst.number).filename());
             let sst_reader = sstable_cache.get(&file)?;
-            if let Some((internal_key, value)) = sst_reader.read(&record_key, snapshot)? {
+            if let Some((internal_key, value)) = sst_reader.read(&record_key, snapshot, min_snapshot)? {
                 return Ok(Some((internal_key, value)))
             }
         }

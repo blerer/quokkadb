@@ -21,16 +21,18 @@ pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
     size: AtomicUsize,                   // Current size of the memtable
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
+    pub min_seq: u64, // The minimum sequence number of the operations in this memtable
     #[cfg(test)]
     return_error_on_flush: AtomicBool,
 }
 
 impl Memtable {
-    pub fn new(log_number: u64) -> Self {
+    pub fn new(log_number: u64, min_seq: u64) -> Self {
         Memtable {
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
             log_number,
+            min_seq,
             #[cfg(test)]
             return_error_on_flush: AtomicBool::new(false),
         }
@@ -43,6 +45,11 @@ impl Memtable {
 
     /// Applies all the WriteBatch operations to the Memtable
     pub fn write(&self, seq: u64, batch: &WriteBatch) {
+
+        assert!(seq >= self.min_seq,
+                "The documents must have a sequence >= min_seq: [seq = {}, min_seq = {}]",
+                seq, self.min_seq);
+
         for operation in batch.operations() {
             let key = operation.internal_key(seq);
             let value = operation.value().to_vec();
@@ -57,12 +64,25 @@ impl Memtable {
         }
     }
 
-    /// Read a collection value by user key and optional snapshot (sequence number)
-    pub fn read(&self, record_key: &[u8], snapshot: u64) -> Option<(Vec<u8>, Vec<u8>)> {
+    /// Read a collection value by user key and snapshot sequence number.
+    ///
+    /// This method finds the most recent version of a value for a given `record_key`
+    /// at a specified `snapshot`. It returns the value associated with the key if a
+    /// version with a sequence number less than or equal to `snapshot` is found.
+    ///
+    /// The `min_snapshot` parameter can be used to specify an exclusive lower bound
+    /// for the sequence number. If provided, only versions with a sequence number
+    /// strictly greater than `min_snapshot` will be considered.
+    pub fn read(&self,
+                record_key: &[u8],
+                snapshot: u64,
+                min_snapshot: Option<u64>
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
         // Create the range bounds for the search:
         // We want to retrieve all the entries for the specified key
         let start_key = encode_internal_key(record_key, snapshot, OperationType::MaxKey);
-        let end_key = encode_internal_key(record_key, u64::MIN, OperationType::MinKey);
+        let min_snapshot = min_snapshot.unwrap_or(u64::MIN);
+        let end_key = encode_internal_key(record_key, min_snapshot, OperationType::MaxKey);
 
         // Traverse the skip list
         let mut iter = self.skiplist.range(start_key..=end_key);
@@ -155,7 +175,7 @@ mod tests {
 
     #[test]
     fn write_put_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
@@ -168,18 +188,18 @@ mod tests {
 
         // Verify data was inserted
         assert_eq!(
-            memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER),
+            memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER, None),
             Some(put_rec(collection, 1, 1, 1))
         );
         assert_eq!(
-            memtable.read(&record_key(collection, 2), MAX_SEQUENCE_NUMBER),
+            memtable.read(&record_key(collection, 2), MAX_SEQUENCE_NUMBER, None),
             Some(put_rec(collection,2, 1, 1))
         );
     }
 
     #[test]
     fn write_put_and_delete_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -191,15 +211,15 @@ mod tests {
         memtable.write(1, &batch);
 
         // Verify key1 was deleted
-        assert_eq!(memtable.read(&record_key(collection, 1), 2),
+        assert_eq!(memtable.read(&record_key(collection, 1), 2, None),
                    Some(delete_rec(collection, 1, 1)));
-        assert_eq!(memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER),
+        assert_eq!(memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER, None),
                    Some(delete_rec(collection, 1, 1)));
     }
 
     #[test]
     fn write_put_and_delete_operations_in_different_batches() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
@@ -213,14 +233,14 @@ mod tests {
 
         // Verify key1 was deleted
         assert_eq!(
-            memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER),
+            memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER, None),
             Some(delete_rec(collection, 1, 2))
         );
     }
 
     #[test]
     fn read_with_snapshot() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 2);
 
         let collection = 10;
         // Insert multiple versions of the same key
@@ -232,35 +252,73 @@ mod tests {
 
         // Read with snapshots
         let record_key = record_key(collection, 1);
-        assert_eq!(memtable.read(&record_key, 1), None); // Snapshot 0
+        assert_eq!(memtable.read(&record_key, 1, None), None); // Snapshot 0
         assert_eq!(
-            memtable.read(&record_key, 2),
+            memtable.read(&record_key, 2, None),
             Some(put_rec(collection, 1, 1, 2))
         ); // Snapshot 1
         assert_eq!(
-            memtable.read(&record_key, 3),
+            memtable.read(&record_key, 3, None),
             Some(put_rec(collection, 1, 2, 3))
         ); // Snapshot 2
         assert_eq!(
-            memtable.read(&record_key, MAX_SEQUENCE_NUMBER),
+            memtable.read(&record_key, MAX_SEQUENCE_NUMBER, None),
             Some(put_rec(collection, 1, 2, 3))
         ); // Latest
     }
 
     #[test]
+    fn read_with_min_snapshot() {
+        let memtable = Memtable::new(2, 2);
+        let collection = 10;
+        let record_key = record_key(collection, 1);
+
+        // Insert versions at seq 2, 3, 5, 7
+        memtable.write(2, &write_batch(vec![put_op(collection, 1, 1)])); // version 1 @ seq 2
+        memtable.write(3, &write_batch(vec![put_op(collection, 1, 2)])); // version 2 @ seq 3
+        memtable.write(5, &write_batch(vec![put_op(collection, 1, 3)])); // version 3 @ seq 5
+        memtable.write(7, &write_batch(vec![put_op(collection, 1, 4)])); // version 4 @ seq 7
+
+        // Reading at snapshot 6, should find version at seq 5
+        assert_eq!(
+            memtable.read(&record_key, 6, None),
+            Some(put_rec(collection, 1, 3, 5))
+        );
+
+        // min_snapshot < seq (5), should still find it
+        assert_eq!(
+            memtable.read(&record_key, 6, Some(4)),
+            Some(put_rec(collection, 1, 3, 5))
+        );
+        // min_snapshot = seq (5), should find it
+        assert_eq!(
+            memtable.read(&record_key, 6, Some(5)), None);
+
+        // Reading at latest snapshot
+        assert_eq!(
+            memtable.read(&record_key, MAX_SEQUENCE_NUMBER, Some(5)),
+            Some(put_rec(collection, 1, 4, 7))
+        );
+        assert_eq!(
+            memtable.read(&record_key, MAX_SEQUENCE_NUMBER, Some(8)),
+            None
+        );
+    }
+
+    #[test]
     fn read_non_existent_key() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 2);
         let collection = 32;
         // Read a key that was never inserted
         assert_eq!(
-            memtable.read(&record_key(collection, -300), MAX_SEQUENCE_NUMBER),
+            memtable.read(&record_key(collection, -300), MAX_SEQUENCE_NUMBER, None),
             None
         );
     }
 
     #[test]
     fn range_scan_with_no_matching_keys() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         let col: u32 = 32;
         let batch = write_batch(vec![
@@ -283,7 +341,7 @@ mod tests {
 
     #[test]
     fn range_scan_with_different_ranges() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         let col: u32 = 32;
         let batch1 = write_batch(vec![
@@ -407,7 +465,7 @@ mod tests {
 
     #[test]
     fn range_scan_with_mixed_operations() {
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 1);
 
         let col: u32 = 32;
         let batch1 = write_batch(vec![
@@ -489,7 +547,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
 
-        let memtable = Memtable::new(2);
+        let memtable = Memtable::new(2, 15);
 
         let collection = 10;
         let inserts = vec![

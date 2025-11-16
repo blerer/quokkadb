@@ -30,7 +30,7 @@ impl ManifestState {
 
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         match edit {
-            ManifestEdit::WalRotation { log_number } => ManifestState {
+            ManifestEdit::WalRotation { log_number, next_seq: _next_seq } => ManifestState {
                 lsm: Arc::new(self.lsm.with_new_log_file(*log_number)),
                 catalog: self.catalog.clone(),
             },
@@ -71,8 +71,9 @@ impl ManifestState {
         &'a self,
         record_key: &'a [u8],
         snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.lsm.find(record_key, snapshot)
+        self.lsm.find(record_key, snapshot, min_snapshot)
     }
 
     pub fn find_range<'a>(
@@ -115,7 +116,7 @@ pub enum ManifestEdit {
     DropCollection { name: String },
 
     /// Indicates a new WAL file has been created.
-    WalRotation { log_number: u64 },
+    WalRotation { log_number: u64, next_seq: u64 },
 
     /// Indicates a new manifest file has been created.
     ManifestRotation { manifest_number: u64 },
@@ -153,8 +154,8 @@ impl ManifestEdit {
             ManifestEdit::DropCollection { name } => {
                 writer.write_u8(2).write_str(&name);
             }
-            ManifestEdit::WalRotation { log_number } => {
-                writer.write_u8(3).write_varint_u64(*log_number);
+            ManifestEdit::WalRotation { log_number, next_seq } => {
+                writer.write_u8(3).write_varint_u64(*log_number).write_varint_u64(*next_seq);
             }
             ManifestEdit::ManifestRotation { manifest_number } => {
                 writer.write_u8(4).write_varint_u64(*manifest_number);
@@ -194,7 +195,8 @@ impl ManifestEdit {
             }
             3 => {
                 let log_number = reader.read_varint_u64()?;
-                Ok(ManifestEdit::WalRotation { log_number })
+                let next_seq = reader.read_varint_u64()?;
+                Ok(ManifestEdit::WalRotation { log_number, next_seq })
             }
             4 => {
                 let manifest_number = reader.read_varint_u64()?;
@@ -237,8 +239,8 @@ impl fmt::Display for ManifestEdit {
             ManifestEdit::DropCollection { name } => {
                 write!(f, "DropCollection {{ name: {} }}", name)
             }
-            ManifestEdit::WalRotation { log_number } => {
-                write!(f, "WalRotation {{ log_number: {} }}", log_number)
+            ManifestEdit::WalRotation { log_number, next_seq } => {
+                write!(f, "WalRotation {{ log_number: {}, next_seq: {} }}", log_number, next_seq)
             }
             ManifestEdit::ManifestRotation { manifest_number } => write!(
                 f,
@@ -292,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_wal_and_manifest_rotation_serialization() {
-        check_edit_serialization_roundtrip(ManifestEdit::WalRotation { log_number: 123 });
+        check_edit_serialization_roundtrip(ManifestEdit::WalRotation { log_number: 123, next_seq: 456 });
         check_edit_serialization_roundtrip(ManifestEdit::ManifestRotation {
             manifest_number: 456,
         });
@@ -348,7 +350,7 @@ mod tests {
     fn test_apply_wal_and_manifest_rotation() {
         let tree = ManifestState::new(1, 2);
 
-        let tree = tree.apply(&ManifestEdit::WalRotation { log_number: 99 });
+        let tree = tree.apply(&ManifestEdit::WalRotation { log_number: 99, next_seq: 567 });
         assert_eq!(tree.lsm.current_log_number, 99);
         assert_eq!(tree.lsm.next_file_number, 100);
 

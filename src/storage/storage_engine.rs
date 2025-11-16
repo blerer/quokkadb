@@ -15,26 +15,32 @@ use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::wal::WriteAheadLog;
-use crate::storage::write_batch::WriteBatch;
+use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::storage::Direction;
 use crate::{debug, error, event, info, warn};
 use arc_swap::ArcSwap;
 use std::collections::VecDeque;
-use std::fs;
+use std::{fmt, fs};
 use std::fs::remove_file;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Result, Error};
 use std::ops::RangeBounds;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+
+struct WalAndManifest {
+    wal: WriteAheadLog,
+    manifest: Manifest,
+}
 
 pub(crate) struct StorageEngine {
     logger: Arc<dyn LoggerAndTracer>,
     db_dir: PathBuf,
     options: Arc<Options>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
-    manifest: Mutex<Manifest>,
-    write_ahead_log: Mutex<WriteAheadLog>,
+    db_mutex: Mutex<WalAndManifest>,
     lsm_tree: Arc<ArcSwap<LsmTree>>,
     next_file_number: AtomicU64, // The counter used to create the file ids
     next_seq_number: AtomicU64,  // The counter used to create sequence numbers
@@ -43,6 +49,8 @@ pub(crate) struct StorageEngine {
     flush_manager: FlushManager,
     async_callback: OnceLock<Arc<Callback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
+    #[cfg(test)]
+    fail_next_precondition_checks: AtomicU8,
 }
 
 impl StorageEngine {
@@ -51,7 +59,7 @@ impl StorageEngine {
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
-    ) -> Result<Arc<Self>> {
+    ) -> StorageResult<Arc<Self>> {
         let sst_cache = Arc::new(SSTableCache::new(
             logger.clone(),
             metric_registry,
@@ -121,6 +129,7 @@ impl StorageEngine {
                 if log_number != &lsm_tree.memtable.log_number {
                     let edit = ManifestEdit::WalRotation {
                         log_number: *log_number,
+                        next_seq: last_seq_nbr + 1,
                     };
                     rotated_log_files.push_back(previous.clone().unwrap());
 
@@ -240,7 +249,7 @@ impl StorageEngine {
                     log_number,
                     rotated_log_files,
                 )?;
-                let edit = ManifestEdit::WalRotation { log_number };
+                let edit = ManifestEdit::WalRotation { log_number, next_seq: last_seq_nbr + 1 };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
 
@@ -287,8 +296,10 @@ impl StorageEngine {
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
-                manifest: Mutex::new(manifest),
-                write_ahead_log: Mutex::new(wal),
+                db_mutex: Mutex::new(WalAndManifest {
+                    wal,
+                    manifest,
+                }),
                 lsm_tree,
                 next_file_number,
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
@@ -297,14 +308,18 @@ impl StorageEngine {
                 flush_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_next_precondition_checks: AtomicU8::new(0),
             }))
         } else {
             let next_file_number = AtomicU64::new(1);
+            let next_seq_number = AtomicU64::new(1);
             let manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let lsm_tree = Arc::new(LsmTree::new(
                 log_number,
                 next_file_number.load(Ordering::Relaxed),
+                next_seq_number.load(Ordering::Relaxed),
             ));
             let snapshot = ManifestEdit::Snapshot(lsm_tree.manifest.clone());
             let manifest = Manifest::new(
@@ -340,16 +355,20 @@ impl StorageEngine {
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
-                manifest: Mutex::new(manifest),
-                write_ahead_log: Mutex::new(wal),
+                db_mutex: Mutex::new(WalAndManifest {
+                    wal,
+                    manifest,
+                }),
                 lsm_tree,
                 next_file_number,
-                next_seq_number: AtomicU64::new(1),
+                next_seq_number,
                 last_visible_seq: AtomicU64::new(0),
                 sst_cache,
                 flush_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_next_precondition_checks: AtomicU8::new(0),
             }))
         }
     }
@@ -361,7 +380,7 @@ impl StorageEngine {
         manifest: &mut Manifest,
         lsm_tree: &mut LsmTree,
         next_file_number: &AtomicU64
-    ) -> Result<LsmTree> {
+    ) -> StorageResult<LsmTree> {
 
         info!(logger, "Flushing data from {}", lsm_tree.imm_memtables[0].log_number);
 
@@ -382,12 +401,9 @@ impl StorageEngine {
         Ok(lsm_tree)
     }
 
-    pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> Result<u32> {
+    pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> StorageResult<u32> {
         if self.error_mode.load(Ordering::Relaxed) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "The database is in error mode dues to a previous write error",
-            ));
+            return Err(StorageError::ErrorMode("The database is in error mode dues to a previous write error".into()));
         }
         let collection = self.catalog().get_collection_by_name(name);
 
@@ -395,7 +411,7 @@ impl StorageEngine {
             Ok(collection.id)
         } else {
             // The collection do not exist we need to create it and update the manifest
-            let mut manifest = self.manifest.lock().unwrap();
+            let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
             // We need first to check that the collection has not been created concurrently
             let lsm_tree = self.lsm_tree.load();
@@ -407,7 +423,7 @@ impl StorageEngine {
                     name: name.to_string(),
                     id,
                 };
-                let _lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
+                let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
                 Ok(id)
             } else {
                 Ok(collection.unwrap().id)
@@ -415,17 +431,20 @@ impl StorageEngine {
         }
     }
 
+    pub fn last_visible_sequence(&self) -> u64 {
+        self.last_visible_seq.load(Ordering::Relaxed)
+    }
+
     pub fn catalog(&self) -> Arc<Catalog> {
         let lsm_tree = self.lsm_tree.load();
         lsm_tree.catalogue().clone()
     }
 
-    pub fn write(self: &Arc<Self>, batch: WriteBatch) -> Result<()> {
+    pub fn write(self: &Arc<Self>, batch: WriteBatch) -> StorageResult<()> {
 
         if self.error_mode.load(Ordering::Relaxed) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "The database is in error mode dues to a previous write error",
+            return Err(StorageError::ErrorMode(
+                "The database is in error mode dues to a previous write error".to_string(),
             ));
         }
 
@@ -475,33 +494,35 @@ impl StorageEngine {
             );
         event!(self.logger, "write start, writers_size={}", writers.len());
 
-        // We want to acquire the lock on the wal before we release the one on
-        // the queue, to avoid a race condition where the next leader thread that just entered
-        // the queue, on lock release, take the wal on them first.
-        let mut wal = self.write_ahead_log.lock().unwrap();
+        // We want to acquire the db lock before we release the one on the queue,
+        // to avoid a race condition where the next leader thread that just entered
+        // the queue, on lock release, take the lock on them first.
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
         // Release the queue lock
         drop(queue);
+
+        // Check the preconditions for each writer
+        let writers = self.check_preconditions(&mut writers);
+
+        if writers.is_empty() {
+            event!(self.logger, "write done (no-op due to preconditions)");
+            return;
+        }
 
         // Grab the sequence numbers for the set of batches
         let seq = self
             .next_seq_number
             .fetch_add(writers.len() as u64, Ordering::Relaxed);
 
-        let res = Self::append_to_wal(&writers, &mut wal, seq);
+        let res = Self::append_to_wal(&writers, &mut wal_and_manifest, seq);
 
-        if let Err(error) = &res {
-            self.handle_write_error(error, &writers);
+        if let Err(error) = res {
+            self.handle_write_error(&StorageError::Io(error), &writers);
             return;
         }
 
         let with_sequence = res.unwrap();
-
-        // We use the manifest lock when accessing the memtable to prevent a race with
-        // a wal/memtable rotation and avoid races on writes between leaders.
-        let memtable_write_lock = self.manifest.lock();
-
-        drop(wal);
 
         let lsm_tree = self.lsm_tree.load().clone();
 
@@ -528,12 +549,82 @@ impl StorageEngine {
                 seq, lsm_tree.memtable.log_number);
         }
 
-        drop(memtable_write_lock);
+        drop(wal_and_manifest); // release the lock as soon as possible
 
         for (writer, result) in with_results {
             writer.done(result);
         }
         event!(self.logger, "write done");
+    }
+
+    fn check_preconditions(self: &Arc<Self>, writers: &mut Vec<Arc<Writer>>) -> Vec<Arc<Writer>> {
+        let seq = self.next_seq_number.load(Ordering::Relaxed);
+
+        let mut successful_writers = Vec::with_capacity(writers.len());
+
+        // Check preconditions before assigning sequence numbers
+        for writer in writers {
+            if let Some(preconditions) = writer.batch().preconditions() {
+                let rs = self.check_writer_preconditions(seq, preconditions);
+                if let Err(error) = rs {
+                    writer.done(Err(error));
+                    continue;
+                }
+            }
+            successful_writers.push(writer.clone());
+        }
+        successful_writers
+    }
+
+    fn check_writer_preconditions(self: &Arc<Self>, seq: u64, preconditions: &Preconditions) -> StorageResult<()> {
+        for precondition in preconditions.conditions() {
+            match precondition {
+                Precondition::MustNotExist {
+                    collection,
+                    index,
+                    user_key,
+                } => {
+                    let rs = self.read_internal(
+                        *collection,
+                        *index,
+                        user_key,
+                        seq,
+                        Some(preconditions.since()),
+                    ).map_err(|e| StorageError::Io(e))?;
+
+                    #[cfg(test)]
+                    if self.fail_next_precondition_checks.load(Ordering::Relaxed) >= 1 {
+                        self.fail_next_precondition_checks.fetch_sub(1, Ordering::Relaxed);
+                        let error = Self::version_conflict_error(collection, index, user_key, preconditions.since());
+                        return Err(error);
+                    }
+
+                    if let Some(_) = rs {
+                        // Conflict detected
+                        let error = Self::version_conflict_error(collection, index, user_key, preconditions.since());
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn version_conflict_error(
+        collection: &u32,
+        index: &u32,
+        user_key: &Vec<u8>,
+        since: u64
+    ) -> StorageError {
+
+        StorageError::VersionConflict {
+            user_key: user_key.clone(),
+            reason:
+            format!(
+                "Optimistic locking failed: key for collection {} index {} user_key {:x?} exists since snapshot {}",
+                collection, index, user_key, since
+            ),
+        }
     }
 
     pub fn read(
@@ -546,13 +637,26 @@ impl StorageEngine {
         let last_visible_sequence = self.last_visible_seq.load(Ordering::Relaxed);
         let snapshot = snapshot.map_or(last_visible_sequence, |s| s.min(last_visible_sequence));
 
+        self.read_internal(collection, index, user_key, snapshot, None)
+    }
+
+    fn read_internal(
+        &self,
+        collection: u32,
+        index: u32,
+        user_key: &[u8],
+        snapshot: u64,
+        min_snapshot: Option<u64>
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+
         let lsm_tree = self.lsm_tree.load();
         lsm_tree.read(
             self.sst_cache.clone(),
             &self.db_dir,
             &encode_record_key(collection, index, user_key),
             snapshot,
-        )
+            min_snapshot,
+        ).into()
     }
 
     pub fn range_scan<R>(
@@ -601,14 +705,14 @@ impl StorageEngine {
 
     fn append_to_wal(
         writers: &Vec<Arc<Writer>>,
-        wal: &mut MutexGuard<WriteAheadLog>,
+        wal_and_manifest: &mut MutexGuard<WalAndManifest>,
         mut seq: u64,
     ) -> Result<Vec<(Arc<Writer>, u64)>> {
         let mut with_sequence = Vec::with_capacity(writers.len());
 
         for writer in writers {
             let batch = writer.batch();
-            wal.append(seq, batch)?;
+            wal_and_manifest.wal.append(seq, batch)?;
             with_sequence.push((writer.clone(), seq));
 
             seq += 1;
@@ -616,21 +720,20 @@ impl StorageEngine {
         Ok(with_sequence)
     }
 
-    pub fn shutdown(self: &Arc<Self>) -> Result<()> {
+    pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
         info!(self.logger, "Shutting down storage engine");
         self.flush()?;
         info!(self.logger, "Storage engine flush completed successfully");
         Ok(())
     }
 
-    pub fn flush(self: &Arc<Self>) -> Result<()> {
+    pub fn flush(self: &Arc<Self>) -> StorageResult<()> {
         info!(self.logger, "Flush requested");
         event!(self.logger, "requested_flush start");
 
         if self.error_mode.load(Ordering::Relaxed) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "The database is in error mode dues to a previous write error",
+            return Err(StorageError::ErrorMode(
+                "The database is in error mode dues to a previous write error".to_string(),
             ));
         }
 
@@ -675,12 +778,7 @@ impl StorageEngine {
     {
         // Rotate the write-ahead log file and the memtable
         // (through applying a WalRotation edit to the LSM tree and replacing it atomically)
-        let mut wal = self.write_ahead_log.lock().unwrap();
-
-        // We want to perform the changes within the manifest lock to avoid concurrent updates to
-        // the LSM tree. The order into which locks are acquired is important to avoid deadlocks
-        // with the writes. The wal lock must always be acquired before the manifest one.
-        let mut manifest = self.manifest.lock().unwrap();
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
         let lsm_tree = self.lsm_tree.load();
 
@@ -694,15 +792,14 @@ impl StorageEngine {
             // No need to perform a flush as the memtable is empty, we can just wait
             // for pending flushes before continuing. At this point, we do not really care if
             // another race with the sync so we can release the locks before performing the sync
-            drop(wal);
-            drop(manifest);
+            drop(wal_and_manifest);
 
             self.wait_for_pending_flushes()
 
         } else {
 
             let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
-            let rs = wal.rotate(new_log_number);
+            let rs = wal_and_manifest.wal.rotate(new_log_number);
             if rs .is_err() {
                 error!(self.logger, "An error occurred during wal rotation: {}", rs.as_ref().err().unwrap());
                 self.error_mode.store(true, Ordering::Relaxed);
@@ -711,11 +808,10 @@ impl StorageEngine {
 
             let edit = ManifestEdit::WalRotation {
                 log_number: new_log_number,
+                next_seq: self.next_seq_number.load(Ordering::Relaxed),
             };
 
-            let lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
-
-            drop(wal); // we can now release the wal lock and allow writes to it
+            let lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
 
             // We want to put the task within the flush queue, while still holding the lock,
             // to ensure ordering with other flushes.
@@ -740,7 +836,7 @@ impl StorageEngine {
 
             // Once the flush task within the flush manager queue, we can release
             // the manifest lock to schedule the flush.
-            drop(manifest);
+            drop(wal_and_manifest);
 
             if callback.is_blocking() {
                 callback.await_blocking()
@@ -783,7 +879,7 @@ impl StorageEngine {
                         );
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
-                        let mut manifest = self.manifest.lock().unwrap();
+                        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
                         let lsm_tree = self.lsm_tree.load();
                         let oldest_log_number = lsm_tree.next_log_number_after(log_number);
@@ -792,11 +888,13 @@ impl StorageEngine {
                             oldest_log_number,
                             sst: flushed,
                         };
-                        let _lsm_tree = self.append_edit(&lsm_tree, &mut manifest, &edit)?;
+                        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
 
-                        drop(manifest); // we do not the manifest lock for deleting obsolete log files
+                        let obsolete_log_files = wal_and_manifest.wal.drain_obsolete_logs(oldest_log_number)?;
 
-                        self.delete_obsolete_log_files(oldest_log_number)?;
+                        drop(wal_and_manifest); // we do not need the manifest lock for deleting obsolete log files
+
+                        self.delete_obsolete_log_files(obsolete_log_files)?;
                     }
                     SSTableOperation::Compaction { added: _, removed: _ } => {}
                 }
@@ -806,13 +904,7 @@ impl StorageEngine {
         }
     }
 
-    fn delete_obsolete_log_files(self: &Arc<Self>, oldest_log_number: u64) -> Result<()> {
-        let obsolete_log_files = self
-            .write_ahead_log
-            .lock()
-            .unwrap()
-            .drain_obsolete_logs(oldest_log_number)?;
-
+    fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {
         for obsolete in obsolete_log_files {
             debug!(self.logger, "Deleting obsolete log file: {}", obsolete.to_string_lossy());
             remove_file(obsolete)?;
@@ -824,9 +916,10 @@ impl StorageEngine {
     fn append_edit(
         self: &Arc<Self>,
         lsm_tree: &LsmTree,
-        manifest: &mut MutexGuard<Manifest>,
+        wal_and_manifest: &mut MutexGuard<WalAndManifest>,
         edit: &ManifestEdit,
     ) -> Result<Arc<LsmTree>> {
+        let manifest = &mut wal_and_manifest.manifest;
         let rs = manifest.append_edit(&edit);
 
         if rs.is_err() {
@@ -861,11 +954,11 @@ impl StorageEngine {
         Ok(new_tree)
     }
 
-    fn handle_write_error(&self, error: &Error, writers: &Vec<Arc<Writer>>) {
+    fn handle_write_error(&self, error: &StorageError, writers: &Vec<Arc<Writer>>) {
         self.error_mode.store(true, Ordering::Relaxed);
         error!(self.logger, "A write error occurred: {}", error);
         for writer in writers {
-            writer.done(Err(Error::new(error.kind(), error.to_string())));
+            writer.done(Err(error.clone()));
         }
         event!(self.logger, "write done");
     }
@@ -929,29 +1022,36 @@ impl StorageEngine {
 
     #[cfg(test)]
     pub fn wal_return_error_on_write(&self, value: bool) {
-        self.write_ahead_log.lock().unwrap().return_error_on_append(value);
+        self.db_mutex.lock().unwrap().wal.return_error_on_append(value);
     }
 
     #[cfg(test)]
     pub fn manifest_return_error_on_write(&self, value: bool) {
-        self.manifest.lock().unwrap().return_error_on_append(value);
+        self.db_mutex.lock().unwrap().manifest.return_error_on_append(value);
     }
 
     #[cfg(test)]
     pub fn wal_return_error_on_rotate(&self, value: bool) {
-        self.write_ahead_log.lock().unwrap().return_error_on_rotate(value);
+        self.db_mutex.lock().unwrap().wal.return_error_on_rotate(value);
     }
 
     #[cfg(test)]
     pub fn manifest_return_error_on_rotate(&self, value: bool) {
-        self.manifest.lock().unwrap().return_error_on_rotate(value);
+        self.db_mutex.lock().unwrap().manifest.return_error_on_rotate(value);
     }
 
     #[cfg(test)]
     pub fn lsm_tree(&self) -> Arc<LsmTree> {
         self.lsm_tree.load_full()
     }
+
+    #[cfg(test)]
+    pub fn fail_next_precondition_checks(&self, count: u8) {
+        let _ = self.fail_next_precondition_checks.store(count, Ordering::Relaxed);
+    }
 }
+
+
 
 /// The result of scanning the database directory at startup.
 ///
@@ -992,7 +1092,7 @@ struct StartupScanResult {
 /// # Errors
 ///
 /// Returns an error if the directory can't be read.
-fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanResult> {
+fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> StorageResult<StartupScanResult> {
     let mut wal_files = Vec::new();
     let mut obsolete_wal_files = Vec::new();
     let mut max_file_num = 0;
@@ -1026,7 +1126,7 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> Result<StartupScanRe
 #[allow(dead_code)]
 struct Writer {
     write_batch: WriteBatch,
-    result: Mutex<Option<Result<()>>>,
+    result: Mutex<Option<StorageResult<()>>>,
     condvar: Condvar,
 }
 
@@ -1043,7 +1143,7 @@ impl Writer {
         &self.write_batch
     }
 
-    fn wait(&self) -> Result<()> {
+    fn wait(&self) -> StorageResult<()> {
         let mut result = self.result.lock().unwrap();
         while result.is_none() {
             result = self.condvar.wait(result).unwrap();
@@ -1051,20 +1151,20 @@ impl Writer {
         Self::copy(result).unwrap()
     }
 
-    fn result(&self) -> Result<()> {
+    fn result(&self) -> StorageResult<()> {
         Self::copy(self.result.lock().unwrap())
-            .unwrap_or_else(|| Err(Error::new(ErrorKind::Other, "No result available")))
+            .unwrap_or_else(|| Err(StorageError::UnexpectedError("No result available".to_string())))
     }
-    fn done(&self, res: Result<()>) {
+    fn done(&self, res: StorageResult<()>) {
         let mut result = self.result.lock().unwrap();
         *result = Some(res);
         self.condvar.notify_one();
     }
 
-    fn copy(result: MutexGuard<Option<Result<()>>>) -> Option<Result<()>> {
+    fn copy(result: MutexGuard<Option<StorageResult<()>>>) -> Option<StorageResult<()>> {
         match &*result {
             Some(Ok(())) => Some(Ok(())), // Return Ok if present
-            Some(Err(e)) => Some(Err(Error::new(e.kind(), e.to_string()))), // Recreate the error
+            Some(Err(e)) => Some(Err(e.clone())), // Recreate the error
             None => None,
         }
     }
@@ -1094,6 +1194,75 @@ impl Iterator for RangeScanIterator {
     }
 }
 
+#[derive(Debug)]
+pub enum StorageError {
+    Io(Error),
+    UnexpectedError(String),
+    ErrorMode(String),
+    VersionConflict{ user_key: Vec<u8>, reason: String },
+    LogCorruption { record_offset: u64, reason: String },
+}
+
+impl StorageError {
+    pub fn as_io_error(&self) -> Option<&Error> {
+        match self {
+            StorageError::Io(ref e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<Error> for StorageError {
+    fn from(err: Error) -> Self {
+        StorageError::Io(err)
+    }
+}
+
+impl From<LogReplayError> for StorageError {
+    fn from(err: LogReplayError) -> Self {
+        match err {
+            LogReplayError::Io(e) => StorageError::Io(e),
+            LogReplayError::Corruption { record_offset, reason } => {
+                StorageError::LogCorruption { record_offset, reason }
+            }
+        }
+    }
+}
+
+impl Clone for StorageError {
+    fn clone(&self) -> Self {
+        match self {
+            StorageError::Io(e) => StorageError::Io(Error::new(e.kind(), e.to_string())),
+            StorageError::UnexpectedError(msg) => StorageError::UnexpectedError(msg.clone()),
+            StorageError::ErrorMode(msg) => StorageError::ErrorMode(msg.clone()),
+            StorageError::VersionConflict { user_key, reason} =>
+                StorageError::VersionConflict{ user_key: user_key.clone(), reason: reason.clone() },
+            StorageError::LogCorruption { record_offset, reason } =>
+                StorageError::LogCorruption {
+                    record_offset: *record_offset,
+                    reason: reason.clone()
+                },
+        }
+    }
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Io(e) => write!(f, "IO error: {}", e),
+            StorageError::UnexpectedError(msg) => write!(f, "Unexpected error: {}", msg),
+            StorageError::ErrorMode(msg) => write!(f, "Error mode: {}", msg),
+            StorageError::VersionConflict { user_key, reason} =>
+                write!(f, "Version conflict for user_key {:?} : {}", user_key, reason),
+            StorageError::LogCorruption { record_offset, reason } => {
+                write!(f, "Log corruption at offset {}: {}", record_offset, reason)
+            }
+        }
+    }
+}
+
+pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,9 +1272,10 @@ mod tests {
     use crate::options::storage_quantity::StorageUnit::Mebibytes;
     use crate::storage::operation::Operation;
     use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key};
+    use crate::storage::write_batch::{Precondition, Preconditions};
     use bson::{doc, to_vec};
     use std::fs::{self, OpenOptions};
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{ErrorKind, Seek, SeekFrom, Write};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -1743,7 +1913,7 @@ mod tests {
             if rs.is_err() {
                 assert_eq!(
                     rs.err().unwrap().to_string(),
-                    "Injected error on rotate",
+                    "IO error: Injected error on rotate",
                 );
                 break;
             }
@@ -2246,8 +2416,7 @@ mod tests {
         // Restart should fail because an old (non-terminal) WAL is corrupted.
         assert!(result.is_err());
         let error = result.err().unwrap();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        assert!(error.to_string().contains("Corruption at offset"));
+        assert!(matches!(error, StorageError::LogCorruption { .. }));
     }
 
     #[test]
@@ -2346,12 +2515,13 @@ mod tests {
         // 1. Inject an error into the WAL write path.
         engine.wal_return_error_on_write(true);
 
-        // 2. Perform a write that is expected to fail.
+        // 2. Perform a write operation that is expected to fail.
         let write_result = engine.write(WriteBatch::new(vec![put_op(col, 1, 1)]));
         assert!(write_result.is_err());
         let error = write_result.err().unwrap();
-        assert_eq!(error.kind(), ErrorKind::Other);
-        assert!(error.to_string().contains("Injected error on append"));
+        let io_error = error.as_io_error().unwrap();
+        assert_eq!(io_error.kind(), ErrorKind::Other);
+        assert!(io_error.to_string().contains("Injected error on append"));
 
         // 3. Disable error injection to ensure subsequent failures are due to error_mode.
         engine.wal_return_error_on_write(false);
@@ -2397,7 +2567,7 @@ mod tests {
             if rs.is_err() {
                 assert_eq!(
                     rs.err().unwrap().to_string(),
-                    "Injected error on rotate",
+                    "IO error: Injected error on rotate",
                 );
                 break;
             }
@@ -2442,7 +2612,7 @@ mod tests {
         if rs.is_err() {
             assert_eq!(
                     rs.err().unwrap().to_string(),
-                    "Injected error on rotate",
+                    "IO error: Injected error on rotate",
                 );
         }
 
@@ -2485,7 +2655,7 @@ mod tests {
         if rs.is_err() {
             assert_eq!(
                     rs.err().unwrap().to_string(),
-                    "Injected error on append",
+                    "IO error: Injected error on append",
                 );
         }
 
@@ -2528,7 +2698,7 @@ mod tests {
         if rs.is_err() {
             assert_eq!(
                     rs.err().unwrap().to_string(),
-                    "Simulated memtable flush error",
+                    "IO error: Simulated memtable flush error",
                 );
         }
 
@@ -2539,7 +2709,7 @@ mod tests {
     }
 
     fn check_error_mode(engine: Arc<StorageEngine>, col: u32) {
-        let expected_error_msg = "The database is in error mode dues to a previous write error";
+        let expected_error_msg = "Error mode: The database is in error mode dues to a previous write error";
 
         // Test write
         let write_result_after_error = engine.write(WriteBatch::new(vec![put_op(col, 2, 2)]));
@@ -2561,5 +2731,82 @@ mod tests {
             create_coll_result.err().unwrap().to_string(),
             expected_error_msg
         );
+    }
+
+    #[test]
+    fn test_optimistic_locking_must_not_exist() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        let col = 10;
+        let idx = 0;
+
+        // 1. Write key1.
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+            .unwrap();
+
+        // 2. Take a snapshot after key1 is written.
+        let snapshot1 = engine.last_visible_sequence();
+
+        // 3. Write key2.
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 2, 1)]))
+            .unwrap();
+
+        // 4. Try to write key2 again with a precondition based on the old snapshot.
+        // This should fail because key2 was created *after* snapshot1.
+        let precondition = Precondition::MustNotExist {
+            collection: col,
+            index: idx,
+            user_key: user_key(2),
+        };
+        let preconditions = Preconditions::new(snapshot1, vec![precondition]);
+        let batch = WriteBatch::new_with_preconditions(vec![put_op(col, 2, 2)], preconditions);
+        let result = engine.write(batch);
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err
+            .to_string()
+            .contains("Optimistic locking failed: key for collection 10 index 0 user_key"));
+
+        // 5. Take a new snapshot and try to write a new key. This should succeed.
+        let snapshot2 = engine.last_visible_sequence();
+        let precondition_ok = Precondition::MustNotExist {
+            collection: col,
+            index: idx,
+            user_key: user_key(3),
+        };
+        let preconditions_ok = Preconditions::new(snapshot2, vec![precondition_ok]);
+        let batch_ok =
+            WriteBatch::new_with_preconditions(vec![put_op(col, 3, 1)], preconditions_ok);
+        engine.write(batch_ok).unwrap();
+
+        // 6. Try to write an existing key (key1) again. This should fail because the key
+        // already exists, and the `read_since` check will find it.
+        let precondition_fail = Precondition::MustNotExist {
+            collection: col,
+            index: idx,
+            user_key: user_key(1),
+        };
+        let preconditions_fail = Preconditions::new(0, vec![precondition_fail]);
+        let batch_fail =
+            WriteBatch::new_with_preconditions(vec![put_op(col, 1, 2)], preconditions_fail);
+        let result_fail = engine.write(batch_fail);
+        println!("Result fail: {:?}", result_fail);
+        assert!(result_fail.is_err());
+        let err_fail = result_fail.err().unwrap();
+        assert!(err_fail
+            .to_string()
+            .contains("Optimistic locking failed: key for collection 10 index 0 user_key"));
     }
 }

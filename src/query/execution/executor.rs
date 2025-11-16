@@ -1,19 +1,22 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::query::execution::{filters, projections, sorts, updates};
 use crate::storage::Direction;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
-use crate::storage::storage_engine::StorageEngine;
-use crate::storage::write_batch::WriteBatch;
+use crate::storage::storage_engine::{StorageEngine, StorageError};
+use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
 use bson::{doc, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex};
+use crate::query::update::UpdateExpr;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -34,100 +37,349 @@ impl QueryExecutor {
 
     pub fn execute_direct(&self, plan: PhysicalPlan, parameters: Option<Parameters>) -> Result<QueryOutput> {
         match plan {
-            PhysicalPlan::InsertMany {
-                collection,
-                documents,
-            } => {
-                let mut operations = Vec::with_capacity(documents.len());
-                let mut ids = Vec::with_capacity(documents.len());
-                for mut doc in documents {
-
-                    let id = self.prepend_id_if_needed(&mut doc)?;
-                    ids.push(id.clone());
-                    // Convert the BSON _id to a key
-                    let user_key = id.try_into_key()?;
-
-                    operations.push(Operation::new_put(collection, 0, user_key, doc));
-                }
-
-                let batch = WriteBatch::new(operations);
-                self.storage_engine.write(batch)?;
-
-                let result = doc! { "inserted_ids": ids.into_iter().map(Bson::from).collect::<Vec<_>>() };
-
-                Ok(Box::new(std::iter::once(Ok(result))))
+            PhysicalPlan::InsertMany { collection, documents, } => {
+                self.perform_insert_many(collection, documents)
             }
-            PhysicalPlan::InsertOne {
-                collection,
-                document,
-            } => {
-                let mut doc = document;
-                let id = self.prepend_id_if_needed(&mut doc)?;
-                // Convert the BSON _id to a key
-                let user_key = id.try_into_key()?;
-
-                let operation = Operation::new_put(collection, 0, user_key, doc);
-                self.storage_engine.write(WriteBatch::new(vec!(operation)))?;
-
-                let result = doc! { "inserted_id": id };
-
-                Ok(Box::new(std::iter::once(Ok(result))))
+            PhysicalPlan::InsertOne { collection, document, } => {
+                self.perform_insert_one(collection, document)
             }
             PhysicalPlan::UpdateOne { collection, query, update } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateOne");
 
-                let mut iter = self.execute_cached(query, &parameters)?;
-
-                let updater = updates::to_updater(&update)?;
-
-                if let Some(doc) = iter.next() {
-                    let new_doc =  updater(doc?)?;
-
-                    let user_key = new_doc.get("_id").unwrap().try_into_key()?;
-
-                    let operation = Operation::new_put(collection, 0, user_key, bson::to_vec(&new_doc)?);
-                    self.storage_engine.write(WriteBatch::new(vec!(operation)))?;
-
-                    let result = doc! { "matched_count": 1, "modified_count": 1 };
-                    Ok(Box::new(std::iter::once(Ok(result))))
-                } else {
-                    let result = doc! { "matched_count": 0, "modified_count": 0 };
-                    Ok(Box::new(std::iter::once(Ok(result))))
-                }
+                self.perform_update_one(collection, query, &update, &parameters)
             }
             PhysicalPlan::UpdateMany { collection, query, update } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateMany");
 
-                let iter = self.execute_cached(query, &parameters)?;
-
-                let updater = updates::to_updater(&update)?;
-
-                let mut operations = Vec::new();
-                let mut matched_count = 0;
-                let mut modified_count = 0;
-
-                for doc in iter {
-                    matched_count += 1;
-                    let new_doc = updater(doc?)?;
-
-                    let user_key = new_doc.get("_id").unwrap().try_into_key()?;
-
-                    operations.push(Operation::new_put(collection, 0, user_key, bson::to_vec(&new_doc)?));
-                    modified_count += 1;
-                }
-
-                if !operations.is_empty() {
-                    self.storage_engine.write(WriteBatch::new(operations))?;
-                }
-
-                let result = doc! { "matched_count": matched_count, "modified_count": modified_count };
-                Ok(Box::new(std::iter::once(Ok(result))))
+                self.perform_update_many(collection, query, &update, &parameters)
             }
             _ => {
                 // Other plans, should be cached
                 panic!("Direct execution not supported for plan: {:?}", plan);
             }
         }
+    }
+
+    /// Executes the given physical plan using the latest visible data.
+    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: &Parameters) -> Result<QueryOutput> {
+        self.execute_cached_at_snapshot(plan, parameters, None)
+    }
+
+    /// Executes a query plan against a specific data snapshot.
+    /// If `snapshot` is `None`, it uses the latest visible data.
+    pub fn execute_cached_at_snapshot(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+        snapshot: Option<u64>,
+    ) -> Result<QueryOutput> {
+        match plan.as_ref() {
+            PhysicalPlan::CollectionScan {
+                collection,
+                range,
+                direction,
+                filter,
+                projection: _, // Projection pushdown is not yet supported at this level
+            } => {
+                self.perform_collection_scan(&parameters, snapshot, collection, range, direction, filter)
+            }
+            PhysicalPlan::PointSearch {
+                collection,
+                key,
+                filter,
+                projection: _,
+            } => {
+                self.perform_point_search(&parameters, snapshot, collection, key, filter)
+            }
+            PhysicalPlan::IndexScan {
+                collection: _,
+                index: _,
+                range: _,
+                filter: _,
+                projection: _,
+            } => {
+                todo!()
+            }
+            PhysicalPlan::MultiPointSearch {
+                collection,
+                keys,
+                direction,
+                filter,
+                projection: _,
+            } => {
+                self.perform_multi_point_search(&parameters, snapshot, collection, keys, direction, filter)
+            }
+            PhysicalPlan::Filter { input, predicate } => {
+                let filter = filters::to_filter(predicate.clone(), &parameters);
+                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                Ok(Box::new(input_iter.filter(move |res| {
+                    if res.is_err() { true } else { filter(res.as_ref().unwrap()) }
+                })))
+            }
+            PhysicalPlan::Projection { input, projection } => {
+                let projector = projections::to_projector(projection, &parameters)?;
+                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                Ok(Box::new(input_iter.map(move |res| {
+                    res.and_then(|doc| projector(doc))
+                })))
+            }
+            PhysicalPlan::InMemorySort {
+                input,
+                sort_fields,
+            } => {
+                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                sorts::in_memory_sort(input_iter, &sort_fields)
+            }
+            PhysicalPlan::ExternalMergeSort {
+                input,
+                sort_fields,
+                max_in_memory_rows,
+            } => {
+                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                sorts::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
+            }
+            PhysicalPlan::TopKHeapSort {
+                input,
+                sort_fields,
+                k,
+            } => {
+                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
+            }
+            PhysicalPlan::Limit {
+                input,
+                skip,
+                limit,
+            } => {
+                let mut iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                if let Some(s) = skip {
+                    iter = Box::new(iter.skip(*s));
+                }
+                if let Some(l) = limit {
+                    iter = Box::new(iter.take(*l));
+                }
+                Ok(iter)
+            }
+            _ => {
+                panic!("Non-parametrized physical plan: {:?}", plan);
+            }
+        }
+    }
+
+    fn perform_update_many(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        update: &UpdateExpr,
+        parameters: &Parameters,
+    ) -> Result<QueryOutput> {
+        let updater = updates::to_updater(&update)?;
+
+        let snapshot = self.storage_engine.last_visible_sequence();
+        let iter =
+            self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
+
+        let mut operations = Vec::new();
+        let mut preconditions = Vec::new();
+        let mut matched_count = 0;
+        let mut modified_count = 0;
+
+        for doc_result in iter {
+            let doc = doc_result?;
+            matched_count += 1;
+            let new_doc = updater(doc)?;
+
+            let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+
+            operations.push(Operation::new_put(
+                collection,
+                0,
+                user_key.clone(),
+                bson::to_vec(&new_doc)?,
+            ));
+            preconditions.push(Precondition::MustNotExist {
+                collection,
+                index: 0,
+                user_key,
+            });
+            modified_count += 1;
+        }
+
+        if operations.is_empty() {
+            let result = doc! { "matched_count": matched_count, "modified_count": 0 };
+            return Ok(Box::new(std::iter::once(Ok(result))));
+        }
+
+        let batch = WriteBatch::new_with_preconditions(
+            operations,
+            Preconditions::new(snapshot, preconditions),
+        );
+        self.storage_engine.write(batch)?;
+
+        let result = doc! { "matched_count": matched_count, "modified_count": modified_count };
+        Ok(Box::new(std::iter::once(Ok(result))))
+    }
+
+    fn perform_update_one(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        update: &UpdateExpr,
+        parameters: &Parameters,
+    ) -> Result<QueryOutput> {
+        const MAX_RETRY_DURATION: Duration = Duration::from_secs(5);
+        let start_time = Instant::now();
+        let mut attempt = 0;
+
+        let updater = updates::to_updater(&update)?;
+
+        loop {
+            let snapshot = self.storage_engine.last_visible_sequence();
+            let mut iter =
+                self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
+
+            let result_doc = if let Some(doc_result) = iter.next() {
+                let doc = doc_result?;
+                let new_doc = updater(doc)?;
+
+                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+
+                let operation = Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    bson::to_vec(&new_doc)?,
+                );
+
+                let precondition = Precondition::MustNotExist {
+                    collection,
+                    index: 0,
+                    user_key,
+                };
+
+                let preconditions = Preconditions::new(snapshot, vec![precondition]);
+                let write_batch =
+                    WriteBatch::new_with_preconditions(vec![operation], preconditions);
+
+                match self.storage_engine.write(write_batch) {
+                    Ok(_) => doc! { "matched_count": 1, "modified_count": 1 },
+                    Err(e @ StorageError::VersionConflict { .. }) => {
+                        if start_time.elapsed() >= MAX_RETRY_DURATION {
+                            return Err(e.into());
+                        }
+                        std::thread::sleep(calculate_backoff(attempt));
+                        attempt += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            } else {
+                doc! { "matched_count": 0, "modified_count": 0 }
+            };
+
+            return Ok(Box::new(std::iter::once(Ok(result_doc))));
+        }
+    }
+
+    fn perform_insert_one(&self, collection: u32, document: Vec<u8>) -> Result<QueryOutput> {
+        let mut doc = document;
+        let id = self.prepend_id_if_needed(&mut doc)?;
+        let user_key = id.try_into_key()?;
+
+        let snapshot = self.storage_engine.last_visible_sequence();
+
+        // check for duplicate key.
+        if self.storage_engine.read(collection, 0, &user_key, None)?.is_some() {
+            return Err(Self::duplicate_key_error(&id));
+        }
+
+        let operation = Operation::new_put(collection, 0, user_key.clone(), doc);
+        let precondition = Precondition::MustNotExist {
+            collection,
+            index: 0,
+            user_key,
+        };
+        let preconditions = Preconditions::new(
+            snapshot,
+            vec![precondition],
+        );
+        let batch =
+            WriteBatch::new_with_preconditions(vec![operation], preconditions);
+
+        self.storage_engine.write(batch).map_err(|e| match e {
+            StorageError::VersionConflict { .. } => Self::duplicate_key_error(&id),
+            _ => e.into(),
+        })?;
+
+        Ok(Box::new(std::iter::once(Ok(doc! { "inserted_id": id }))))
+    }
+
+    fn perform_insert_many(&self, collection: u32, documents: Vec<Vec<u8>>) -> Result<QueryOutput> {
+        if documents.is_empty() {
+            return Ok(Box::new(std::iter::once(Ok(
+                doc! { "inserted_ids": Bson::Array(vec![]) },
+            ))));
+        }
+
+        let mut documents_with_ids: Vec<(Vec<u8>, Bson, Vec<u8>)> =
+            Vec::with_capacity(documents.len());
+
+        // generate IDs and prepare data.
+        for mut doc in documents {
+            let id = self.prepend_id_if_needed(&mut doc)?;
+            let user_key = id.try_into_key()?;
+            documents_with_ids.push((doc, id, user_key));
+        }
+
+        let snapshot = self.storage_engine.last_visible_sequence();
+
+        // checks for duplicates (both within the batch and against storage).
+        // This mimics `ordered: true` behavior, failing on the first error.
+        let mut seen_keys = HashMap::new();
+        for (_, id, user_key) in &documents_with_ids {
+            if seen_keys.insert(user_key.clone(), id.clone()).is_some()
+                || self.storage_engine.read(collection, 0, user_key, Some(snapshot))?.is_some() {
+                return Err(Self::duplicate_key_error(id));
+            }
+        }
+
+        // build operations if all checks passed.
+        let mut operations = Vec::with_capacity(documents_with_ids.len());
+        let mut preconditions = Vec::with_capacity(documents_with_ids.len());
+        let mut ids = Vec::with_capacity(documents_with_ids.len());
+        for (doc, id, user_key) in documents_with_ids {
+            ids.push(id);
+            preconditions.push(Precondition::MustNotExist {
+                collection,
+                index: 0,
+                user_key: user_key.clone(),
+            });
+            operations.push(Operation::new_put(collection, 0, user_key, doc));
+        }
+
+        let preconditions = Preconditions::new(snapshot, preconditions);
+        let batch = WriteBatch::new_with_preconditions(operations, preconditions);
+        if let Err(e) = self.storage_engine.write(batch) {
+            match e {
+                StorageError::VersionConflict { user_key: conflicting_key, .. } => {
+                    // A key was inserted concurrently.
+                    let id = seen_keys.get(&conflicting_key).unwrap();
+                    Err(Self::duplicate_key_error(&id))
+                }
+                _ => Err(e.into()),
+            }
+        } else {
+            let result =
+                doc! { "inserted_ids": ids.into_iter().map(Bson::from).collect::<Vec<_>>() };
+            Ok(Box::new(std::iter::once(Ok(result))))
+        }
+    }
+
+    fn duplicate_key_error(id: &Bson) -> Error {
+        Error::InvalidRequest(format!(
+            "Duplicate key error. dup key: {{ _id: {} }}",
+            id
+        ))
     }
 
     /// Ensures that each document has an `_id` field, prepending it if necessary.
@@ -146,229 +398,169 @@ impl QueryExecutor {
         Ok(id)
     }
 
-    /// Executes the given physical plan.
-    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: &Parameters) -> Result<QueryOutput> {
-        match plan.as_ref() {
-            PhysicalPlan::CollectionScan {
-                collection,
-                range,
-                direction,
-                filter,
-                projection: _, // Projection pushdown is not yet supported at this level
-            } => {
-                let range = Self::bind_key_range_parameters(range, &parameters)?;
+    fn perform_multi_point_search(&self,
+                                  parameters: &Parameters,
+                                  snapshot: Option<u64>,
+                                  collection: &u32,
+                                  keys: &Arc<Expr>,
+                                  direction: &Direction,
+                                  filter: &Option<Arc<Expr>>
+    ) -> Result<QueryOutput> {
 
-                // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
-                let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+        let filter = filter
+            .clone()
+            .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
 
-                Ok(Box::new(self.storage_engine.range_scan(
-                    *collection,
-                    0, // This is table scan so index is 0
-                    &range,
-                    None,
-                    direction.clone(),
-                )?.filter_map(move |res| {
-                    let doc = match res {
-                        Ok((k, v)) => {
-                            let op = extract_operation_type(&k);
-                            match op {
-                                OperationType::Delete => return None,
-                                OperationType::Put => {
-                                    // Deserialize the value into a Document
-                                    let doc = Document::from_reader(Cursor::new(v));
-                                    match doc {
-                                        Err(e) => return Some(Err(e.into())),
-                                        Ok(doc) => doc
+        let keys_values = Self::bind_parameter(keys, &parameters);
+        let keys_array = if let BsonValue(Bson::Array(arr)) = keys_values {
+            arr
+        } else {
+            panic!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
+        };
+
+        let mut keys_as_bson_values: Vec<BsonValue> =
+            keys_array.into_iter().map(BsonValue).collect();
+
+        // Sort keys to ensure consistent order for storage engine lookups
+        keys_as_bson_values.sort();
+
+        let key_iterator: Box<dyn Iterator<Item=BsonValue>> =
+            if *direction == Direction::Reverse {
+                Box::new(keys_as_bson_values.into_iter().rev())
+            } else {
+                Box::new(keys_as_bson_values.into_iter())
+            };
+
+        let storage_engine = self.storage_engine.clone();
+        let collection = *collection;
+
+        let iter = key_iterator.filter_map(move |key| match key.try_into_key() {
+            Ok(storage_key) => {
+                match storage_engine.read(collection, 0, &storage_key, snapshot) {
+                    Ok(Some((k, v))) => {
+                        let op = extract_operation_type(&k);
+                        if op == OperationType::Put {
+                            match Document::from_reader(Cursor::new(v)) {
+                                Ok(doc) => {
+                                    if filter.as_ref().map_or(true, |f| f(&doc)) {
+                                        Some(Ok(doc))
+                                    } else {
+                                        None
                                     }
-                                },
-                                _ => panic!("Unexpected operation type: {:?}", op),
+                                }
+                                Err(e) => Some(Err(e.into())),
                             }
+                        } else {
+                            None // Deleted
                         }
-                        Err(e) => return Some(Err(e.into())),
-                    };
+                    }
+                    Ok(None) => None, // Not found
+                    Err(e) => Some(Err(e.into())),
+                }
+            }
+            Err(e) => Some(Err(e.into())),
+        });
 
-                    match &filter {
-                        Some(filter) => {
-                            if filter(&doc) {
-                                Some(Ok(doc))
-                            } else {
-                                None
+        Ok(Box::new(iter))
+    }
+
+    fn perform_point_search(&self,
+                            parameters: &Parameters,
+                            snapshot: Option<u64>,
+                            collection: &u32,
+                            key: &Arc<Expr>,
+                            filter: &Option<Arc<Expr>>
+    ) -> Result<QueryOutput> {
+
+        // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
+        let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+
+        let key = Self::bind_key_parameter(key, &parameters)?;
+        let result = self.storage_engine.read(*collection, 0, &key, snapshot)?;
+        let iter: QueryOutput = match result {
+            Some((k, v)) => {
+                let op = extract_operation_type(&k);
+                match op {
+                    OperationType::Delete => Box::new(std::iter::empty()),
+                    OperationType::Put => {
+                        let result = Document::from_reader(Cursor::new(v));
+
+                        if result.is_err() {
+                            return Ok(Box::new(std::iter::once(result.map_err(|e| e.into()))));
+                        }
+
+                        let doc = result?;
+
+                        match &filter {
+                            Some(filter) => {
+                                if filter(&doc) {
+                                    Box::new(std::iter::once(Ok(doc)))
+                                } else {
+                                    Box::new(std::iter::empty())
+                                }
+                            },
+                            None => Box::new(std::iter::once(Ok(doc)))
+                        }
+                    }
+                    _ => panic!("Unexpected operation type: {:?}", op),
+                }
+            }
+            None => Box::new(std::iter::empty()),
+        };
+        Ok(iter)
+    }
+
+    fn perform_collection_scan(&self,
+                               parameters: &Parameters,
+                               snapshot: Option<u64>,
+                               collection: &u32,
+                               range: &Interval<Arc<Expr>>,
+                               direction: &Direction,
+                               filter: &Option<Arc<Expr>>
+    ) -> Result<QueryOutput> {
+
+        let range = Self::bind_key_range_parameters(range, &parameters)?;
+
+        // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
+        let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+
+        Ok(Box::new(self.storage_engine.range_scan(
+            *collection,
+            0, // This is table scan so index is 0
+            &range,
+            snapshot,
+            direction.clone(),
+        )?.filter_map(move |res| {
+            let doc = match res {
+                Ok((k, v)) => {
+                    let op = extract_operation_type(&k);
+                    match op {
+                        OperationType::Delete => return None,
+                        OperationType::Put => {
+                            // Deserialize the value into a Document
+                            let doc = Document::from_reader(Cursor::new(v));
+                            match doc {
+                                Err(e) => return Some(Err(e.into())),
+                                Ok(doc) => doc
                             }
                         },
-                        None => Some(Ok(doc))
+                        _ => panic!("Unexpected operation type: {:?}", op),
                     }
-                })))
-            }
-            PhysicalPlan::PointSearch {
-                collection,
-                key,
-                filter,
-                projection: _,
-            } => {
-                // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
-                let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+                }
+                Err(e) => return Some(Err(e.into())),
+            };
 
-                let key = Self::bind_key_parameter(key, &parameters)?;
-                let result = self.storage_engine.read(*collection, 0, &key, None)?;
-                let iter: QueryOutput = match result {
-                    Some((k, v)) => {
-                        let op = extract_operation_type(&k);
-                        match op {
-                            OperationType::Delete => Box::new(std::iter::empty()),
-                            OperationType::Put => {
-                                let result = Document::from_reader(Cursor::new(v));
-
-                                if result.is_err() {
-                                    return Ok(Box::new(std::iter::once(result.map_err(|e| e.into()))));
-                                }
-
-                                let doc = result?;
-
-                                match &filter {
-                                    Some(filter) => {
-                                        if filter(&doc) {
-                                            Box::new(std::iter::once(Ok(doc)))
-                                        } else {
-                                            Box::new(std::iter::empty())
-                                        }
-                                    },
-                                    None =>  Box::new(std::iter::once(Ok(doc)))
-                                }
-                             }
-                            _ => panic!("Unexpected operation type: {:?}", op),
-                        }
-                    }
-                    None => Box::new(std::iter::empty()),
-                };
-                Ok(iter)
-            }
-            PhysicalPlan::IndexScan {
-                collection: _,
-                index: _,
-                range: _,
-                filter: _,
-                projection: _,
-            } => {
-                todo!()
-            }
-            PhysicalPlan::MultiPointSearch {
-                collection,
-                keys,
-                direction,
-                filter,
-                projection: _,
-            } => {
-                let filter = filter
-                    .clone()
-                    .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
-
-                let keys_values = Self::bind_parameter(keys, &parameters);
-                let keys_array = if let BsonValue(Bson::Array(arr)) = keys_values {
-                    arr
-                } else {
-                    panic!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
-                };
-
-                let mut keys_as_bson_values: Vec<BsonValue> =
-                    keys_array.into_iter().map(BsonValue).collect();
-
-                // Sort keys to ensure consistent order for storage engine lookups
-                keys_as_bson_values.sort();
-
-                let key_iterator: Box<dyn Iterator<Item = BsonValue>> =
-                    if *direction == Direction::Reverse {
-                        Box::new(keys_as_bson_values.into_iter().rev())
+            match &filter {
+                Some(filter) => {
+                    if filter(&doc) {
+                        Some(Ok(doc))
                     } else {
-                        Box::new(keys_as_bson_values.into_iter())
-                    };
-
-                let storage_engine = self.storage_engine.clone();
-                let collection = *collection;
-
-                let iter = key_iterator.filter_map(move |key| match key.try_into_key() {
-                    Ok(storage_key) => {
-                        match storage_engine.read(collection, 0, &storage_key, None) {
-                            Ok(Some((k, v))) => {
-                                let op = extract_operation_type(&k);
-                                if op == OperationType::Put {
-                                    match Document::from_reader(Cursor::new(v)) {
-                                        Ok(doc) => {
-                                            if filter.as_ref().map_or(true, |f| f(&doc)) {
-                                                Some(Ok(doc))
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        Err(e) => Some(Err(e.into())),
-                                    }
-                                } else {
-                                    None // Deleted
-                                }
-                            }
-                            Ok(None) => None, // Not found
-                            Err(e) => Some(Err(e.into())),
-                        }
+                        None
                     }
-                    Err(e) => Some(Err(e.into())),
-                });
-
-                Ok(Box::new(iter))
+                },
+                None => Some(Ok(doc))
             }
-            PhysicalPlan::Filter { input, predicate } => {
-                let filter = filters::to_filter(predicate.clone(), &parameters);
-                let input_iter = self.execute_cached(input.clone(), parameters)?;
-                Ok(Box::new(input_iter.filter(move |res| {
-                    if res.is_err() { true } else { filter(res.as_ref().unwrap()) }
-                })))
-            }
-            PhysicalPlan::Projection { input, projection } => {
-                let projector = projections::to_projector(projection, &parameters)?;
-                let input_iter = self.execute_cached(input.clone(), parameters)?;
-                Ok(Box::new(input_iter.map(move |res| {
-                    res.and_then(|doc| projector(doc))
-                })))
-            }
-            PhysicalPlan::InMemorySort {
-                input,
-                sort_fields,
-            } => {
-                let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sorts::in_memory_sort(input_iter, &sort_fields)
-            }
-            PhysicalPlan::ExternalMergeSort {
-                input,
-                sort_fields,
-                max_in_memory_rows,
-            } => {
-                let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sorts::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
-            }
-            PhysicalPlan::TopKHeapSort {
-                input,
-                sort_fields,
-                k,
-            } => {
-                let input_iter = self.execute_cached(input.clone(), parameters)?;
-                sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
-            }
-            PhysicalPlan::Limit {
-                input,
-                skip,
-                limit,
-            } => {
-                let mut iter = self.execute_cached(input.clone(), parameters)?;
-                if let Some(s) = skip {
-                    iter = Box::new(iter.skip(*s));
-                }
-                if let Some(l) = limit {
-                    iter = Box::new(iter.take(*l));
-                }
-                Ok(iter)
-            }
-            _ => {
-                panic!("Non-parametrized physical plan: {:?}", plan);
-            }
-        }
+        })))
     }
 
     fn bind_key_range_parameters(range: &Interval<Arc<Expr>>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
@@ -404,17 +596,116 @@ impl QueryExecutor {
     }
 }
 
+/// Calculates an exponential backoff duration.
+fn calculate_backoff(attempt: u32) -> Duration {
+    let base_delay = Duration::from_millis(5);
+    let max_delay = Duration::from_secs(1);
+
+    // Exponential backoff: base * 2^attempt
+    let mut backoff = base_delay.as_millis() as u64 * 2_u64.pow(attempt);
+    if backoff > max_delay.as_millis() as u64 {
+        backoff = max_delay.as_millis() as u64;
+    }
+
+    Duration::from_millis(backoff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Result;
+    use crate::error::{Error, Result};
     use crate::query::{make_sort_field, SortOrder};
     use crate::query::{BsonValue, Expr, Parameters, Projection};
+    use crate::storage::operation::Operation;
     use crate::storage::test_utils::storage_engine;
+    use crate::storage::write_batch::WriteBatch;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::sync::Arc;
     use crate::query::expr_fn::{all, and, elem_match, exists, field, field_filters, has_type, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice, interval, point, greater_than, less_than, at_most, at_least};
+    use crate::query::update_fn::{field_name, set, update};
+
+    #[test]
+    fn test_insert_duplicate_key_preflight_check() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_duplicates")?;
+
+        // 2. Insert a document with a known ID
+        let doc1 = doc! { "_id": 1_i32, "name": "doc1" };
+        let insert_one_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&doc1)?,
+        };
+        executor.execute_direct(insert_one_plan, None)?.count(); // Consume iterator
+
+        // 3. Try to insert another document with the same ID
+        let doc1_dup = doc! { "_id": 1_i32, "name": "doc1_dup" };
+        let insert_dup_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&doc1_dup)?,
+        };
+        let result = executor.execute_direct(insert_dup_plan, None);
+        match result {
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.starts_with("Duplicate key error"));
+                assert!(msg.contains("_id: 1"));
+            }
+            Err(err) => panic!("Expected InvalidRequest for duplicate key, got {:?}", err),
+            Ok(_) => panic!("Expected error for duplicate key, got Ok"),
+        }
+
+        // 4. InsertMany with a duplicate within the batch
+        let doc2 = doc! { "_id": 2_i32, "name": "doc2" };
+        let doc2_dup = doc! { "_id": 2_i32, "name": "doc2_dup" };
+        let insert_many_intra_batch_dup_plan = PhysicalPlan::InsertMany {
+            collection: collection_id,
+            documents: vec![bson::to_vec(&doc2)?, bson::to_vec(&doc2_dup)?],
+        };
+        let result_many_intra = executor.execute_direct(insert_many_intra_batch_dup_plan, None);
+        match result_many_intra {
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.starts_with("Duplicate key error"));
+                assert!(msg.contains("_id: 2"));
+            }
+            Err(err) => panic!("Expected InvalidRequest for duplicate key, got {:?}", err),
+            Ok(_) => panic!("Expected error for duplicate key, got Ok"),
+        }
+
+        // 5. InsertMany with a duplicate that already exists in the collection
+        let doc3 = doc! { "_id": 3_i32, "name": "doc3" };
+        let insert_many_existing_dup_plan = PhysicalPlan::InsertMany {
+            collection: collection_id,
+            documents: vec![bson::to_vec(&doc3)?, bson::to_vec(&doc1)?], // doc1 has _id: 1
+        };
+        let result_many_existing = executor.execute_direct(insert_many_existing_dup_plan, None);
+        match result_many_existing {
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.starts_with("Duplicate key error"));
+                assert!(msg.contains("_id: 1"));
+            }
+            Err(err) => panic!("Expected InvalidRequest for duplicate key, got {:?}", err),
+            Ok(_) => panic!("Expected error for duplicate key, got Ok"),
+        }
+
+        // 6. Verify that no partial insert happened from the failed InsertMany
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(3)));
+        let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+        let mut search_result = executor.execute_cached(point_search_plan, &params)?;
+        assert!(
+            search_result.next().is_none(),
+            "Document with _id: 3 should not have been inserted"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn test_execution_roundtrip() -> Result<()> {
@@ -1413,6 +1704,261 @@ mod tests {
         let found_docs3: Vec<Document> = results3.collect::<Result<_>>()?;
         let found_ids3: Vec<i32> = found_docs3.iter().map(|d| d.get_i32("_id").unwrap()).collect();
         assert_eq!(found_ids3, vec![1, 3]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_cached_at_snapshot() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_snapshot")?;
+
+        // 2. Insert initial doc
+        let initial_doc = doc! { "_id": 1_i32, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&initial_doc)?,
+        };
+        executor.execute_direct(insert_plan, None)?.count(); // Consume iterator
+
+        // 3. Get snapshot
+        let snapshot1 = storage_engine.last_visible_sequence();
+
+        // 4. Update the doc directly in storage
+        let key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let update_op = Operation::new_put(
+            collection_id,
+            0,
+            key.clone(),
+            bson::to_vec(&doc! { "_id": 1_i32, "value": "updated" })?,
+        );
+        storage_engine.write(WriteBatch::new(vec![update_op]))?;
+
+        // 5. Query at snapshot
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let mut result_at_snapshot =
+            executor.execute_cached_at_snapshot(point_search_plan.clone(), &params, Some(snapshot1))?;
+        let doc_at_snapshot = result_at_snapshot.next().unwrap()?;
+        assert!(result_at_snapshot.next().is_none());
+        assert_eq!(doc_at_snapshot, initial_doc);
+
+        // 6. Query at latest
+        let mut result_latest = executor.execute_cached(point_search_plan, &params)?;
+        let doc_latest = result_latest.next().unwrap()?;
+        assert!(result_latest.next().is_none());
+        assert_eq!(doc_latest.get_str("value").unwrap(), "updated");
+
+        // 7. Test with scan and deletes
+        let doc_to_delete = doc! { "_id": 2_i32, "value": "to_delete" };
+        let insert_plan_2 = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&doc_to_delete)?,
+        };
+        executor.execute_direct(insert_plan_2, None)?.count();
+
+        let snapshot2 = storage_engine.last_visible_sequence();
+
+        let key_to_delete = BsonValue(Bson::Int32(2)).try_into_key()?;
+        let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
+        storage_engine.write(WriteBatch::new(vec![delete_op]))?;
+
+        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        });
+
+        // Scan at snapshot2 should see both documents (doc1 is updated, doc2 exists)
+        let results_at_snapshot2 =
+            executor.execute_cached_at_snapshot(scan_plan.clone(), &Parameters::new(), Some(snapshot2))?;
+        let mut docs_at_snapshot2: Vec<Document> = results_at_snapshot2.collect::<Result<_>>()?;
+        assert_eq!(docs_at_snapshot2.len(), 2);
+        docs_at_snapshot2.sort_by_key(|d| d.get_i32("_id").unwrap());
+
+        assert_eq!(docs_at_snapshot2[0].get_i32("_id").unwrap(), 1);
+        assert_eq!(docs_at_snapshot2[0].get_str("value").unwrap(), "updated");
+        assert_eq!(docs_at_snapshot2[1].get_i32("_id").unwrap(), 2);
+        assert_eq!(docs_at_snapshot2[1].get_str("value").unwrap(), "to_delete");
+
+        // Scan at latest should see only one document
+        let results_latest_scan = executor.execute_cached(scan_plan, &Parameters::new())?;
+        let docs_latest_scan: Vec<Document> = results_latest_scan.collect::<Result<_>>()?;
+        assert_eq!(docs_latest_scan.len(), 1);
+        assert_eq!(docs_latest_scan[0].get_i32("_id").unwrap(), 1);
+        assert_eq!(docs_latest_scan[0].get_str("value").unwrap(), "updated");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_succeeds_on_retry() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&initial_doc)?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+
+        // 2. Arrange to fail the next precondition check, simulating a conflict
+        storage_engine.fail_next_precondition_checks(1);
+
+        // 3. Act: prepare and execute UpdateOne
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("value")], "updated")]);
+
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+        };
+
+        // The executor will attempt the update, fail, retry, and then succeed.
+        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 1);
+        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 1);
+
+        // 4. Assert final state
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        assert_eq!(final_doc.get_str("value").unwrap(), "updated");
+        assert_eq!(final_doc.get_i32("_id").unwrap(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_fails_after_retry_timeout() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&initial_doc)?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+
+        // 2. Arrange to fail many times to ensure timeout is reached
+        storage_engine.fail_next_precondition_checks(20);
+
+        // 3. Act: prepare UpdateOne
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("value")], "updated")]);
+
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params));
+
+        // 4. Assert: Expect a VersionConflict error
+        match result {
+            Err(Error::VersionConflict { .. }) => {
+                // This is the expected error after timeout
+            }
+            Err(e) => panic!("Expected a VersionConflict error, but got {:?}", e),
+            Ok(_) => panic!("Expected an error, but the update succeeded"),
+        }
+
+        // 5. Assert that the document was not changed
+        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        assert_eq!(final_doc.get_str("value").unwrap(), "initial");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let doc1 = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&doc1)?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+
+        // 2. Arrange to fail the next precondition check
+        storage_engine.fail_next_precondition_checks(1);
+
+        // 3. Act: prepare and execute UpdateMany
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("value")], "updated")]);
+
+        let update_plan = PhysicalPlan::UpdateMany {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params));
+
+        // 4. Assert: Expect an immediate VersionConflict error
+        match result {
+            Err(Error::VersionConflict { .. }) => {
+                // Correct: the operation failed without retrying.
+            }
+            Err(e) => panic!("Expected a VersionConflict error, but got {:?}", e),
+            Ok(_) => panic!("Expected an error, but the update succeeded"),
+        }
+
+        // 5. Assert that the document was not changed
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        assert_eq!(final_doc.get_str("value").unwrap(), "initial");
 
         Ok(())
     }

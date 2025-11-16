@@ -105,8 +105,9 @@ impl LsmVersion {
         &'a self,
         record_key: &'a [u8],
         snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.sst_levels.find(record_key, snapshot)
+        self.sst_levels.find(record_key, snapshot, min_snapshot)
     }
 
     pub fn find_range<'a>(
@@ -182,10 +183,11 @@ impl Levels {
         &'a self,
         record_key: &'a [u8],
         snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
         self.levels
             .iter()
-            .flat_map(move |level| level.find(record_key, snapshot))
+            .flat_map(move |level| level.find(record_key, snapshot, min_snapshot))
     }
 
     pub fn level(&self, level: usize) -> Option<&Level> {
@@ -284,10 +286,12 @@ impl Level {
     }
 
     /// Finds the SSTables that contains the key and are visible under the given snapshot.
+    /// The `min_snapshot` is an exclusive lower bound.
     pub fn find<'a>(
         &'a self,
         record_key: &'a [u8],
         snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> Box<dyn Iterator<Item = Arc<SSTableMetadata>> + 'a> {
         match self {
             Overlapping { sstables, .. } => Box::new(
@@ -298,6 +302,7 @@ impl Level {
                         record_key >= sst.min_key.as_slice()
                             && record_key <= sst.max_key.as_slice()
                             && snapshot >= sst.min_sequence_number
+                            && min_snapshot.map_or(true, |min_snap| sst.max_sequence_number > min_snap)
                     })
                     .cloned(),
             ),
@@ -316,7 +321,9 @@ impl Level {
                     .into_iter()
                     .filter_map(move |i| {
                         let sst = &sstables[i];
-                        if snapshot >= sst.min_sequence_number {
+                        if snapshot >= sst.min_sequence_number
+                            && min_snapshot.map_or(true, |min_snap| sst.max_sequence_number > min_snap)
+                        {
                             Some(sst.clone())
                         } else {
                             None
@@ -534,22 +541,22 @@ mod tests {
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
         // Key 2 falls only in sst1.
-        let found: Vec<_> = level.find(&record_key(2), 300).collect();
+        let found: Vec<_> = level.find(&record_key(2), 300, None).collect();
         assert_eq!(vec![sst1.clone()], found);
 
         // Key 58 falls only in sst2.
-        let found: Vec<_> = level.find(&record_key(58), 300).collect();
+        let found: Vec<_> = level.find(&record_key(58), 300, None).collect();
         assert_eq!(vec![sst2.clone()], found);
 
         // If the snapshot is bellow sst2 min sequence, nothing is returned
-        let found: Vec<_> = level.find(&record_key(58), 150).collect();
+        let found: Vec<_> = level.find(&record_key(58), 150, None).collect();
         assert_eq!(empty, found);
 
         // Key 25 falls in sst1 and sst2
-        let found: Vec<_> = level.find(&record_key(25), 300).collect();
+        let found: Vec<_> = level.find(&record_key(25), 300, None).collect();
         assert_eq!(vec![sst2.clone(), sst1.clone()], found);
 
-        let found: Vec<_> = level.find(&record_key(87), 300).collect();
+        let found: Vec<_> = level.find(&record_key(87), 300, None).collect();
         // A key out of range should yield None.
         assert_eq!(empty, found)
     }
@@ -566,19 +573,97 @@ mod tests {
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
         // Key 2 should be found in sst1.
-        let found: Vec<_> = level.find(&record_key(2), 300).collect();
+        let found: Vec<_> = level.find(&record_key(2), 300, None).collect();
         assert_eq!(vec![sst1.clone()], found);
 
         // Key 58 falls only in sst2.
-        let found: Vec<_> = level.find(&record_key(58), 300).collect();
+        let found: Vec<_> = level.find(&record_key(58), 300, None).collect();
         assert_eq!(vec![sst2.clone()], found);
 
         // If the snapshot is bellow sst2 min sequence, nothing is returned
-        let found: Vec<_> = level.find(&record_key(58), 150).collect();
+        let found: Vec<_> = level.find(&record_key(58), 150, None).collect();
         assert_eq!(empty, found);
 
         // A key out of range should yield None.
-        let found: Vec<_> = level.find(&record_key(87), 300).collect();
+        let found: Vec<_> = level.find(&record_key(87), 300, None).collect();
+        assert_eq!(empty, found);
+    }
+
+    #[test]
+    fn test_find_with_min_snapshot_overlapping() {
+        let sst1 = create_sstable(1, 0, 1, 50, 100, 200, 1000);
+        let sst2 = create_sstable(2, 0, 25, 75, 201, 300, 1000);
+        let sst3 = create_sstable(3, 0, 50, 100, 301, 400, 1000);
+        let level = Level::new(0, vec![sst1.clone(), sst2.clone(), sst3.clone()], 3000);
+        let key = record_key(50);
+        let empty: Vec<Arc<SSTableMetadata>> = vec![];
+
+        // snapshot=400, min_snapshot=None: should find sst3, sst2, sst1 (reverse order).
+        let found: Vec<_> = level.find(&key, 400, None).collect();
+        assert_eq!(vec![sst3.clone(), sst2.clone(), sst1.clone()], found);
+
+        // snapshot=400, min_snapshot=Some(300): (300, 400].
+        // sst1: max_seq=200 <= 300 -> filtered out.
+        // sst2: max_seq=300 <= 300 -> filtered out.
+        // sst3: max_seq=400 > 300 -> included.
+        let found: Vec<_> = level.find(&key, 400, Some(300)).collect();
+        assert_eq!(vec![sst3.clone()], found);
+
+        // snapshot=400, min_snapshot=Some(301): (301, 400].
+        // sst1/sst2 filtered out. sst3 included.
+        let found: Vec<_> = level.find(&key, 400, Some(301)).collect();
+        assert_eq!(vec![sst3.clone()], found);
+
+        // snapshot=300, min_snapshot=Some(200): (200, 300].
+        // sst1: max_seq=200 <= 200 -> filtered out.
+        // sst2: max_seq=300 > 200 -> included.
+        // sst3: min_seq=301 > snapshot=300 -> filtered out by snapshot check.
+        let found: Vec<_> = level.find(&key, 300, Some(200)).collect();
+        assert_eq!(vec![sst2.clone()], found);
+
+        // snapshot=400, min_snapshot=Some(400): (400, 400] -> empty range.
+        // An SSTable is visible if its max_sequence_number > min_snapshot.
+        // all sst's max_seq <= 400, so all filtered out.
+        let found: Vec<_> = level.find(&key, 400, Some(400)).collect();
+        assert_eq!(empty, found);
+
+        // snapshot=250, min_snapshot=Some(200): (200, 250].
+        // sst1: max_seq=200 <= 200 -> filtered out.
+        // sst2: max_seq=300 > 200 -> included. And snapshot=250 >= min_seq=201.
+        // sst3: min_seq=301 > snapshot=250 -> filtered out.
+        let found: Vec<_> = level.find(&key, 250, Some(200)).collect();
+        assert_eq!(vec![sst2.clone()], found);
+    }
+
+    #[test]
+    fn test_find_with_min_snapshot_non_overlapping() {
+        let sst1 = create_sstable(1, 1, 1, 50, 100, 200, 1000);
+        let sst2 = create_sstable(2, 1, 51, 100, 201, 300, 1000);
+        let sst3 = create_sstable(3, 1, 101, 150, 301, 400, 1000);
+        let level = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], 3000);
+        let key = record_key(25);
+        let empty: Vec<Arc<SSTableMetadata>> = vec![];
+
+        // snapshot=400, min_snapshot=None: key 25 is in sst1. snapshot=400 >= min_seq=100.
+        let found: Vec<_> = level.find(&key, 400, None).collect();
+        assert_eq!(vec![sst1.clone()], found);
+
+        // snapshot=400, min_snapshot=Some(200): (200, 400].
+        // key is in sst1. sst1.max_seq=200 <= 200 -> filtered out.
+        let found: Vec<_> = level.find(&key, 400, Some(200)).collect();
+        assert_eq!(empty, found);
+
+        // snapshot=400, min_snapshot=Some(199): (199, 400].
+        // key is in sst1. sst1.max_seq=200 > 199 -> included. And snapshot=400 >= min_seq=100.
+        let found: Vec<_> = level.find(&key, 400, Some(199)).collect();
+        assert_eq!(vec![sst1.clone()], found);
+
+        // snapshot=150, min_snapshot=None: snapshot=150 >= min_seq=100.
+        let found: Vec<_> = level.find(&key, 150, None).collect();
+        assert_eq!(vec![sst1.clone()], found);
+
+        // snapshot=99, min_snapshot=None: snapshot=99 < min_seq=100.
+        let found: Vec<_> = level.find(&key, 99, None).collect();
         assert_eq!(empty, found);
     }
 

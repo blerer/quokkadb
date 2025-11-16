@@ -213,7 +213,7 @@ impl<F: LogFileCreator> AppendLog<F> {
         file.read_exact(&mut block)
             .map_err(|_e| LogReplayError::Corruption {
                 record_offset: 0,
-                reason: format!("Not enough bytes to read {} header.", path.display()),
+                reason: format!("Not enough bytes to read in {} header.", path.to_string_lossy()),
             })?;
 
         let mut header = vec![0; header_size];
@@ -225,7 +225,7 @@ impl<F: LogFileCreator> AppendLog<F> {
         if actual_crc32 != expected_crc32 {
             return Err(LogReplayError::Corruption {
                 record_offset: 0,
-                reason: format!("Invalid checksum found in {} header.", path.display()),
+                reason: format!("Invalid checksum found in {} header.", path.to_string_lossy()),
             });
         }
 
@@ -495,7 +495,8 @@ pub enum LogReplayError {
 impl fmt::Display for LogReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LogReplayError::Io(err) => write!(f, "I/O error: {}", err),
+            LogReplayError::Io(err) =>
+                write!(f, "I/O error while replaying: {}", err),
             LogReplayError::Corruption {
                 record_offset,
                 reason,

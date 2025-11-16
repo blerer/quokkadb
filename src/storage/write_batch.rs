@@ -3,9 +3,38 @@ use crate::io::varint;
 use crate::storage::operation::Operation;
 use std::io::Result;
 
+#[derive(Debug, PartialEq)]
+pub enum Precondition {
+    MustNotExist {
+        collection: u32,
+        index: u32,
+        user_key: Vec<u8>,
+    },
+}
+#[derive(Debug, PartialEq)]
+pub struct Preconditions {
+    since: u64,
+    conditions: Vec<Precondition>,
+}
+
+impl Preconditions {
+    pub fn new(since: u64, conditions: Vec<Precondition>) -> Self {
+        Preconditions { since, conditions }
+    }
+
+    pub fn since(&self) -> u64 {
+        self.since
+    }
+
+    pub fn conditions(&self) -> &[Precondition] {
+        &self.conditions
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct WriteBatch {
     operations: Vec<Operation>,
+    preconditions: Option<Preconditions>,
     precomputed_wal_record: Option<Vec<u8>>,
 }
 
@@ -14,12 +43,29 @@ impl WriteBatch {
         let precomputed_wal_record = Some(Self::precompute_wal_record(&operations));
         WriteBatch {
             operations,
+            preconditions: None,
+            precomputed_wal_record,
+        }
+    }
+
+    pub fn new_with_preconditions(
+        operations: Vec<Operation>,
+        preconditions: Preconditions,
+    ) -> Self {
+        let precomputed_wal_record = Some(Self::precompute_wal_record(&operations));
+        WriteBatch {
+            operations,
+            preconditions: Some(preconditions),
             precomputed_wal_record,
         }
     }
 
     pub fn operations(&self) -> &[Operation] {
         &self.operations
+    }
+
+    pub fn preconditions(&self) -> Option<&Preconditions> {
+        self.preconditions.as_ref()
     }
 
     pub fn to_wal_record(&self, seq: u64) -> Vec<u8> {
@@ -57,6 +103,7 @@ impl WriteBatch {
 
         Ok(WriteBatch {
             operations,
+            preconditions: None,
             precomputed_wal_record: None,
         })
     }
@@ -68,7 +115,7 @@ impl WriteBatch {
 
 impl PartialEq for WriteBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations
+        self.operations == other.operations && self.preconditions == other.preconditions
     }
 }
 

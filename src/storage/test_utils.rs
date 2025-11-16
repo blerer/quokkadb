@@ -1,5 +1,5 @@
 use crate::obs::metrics::MetricRegistry;
-use crate::storage::storage_engine::StorageEngine;
+use crate::storage::storage_engine::{StorageEngine, StorageResult};
 use std::fmt::Debug;
 use std::io::Result;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub fn document(user_key: i32, version: u32) -> Document {
         }
 }
 
-pub fn storage_engine() -> Result<(Arc<StorageEngine>, TempDir)> {
+pub fn storage_engine() -> StorageResult<(Arc<StorageEngine>, TempDir)> {
     let dir = tempdir()?;
     let options = Arc::new(Options::lightweight());
     let mut metric_registry = MetricRegistry::new();
