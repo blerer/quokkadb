@@ -9,23 +9,27 @@ use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
 use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
-use bson::oid::ObjectId;
 use bson::{doc, Bson, Document, RawDocument};
+use sonyflake::Sonyflake;
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
 /// Executes a physical query plan.
 pub struct QueryExecutor {
     storage_engine: Arc<StorageEngine>,
+    id_generator: Mutex<Sonyflake>,
 }
 
 impl QueryExecutor {
     /// Creates a new `QueryExecutor`.
     pub fn new(storage_engine: Arc<StorageEngine>) -> Self {
-        Self { storage_engine }
+        Self {
+            storage_engine,
+            id_generator: Mutex::new(Sonyflake::new().unwrap()),
+        }
     }
 
     pub fn execute_direct(&self, plan: PhysicalPlan, parameters: Option<Parameters>) -> Result<QueryOutput> {
@@ -38,7 +42,7 @@ impl QueryExecutor {
                 let mut ids = Vec::with_capacity(documents.len());
                 for mut doc in documents {
 
-                    let id = Self::prepend_id_if_needed(&mut doc)?;
+                    let id = self.prepend_id_if_needed(&mut doc)?;
                     ids.push(id.clone());
                     // Convert the BSON _id to a key
                     let user_key = id.try_into_key()?;
@@ -58,7 +62,7 @@ impl QueryExecutor {
                 document,
             } => {
                 let mut doc = document;
-                let id = Self::prepend_id_if_needed(&mut doc)?;
+                let id = self.prepend_id_if_needed(&mut doc)?;
                 // Convert the BSON _id to a key
                 let user_key = id.try_into_key()?;
 
@@ -127,16 +131,14 @@ impl QueryExecutor {
     }
 
     /// Ensures that each document has an `_id` field, prepending it if necessary.
-    fn prepend_id_if_needed(mut doc: &mut Vec<u8>) -> Result<Bson> {
-
+    fn prepend_id_if_needed(&self, mut doc: &mut Vec<u8>) -> Result<Bson> {
         let id = RawDocument::from_bytes(&doc)?.get("_id")?;
 
         let id: Bson = match id {
-            Some(id) => {
-                id.to_raw_bson().try_into()?
-            },
+            Some(id) => id.to_raw_bson().try_into()?,
             None => {
-                let bson = Bson::ObjectId(ObjectId::new());
+                let new_id = self.id_generator.lock().unwrap().next_id().unwrap();
+                let bson = Bson::Int64(new_id as i64);
                 bson_utils::prepend_field(&mut doc, "_id", &bson)?;
                 bson
             }
