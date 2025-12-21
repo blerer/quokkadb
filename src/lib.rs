@@ -97,13 +97,13 @@ impl DbImpl {
             LogicalPlan::InsertMany { collection, documents } => {
                 (PhysicalPlan::InsertMany { collection, documents, }, None)
             }
-            LogicalPlan::UpdateOne { collection, query, update} => {
+            LogicalPlan::UpdateOne { collection, query, update, upsert} => {
                 let (parameters, query) = self.optimize_query(query);
-                (PhysicalPlan::UpdateOne { collection, query, update, }, Some(parameters))
+                (PhysicalPlan::UpdateOne { collection, query, update, upsert}, Some(parameters))
             }
-            LogicalPlan::UpdateMany { collection, query, update} => {
+            LogicalPlan::UpdateMany { collection, query, update, upsert} => {
                 let (parameters, query) = self.optimize_query(query);
-                (PhysicalPlan::UpdateMany { collection, query, update, }, Some(parameters))
+                (PhysicalPlan::UpdateMany { collection, query, update, upsert}, Some(parameters))
             }
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };

@@ -95,6 +95,8 @@ pub enum PhysicalPlan {
         query: Arc<PhysicalPlan>,
         /// The update expression defining the modifications.
         update: UpdateExpr,
+        /// Whether to perform an upsert if no documents match the query.
+        upsert: bool,
     },
 
     /// Updates multiple documents in a collection.
@@ -105,6 +107,8 @@ pub enum PhysicalPlan {
         query: Arc<PhysicalPlan>,
         /// The update expression defining the modifications.
         update: UpdateExpr,
+        /// Whether to perform an upsert if no documents match the query.
+        upsert: bool,
     },
 
     /// Filters rows from its input based on a predicate.

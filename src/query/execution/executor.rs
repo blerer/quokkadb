@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::query::physical_plan::PhysicalPlan;
-use crate::query::{BsonValue, Expr, Parameters};
+use crate::query::{BsonValue, Expr, PathComponent, Parameters};
 use crate::query::execution::{filters, projections, sorts, updates};
 use crate::storage::Direction;
 use crate::storage::internal_key::extract_operation_type;
@@ -11,12 +11,12 @@ use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
 use bson::{doc, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex};
-use crate::query::update::UpdateExpr;
+use crate::query::update::{UpdateExpr, UpdateOp, UpdatePathComponent};
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -43,15 +43,15 @@ impl QueryExecutor {
             PhysicalPlan::InsertOne { collection, document, } => {
                 self.perform_insert_one(collection, document)
             }
-            PhysicalPlan::UpdateOne { collection, query, update } => {
+            PhysicalPlan::UpdateOne { collection, query, update, upsert } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateOne");
 
-                self.perform_update_one(collection, query, &update, &parameters)
+                self.perform_update_one(collection, query, &update, upsert, &parameters)
             }
-            PhysicalPlan::UpdateMany { collection, query, update } => {
+            PhysicalPlan::UpdateMany { collection, query, update, upsert } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateMany");
 
-                self.perform_update_many(collection, query, &update, &parameters)
+                self.perform_update_many(collection, query, &update, upsert, &parameters)
             }
             _ => {
                 // Other plans, should be cached
@@ -171,6 +171,7 @@ impl QueryExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         update: &UpdateExpr,
+        upsert: bool,
         parameters: &Parameters,
     ) -> Result<QueryOutput> {
         let updater = updates::to_updater(&update)?;
@@ -183,6 +184,7 @@ impl QueryExecutor {
         let mut preconditions = Vec::new();
         let mut matched_count = 0;
         let mut modified_count = 0;
+        let mut upserted_id: Option<Bson> = None;
 
         for doc_result in iter {
             let doc = doc_result?;
@@ -206,8 +208,26 @@ impl QueryExecutor {
         }
 
         if operations.is_empty() {
-            let result = doc! { "matched_count": matched_count, "modified_count": 0 };
-            return Ok(Box::new(std::iter::once(Ok(result))));
+            if upsert {
+                let (new_doc, generated_id) = self.create_upsert_document(&query, parameters, &updater)?;
+                upserted_id = Some(generated_id.clone());
+
+                let user_key = generated_id.try_into_key()?;
+                operations.push(Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    bson::to_vec(&new_doc)?,
+                ));
+                preconditions.push(Precondition::MustNotExist {
+                    collection,
+                    index: 0,
+                    user_key,
+                });
+            } else {
+                let result = doc! { "matched_count": matched_count, "modified_count": 0 };
+                return Ok(Box::new(std::iter::once(Ok(result))));
+            }
         }
 
         let batch = WriteBatch::new_with_preconditions(
@@ -216,7 +236,11 @@ impl QueryExecutor {
         );
         self.storage_engine.write(batch)?;
 
-        let result = doc! { "matched_count": matched_count, "modified_count": modified_count };
+        let result = if let Some(id) = upserted_id {
+            doc! { "matched_count": matched_count, "modified_count": modified_count, "upserted_id": id }
+        } else {
+            doc! { "matched_count": matched_count, "modified_count": modified_count }
+        };
         Ok(Box::new(std::iter::once(Ok(result))))
     }
 
@@ -225,6 +249,7 @@ impl QueryExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         update: &UpdateExpr,
+        upsert: bool,
         parameters: &Parameters,
     ) -> Result<QueryOutput> {
         const MAX_RETRY_DURATION: Duration = Duration::from_secs(5);
@@ -263,6 +288,40 @@ impl QueryExecutor {
 
                 match self.storage_engine.write(write_batch) {
                     Ok(_) => doc! { "matched_count": 1, "modified_count": 1 },
+                    Err(e @ StorageError::VersionConflict { .. }) => {
+                        if start_time.elapsed() >= MAX_RETRY_DURATION {
+                            return Err(e.into());
+                        }
+                        std::thread::sleep(calculate_backoff(attempt));
+                        attempt += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            } else if upsert {
+                let (new_doc, upserted_id) = self.create_upsert_document(&query, parameters, &updater)?;
+
+                let user_key = upserted_id.clone().try_into_key()?;
+
+                let operation = Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    bson::to_vec(&new_doc)?,
+                );
+
+                let precondition = Precondition::MustNotExist {
+                    collection,
+                    index: 0,
+                    user_key,
+                };
+
+                let preconditions = Preconditions::new(snapshot, vec![precondition]);
+                let write_batch =
+                    WriteBatch::new_with_preconditions(vec![operation], preconditions);
+
+                match self.storage_engine.write(write_batch) {
+                    Ok(_) => doc! { "matched_count": 0, "modified_count": 0, "upserted_id": upserted_id },
                     Err(e @ StorageError::VersionConflict { .. }) => {
                         if start_time.elapsed() >= MAX_RETRY_DURATION {
                             return Err(e.into());
@@ -389,13 +448,18 @@ impl QueryExecutor {
         let id: Bson = match id {
             Some(id) => id.to_raw_bson().try_into()?,
             None => {
-                let new_id = self.id_generator.lock().unwrap().next_id().unwrap();
-                let bson = Bson::Int64(new_id as i64);
+                let bson = self.generate_id();
                 bson_utils::prepend_field(&mut doc, "_id", &bson)?;
                 bson
             }
         };
         Ok(id)
+    }
+
+    fn generate_id(&self) -> Bson {
+        let new_id = self.id_generator.lock().unwrap().next_id().unwrap();
+        let bson = Bson::Int64(new_id as i64);
+        bson
     }
 
     fn perform_multi_point_search(&self,
@@ -561,6 +625,161 @@ impl QueryExecutor {
                 None => Some(Ok(doc))
             }
         })))
+    }
+
+    /// Creates a new document for an upsert operation by:
+    /// 1. Extracting equality conditions from the query to build a base document
+    /// 2. Applying the update operations to the base document
+    /// 3. Ensuring the document has an `_id` field
+    fn create_upsert_document(
+        &self,
+        query: &PhysicalPlan,
+        parameters: &Parameters,
+        updater: &Box<dyn Fn(Document) -> Result<Document> + Send + Sync>,
+    ) -> Result<(Document, Bson)> {
+
+        let mut new_doc = self.create_base_document_from_query(query, parameters)?;
+        new_doc = updater(new_doc)?;
+
+        let id = if new_doc.contains_key("_id") {
+            new_doc.get("_id").unwrap().clone()
+        } else {
+            let id = self.generate_id();
+            new_doc.insert("_id", id.clone());
+            id
+        };
+
+        Ok((new_doc, id))
+    }
+
+    /// Constructs a base document from equality conditions in the query plan.
+    fn create_base_document_from_query(
+        &self,
+        query: &PhysicalPlan,
+        parameters: &Parameters,
+    ) -> Result<Document> {
+
+        let mut ops: Vec<UpdateOp> = Vec::new();
+        self.extract_equality_conditions(query, parameters, &mut ops)?;
+
+        let update_expr = UpdateExpr { ops, array_filters: BTreeMap::new() };
+        let updater = updates::to_updater(&update_expr)?;
+
+        Ok(updater(Document::new())?)
+    }
+
+    /// Extracts equality conditions from a query plan to build a base document for upsert.
+    fn extract_equality_conditions(&self,
+                                   query: &PhysicalPlan,
+                                   parameters: &Parameters,
+                                   ops: &mut Vec<UpdateOp>
+    ) -> Result<()> {
+
+        match query {
+            PhysicalPlan::PointSearch { key, filter, .. } => {
+                ops.push(UpdateOp::Set {
+                    path: vec![UpdatePathComponent::FieldName("_id".to_string())],
+                    value: Arc::new(Expr::Literal(Self::bind_parameter(key, parameters))),
+                });
+
+                if let Some(filter_expr) = filter {
+                    self.extract_equality_from_expr(filter_expr, parameters, ops);
+                }
+            }
+            PhysicalPlan::CollectionScan { filter, .. } => {
+                if let Some(filter_expr) = filter {
+                    self.extract_equality_from_expr(filter_expr, parameters, ops);
+                }
+            }
+            PhysicalPlan::Filter { input, predicate } => {
+                self.extract_equality_conditions(input, parameters, ops)?;
+                self.extract_equality_from_expr(predicate, parameters, ops);
+            }
+            PhysicalPlan::Limit { input, .. } => {
+                self.extract_equality_conditions(input, parameters, ops)?;
+            }
+            _ => {},
+        }
+        Ok(())
+    }
+
+    /// Extracts equality conditions from an expression tree.
+    fn extract_equality_from_expr(&self, expr: &Expr, parameters: &Parameters, operations: &mut Vec<UpdateOp>) {
+        match expr {
+            Expr::And(exprs) => {
+                for e in exprs {
+                    self.extract_equality_from_expr(e, parameters, operations);
+                }
+            }
+            Expr::FieldFilters { field, filters } => {
+                if let Expr::Field(path) = field.as_ref() {
+                    for filter in filters {
+                        if let Some(value) = self.extract_point_value(filter, parameters) {
+                            operations.push(self.to_set_operation(path, value));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Extracts a point (equality) value from an interval expression.
+    fn extract_point_value(&self, expr: &Expr, parameters: &Parameters) -> Option<BsonValue> {
+        match expr {
+            Expr::Interval(interval) if interval.is_point() => {
+                interval.start_bound_value()
+                    .and_then(|e| self.resolve_expr_value(&e, parameters))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves a placeholder expression to a concrete Bson value.
+    fn resolve_expr_value(&self, expr: &Expr, parameters: &Parameters) -> Option<BsonValue> {
+        match expr {
+            Expr::Placeholder(idx) => Some(parameters.get(*idx).clone()),
+            _ => None,
+        }
+    }
+
+    /// Converts a path and value into a set update operation.
+    fn to_set_operation(&self, path: &[PathComponent], value: BsonValue) -> UpdateOp {
+        let mut update_path = Vec::with_capacity(path.len());
+        for component in path {
+            match component {
+                PathComponent::FieldName(name) => update_path.push(UpdatePathComponent::FieldName(name.clone())),
+                PathComponent::ArrayElement(idx) => update_path.push(UpdatePathComponent::ArrayElement(*idx)),
+            }
+        }
+        UpdateOp::Set {
+            path: update_path,
+            value: Arc::new(Expr::Literal(value)),
+        }
+    }
+
+    /// Sets a value at a nested path in a document, creating intermediate documents as needed.
+    fn set_nested_value(&self, doc: &mut Document, path: &[PathComponent], value: Bson) {
+        if path.is_empty() {
+            return;
+        }
+
+        if path.len() == 1 {
+            if let PathComponent::FieldName(name) = &path[0] {
+                doc.insert(name.clone(), value);
+            }
+            return;
+        }
+
+        if let PathComponent::FieldName(name) = &path[0] {
+            let nested = doc
+                .entry(name.clone())
+                .or_insert_with(|| Bson::Document(Document::new()));
+            
+            if let Bson::Document(nested_doc) = nested {
+                self.set_nested_value(nested_doc, &path[1..], value);
+            }
+        }
     }
 
     fn bind_key_range_parameters(range: &Interval<Arc<Expr>>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
@@ -1835,6 +2054,7 @@ mod tests {
             collection: collection_id,
             query: query_plan,
             update: update_expr,
+            upsert: false,
         };
 
         // The executor will attempt the update, fail, retry, and then succeed.
@@ -1887,6 +2107,7 @@ mod tests {
             collection: collection_id,
             query: query_plan,
             update: update_expr,
+            upsert: false,
         };
 
         let result = executor.execute_direct(update_plan, Some(params));
@@ -1904,6 +2125,201 @@ mod tests {
         let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value").unwrap(), "initial");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_upsert_inserts_when_no_match() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        // 2. Execute UpdateOne with upsert=true on empty collection
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("value")], "created")]);
+
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: true,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        
+        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
+        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
+        assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 1);
+
+        // 3. Verify the document was inserted
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        assert_eq!(doc.get_i32("_id").unwrap(), 1);
+        assert_eq!(doc.get_str("value").unwrap(), "created");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_upsert_updates_when_match_exists() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        // Insert initial doc
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: bson::to_vec(&initial_doc)?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+
+        // 2. Execute UpdateOne with upsert=true
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("value")], "updated")]);
+
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: true,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        
+        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 1);
+        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 1);
+        assert!(result_doc.get("upserted_id").is_none());
+
+        // 3. Verify the document was updated
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        assert_eq!(doc.get_str("value").unwrap(), "updated");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_many_upsert_inserts_when_no_match() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        // 2. Execute UpdateMany with upsert=true on empty collection
+        let mut params = Parameters::new();
+        let p_val = params.collect_parameter(BsonValue(Bson::String("target".to_string())));
+        
+        let query_plan = Arc::new(PhysicalPlan::Filter {
+            input: Arc::new(PhysicalPlan::CollectionScan {
+                collection: collection_id,
+                range: Interval::all(),
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            predicate: field_filters(field(["name"]), [interval(point(&p_val))]),
+        });
+
+        let update_expr = update([set([field_name("status")], "processed")]);
+
+        let update_plan = PhysicalPlan::UpdateMany {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: true,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        
+        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
+        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
+        assert!(result_doc.get("upserted_id").is_some());
+        
+        // 3. Verify document was created with equality condition from query
+        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        });
+        let results = executor.execute_cached(scan_plan, &Parameters::new())?;
+        let docs: Vec<Document> = results.collect::<Result<_>>()?;
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].get_str("name").unwrap(), "target");
+        assert_eq!(docs[0].get_str("status").unwrap(), "processed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_upsert_with_nested_equality_conditions() -> Result<()> {
+        // 1. Setup
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        // 2. Execute UpdateOne with upsert=true with nested field equality
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(42)));
+        let p_nested = params.collect_parameter(BsonValue(Bson::String("nested_val".to_string())));
+        
+        let filter = field_filters(field(["data", "inner"]), [interval(point(&p_nested))]);
+        
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: Some(filter),
+            projection: None,
+        });
+
+        let update_expr = update([set([field_name("extra")], "added")]);
+
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: true,
+        };
+
+        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        
+        assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 42);
+
+        // 3. Verify the nested structure was created
+        let user_key = BsonValue(Bson::Int32(42)).try_into_key()?;
+        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        assert_eq!(doc.get_i32("_id").unwrap(), 42);
+        assert_eq!(doc.get_str("extra").unwrap(), "added");
+        let data = doc.get_document("data").unwrap();
+        assert_eq!(data.get_str("inner").unwrap(), "nested_val");
 
         Ok(())
     }
@@ -1941,6 +2357,7 @@ mod tests {
             collection: collection_id,
             query: query_plan,
             update: update_expr,
+            upsert: false,
         };
 
         let result = executor.execute_direct(update_plan, Some(params));

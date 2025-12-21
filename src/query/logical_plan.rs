@@ -28,12 +28,14 @@ pub enum LogicalPlan {
         collection: u32, // Collection identifier
         query: Arc<LogicalPlan>, // Filter to match the document to update
         update: UpdateExpr, // Update operations
+        upsert: bool, // Whether to perform an upsert if no documents match the query
     },
     /// Represents an update operation for multiple documents. This is a terminal operator.
     UpdateMany {
         collection: u32, // Collection identifier
         query: Arc<LogicalPlan>, // Filter to match documents to update
         update: UpdateExpr, // Update operations
+        upsert: bool, // Whether to perform an upsert if no documents match the query
     },
     /// Represents a collection scan with optional projection, filtering, and sorting. This is a terminal operator.
     CollectionScan {
@@ -87,15 +89,17 @@ impl TreeNode for LogicalPlan {
     /// Create a new node with updated children
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self::Child>>) -> Arc<Self> {
         match self.as_ref() {
-            LogicalPlan::UpdateOne { collection, update, .. } => Arc::new(LogicalPlan::UpdateOne {
+            LogicalPlan::UpdateOne { collection, update, upsert, .. } => Arc::new(LogicalPlan::UpdateOne {
                 collection: *collection,
                 query: Self::get_first(children),
                 update: update.clone(),
+                upsert: *upsert,
             }),
-            LogicalPlan::UpdateMany { collection, update, .. } => Arc::new(LogicalPlan::UpdateMany {
+            LogicalPlan::UpdateMany { collection, update, upsert, .. } => Arc::new(LogicalPlan::UpdateMany {
                 collection: *collection,
                 query: Self::get_first(children),
                 update: update.clone(),
+                upsert: *upsert,
             }),
             LogicalPlan::Filter { condition, .. } => Arc::new(LogicalPlan::Filter {
                 input: Self::get_first(children),
