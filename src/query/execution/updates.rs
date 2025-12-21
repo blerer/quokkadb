@@ -714,6 +714,50 @@ where
                         Ok(())
                     }
                 }
+                (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::FieldName(name)) => {
+                    let mut arr = vec![];
+                    mutator(&mut arr)?;
+                    let mut new_doc = Document::new();
+                    new_doc.insert(name.clone(), Bson::Array(arr));
+                    parent.insert(field_name, Bson::Document(new_doc));
+                    Ok(())
+                }
+                (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::ArrayElement(idx)) => {
+                    let mut arr = vec![];
+                    mutator(&mut arr)?;
+                    let mut new_arr = Vec::new();
+                    while new_arr.len() < *idx {
+                        new_arr.push(Bson::Null);
+                    }
+                    new_arr.push(Bson::Array(arr));
+                    parent.insert(field_name, Bson::Array(new_arr));
+                    Ok(())
+                }
+                (BsonComponent::MissingArrayElement { parent, index }, UpdatePathComponent::FieldName(name)) => {
+                    while parent.len() <= index {
+                        parent.push(Bson::Null);
+                    }
+                    let mut arr = vec![];
+                    mutator(&mut arr)?;
+                    let mut new_doc = Document::new();
+                    new_doc.insert(name.clone(), Bson::Array(arr));
+                    parent[index] = Bson::Document(new_doc);
+                    Ok(())
+                }
+                (BsonComponent::MissingArrayElement { parent, index }, UpdatePathComponent::ArrayElement(idx)) => {
+                    while parent.len() <= index {
+                        parent.push(Bson::Null);
+                    }
+                    let mut arr = vec![];
+                    mutator(&mut arr)?;
+                    let mut new_arr = Vec::new();
+                    while new_arr.len() < *idx {
+                        new_arr.push(Bson::Null);
+                    }
+                    new_arr.push(Bson::Array(arr));
+                    parent[index] = Bson::Array(new_arr);
+                    Ok(())
+                }
                 (component, path_comp) => Err(Error::InvalidRequest(format!(
                     "Invalid path for {}: cannot use {:?} on {:?}",
                     op_name, path_comp, component
@@ -760,10 +804,15 @@ fn to_push_fn(values: Vec<Bson>, position: Option<i32>) -> Box<dyn Fn(&mut Vec<B
         if !values.is_empty() {
             let temp_values = values.clone();
             if let Some(position) = position {
-                let pos = position as usize;
-                if pos >= arr.len() {
+                let pos = position;
+                if pos >= arr.len() as i32 {
                     arr.extend(temp_values);
                 } else {
+                    let pos = if pos < 0 {
+                        (arr.len() as isize + (pos as isize)).max(0) as usize
+                    } else {
+                        pos as usize
+                    };
                     let tail = arr.split_off(pos);
                     arr.extend(temp_values);
                     arr.extend(tail);
@@ -1727,6 +1776,42 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_add_to_set_creates_missing_nested_document() {
+        let update_expr = update([add_to_set_single([field("a"), field("b")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "a": { "b": [1] } });
+    }
+
+    #[test]
+    fn test_add_to_set_creates_missing_deeply_nested_path() {
+        let update_expr = update([add_to_set_single([field("a"), field("b"), field("c")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "a": { "b": { "c": [1] } } });
+    }
+
+    #[test]
+    fn test_add_to_set_creates_missing_array_element_in_path() {
+        let update_expr = update([add_to_set_single([field("a"), index(1), field("b")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! { "a": [] }).unwrap();
+        assert_eq!(updated, doc! { "a": [Bson::Null, { "b": [1] }] });
+    }
+
+    #[test]
+    fn test_add_to_set_each_creates_missing_nested_path() {
+        let update_expr = update([add_to_set_each([field("x"), field("y")], [1, 2, 3])]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "x": { "y": [1, 2, 3] } });
+    }
+
     // -----------------------------
     // $push
     // -----------------------------
@@ -1772,6 +1857,30 @@ mod tests {
     }
 
     #[test]
+    fn test_push_with_negative_position_each() {
+        let spec = push_each_spec([10, 11], Some(-2), None, None);
+        let update_expr = update([
+            push_spec([field("a")], spec),
+        ]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! { "a": [1, 2, 3] }).unwrap();
+        assert_eq!(updated, doc! { "a": [1, 10, 11, 2, 3] });
+    }
+
+    #[test]
+    fn test_push_with_negative_position_greater_then_array_length_each() {
+        let spec = push_each_spec([10, 11], Some(-5), None, None);
+        let update_expr = update([
+            push_spec([field("a")], spec),
+        ]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! { "a": [1, 2, 3] }).unwrap();
+        assert_eq!(updated, doc! { "a": [10, 11, 1, 2, 3] });
+    }
+
+    #[test]
     fn test_push_with_sort_and_slice() {
         // Start with one quiz, push two, then sort by score desc and slice -2 (keep last two)
         let spec = push_each_spec(
@@ -1798,6 +1907,60 @@ mod tests {
 
         let result = updater(doc! { "a": "oops" });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_push_creates_missing_nested_document() {
+        let update_expr = update([push_single([field("a"), field("b")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "a": { "b": [1] } });
+    }
+
+    #[test]
+    fn test_push_creates_missing_deeply_nested_path() {
+        let update_expr = update([push_single([field("a"), field("b"), field("c")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "a": { "b": { "c": [1] } } });
+    }
+
+    #[test]
+    fn test_push_creates_missing_array_element_in_path() {
+        let update_expr = update([push_single([field("a"), index(1), field("b")], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! { "a": [] }).unwrap();
+        assert_eq!(updated, doc! { "a": [Bson::Null, { "b": [1] }] });
+    }
+
+    #[test]
+    fn test_push_creates_missing_nested_array_in_path() {
+        let update_expr = update([push_single([field("a"), index(0), index(0)], 1)]);
+        let updater = to_updater(&update_expr).unwrap();
+
+        let updated = updater(doc! {}).unwrap();
+        assert_eq!(updated, doc! { "a": [ [[1]] ] });
+    }
+
+    #[test]
+    fn test_push_creates_nested_path() {
+        let update_expr = update([
+            push_single([field("metadata"), field("history")], "event1"),
+        ]);
+
+        let updater = to_updater(&update_expr).unwrap();
+        let updated = updater(doc! { "_id": 1,
+            "item": "journal",
+            "dim_cm": [ 14, 21 ] }).unwrap();
+
+        assert_eq!(updated,
+                   doc! { "_id": 1,
+                       "item": "journal",
+                       "dim_cm": [ 14, 21 ],
+                       "metadata": { "history": ["event1"] } });
     }
 
     // -----------------------------

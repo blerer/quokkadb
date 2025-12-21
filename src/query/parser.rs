@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use crate::query::{format_path, Projection, ProjectionExpr, SortField, SortOrder};
+use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
 use crate::query::{
     BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
 };
@@ -8,7 +8,7 @@ use crate::query::update::{
     UpdateExpr, UpdateOp, UpdatePathComponent,
 };
 use crate::Error;
-use bson::{doc, Bson, Document};
+use bson::{Bson, Document};
 use std::sync::{Arc, LazyLock};
 
 static SCALAR_OPERATIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -452,46 +452,77 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
 fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr>>, Error> {
     let mut parsed_filters = BTreeMap::new();
     for filter_doc in filters {
-        if filter_doc.len() != 1 {
-            return Err(Error::InvalidRequest(
-                "Each array filter must be a document with a single key".to_string(),
-            ));
+
+        let mut previous_identifier = None;
+        let mut predicates = Vec::with_capacity(filter_doc.len());
+
+        for (field_name, predicate_doc_bson) in filter_doc.iter() {
+            let (identifier, predicate) =
+                parse_identifier_and_predicate(field_name, predicate_doc_bson)?;
+
+            match &previous_identifier {
+                Some(previous) => {
+                    if previous != &identifier {
+                        return Err(Error::InvalidRequest(format!(
+                            "Array filters must have a single identifier. Found '{}' and '{}'",
+                            previous,
+                            &identifier,
+                        )));
+                    }
+                }
+                None => previous_identifier = Some(identifier),
+            }
+            predicates.push(predicate)
         }
-        let (identifier, predicate_doc_bson) = filter_doc.iter().next().unwrap();
 
-        let predicate_doc = predicate_doc_bson.as_document().ok_or_else(|| {
-            Error::InvalidRequest(format!(
-                "Filter for identifier '{}' must be a document",
-                identifier
-            ))
-        })?;
-
-        let components = parse_field_path(identifier)?;
-
-        let identifier = if let PathComponent::FieldName(s) = &components[0] {
-            s.to_string()
+        let identifier = previous_identifier.unwrap();
+        let predicate = if predicates.len() > 1 {
+            Arc::new(Expr::And(predicates))
         } else {
-            return Err(Error::InvalidRequest(
-                "Array filter identifier must be a field name".to_string(),
-            ));
+            predicates.into_iter().next().unwrap()
         };
-
-        let predicate = if components.len() > 1 {
-            let field = format_path(&components[1..]);
-            let doc = doc! { field: predicate_doc_bson.clone() };
-            parse_conditions(&doc)
-        } else {
-            parse_conditions(predicate_doc)
-        }?;
 
         if parsed_filters.insert(identifier.clone(), predicate).is_some() {
             return Err(Error::InvalidRequest(format!(
-                "Found multiple array filters with the same name '{}'",
+                "Found multiple array filters with the same identifier '{}'",
                 identifier
             )));
         }
     }
+
     Ok(parsed_filters)
+}
+
+fn parse_identifier_and_predicate(
+    field_name: &String,
+    predicate: &Bson
+) -> Result<(String, Arc<Expr>), Error> {
+
+    let components = parse_field_path(field_name)?;
+
+    let identifier = if let PathComponent::FieldName(s) = &components[0] {
+        s.to_string()
+    } else {
+        return Err(Error::InvalidRequest(
+            "Array filter identifier must be a field name".to_string(),
+        ));
+    };
+
+    let predicate = if components.len() > 1 {
+        let field = Expr::Field(components[1..].to_vec());
+        parse_field_conditions(field, predicate)
+    } else {
+        let predicate_doc = predicate.as_document().ok_or_else(|| {
+            Error::InvalidRequest(format!(
+                "Array filter for identifier '{}' must reference at least one subfield (e.g. '{}.x').",
+                &components[0],
+                &components[0]))
+        })?;
+
+        parse_conditions(predicate_doc)
+    }?;
+
+    Ok((identifier, predicate))
 }
 
 /// Parses a BSON document representing an update operation into an `UpdateExpr`.
@@ -1638,14 +1669,14 @@ mod tests {
             let err = parse_update(&update_doc, array_filters).unwrap_err();
             assert_eq!(
                 err.to_string(),
-                "Each array filter must be a document with a single key"
+                "Array filters must have a single identifier. Found 'elem' and 'elem2'"
             );
 
             let array_filters_not_doc = Some(vec![doc! { "elem": "not a doc" }]);
             let err = parse_update(&update_doc, array_filters_not_doc).unwrap_err();
             assert_eq!(
                 err.to_string(),
-                "Filter for identifier 'elem' must be a document"
+                "Array filter for identifier 'elem' must reference at least one subfield (e.g. 'elem.x')."
             );
         }
 
@@ -1704,17 +1735,17 @@ mod tests {
                 let err = parse_array_filters(&filters).unwrap_err();
                 assert_eq!(
                     err.to_string(),
-                    "Found multiple array filters with the same name 'elem'"
+                    "Found multiple array filters with the same identifier 'elem'"
                 );
             }
 
             #[test]
-            fn test_parse_array_filters_error_multiple_keys() {
+            fn test_parse_array_filters_error_multiple_identifiers() {
                 let filters = vec![doc! { "elem": { "g": 1 }, "elem2": { "h": 2 } }];
                 let err = parse_array_filters(&filters).unwrap_err();
                 assert_eq!(
                     err.to_string(),
-                    "Each array filter must be a document with a single key"
+                    "Array filters must have a single identifier. Found 'elem' and 'elem2'"
                 );
             }
 
@@ -1724,7 +1755,7 @@ mod tests {
                 let err = parse_array_filters(&filters).unwrap_err();
                 assert_eq!(
                     err.to_string(),
-                    "Filter for identifier 'elem' must be a document"
+                    "Array filter for identifier 'elem' must reference at least one subfield (e.g. 'elem.x')."
                 );
             }
 
