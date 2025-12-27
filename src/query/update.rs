@@ -37,6 +37,8 @@ pub type UpdatePath = Vec<UpdatePathComponent>;
 pub enum UpdateOp {
     /// `$set`: Sets the value of a field.
     Set { path: UpdatePath, value: Arc<Expr> },
+    /// `$setOnInsert`: Sets the value of a field only during an insert (upsert).
+    SetOnInsert { path: UpdatePath, value: Arc<Expr> },
     /// `$unset`: Removes a field.
     Unset { path: UpdatePath },
     /// `$inc`: Increments a field by a specified amount.
@@ -187,6 +189,7 @@ impl UpdateExpr {
         for op in &self.ops {
             let paths: Vec<&UpdatePath> = match op {
                 UpdateOp::Set { path, .. } => vec![path],
+                UpdateOp::SetOnInsert { path, .. } => vec![path],
                 UpdateOp::Unset { path } => vec![path],
                 UpdateOp::Inc { path, .. } => vec![path],
                 UpdateOp::Mul { path, .. } => vec![path],
@@ -330,6 +333,7 @@ impl UpdateExpr {
         for op in &self.ops {
             match op {
                 UpdateOp::Set { value, .. }
+                | UpdateOp::SetOnInsert { value, .. }
                 | UpdateOp::Inc { amount: value, .. }
                 | UpdateOp::Mul { factor: value, .. }
                 | UpdateOp::Min { value, .. }

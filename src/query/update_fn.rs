@@ -29,6 +29,12 @@ where
     UpdateOp::Set { path: path.into_iter().collect(), value: lit(value) }
 }
 
+pub fn set_on_insert<T>(path: T, value: impl Into<BsonValue>) -> UpdateOp
+where
+    T: IntoIterator<Item = UpdatePathComponent> {
+    UpdateOp::SetOnInsert { path: path.into_iter().collect(), value: lit(value) }
+}
+
 pub fn unset<T>(path: T) -> UpdateOp
 where
     T: IntoIterator<Item = UpdatePathComponent> {

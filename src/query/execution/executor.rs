@@ -174,10 +174,9 @@ impl QueryExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<QueryOutput> {
-        let updater = updates::to_updater(&update)?;
 
         let snapshot = self.storage_engine.last_visible_sequence();
-        let iter =
+        let mut iter =
             self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
 
         let mut operations = Vec::new();
@@ -186,28 +185,38 @@ impl QueryExecutor {
         let mut modified_count = 0;
         let mut upserted_id: Option<Bson> = None;
 
-        for doc_result in iter {
-            let doc = doc_result?;
-            matched_count += 1;
-            let new_doc = updater(doc)?;
+        let mut next = iter.next();
 
-            let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+        if next.is_some() {
 
-            operations.push(Operation::new_put(
-                collection,
-                0,
-                user_key.clone(),
-                bson::to_vec(&new_doc)?,
-            ));
-            preconditions.push(Precondition::MustNotExist {
-                collection,
-                index: 0,
-                user_key,
-            });
-            modified_count += 1;
-        }
+            let updater = updates::to_updater(&update, false)?;
 
-        if operations.is_empty() {
+            while let Some(doc_result) = next {
+                let doc = doc_result?;
+                matched_count += 1;
+                let new_doc = updater(doc)?;
+
+                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+
+                operations.push(Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    bson::to_vec(&new_doc)?,
+                ));
+                preconditions.push(Precondition::MustNotExist {
+                    collection,
+                    index: 0,
+                    user_key,
+                });
+                modified_count += 1;
+                next = iter.next();
+            }
+
+        } else {
+
+            let updater = updates::to_updater(&update, true)?;
+
             if upsert {
                 let (new_doc, generated_id) = self.create_upsert_document(&query, parameters, &updater)?;
                 upserted_id = Some(generated_id.clone());
@@ -256,8 +265,6 @@ impl QueryExecutor {
         let start_time = Instant::now();
         let mut attempt = 0;
 
-        let updater = updates::to_updater(&update)?;
-
         loop {
             let snapshot = self.storage_engine.last_visible_sequence();
             let mut iter =
@@ -265,6 +272,7 @@ impl QueryExecutor {
 
             let result_doc = if let Some(doc_result) = iter.next() {
                 let doc = doc_result?;
+                let updater = updates::to_updater(&update, false)?;
                 let new_doc = updater(doc)?;
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
@@ -299,6 +307,7 @@ impl QueryExecutor {
                     Err(e) => return Err(e.into()),
                 }
             } else if upsert {
+                let updater = updates::to_updater(&update, true)?;
                 let (new_doc, upserted_id) = self.create_upsert_document(&query, parameters, &updater)?;
 
                 let user_key = upserted_id.clone().try_into_key()?;
@@ -663,7 +672,7 @@ impl QueryExecutor {
         self.extract_equality_conditions(query, parameters, &mut ops)?;
 
         let update_expr = UpdateExpr { ops, array_filters: BTreeMap::new() };
-        let updater = updates::to_updater(&update_expr)?;
+        let updater = updates::to_updater(&update_expr, false)?;
 
         Ok(updater(Document::new())?)
     }

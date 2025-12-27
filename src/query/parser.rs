@@ -549,6 +549,17 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                     });
                 }
             }
+            "$setOnInsert" => {
+                let sub_doc = value.as_document().ok_or_else(|| {
+                    Error::InvalidRequest("$setOnInsert value must be a document".to_string())
+                })?;
+                for (path, val) in sub_doc {
+                    ops.push(UpdateOp::SetOnInsert {
+                        path: parse_update_path(path)?,
+                        value: Arc::new(Expr::Literal(BsonValue(val.clone()))),
+                    });
+                }
+            }
             "$unset" => {
                 let sub_doc = value.as_document().ok_or_else(|| {
                     Error::InvalidRequest("$unset value must be a document".to_string())
@@ -908,7 +919,7 @@ mod tests {
     use crate::query::expr_fn::*;
     use bson::{doc, Bson};
     use crate::query::update_fn;
-    use crate::query::update_fn::{by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec, push_single, push_spec, set, unset, update};
+    use crate::query::update_fn::{by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec, push_single, push_spec, set, set_on_insert, unset, update};
 
     #[cfg(test)]
     mod bson_type_parsing {
@@ -1497,6 +1508,48 @@ mod tests {
                 set([field_name("b"), field_name("c")], "hello")
             ]);
             assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn test_parse_update_set_on_insert() {
+            let update_doc = doc! { "$setOnInsert": { "createdAt": "2024-01-01", "version": 1 } };
+            let parsed = parse_update(&update_doc, None).unwrap();
+            let expected = update([
+                set_on_insert([field_name("createdAt")], "2024-01-01"),
+                set_on_insert([field_name("version")], 1),
+            ]);
+            assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn test_parse_update_set_and_set_on_insert() {
+            let update_doc = doc! {
+                "$set": { "lastModified": "2024-06-01" },
+                "$setOnInsert": { "createdAt": "2024-01-01" }
+            };
+            let parsed = parse_update(&update_doc, None).unwrap();
+            let expected = update([
+                set([field_name("lastModified")], "2024-06-01"),
+                set_on_insert([field_name("createdAt")], "2024-01-01"),
+            ]);
+            assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn test_parse_update_set_on_insert_nested_path() {
+            let update_doc = doc! { "$setOnInsert": { "meta.created": true } };
+            let parsed = parse_update(&update_doc, None).unwrap();
+            let expected = update([
+                set_on_insert([field_name("meta"), field_name("created")], true),
+            ]);
+            assert_eq!(parsed, expected);
+        }
+
+        #[test]
+        fn test_parse_update_set_on_insert_invalid() {
+            let update_doc = doc! { "$setOnInsert": "not a document" };
+            let err = parse_update(&update_doc, None).unwrap_err();
+            assert_eq!(err.to_string(), "$setOnInsert value must be a document");
         }
 
         #[test]

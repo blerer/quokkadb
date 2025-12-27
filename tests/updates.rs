@@ -2134,6 +2134,190 @@ fn test_upsert_with_complex_nested_structure() {
     assert!(config.get_bool("enabled").unwrap());
 }
 
+// ============================================================================
+// $setOnInsert Tests
+// ============================================================================
+
+#[test]
+fn test_set_on_insert_applies_on_upsert_insert() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_one(
+            doc! { "_id": 300 },
+            doc! { "$setOnInsert": { "defaultQty": 100, "status": "new" }, "$set": { "item": "gadget" } },
+            options,
+        )
+        .unwrap();
+
+    let doc = find_one(&collection, doc! { "_id": 300 }).unwrap();
+    assert_eq!(doc.get_i32("_id").unwrap(), 300);
+    assert_eq!(doc.get_str("item").unwrap(), "gadget");
+    assert_eq!(doc.get_i32("defaultQty").unwrap(), 100);
+    assert_eq!(doc.get_str("status").unwrap(), "new");
+}
+
+#[test]
+fn test_set_on_insert_ignored_on_update() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let doc_before = find_one(&collection, doc! { "_id": 1 }).unwrap();
+    let original_qty = doc_before.get_i32("qty").unwrap();
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_one(
+            doc! { "_id": 1 },
+            doc! { "$setOnInsert": { "qty": 999, "newField": "should_not_appear" }, "$set": { "status": "updated" } },
+            options,
+        )
+        .unwrap();
+
+    let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
+    assert_eq!(doc.get_i32("qty").unwrap(), original_qty);
+    assert!(!doc.contains_key("newField"));
+    assert_eq!(doc.get_str("status").unwrap(), "updated");
+}
+
+#[test]
+fn test_set_on_insert_alone_on_new_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_one(
+            doc! { "_id": 301 },
+            doc! { "$setOnInsert": { "initialized": true, "count": 0, "tags": ["default"] } },
+            options,
+        )
+        .unwrap();
+
+    let doc = find_one(&collection, doc! { "_id": 301 }).unwrap();
+    assert!(doc.get_bool("initialized").unwrap());
+    assert_eq!(doc.get_i32("count").unwrap(), 0);
+    let tags = doc.get_array("tags").unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].as_str().unwrap(), "default");
+}
+
+#[test]
+fn test_set_on_insert_with_nested_fields() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_one(
+            doc! { "_id": 302 },
+            doc! { "$setOnInsert": { "config.version": 1, "config.enabled": false, "meta.createdBy": "system" } },
+            options,
+        )
+        .unwrap();
+
+    let doc = find_one(&collection, doc! { "_id": 302 }).unwrap();
+    let config = doc.get_document("config").unwrap();
+    assert_eq!(config.get_i32("version").unwrap(), 1);
+    assert!(!config.get_bool("enabled").unwrap());
+    let meta = doc.get_document("meta").unwrap();
+    assert_eq!(meta.get_str("createdBy").unwrap(), "system");
+}
+
+#[test]
+fn test_set_on_insert_combined_with_inc() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_one(
+            doc! { "_id": 303 },
+            doc! { "$setOnInsert": { "baseValue": 100 }, "$inc": { "counter": 1 } },
+            options,
+        )
+        .unwrap();
+
+    let doc = find_one(&collection, doc! { "_id": 303 }).unwrap();
+    assert_eq!(doc.get_i32("baseValue").unwrap(), 100);
+    assert_eq!(doc.get_i32("counter").unwrap(), 1);
+}
+
+#[test]
+fn test_set_on_insert_without_upsert_no_effect() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let initial_count = collection.find(doc! {}).execute().unwrap().count();
+
+    collection
+        .update_one(
+            doc! { "_id": 999 },
+            doc! { "$setOnInsert": { "field": "value" } },
+            UpdateOptions::default(),
+        )
+        .unwrap();
+
+    let new_count = collection.find(doc! {}).execute().unwrap().count();
+    assert_eq!(new_count, initial_count);
+
+    let doc = find_one(&collection, doc! { "_id": 999 });
+    assert!(doc.is_none());
+}
+
+#[test]
+fn test_set_on_insert_update_many_inserts_one() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let initial_count = collection.find(doc! {}).execute().unwrap().count();
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_many(
+            doc! { "category": "nonexistent" },
+            doc! { "$setOnInsert": { "isNew": true }, "$set": { "processed": true } },
+            options,
+        )
+        .unwrap();
+
+    let new_count = collection.find(doc! {}).execute().unwrap().count();
+    assert_eq!(new_count, initial_count + 1);
+
+    let doc = find_one(&collection, doc! { "category": "nonexistent" }).unwrap();
+    assert!(doc.get_bool("isNew").unwrap());
+    assert!(doc.get_bool("processed").unwrap());
+}
+
+#[test]
+fn test_set_on_insert_update_many_ignores_on_existing() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let options = UpdateOptions { upsert: true, ..Default::default() };
+    collection
+        .update_many(
+            doc! { "status": "A" },
+            doc! { "$setOnInsert": { "shouldNotExist": true }, "$set": { "checked": true } },
+            options,
+        )
+        .unwrap();
+
+    let docs: Vec<Document> = collection
+        .find(doc! { "status": "A" })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    for doc in docs {
+        assert!(doc.get_bool("checked").unwrap());
+        assert!(!doc.contains_key("shouldNotExist"));
+    }
+}
+
 #[test]
 fn test_upsert_false_does_not_insert() {
     let (_dir, db) = setup_db_with_data();
