@@ -1,6 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::varint;
 use crate::storage::operation::Operation;
+use std::collections::BTreeSet;
 use std::io::Result;
 
 #[derive(Debug, PartialEq)]
@@ -36,15 +37,18 @@ pub struct WriteBatch {
     operations: Vec<Operation>,
     preconditions: Option<Preconditions>,
     precomputed_wal_record: Option<Vec<u8>>,
+    required_collections: BTreeSet<(u32, u32)>,
 }
 
 impl WriteBatch {
     pub fn new(operations: Vec<Operation>) -> WriteBatch {
         let precomputed_wal_record = Some(Self::precompute_wal_record(&operations));
+        let required_collections = Self::extract_required_collections(&operations);
         WriteBatch {
             operations,
             preconditions: None,
             precomputed_wal_record,
+            required_collections,
         }
     }
 
@@ -53,10 +57,12 @@ impl WriteBatch {
         preconditions: Preconditions,
     ) -> Self {
         let precomputed_wal_record = Some(Self::precompute_wal_record(&operations));
+        let required_collections = Self::extract_required_collections(&operations);
         WriteBatch {
             operations,
             preconditions: Some(preconditions),
             precomputed_wal_record,
+            required_collections,
         }
     }
 
@@ -66,6 +72,10 @@ impl WriteBatch {
 
     pub fn preconditions(&self) -> Option<&Preconditions> {
         self.preconditions.as_ref()
+    }
+
+    pub fn required_collections(&self) -> &BTreeSet<(u32, u32)> {
+        &self.required_collections
     }
 
     pub fn to_wal_record(&self, seq: u64) -> Vec<u8> {
@@ -78,6 +88,13 @@ impl WriteBatch {
         vec.extend_from_slice(&seq.to_be_bytes());
         vec.extend_from_slice(precomputed_wal_record);
         vec
+    }
+
+    fn extract_required_collections(operations: &[Operation]) -> BTreeSet<(u32, u32)> {
+        operations
+            .iter()
+            .map(|op| (op.collection, op.index))
+            .collect()
     }
 
     fn precompute_wal_record(operations: &[Operation]) -> Vec<u8> {
@@ -105,6 +122,7 @@ impl WriteBatch {
             operations,
             preconditions: None,
             precomputed_wal_record: None,
+            required_collections: BTreeSet::new(),
         })
     }
 

@@ -1303,7 +1303,7 @@ mod optimizer_tests {
 
     fn test_catalog() -> Arc<Catalog> {
         let mut catalog = Catalog::new();
-        catalog = catalog.add_collection("test", COLLECTION);
+        catalog = catalog.add_collection("test", COLLECTION, 2);
         Arc::new(catalog)
     }
 }

@@ -1,10 +1,11 @@
-pub mod buffer;
-pub mod byte_reader;
-pub mod byte_writer;
-pub mod checksum;
-pub mod compressor;
-pub mod varint;
-pub mod serializable;
+pub (crate) mod buffer;
+pub (crate) mod byte_reader;
+pub (crate) mod byte_writer;
+pub (crate) mod checksum;
+pub (crate) mod compressor;
+pub (crate) mod varint;
+pub (crate) mod serializable;
+pub (crate) mod bitset;
 
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use std::fs::{File, OpenOptions};

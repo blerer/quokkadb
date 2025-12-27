@@ -4,10 +4,9 @@ use crate::obs::metrics::{DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
-use crate::storage::catalog::Catalog;
+use crate::storage::catalog::{Catalog, CollectionOptions};
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
-use crate::storage::internal_key::encode_record_key;
 use crate::storage::lsm_tree::LsmTree;
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::manifest::Manifest;
@@ -402,33 +401,125 @@ impl StorageEngine {
     }
 
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> StorageResult<u32> {
-        if self.error_mode.load(Ordering::Relaxed) {
-            return Err(StorageError::ErrorMode("The database is in error mode dues to a previous write error".into()));
-        }
-        let collection = self.catalog().get_collection_by_name(name);
-
-        if let Some(collection) = collection {
+        self.check_error_mode()?;
+        if let Some(collection) = self.catalog().get_collection_by_name(name) {
             Ok(collection.id)
         } else {
-            // The collection do not exist we need to create it and update the manifest
-            let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+            self.perform_create_collection(name, CollectionOptions::default(), true)
+        }
+    }
 
-            // We need first to check that the collection has not been created concurrently
-            let lsm_tree = self.lsm_tree.load();
-            let catalogue = lsm_tree.catalogue();
-            let collection = catalogue.get_collection_by_name(name);
-            if collection.is_none() {
-                let id = catalogue.next_collection_id;
-                let edit = ManifestEdit::CreateCollection {
-                    name: name.to_string(),
-                    id,
-                };
-                let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
-                Ok(id)
-            } else {
+    fn check_error_mode(self: &Arc<Self>) -> StorageResult<()> {
+        if self.error_mode.load(Ordering::Relaxed) {
+            Err(StorageError::ErrorMode("The database is in error mode dues to a previous write error".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn create_collection(self: &Arc<Self>,
+                             name: &str,
+                             options: CollectionOptions
+    ) -> StorageResult<u32> {
+        self.check_error_mode()?;
+        self.perform_create_collection(name, options, false)
+    }
+
+    fn perform_create_collection(self: &Arc<Self>,
+                                 name: &str,
+                                 options: CollectionOptions,
+                                 if_exists: bool
+    ) -> StorageResult<u32> {
+
+        // The collection do not exist we need to create it and update the manifest
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+
+        // We need first to check that the collection has not been created concurrently
+        let lsm_tree = self.lsm_tree.load();
+        let catalogue = lsm_tree.catalog();
+        let collection = catalogue.get_collection_by_name(name);
+        if collection.is_none() {
+            let id = catalogue.next_collection_id;
+            let edit = ManifestEdit::CreateCollection {
+                name: name.to_string(),
+                id,
+                created_at: self.next_seq_number.load(Ordering::Relaxed),
+                options,
+            };
+            // We want to sync to ensure that all the previous sequence numbers are persisted.
+            wal_and_manifest.wal.sync()?;
+            info!(self.logger, "Creating collection '{}' with id {}", name, id);
+            let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+            Ok(id)
+        } else {
+            if if_exists {
                 Ok(collection.unwrap().id)
+            } else {
+                Err(StorageError::CollectionAlreadyExists(name.to_string()))
             }
         }
+    }
+
+    pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<()> {
+        self.check_error_mode()?;
+        let id =  self.catalog().get_collection_by_name(name).map(|c| c.id);
+
+        if id.is_none() {
+            // Collection does not exist, nothing to do
+            return Ok(());
+        }
+
+        let id = id.unwrap();
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+
+        let lsm_tree = self.lsm_tree.load();
+        let edit = ManifestEdit::DropCollection {
+            id,
+            dropped_at: self.next_seq_number.load(Ordering::Relaxed),
+        };
+        // We want to sync to ensure that all the previous sequence numbers are persisted.
+        wal_and_manifest.wal.sync()?;
+        info!(self.logger, "Dropping collection '{}' with id {}", name, id);
+        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        Ok(())
+    }
+
+    pub fn rename_collection(self: &Arc<Self>, old_name: &str, new_name: &str) -> StorageResult<()> {
+        self.check_error_mode()?;
+
+        let catalog = self.catalog();
+        let id = catalog
+            .get_collection_by_name(old_name)
+            .map(|c| c.id)
+            .ok_or_else(|| StorageError::CollectionNotFound { name: old_name.to_string(), id: None })?;
+
+        // Check that new name is not already taken
+        if catalog.get_collection_by_name(new_name).is_some() {
+            return Err(StorageError::CollectionAlreadyExists(new_name.to_string()));
+        }
+
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+
+        // Re-check under lock to avoid TOCTOU
+        let lsm_tree = self.lsm_tree.load();
+        let catalog = lsm_tree.catalog();
+
+        if catalog.get_collection_by_name(old_name).is_none() {
+            return Err(StorageError::CollectionNotFound { name: old_name.to_string(), id: None });
+        }
+        if catalog.get_collection_by_name(new_name).is_some() {
+            return Err(StorageError::CollectionAlreadyExists(new_name.to_string()));
+        }
+
+        let edit = ManifestEdit::RenameCollection {
+            id,
+            new_name: new_name.to_string(),
+        };
+
+        wal_and_manifest.wal.sync()?;
+        info!(self.logger, "Renaming collection '{}' to '{}' (id {})", old_name, new_name, id);
+        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        Ok(())
     }
 
     pub fn last_visible_sequence(&self) -> u64 {
@@ -437,16 +528,12 @@ impl StorageEngine {
 
     pub fn catalog(&self) -> Arc<Catalog> {
         let lsm_tree = self.lsm_tree.load();
-        lsm_tree.catalogue().clone()
+        lsm_tree.catalog().clone()
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch) -> StorageResult<()> {
 
-        if self.error_mode.load(Ordering::Relaxed) {
-            return Err(StorageError::ErrorMode(
-                "The database is in error mode dues to a previous write error".to_string(),
-            ));
-        }
+        self.check_error_mode()?;
 
         let writer = Arc::new(Writer::new(batch));
 
@@ -502,8 +589,10 @@ impl StorageEngine {
         // Release the queue lock
         drop(queue);
 
+        let lsm_tree = self.lsm_tree.load().clone();
+
         // Check the preconditions for each writer
-        let writers = self.check_preconditions(&mut writers);
+        let writers = self.check_preconditions(lsm_tree.catalog(), &mut writers);
 
         if writers.is_empty() {
             event!(self.logger, "write done (no-op due to preconditions)");
@@ -523,8 +612,6 @@ impl StorageEngine {
         }
 
         let with_sequence = res.unwrap();
-
-        let lsm_tree = self.lsm_tree.load().clone();
 
         let mut with_results = Vec::with_capacity(with_sequence.len());
 
@@ -557,13 +644,24 @@ impl StorageEngine {
         event!(self.logger, "write done");
     }
 
-    fn check_preconditions(self: &Arc<Self>, writers: &mut Vec<Arc<Writer>>) -> Vec<Arc<Writer>> {
+    fn check_preconditions(
+        self: &Arc<Self>,
+        catalog: Arc<Catalog>,
+        writers: &mut Vec<Arc<Writer>>) -> Vec<Arc<Writer>> {
+
         let seq = self.next_seq_number.load(Ordering::Relaxed);
 
         let mut successful_writers = Vec::with_capacity(writers.len());
 
-        // Check preconditions before assigning sequence numbers
         for writer in writers {
+
+            let rs = self.check_writer_collections_exist(&catalog, writer.batch(), seq);
+
+            if let Err(error) = rs {
+                writer.done(Err(error));
+                continue;
+            }
+
             if let Some(preconditions) = writer.batch().preconditions() {
                 let rs = self.check_writer_preconditions(seq, preconditions);
                 if let Err(error) = rs {
@@ -574,6 +672,34 @@ impl StorageEngine {
             successful_writers.push(writer.clone());
         }
         successful_writers
+    }
+
+    fn check_writer_collections_exist(
+        self: &Arc<Self>,
+        catalog: &Catalog,
+        batch: &WriteBatch,
+        seq: u64,
+    ) -> StorageResult<()> {
+
+        for &(col, idx) in batch.required_collections() {
+            let collection = catalog.get_collection_at(col, seq).ok_or(
+                StorageError::CollectionNotFound {
+                    name: catalog.get_collection_by_id(&col).map(|c| c.name.clone()).unwrap(),
+                    id: Some(col)
+                }
+            )?;
+
+            if idx != 0 {
+                collection.get_index_at(idx, seq).ok_or(
+                    StorageError::IndexNotFound {
+                        collection_name: collection.name.clone(),
+                        index_name: collection.get_index_by_id(idx).map(|i| i.name.clone()).unwrap(),
+                        id: Some(idx),
+                    }
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn check_writer_preconditions(self: &Arc<Self>, seq: u64, preconditions: &Preconditions) -> StorageResult<()> {
@@ -650,10 +776,13 @@ impl StorageEngine {
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
         let lsm_tree = self.lsm_tree.load();
+
         lsm_tree.read(
             self.sst_cache.clone(),
             &self.db_dir,
-            &encode_record_key(collection, index, user_key),
+            collection,
+            index,
+            user_key,
             snapshot,
             min_snapshot,
         ).into()
@@ -731,11 +860,7 @@ impl StorageEngine {
         info!(self.logger, "Flush requested");
         event!(self.logger, "requested_flush start");
 
-        if self.error_mode.load(Ordering::Relaxed) {
-            return Err(StorageError::ErrorMode(
-                "The database is in error mode dues to a previous write error".to_string(),
-            ));
-        }
+        self.check_error_mode()?;
 
         self.perform_wal_and_memtable_rotation(true)?;
         event!(self.logger, "requested_flush completed");
@@ -1051,8 +1176,6 @@ impl StorageEngine {
     }
 }
 
-
-
 /// The result of scanning the database directory at startup.
 ///
 /// Contains the list of WAL files that must be replayed,
@@ -1199,8 +1322,11 @@ pub enum StorageError {
     Io(Error),
     UnexpectedError(String),
     ErrorMode(String),
-    VersionConflict{ user_key: Vec<u8>, reason: String },
+    VersionConflict { user_key: Vec<u8>, reason: String },
     LogCorruption { record_offset: u64, reason: String },
+    CollectionAlreadyExists(String),
+    CollectionNotFound { name: String, id: Option<u32> },
+    IndexNotFound { collection_name: String, index_name: String, id: Option<u32> },
 }
 
 impl StorageError {
@@ -1235,13 +1361,23 @@ impl Clone for StorageError {
             StorageError::Io(e) => StorageError::Io(Error::new(e.kind(), e.to_string())),
             StorageError::UnexpectedError(msg) => StorageError::UnexpectedError(msg.clone()),
             StorageError::ErrorMode(msg) => StorageError::ErrorMode(msg.clone()),
-            StorageError::VersionConflict { user_key, reason} =>
-                StorageError::VersionConflict{ user_key: user_key.clone(), reason: reason.clone() },
+            StorageError::VersionConflict { user_key, reason } =>
+                StorageError::VersionConflict { user_key: user_key.clone(), reason: reason.clone() },
+            StorageError::CollectionNotFound { name, id } =>
+                StorageError::CollectionNotFound { name: name.clone() , id: *id },
+            StorageError::IndexNotFound { collection_name, index_name, id } =>
+                StorageError::IndexNotFound {
+                    collection_name: collection_name.clone(),
+                    index_name: index_name.clone(),
+                    id: *id
+                },
             StorageError::LogCorruption { record_offset, reason } =>
                 StorageError::LogCorruption {
                     record_offset: *record_offset,
                     reason: reason.clone()
                 },
+            StorageError::CollectionAlreadyExists(name) =>
+                StorageError::CollectionAlreadyExists(name.clone()),
         }
     }
 }
@@ -1252,11 +1388,27 @@ impl fmt::Display for StorageError {
             StorageError::Io(e) => write!(f, "IO error: {}", e),
             StorageError::UnexpectedError(msg) => write!(f, "Unexpected error: {}", msg),
             StorageError::ErrorMode(msg) => write!(f, "Error mode: {}", msg),
-            StorageError::VersionConflict { user_key, reason} =>
+            StorageError::VersionConflict { user_key, reason } =>
                 write!(f, "Version conflict for user_key {:?} : {}", user_key, reason),
+            StorageError::CollectionNotFound { name, id } => {
+                if let Some(col_id) = id {
+                    write!(f, "Collection does not exist: {} (id: {})", name, col_id)
+                } else {
+                    write!(f, "Collection does not exist: {}", name)
+                }
+            }
+            StorageError::IndexNotFound { collection_name, index_name, id} => {
+                if let Some(idx_id) = id {
+                    write!(f, "Index does not exist: {}.{} (id: {})", collection_name, index_name, idx_id)
+                } else {
+                    write!(f, "Index does not exist: {}.{}", collection_name, index_name)
+                }
+            }
             StorageError::LogCorruption { record_offset, reason } => {
                 write!(f, "Log corruption at offset {}: {}", record_offset, reason)
             }
+            StorageError::CollectionAlreadyExists(name) =>
+                write!(f, "Collection already exists: {}", name),
         }
     }
 }
@@ -1278,6 +1430,7 @@ mod tests {
     use std::io::{ErrorKind, Seek, SeekFrom, Write};
     use std::path::Path;
     use tempfile::tempdir;
+    use crate::storage::internal_key::encode_record_key;
 
     mod scan_tests {
         use super::*;
@@ -1347,7 +1500,7 @@ mod tests {
         )
         .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_read").unwrap();
         let idx = 0;
 
         let inserts = vec![
@@ -1456,7 +1609,7 @@ mod tests {
         )
         .unwrap();
 
-        let col = 42;
+        let col = engine.create_collection_if_not_exists("test_range_scan").unwrap();
         let idx = 0;
 
         // Stage 1: All in memtable
@@ -1598,7 +1751,7 @@ mod tests {
         )
         .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_immutable_memtables").unwrap();
         let idx = 0;
 
         // Pause the flush manager to keep immutable memtables around.
@@ -1741,13 +1894,12 @@ mod tests {
         let mut options = Options::lightweight();
         options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
 
-        let col = 10;
         let idx = 0;
 
         let val_1mb_string = "a".repeat(1024 * 1024);
         let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
 
-        {
+        let col = {
             let old_engine = StorageEngine::new(
                 test_instance(),
                 registry,
@@ -1757,6 +1909,8 @@ mod tests {
 
             // Pause the flush manager to keep immutable memtables around.
             old_engine.flush_manager.pause();
+
+            let col = old_engine.create_collection_if_not_exists("test_replay_with_multiple_wals").unwrap();
 
             // Write enough data to trigger 2 memtable rotations.
             // We write four ~1MB values to fill up the 4MB memtable.
@@ -1778,7 +1932,9 @@ mod tests {
             assert!(path.join("000003.log").exists());
             // The next WAL should be 000005.log as the flush will be blocked after the sstable number is assigned.
             assert!(path.join("000005.log").exists());
-        }
+
+            col
+        };
 
         let engine = StorageEngine::new(
             test_instance(),
@@ -1814,15 +1970,15 @@ mod tests {
         // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
         // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
         options.db.max_manifest_file_size =
-            StorageQuantity::new(5, crate::options::storage_quantity::StorageUnit::Kibibytes);
+            StorageQuantity::new(5, StorageUnit::Kibibytes);
 
         let engine =
             StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
 
-        let col = 1;
-        let idx = 0;
-
         assert_counter_eq(registry, "manifest_rewrite", 0);
+
+        let col = engine.create_collection_if_not_exists("test_manifest_rotation").unwrap();
+        let idx = 0;
 
         let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
         assert!(initial_manifest_path
@@ -1830,9 +1986,9 @@ mod tests {
             .contains("MANIFEST-000001"));
 
         // Each flush generates two edits (WalRotation, Flush), consuming space in the manifest.
-        // The initial manifest is ~4KiB. Each pair of edits for a flush is ~40 bytes.
-        // We need to cross the 5KiB threshold, so we need ~30 flushes.
-        for i in 0..30 {
+        // The initial manifest is ~4KiB. Each pair of edits for a flush
+        // is ~40 bytes. We need to cross the 5KiB threshold, so we need ~25 flushes.
+        for i in 0..25 {
             engine
                 .write(WriteBatch::new(vec![put_op(col, i, i as u32)]))
                 .unwrap();
@@ -1845,7 +2001,7 @@ mod tests {
         assert_ne!(current_manifest_path, initial_manifest_path);
 
         // Verify data is readable after rotation.
-        for i in 0..30 {
+        for i in 0..25 {
             let (_key, val) = engine
                 .read(col, idx, &user_key(i), None)
                 .unwrap()
@@ -1867,7 +2023,7 @@ mod tests {
         .unwrap();
 
         // Verify data is readable after restart.
-        for i in 0..30 {
+        for i in 0..25 {
             let (_key, val) = engine_restarted
                 .read(col, idx, &user_key(i), None)
                 .unwrap()
@@ -1891,7 +2047,7 @@ mod tests {
         let engine =
             StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
 
-        let col = 1;
+        let col = engine.create_collection_if_not_exists("test_manifest_rotation_error").unwrap();
 
         assert_counter_eq(registry, "manifest_rewrite", 0);
 
@@ -1932,7 +2088,7 @@ mod tests {
         let engine =
             StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_obsolete_wal_deletion").unwrap();
         let idx = 0;
 
         // The first WAL file should be 000002.log.
@@ -2009,7 +2165,7 @@ mod tests {
 
         let num_threads = 5;
         let writes_per_thread = 200;
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("concurrent_writes").unwrap();
         let idx = 0;
 
         std::thread::scope(|s| {
@@ -2060,11 +2216,10 @@ mod tests {
         options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
         let options = Arc::new(options);
 
-        let col = 10;
         let idx = 0;
 
         // --- First run ---
-        {
+        let col = {
             let engine = StorageEngine::new(
                 test_instance(),
                 registry,
@@ -2072,6 +2227,8 @@ mod tests {
                 &db_path,
             )
             .unwrap();
+
+            let col = engine.create_collection_if_not_exists("test_shutdown_and_restart").unwrap();
 
             // Write some data and flush it to an SSTable.
             engine.write(WriteBatch::new(vec![put_op(col, 1, 1)])).unwrap();
@@ -2084,7 +2241,9 @@ mod tests {
 
             // Gracefully shut down the engine. This should flush the memtable.
             engine.shutdown().unwrap();
-        }
+
+            col
+        };
 
         // --- Second run (restart) ---
         let engine_restarted = StorageEngine::new(
@@ -2121,13 +2280,14 @@ mod tests {
         options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
         let options = Arc::new(options);
 
-        let col = 10;
         let idx = 0;
 
         // --- First run (simulating a crash) ---
-        {
+        let col = {
             let engine =
                 StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+
+            let col = engine.create_collection_if_not_exists("test_wal_replay_on_restart").unwrap();
 
             // Write some data and flush it to an SSTable.
             engine
@@ -2151,7 +2311,9 @@ mod tests {
             // Simulate a crash by just dropping the engine without calling shutdown.
             // The memtable content is lost, but the WAL records should persist.
             drop(engine);
-        }
+
+            col
+        };
 
         // --- Second run (restart and replay) ---
         let engine_restarted = StorageEngine::new(
@@ -2205,14 +2367,16 @@ mod tests {
         options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
         let options = Arc::new(options);
 
-        let col = 10;
         let idx = 0;
 
         let wal_path;
         // --- First run (simulating a crash) ---
-        {
+        let col = {
             let engine =
                 StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+
+            let col = engine.create_collection_if_not_exists("test_wal_replay_with_partial_log").unwrap();
+
             engine
                 .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
                 .unwrap();
@@ -2222,7 +2386,8 @@ mod tests {
 
             wal_path = db_path.join("000002.log");
             drop(engine);
-        }
+            col
+        };
 
         // Corrupt the WAL by appending a partial record.
         let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
@@ -2283,20 +2448,23 @@ mod tests {
         options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
         let options = Arc::new(options);
 
-        let col = 10;
         let idx = 0;
 
         let original_wal_path;
         // --- First run ---
-        {
+        let col = {
             let engine =
                 StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+
+            let col = engine.create_collection_if_not_exists("test_wal_replay_with_header_corruption").unwrap();
+
             engine
                 .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
                 .unwrap();
             original_wal_path = db_path.join("000002.log");
             drop(engine);
-        }
+            col
+        };
 
         // Corrupt the WAL header by overwriting the first few bytes.
         let mut file = OpenOptions::new()
@@ -2356,7 +2524,6 @@ mod tests {
         options.db.file_write_buffer_size = StorageQuantity::new(1, StorageUnit::Kibibytes);
         let options = Arc::new(options);
 
-        let col = 10;
         let idx = 0;
 
         let old_wal_path;
@@ -2370,6 +2537,8 @@ mod tests {
 
             // Pause the flush manager to keep wal around.
             engine.flush_manager.pause();
+
+            let col = engine.create_collection_if_not_exists("test_restart_fails_with_corrupted_old_wal").unwrap();
 
             // Write enough data to trigger memtable rotation, which also rotates the WAL.
             let large_val = vec![0; 1024];
@@ -2426,10 +2595,8 @@ mod tests {
         let db_path = path.to_path_buf();
         let options = Arc::new(Options::lightweight());
 
-        let col = 10;
-
         // --- First run ---
-        {
+        let col ={
             let engine = StorageEngine::new(
                 test_instance(),
                 &mut MetricRegistry::default(),
@@ -2441,6 +2608,8 @@ mod tests {
             // After initialization: MANIFEST-000001, 000002.log are created. Next file is 3.
             let next_file_num_before = engine.next_file_number.load(Ordering::Relaxed);
             assert_eq!(next_file_num_before, 3);
+
+            let col = engine.create_collection_if_not_exists("test_restart_with_stale_files").unwrap();
 
             let inserts = vec![
                 put_op(col, 1, 1),
@@ -2455,7 +2624,9 @@ mod tests {
 
             // Simulate crash
             drop(engine);
-        }
+
+            col
+        };
 
         // --- Create stale files ---
         // Create files with numbers higher than what the manifest knows.
@@ -2510,7 +2681,7 @@ mod tests {
         let engine =
             StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_error_mode_activation_and_rejection").unwrap();
 
         // 1. Inject an error into the WAL write path.
         engine.wal_return_error_on_write(true);
@@ -2546,7 +2717,7 @@ mod tests {
         )
             .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_wal_rotation_on_write_error").unwrap();
         let idx = 0;
 
         engine.wal_return_error_on_rotate(true);
@@ -2593,7 +2764,7 @@ mod tests {
         )
             .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_wal_rotation_on_flush_error").unwrap();
 
         engine.wal_return_error_on_rotate(true);
 
@@ -2636,7 +2807,7 @@ mod tests {
         )
             .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_manifest_write_error").unwrap();
 
         engine.manifest_return_error_on_write(true);
 
@@ -2679,7 +2850,7 @@ mod tests {
         )
             .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_memtable_flush_error").unwrap();
 
         engine.lsm_tree().memtable.return_error_on_flush(true);
 
@@ -2734,6 +2905,594 @@ mod tests {
     }
 
     #[test]
+    fn test_create_collection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a new collection
+        let col_id = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+        assert_eq!(col_id, 10); // First user collection ID
+
+        // Verify collection exists in catalog
+        let catalog = engine.catalog();
+        let collection = catalog.get_collection_by_name("test_collection");
+        assert!(collection.is_some());
+        assert_eq!(collection.unwrap().id, col_id);
+
+        // Create another collection
+        let col_id_2 = engine.create_collection("test_collection_2", CollectionOptions::default()).unwrap();
+        assert_eq!(col_id_2, 11);
+
+        // Verify both collections exist
+        let catalog = engine.catalog();
+        assert!(catalog.get_collection_by_name("test_collection").is_some());
+        assert!(catalog.get_collection_by_name("test_collection_2").is_some());
+    }
+
+    #[test]
+    fn test_create_collection_already_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection
+        engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+
+        // Try to create the same collection again - should fail
+        let result = engine.create_collection("test_collection", CollectionOptions::default());
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, StorageError::CollectionAlreadyExists(_)));
+        assert!(err.to_string().contains("test_collection"));
+    }
+
+    #[test]
+    fn test_create_collection_if_not_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection
+        let col_id_1 = engine.create_collection_if_not_exists("test_collection").unwrap();
+        assert_eq!(col_id_1, 10);
+
+        // Call again - should return existing ID, not error
+        let col_id_2 = engine.create_collection_if_not_exists("test_collection").unwrap();
+        assert_eq!(col_id_2, col_id_1);
+
+        // Verify only one collection exists with that name
+        let catalog = engine.catalog();
+        assert_eq!(catalog.next_collection_id, 11);
+    }
+
+    #[test]
+    fn test_drop_collection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection
+        let col_id = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+
+        // Write some data to it
+        engine.write(WriteBatch::new(vec![put_op(col_id, 1, 1)])).unwrap();
+
+        // Verify data exists
+        let result = engine.read(col_id, 0, &user_key(1), None).unwrap();
+        assert!(result.is_some());
+
+        // Drop the collection
+        engine.drop_collection("test_collection").unwrap();
+
+        // Verify collection is no longer accessible by name
+        let catalog = engine.catalog();
+        assert!(catalog.get_collection_by_name("test_collection").is_none());
+    }
+
+    #[test]
+    fn test_drop_collection_not_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Drop a non-existent collection - should succeed (no-op)
+        let result = engine.drop_collection("non_existent");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_write_to_non_existent_collection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        let name = "existing_collection";
+        let col = engine.create_collection_if_not_exists(name).unwrap();
+        engine.write(WriteBatch::new(vec![put_op(col, 1, 1)])).unwrap();
+
+        engine.drop_collection(name).unwrap();
+
+        // Try to write to a collection that doesn't exist
+        let result = engine.write(WriteBatch::new(vec![put_op(col, 1, 1)]));
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, StorageError::CollectionNotFound { .. }));
+    }
+
+    #[test]
+    fn test_write_to_dropped_collection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create and then drop a collection
+        let col_id = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+        engine.drop_collection("test_collection").unwrap();
+
+        // Try to write to the dropped collection
+        let result = engine.write(WriteBatch::new(vec![put_op(col_id, 1, 1)]));
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, StorageError::CollectionNotFound { .. }));
+    }
+
+    #[test]
+    fn test_collection_persistence_across_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        // First run - create collections
+        let (col_id_1, col_id_2) = {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let col_id_1 = engine.create_collection("collection_1", CollectionOptions::default()).unwrap();
+            let col_id_2 = engine.create_collection("collection_2", CollectionOptions::default()).unwrap();
+
+            // Write data to both
+            engine.write(WriteBatch::new(vec![put_op(col_id_1, 1, 1)])).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col_id_2, 2, 2)])).unwrap();
+
+            engine.shutdown().unwrap();
+
+            (col_id_1, col_id_2)
+        };
+
+        // Second run - verify collections persist
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let catalog = engine.catalog();
+            assert!(catalog.get_collection_by_name("collection_1").is_some());
+            assert!(catalog.get_collection_by_name("collection_2").is_some());
+
+            // Verify data
+            let result_1 = engine.read(col_id_1, 0, &user_key(1), None).unwrap();
+            assert!(result_1.is_some());
+
+            let result_2 = engine.read(col_id_2, 0, &user_key(2), None).unwrap();
+            assert!(result_2.is_some());
+
+            // Creating a new collection should get the next ID
+            let col_id_3 = engine.create_collection("collection_3", CollectionOptions::default()).unwrap();
+            assert_eq!(col_id_3, 12);
+        }
+    }
+
+    #[test]
+    fn test_drop_collection_persistence_across_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        // First run - create and drop a collection
+        let col_id = {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let col_id = engine.create_collection("to_drop", CollectionOptions::default()).unwrap();
+            engine.create_collection("to_keep", CollectionOptions::default()).unwrap();
+
+            engine.drop_collection("to_drop").unwrap();
+
+            engine.shutdown().unwrap();
+
+            col_id
+        };
+
+        // Second run - verify drop persisted
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let catalog = engine.catalog();
+            assert!(catalog.get_collection_by_name("to_drop").is_none());
+            assert!(catalog.get_collection_by_name("to_keep").is_some());
+
+            // Writing to dropped collection should fail
+            let result = engine.write(WriteBatch::new(vec![put_op(col_id, 1, 1)]));
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_drop_and_recreate_collection_data_isolation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection and write data to it
+        let col_id_1 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+        assert_eq!(col_id_1, 10);
+
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 1, 100)])).unwrap();
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 2, 200)])).unwrap();
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 3, 300)])).unwrap();
+
+        // Verify data exists
+        let (_, val1) = engine.read(col_id_1, 0, &user_key(1), None).unwrap().unwrap();
+        let (_, expected_val1) = put_rec(col_id_1, 1, 100, 1);
+        assert_eq!(val1, expected_val1);
+
+        // Drop the collection
+        engine.drop_collection("test_collection").unwrap();
+
+        // Recreate the collection with the same name
+        let col_id_2 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+        assert_eq!(col_id_2, 11); // Should get a new ID
+
+        // The old data should NOT be visible when querying with the new collection ID
+        assert!(engine.read(col_id_2, 0, &user_key(1), None).unwrap().is_none());
+        assert!(engine.read(col_id_2, 0, &user_key(2), None).unwrap().is_none());
+        assert!(engine.read(col_id_2, 0, &user_key(3), None).unwrap().is_none());
+
+        // Write new data to the recreated collection
+        engine.write(WriteBatch::new(vec![put_op(col_id_2, 1, 999)])).unwrap();
+
+        // The new data should be visible
+        let (_, new_val) = engine.read(col_id_2, 0, &user_key(1), None).unwrap().unwrap();
+        let (_, expected_new_val) = put_rec(col_id_2, 1, 999, 5); // seq 5 after create(1), 3 writes, drop(doesn't increment)
+        assert_eq!(new_val, expected_new_val);
+
+        // Range scan on new collection should only return the new data
+        let results: Vec<_> = engine
+            .range_scan(col_id_2, 0, &(..), None, Direction::Forward)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_drop_and_recreate_collection_with_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection and write data to it
+        let col_id_1 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 1, 100)])).unwrap();
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 2, 200)])).unwrap();
+
+        // Flush data to SSTable
+        engine.flush().unwrap();
+
+        // Write more data (in memtable)
+        engine.write(WriteBatch::new(vec![put_op(col_id_1, 3, 300)])).unwrap();
+
+        // Verify all data exists
+        assert!(engine.read(col_id_1, 0, &user_key(1), None).unwrap().is_some());
+        assert!(engine.read(col_id_1, 0, &user_key(2), None).unwrap().is_some());
+        assert!(engine.read(col_id_1, 0, &user_key(3), None).unwrap().is_some());
+
+        // Drop the collection
+        engine.drop_collection("test_collection").unwrap();
+
+        // Recreate the collection
+        let col_id_2 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+
+        // Old data (both from SSTable and memtable) should NOT be visible with new collection ID
+        assert!(engine.read(col_id_2, 0, &user_key(1), None).unwrap().is_none());
+        assert!(engine.read(col_id_2, 0, &user_key(2), None).unwrap().is_none());
+        assert!(engine.read(col_id_2, 0, &user_key(3), None).unwrap().is_none());
+
+        // Write and flush new data
+        engine.write(WriteBatch::new(vec![put_op(col_id_2, 1, 999)])).unwrap();
+        engine.flush().unwrap();
+
+        // New data should be visible
+        let (_, new_val) = engine.read(col_id_2, 0, &user_key(1), None).unwrap().unwrap();
+        let (_, expected_new_val) = put_rec(col_id_2, 1, 999, 4);
+        assert_eq!(new_val, expected_new_val);
+
+        // Range scan should only return data from the new collection
+        let results: Vec<_> = engine
+            .range_scan(col_id_2, 0, &(..), None, Direction::Forward)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_drop_and_recreate_collection_persistence() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        let col_id_2;
+        // First run - create, populate, drop, recreate, repopulate
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            // Create first collection
+            let col_id_1 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col_id_1, 1, 100)])).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col_id_1, 2, 200)])).unwrap();
+            engine.flush().unwrap();
+
+            // Drop and recreate
+            engine.drop_collection("test_collection").unwrap();
+            col_id_2 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
+
+            // Write different data to recreated collection
+            engine.write(WriteBatch::new(vec![put_op(col_id_2, 5, 500)])).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col_id_2, 6, 600)])).unwrap();
+
+            engine.shutdown().unwrap();
+        }
+
+        // Second run - verify only new data is visible after restart
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            // Collection should exist with the new ID
+            let catalog = engine.catalog();
+            let collection = catalog.get_collection_by_name("test_collection").unwrap();
+            assert_eq!(collection.id, col_id_2);
+
+            // Old data (keys 1, 2) should NOT be visible
+            assert!(engine.read(col_id_2, 0, &user_key(1), None).unwrap().is_none());
+            assert!(engine.read(col_id_2, 0, &user_key(2), None).unwrap().is_none());
+
+            // New data (keys 5, 6) should be visible
+            assert!(engine.read(col_id_2, 0, &user_key(5), None).unwrap().is_some());
+            assert!(engine.read(col_id_2, 0, &user_key(6), None).unwrap().is_some());
+
+            // Range scan should only return the new data
+            let results: Vec<_> = engine
+                .range_scan(col_id_2, 0, &(..), None, Direction::Forward)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(results.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_rename_collection() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create a collection and write data
+        let col_id = engine.create_collection("original_name", CollectionOptions::default()).unwrap();
+        engine.write(WriteBatch::new(vec![put_op(col_id, 1, 100)])).unwrap();
+
+        // Rename the collection
+        engine.rename_collection("original_name", "new_name").unwrap();
+
+        // Verify old name no longer works
+        let catalog = engine.catalog();
+        assert!(catalog.get_collection_by_name("original_name").is_none());
+
+        // Verify new name works and has the same ID
+        let collection = catalog.get_collection_by_name("new_name").unwrap();
+        assert_eq!(collection.id, col_id);
+
+        // Verify data is still accessible with the same collection ID
+        let (_, val) = engine.read(col_id, 0, &user_key(1), None).unwrap().unwrap();
+        let (_, expected_val) = put_rec(col_id, 1, 100, 1);
+        assert_eq!(val, expected_val);
+    }
+
+    #[test]
+    fn test_rename_collection_not_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        let result = engine.rename_collection("non_existent", "new_name");
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, StorageError::CollectionNotFound { name: _, id: _  }));
+        assert!(err.to_string().contains("non_existent"));
+    }
+
+    #[test]
+    fn test_rename_collection_target_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let engine = StorageEngine::new(
+            test_instance(),
+            registry,
+            Arc::new(Options::lightweight()),
+            &path,
+        )
+        .unwrap();
+
+        // Create two collections
+        engine.create_collection("collection_a", CollectionOptions::default()).unwrap();
+        engine.create_collection("collection_b", CollectionOptions::default()).unwrap();
+
+        // Try to rename collection_a to collection_b - should fail
+        let result = engine.rename_collection("collection_a", "collection_b");
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, StorageError::CollectionAlreadyExists(_)));
+        assert!(err.to_string().contains("collection_b"));
+    }
+
+    #[test]
+    fn test_rename_collection_persistence() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        let col_id;
+        // First run - create and rename
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            col_id = engine.create_collection("original", CollectionOptions::default()).unwrap();
+            engine.write(WriteBatch::new(vec![put_op(col_id, 1, 100)])).unwrap();
+            engine.rename_collection("original", "renamed").unwrap();
+            engine.shutdown().unwrap();
+        }
+
+        // Second run - verify rename persisted
+        {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let catalog = engine.catalog();
+            assert!(catalog.get_collection_by_name("original").is_none());
+            assert!(catalog.get_collection_by_name("renamed").is_some());
+            assert_eq!(catalog.get_collection_by_name("renamed").unwrap().id, col_id);
+
+            // Data still accessible
+            let (_, val) = engine.read(col_id, 0, &user_key(1), None).unwrap().unwrap();
+            let (_, expected_val) = put_rec(col_id, 1, 100, 1);
+            assert_eq!(val, expected_val);
+        }
+    }
+
+    #[test]
     fn test_optimistic_locking_must_not_exist() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
@@ -2746,7 +3505,7 @@ mod tests {
         )
         .unwrap();
 
-        let col = 10;
+        let col = engine.create_collection_if_not_exists("test_optimistic_locking").unwrap();
         let idx = 0;
 
         // 1. Write key1.

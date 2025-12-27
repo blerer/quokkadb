@@ -1,6 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::catalog::Catalog;
+use crate::storage::catalog::{Catalog, CollectionOptions};
 use crate::util::interval::Interval;
 use crate::storage::lsm_version::{LsmVersion, SSTableMetadata};
 use std::fmt::Debug;
@@ -41,13 +41,20 @@ impl ManifestState {
                 lsm: Arc::new(self.lsm.with_flushed_sstable(*oldest_log_number, sst)),
                 catalog: self.catalog.clone(),
             },
-            ManifestEdit::CreateCollection { name, id } => ManifestState {
+            ManifestEdit::CreateCollection { name, id, created_at , options} => ManifestState {
                 lsm: self.lsm.clone(),
-                catalog: Arc::new(self.catalog.add_collection(name, *id)),
+                catalog: Arc::new(self.catalog.add_collection_with_options(name,
+                                                                           *id,
+                                                                           *created_at,
+                                                                           options.clone())),
             },
-            ManifestEdit::DropCollection { name } => ManifestState {
+            ManifestEdit::DropCollection { id, dropped_at } => ManifestState {
                 lsm: self.lsm.clone(),
-                catalog: Arc::new(self.catalog.drop_collection(name)),
+                catalog: Arc::new(self.catalog.drop_collection(*id, *dropped_at)),
+            },
+            ManifestEdit::RenameCollection { id, new_name } => ManifestState {
+                lsm: self.lsm.clone(),
+                catalog: Arc::new(self.catalog.rename_collection(*id, new_name)),
             },
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => ManifestState {
                 lsm: Arc::new(self.lsm.adjust_file_number(*next_file_number)),
@@ -110,10 +117,13 @@ pub enum ManifestEdit {
     Snapshot(Arc<ManifestState>),
 
     /// Adds a new collection to the catalog.
-    CreateCollection { name: String, id: u32 },
+    CreateCollection { name: String, id: u32, created_at: u64, options: CollectionOptions},
 
     /// Removes a collection from the catalog.
-    DropCollection { name: String },
+    DropCollection { id: u32, dropped_at: u64 },
+
+    /// Renames a collection in the catalog.
+    RenameCollection { id: u32, new_name: String },
 
     /// Indicates a new WAL file has been created.
     WalRotation { log_number: u64, next_seq: u64 },
@@ -145,33 +155,38 @@ impl ManifestEdit {
                 writer.write_u8(0);
                 tree.write_to(&mut writer);
             }
-            ManifestEdit::CreateCollection { name, id } => {
+            ManifestEdit::CreateCollection { name, id, created_at, options } => {
                 writer
                     .write_u8(1)
                     .write_str(&name)
-                    .write_varint_u64(*id as u64);
+                    .write_varint_u32(*id)
+                    .write_varint_u64(*created_at);
+                options.write_to(&mut writer);
             }
-            ManifestEdit::DropCollection { name } => {
-                writer.write_u8(2).write_str(&name);
+            ManifestEdit::DropCollection { id, dropped_at: drop_at } => {
+                writer.write_u8(2).write_varint_u32(*id).write_varint_u64(*drop_at);
+            }
+            ManifestEdit::RenameCollection { id, new_name } => {
+                writer.write_u8(3).write_varint_u32(*id).write_str(new_name);
             }
             ManifestEdit::WalRotation { log_number, next_seq } => {
-                writer.write_u8(3).write_varint_u64(*log_number).write_varint_u64(*next_seq);
+                writer.write_u8(4).write_varint_u64(*log_number).write_varint_u64(*next_seq);
             }
             ManifestEdit::ManifestRotation { manifest_number } => {
-                writer.write_u8(4).write_varint_u64(*manifest_number);
+                writer.write_u8(5).write_varint_u64(*manifest_number);
             }
             ManifestEdit::Flush {
                 oldest_log_number,
                 sst,
             } => {
-                writer.write_u8(5).write_varint_u64(*oldest_log_number);
+                writer.write_u8(6).write_varint_u64(*oldest_log_number);
                 sst.write_to(&mut writer);
             }
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => {
-                writer.write_u8(6).write_varint_u64(*next_file_number);
+                writer.write_u8(7).write_varint_u64(*next_file_number);
             }
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => {
-                writer.write_u8(7).write_varint_u64(*oldest_log_number);
+                writer.write_u8(8).write_varint_u64(*oldest_log_number);
             }
         }
         writer.take_buffer()
@@ -186,23 +201,31 @@ impl ManifestEdit {
             )?))),
             1 => {
                 let name = reader.read_str()?.to_string();
-                let id = reader.read_varint_u64()? as u32;
-                Ok(ManifestEdit::CreateCollection { name, id })
+                let id = reader.read_varint_u32()?;
+                let created_at = reader.read_varint_u64()?;
+                let options = CollectionOptions::read_from(&reader)?;
+                Ok(ManifestEdit::CreateCollection { name, id, created_at, options })
             }
             2 => {
-                let name = reader.read_str()?.to_string();
-                Ok(ManifestEdit::DropCollection { name })
+                let id = reader.read_varint_u32()?;
+                let dropped_at = reader.read_varint_u64()?;
+                Ok(ManifestEdit::DropCollection { id, dropped_at })
             }
             3 => {
+                let id = reader.read_varint_u32()?;
+                let new_name = reader.read_str()?.to_string();
+                Ok(ManifestEdit::RenameCollection { id, new_name })
+            }
+            4 => {
                 let log_number = reader.read_varint_u64()?;
                 let next_seq = reader.read_varint_u64()?;
                 Ok(ManifestEdit::WalRotation { log_number, next_seq })
             }
-            4 => {
+            5 => {
                 let manifest_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::ManifestRotation { manifest_number })
             }
-            5 => {
+            6 => {
                 let oldest_log_number = reader.read_varint_u64()?;
                 let sst = Arc::new(SSTableMetadata::read_from(&reader)?);
                 Ok(ManifestEdit::Flush {
@@ -210,11 +233,11 @@ impl ManifestEdit {
                     sst,
                 })
             }
-            6 => {
+            7 => {
                 let next_file_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::FilesDetectedOnRestart { next_file_number })
             }
-            7 => {
+            8 => {
                 let oldest_log_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::IgnoringEmptyMemtable { oldest_log_number })
             }
@@ -233,11 +256,14 @@ impl fmt::Display for ManifestEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ManifestEdit::Snapshot(state) => write!(f, "Snapshot({:?})", state),
-            ManifestEdit::CreateCollection { name, id } => {
-                write!(f, "CreateCollection {{ name: {}, id: {} }}", name, id)
+            ManifestEdit::CreateCollection { name, id, created_at, options } => {
+                write!(f, "CreateCollection {{ name: {}, id: {}, created_at: {}, options: {} }}", name, id, created_at, options)
             }
-            ManifestEdit::DropCollection { name } => {
-                write!(f, "DropCollection {{ name: {} }}", name)
+            ManifestEdit::DropCollection { id, dropped_at } => {
+                write!(f, "DropCollection {{ id: {}, dropped_at: {} }}", id, dropped_at)
+            }
+            ManifestEdit::RenameCollection { id, new_name } => {
+                write!(f, "RenameCollection {{ id: {}, new_name: {} }}", id, new_name)
             }
             ManifestEdit::WalRotation { log_number, next_seq } => {
                 write!(f, "WalRotation {{ log_number: {}, next_seq: {} }}", log_number, next_seq)
@@ -276,20 +302,56 @@ mod tests {
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;
-    use crate::storage::catalog::CollectionMetadata;
+    use crate::storage::catalog::{CollectionMetadata, CollectionOptions};
 
     #[test]
     fn test_create_and_drop_collection_serialization() {
         let edit = ManifestEdit::CreateCollection {
             name: "my_collection".to_string(),
             id: 42,
+            created_at: 1627846261,
+            options: CollectionOptions::default(),
         };
         check_edit_serialization_roundtrip(edit);
 
         let edit = ManifestEdit::DropCollection {
-            name: "my_collection".to_string(),
+            id: 42,
+            dropped_at: 1627846262,
         };
         check_edit_serialization_roundtrip(edit);
+    }
+
+    #[test]
+    fn test_rename_collection_serialization() {
+        let edit = ManifestEdit::RenameCollection {
+            id: 42,
+            new_name: "new_name".to_string(),
+        };
+        check_edit_serialization_roundtrip(edit);
+    }
+
+    #[test]
+    fn test_apply_rename_collection() {
+        let tree = ManifestState::new(1, 2);
+
+        let tree = tree.apply(&ManifestEdit::CreateCollection {
+            name: "old_name".to_string(),
+            id: 10,
+            created_at: 1000,
+            options: CollectionOptions::default(),
+        });
+
+        assert!(tree.catalog.get_collection_by_name("old_name").is_some());
+        assert!(tree.catalog.get_collection_by_name("new_name").is_none());
+
+        let tree = tree.apply(&ManifestEdit::RenameCollection {
+            id: 10,
+            new_name: "new_name".to_string(),
+        });
+
+        assert!(tree.catalog.get_collection_by_name("old_name").is_none());
+        assert!(tree.catalog.get_collection_by_name("new_name").is_some());
+        assert_eq!(tree.catalog.get_collection_by_name("new_name").unwrap().id, 10);
     }
 
     #[test]
@@ -333,15 +395,18 @@ mod tests {
         let tree = tree.apply(&ManifestEdit::CreateCollection {
             name: "docs".to_string(),
             id: 10,
+            created_at: 1000,
+            options: CollectionOptions::default(),
         });
 
         assert_eq!(
-            Some(Arc::new(CollectionMetadata::new(10, "docs"))),
+            Some(Arc::new(CollectionMetadata::new(10, "docs", 1000, CollectionOptions::default()))),
             tree.catalog.get_collection_by_name(&"docs".to_string())
         );
 
         let tree = tree.apply(&ManifestEdit::DropCollection {
-            name: "docs".to_string(),
+            id: 10,
+            dropped_at: 2000,
         });
         assert_eq!(None, tree.catalog.get_collection_by_name(&"docs".to_string()));
     }

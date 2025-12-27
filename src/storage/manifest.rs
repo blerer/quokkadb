@@ -323,6 +323,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use crate::obs::metrics::Gauge;
+    use crate::storage::catalog::{CollectionOptions, IdCreationStrategy};
 
     #[test]
     fn test_rebuild_lsm_tree_from_valid_manifest() {
@@ -368,10 +369,16 @@ mod tests {
             ManifestEdit::CreateCollection {
                 id: 10,
                 name: "my_coll".to_string(),
+                created_at: 1000,
+                options: CollectionOptions::default(),
             },
             ManifestEdit::CreateCollection {
                 id: 11,
                 name: "my_other_coll".to_string(),
+                created_at: 1001,
+                options: CollectionOptions {
+                    id_creation_strategy: IdCreationStrategy::Generated,
+                }
             },
             ManifestEdit::Flush {
                 oldest_log_number: 2,
@@ -427,6 +434,8 @@ mod tests {
             .append_edit(&ManifestEdit::CreateCollection {
                 id: 1,
                 name: "my_coll".to_string(),
+                created_at: 1000,
+                options: CollectionOptions::default(),
             })
             .unwrap();
 
@@ -470,6 +479,8 @@ mod tests {
         let edit = ManifestEdit::CreateCollection {
             id: 10,
             name: "my_coll".to_string(),
+            created_at: 1000,
+            options: CollectionOptions::default(),
         };
         manifest.append_edit(&edit).unwrap();
 
@@ -527,6 +538,8 @@ mod tests {
         let edit = ManifestEdit::CreateCollection {
             id: 1,
             name: "my_coll".to_string(),
+            created_at: 1000,
+            options: CollectionOptions::default(),
         };
         manifest.append_edit(&edit).unwrap();
         drop(manifest);

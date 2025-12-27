@@ -13,7 +13,7 @@ use crate::error::Error;
 use std::path::{Path};
 use std::sync::Arc;
 use bson::Document;
-use crate::collection::Collection;
+use crate::collection::{Collection, CreateCollectionOptions};
 use crate::obs::logger::{LoggerAndTracer, NoOpLogger, LogLevel};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
@@ -71,6 +71,38 @@ impl QuokkaDB {
     pub fn collection(&self, name: &str) -> Collection {
         Collection::new(self.db_impl.clone(), name.to_string())
     }
+
+    /// Creates a new collection with the given name and default options.
+    /// Returns an error if a collection with the same name already exists.
+    pub fn create_collection(&self, name: &str) -> error::Result<()> {
+        self.db_impl.create_collection(name, CreateCollectionOptions::default())?;
+        Ok(())
+    }
+
+    /// Creates a new collection with the given name and options.
+    /// Returns an error if a collection with the same name already exists.
+    pub fn create_collection_with_options(
+        &self,
+        name: &str,
+        options: CreateCollectionOptions,
+    ) -> error::Result<()> {
+        self.db_impl.create_collection(name, options)?;
+        Ok(())
+    }
+
+    /// Drops the collection with the given name.
+    /// Returns an error if the collection does not exist.
+    pub fn drop_collection(&self, name: &str) -> error::Result<()> {
+        self.db_impl.drop_collection(name)?;
+        Ok(())
+    }
+
+    /// Renames a collection from `old_name` to `new_name`.
+    /// Returns an error if the source collection does not exist or if the target name already exists.
+    pub fn rename_collection(&self, old_name: &str, new_name: &str) -> error::Result<()> {
+        self.db_impl.rename_collection(old_name, new_name)?;
+        Ok(())
+    }
 }
 
 struct DbImpl {
@@ -83,6 +115,18 @@ struct DbImpl {
 impl DbImpl {
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> error::Result<u32> {
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
+    }
+
+    pub fn create_collection(self: &Arc<Self>, name: &str, options: CreateCollectionOptions) -> error::Result<u32> {
+        Ok(self.storage_engine.create_collection(name, options.into())?)
+    }
+
+    pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
+        Ok(self.storage_engine.drop_collection(name)?)
+    }
+
+    pub fn rename_collection(self: &Arc<Self>, old_name: &str, new_name: &str) -> error::Result<()> {
+        Ok(self.storage_engine.rename_collection(old_name, new_name)?)
     }
 
     pub fn get_collection_id(self: &Arc<Self>, name: &str) -> Option<u32> {

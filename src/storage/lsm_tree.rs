@@ -1,6 +1,6 @@
 use crate::storage::catalog::Catalog;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::encode_record_key_range;
+use crate::storage::internal_key::{encode_record_key, encode_record_key_range};
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
@@ -109,11 +109,18 @@ impl LsmTree {
         &self,
         sstable_cache: Arc<SSTableCache>,
         db_dir: &Path,
-        record_key: &[u8],
+        collection: u32,
+        index: u32,
+        user_key: &[u8],
         snapshot: u64,
         min_snapshot: Option<u64>
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
 
+        if self.catalog().collection_or_index_exist_at(collection, index, snapshot) == false {
+            return Ok(None);
+        }
+
+        let record_key = encode_record_key(collection, index, user_key);
         let rs = self.memtable.read(&record_key, snapshot, min_snapshot);
         if let Some((internal_key, value)) = rs {
             return Ok(Some((internal_key, value)))
@@ -166,6 +173,12 @@ impl LsmTree {
     where
         R: RangeBounds<Vec<u8>>,
     {
+        if self.catalog().collection_or_index_exist_at(collection, index, snapshot) == false {
+            // Return an empty iterator if the collection or index does not exist
+            let empty_iter = std::iter::empty();
+            return Ok(Box::new(empty_iter));
+        }
+
         let internal_key_range_for_scan = encode_internal_key_range(
             collection,
             index,
@@ -218,7 +231,7 @@ impl LsmTree {
         Ok(result_iter)
     }
 
-    pub fn catalogue(&self) -> Arc<Catalog> {
+    pub fn catalog(&self) -> Arc<Catalog> {
         let self1 = &self.manifest;
         self1.catalog.clone()
     }
