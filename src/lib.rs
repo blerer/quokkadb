@@ -13,6 +13,7 @@ use crate::error::Error;
 use std::path::{Path};
 use std::sync::Arc;
 use bson::Document;
+use bson::doc;
 use crate::collection::{Collection, CreateCollectionOptions};
 use crate::obs::logger::{LoggerAndTracer, NoOpLogger, LogLevel};
 use crate::obs::metrics::MetricRegistry;
@@ -102,6 +103,28 @@ impl QuokkaDB {
     pub fn rename_collection(&self, old_name: &str, new_name: &str) -> error::Result<()> {
         self.db_impl.rename_collection(old_name, new_name)?;
         Ok(())
+    }
+
+    /// Returns a list of all collections in the database.
+    /// Each document contains metadata about a collection, similar to MongoDB's listCollections.
+    pub fn list_collections(&self) -> Vec<Document> {
+        let catalog = self.db_impl.storage_engine.catalog();
+        catalog
+            .list_collections()
+            .map(|c| {
+                doc! {
+                    "name": &c.name,
+                    "type": "collection",
+                    "options": {
+                        "idCreationStrategy": format!("{:?}", c.options.id_creation_strategy)
+                    },
+                    "info": {
+                        "id": c.id as i64,
+                        "createdAt": c.created_at as i64,
+                    }
+                }
+            })
+            .collect()
     }
 }
 

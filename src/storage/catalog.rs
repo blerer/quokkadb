@@ -88,6 +88,7 @@ impl Catalog {
         })
     }
 
+    #[test]
     pub fn add_collection(&self, name: &str, id: u32, created_at: u64) -> Self {
         self.add_collection_with_options(
             name,
@@ -143,6 +144,11 @@ impl Catalog {
             collections,
             id_by_name,
         }
+    }
+
+    /// Returns an iterator over all non-dropped collections.
+    pub fn list_collections(&self) -> impl Iterator<Item = &Arc<CollectionMetadata>> {
+        self.collections.values().filter(|c| c.dropped_at.is_none())
     }
 
     pub fn rename_collection(&self, id: u32, new_name: &str) -> Self {
