@@ -88,7 +88,7 @@ impl Catalog {
         })
     }
 
-    #[test]
+    #[cfg(test)]
     pub fn add_collection(&self, name: &str, id: u32, created_at: u64) -> Self {
         self.add_collection_with_options(
             name,

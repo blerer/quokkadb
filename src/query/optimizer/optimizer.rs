@@ -934,7 +934,6 @@ mod optimizer_tests {
     use crate::query::expr_fn::{and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field, proj_fields, within};
     use crate::query::logical_plan::LogicalPlanBuilder;
     use bson::Bson;
-    use crate::storage::catalog::CollectionOptions;
 
     const COLLECTION: u32 = 10;
 

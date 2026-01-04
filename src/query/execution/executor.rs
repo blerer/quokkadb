@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{BsonValue, Expr, PathComponent, Parameters};
 use crate::query::execution::{filters, projections, sorts, updates};
+use crate::storage::catalog::IdCreationStrategy;
 use crate::storage::Direction;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::{Operation, OperationType};
@@ -351,28 +352,33 @@ impl QueryExecutor {
 
     fn perform_insert_one(&self, collection: u32, document: Vec<u8>) -> Result<QueryOutput> {
         let mut doc = document;
-        let id = self.prepend_id_if_needed(&mut doc)?;
+        let id_strategy = self.get_id_creation_strategy(collection);
+        let id = self.ensure_id(&mut doc, &id_strategy)?;
         let user_key = id.try_into_key()?;
 
-        let snapshot = self.storage_engine.last_visible_sequence();
-
-        // check for duplicate key.
-        if self.storage_engine.read(collection, 0, &user_key, None)?.is_some() {
-            return Err(Self::duplicate_key_error(&id));
-        }
-
         let operation = Operation::new_put(collection, 0, user_key.clone(), doc);
-        let precondition = Precondition::MustNotExist {
-            collection,
-            index: 0,
-            user_key,
+
+        // For Generated strategy, IDs are guaranteed unique, so skip precondition checks.
+        let batch = if id_strategy == IdCreationStrategy::Generated {
+            WriteBatch::new(vec![operation])
+        } else {
+            let snapshot = self.storage_engine.last_visible_sequence();
+
+            // check for duplicate key.
+            if self.storage_engine.read(collection, 0, &user_key, None)?.is_some() {
+                return Err(Self::duplicate_key_error(&id));
+            }
+
+            let precondition = Precondition::MustNotExist {
+                collection,
+                index: 0,
+                user_key,
+            };
+            WriteBatch::new_with_preconditions(
+                vec![operation],
+                Preconditions::new(snapshot, vec![precondition]),
+            )
         };
-        let preconditions = Preconditions::new(
-            snapshot,
-            vec![precondition],
-        );
-        let batch =
-            WriteBatch::new_with_preconditions(vec![operation], preconditions);
 
         self.storage_engine.write(batch).map_err(|e| match e {
             StorageError::VersionConflict { .. } => Self::duplicate_key_error(&id),
@@ -389,49 +395,73 @@ impl QueryExecutor {
             ))));
         }
 
+        let id_strategy = self.get_id_creation_strategy(collection);
+
         let mut documents_with_ids: Vec<(Vec<u8>, Bson, Vec<u8>)> =
             Vec::with_capacity(documents.len());
 
         // generate IDs and prepare data.
         for mut doc in documents {
-            let id = self.prepend_id_if_needed(&mut doc)?;
+            let id = self.ensure_id(&mut doc, &id_strategy)?;
             let user_key = id.try_into_key()?;
             documents_with_ids.push((doc, id, user_key));
         }
 
-        let snapshot = self.storage_engine.last_visible_sequence();
-
-        // checks for duplicates (both within the batch and against storage).
-        // This mimics `ordered: true` behavior, failing on the first error.
-        let mut seen_keys = HashMap::new();
-        for (_, id, user_key) in &documents_with_ids {
-            if seen_keys.insert(user_key.clone(), id.clone()).is_some()
-                || self.storage_engine.read(collection, 0, user_key, Some(snapshot))?.is_some() {
-                return Err(Self::duplicate_key_error(id));
+        // For Generated strategy, IDs are guaranteed unique, so skip duplicate checks.
+        let (batch, ids, seen_keys) = if id_strategy == IdCreationStrategy::Generated {
+            let mut operations = Vec::with_capacity(documents_with_ids.len());
+            let mut ids = Vec::with_capacity(documents_with_ids.len());
+            for (doc, id, user_key) in documents_with_ids {
+                ids.push(id);
+                operations.push(Operation::new_put(collection, 0, user_key, doc));
             }
-        }
+            (WriteBatch::new(operations), ids, None)
+        } else {
+            let snapshot = self.storage_engine.last_visible_sequence();
 
-        // build operations if all checks passed.
-        let mut operations = Vec::with_capacity(documents_with_ids.len());
-        let mut preconditions = Vec::with_capacity(documents_with_ids.len());
-        let mut ids = Vec::with_capacity(documents_with_ids.len());
-        for (doc, id, user_key) in documents_with_ids {
-            ids.push(id);
-            preconditions.push(Precondition::MustNotExist {
-                collection,
-                index: 0,
-                user_key: user_key.clone(),
-            });
-            operations.push(Operation::new_put(collection, 0, user_key, doc));
-        }
+            // checks for duplicates (both within the batch and against storage).
+            // This mimics `ordered: true` behavior, failing on the first error.
+            let mut seen_keys = HashMap::new();
+            for (_, id, user_key) in &documents_with_ids {
+                if seen_keys.insert(user_key.clone(), id.clone()).is_some()
+                    || self.storage_engine.read(collection, 0, user_key, Some(snapshot))?.is_some()
+                {
+                    return Err(Self::duplicate_key_error(id));
+                }
+            }
 
-        let preconditions = Preconditions::new(snapshot, preconditions);
-        let batch = WriteBatch::new_with_preconditions(operations, preconditions);
+            // build operations if all checks passed.
+            let mut operations = Vec::with_capacity(documents_with_ids.len());
+            let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
+            let mut ids = Vec::with_capacity(documents_with_ids.len());
+            for (doc, id, user_key) in documents_with_ids {
+                preconditions_vec.push(Precondition::MustNotExist {
+                    collection,
+                    index: 0,
+                    user_key: user_key.clone(),
+                });
+                operations.push(Operation::new_put(collection, 0, user_key, doc));
+                ids.push(id);
+            }
+
+            (
+                WriteBatch::new_with_preconditions(
+                    operations,
+                    Preconditions::new(snapshot, preconditions_vec),
+                ),
+                ids,
+                Some(seen_keys),
+            )
+        };
+
         if let Err(e) = self.storage_engine.write(batch) {
             match e {
-                StorageError::VersionConflict { user_key: conflicting_key, .. } => {
+                StorageError::VersionConflict {
+                    user_key: conflicting_key,
+                    ..
+                } => {
                     // A key was inserted concurrently.
-                    let id = seen_keys.get(&conflicting_key).unwrap();
+                    let id = seen_keys.as_ref().unwrap().get(&conflicting_key).unwrap();
                     Err(Self::duplicate_key_error(&id))
                 }
                 _ => Err(e.into()),
@@ -450,19 +480,53 @@ impl QueryExecutor {
         ))
     }
 
-    /// Ensures that each document has an `_id` field, prepending it if necessary.
-    fn prepend_id_if_needed(&self, mut doc: &mut Vec<u8>) -> Result<Bson> {
-        let id = RawDocument::from_bytes(&doc)?.get("_id")?;
+    /// Returns the `IdCreationStrategy` for the given collection.
+    fn get_id_creation_strategy(&self, collection: u32) -> IdCreationStrategy {
+        self.storage_engine
+            .catalog()
+            .get_collection_by_id(&collection)
+            .map(|meta| meta.options.id_creation_strategy.clone())
+            .unwrap_or_default()
+    }
 
-        let id: Bson = match id {
-            Some(id) => id.to_raw_bson().try_into()?,
-            None => {
+    /// Ensures that the document has an `_id` field according to the collection's strategy.
+    ///
+    /// - `Generated`: Always generates an ID, fails if one is already present.
+    /// - `Manual`: Requires the user to provide an ID, fails if missing.
+    /// - `Mixed`: Generates an ID if missing, uses the provided one otherwise.
+    fn ensure_id(&self, doc: &mut Vec<u8>, strategy: &IdCreationStrategy) -> Result<Bson> {
+        let existing_id = RawDocument::from_bytes(doc)?.get("_id")?;
+
+        match *strategy {
+            IdCreationStrategy::Generated => {
+                if existing_id.is_some() {
+                    return Err(Error::InvalidRequest(
+                        "Cannot specify _id for a collection with generated IDs".to_string(),
+                    ));
+                }
                 let bson = self.generate_id();
-                bson_utils::prepend_field(&mut doc, "_id", &bson)?;
-                bson
+                bson_utils::prepend_field(doc, "_id", &bson)?;
+                Ok(bson)
             }
-        };
-        Ok(id)
+            IdCreationStrategy::Manual => {
+                match existing_id {
+                    Some(id) => Ok(id.to_raw_bson().try_into()?),
+                    None => Err(Error::InvalidRequest(
+                        "Document must contain an _id field for this collection".to_string(),
+                    )),
+                }
+            }
+            IdCreationStrategy::Mixed => {
+                match existing_id {
+                    Some(id) => Ok(id.to_raw_bson().try_into()?),
+                    None => {
+                        let bson = self.generate_id();
+                        bson_utils::prepend_field(doc, "_id", &bson)?;
+                        Ok(bson)
+                    }
+                }
+            }
+        }
     }
 
     fn generate_id(&self) -> Bson {
