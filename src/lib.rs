@@ -46,6 +46,7 @@ impl QuokkaDB {
     pub fn open_with_options_and_logger(path: &Path,
                                         options: Options,
                                         logger: Arc<dyn LoggerAndTracer>) -> error::Result<Self> {
+        options.validate()?;
 
         let options = Arc::new(options);
         let mut metric_registry = MetricRegistry::new();

@@ -16,7 +16,8 @@ pub enum Error {
     LogCorruption { record_offset: u64, reason: String },
     CollectionAlreadyExists(String),
     CollectionNotFound { name: String, id: Option<u32> },
-    IndexNotFound { collection_name: String, index_name: String, id: Option<u32> } ,
+    IndexNotFound { collection_name: String, index_name: String, id: Option<u32> },
+    InvalidOptions(String),
 }
 
 impl fmt::Display for Error {
@@ -52,6 +53,7 @@ impl fmt::Display for Error {
                     write!(f, "Index does not exist: {}.{}", collection_name, index_name)
                 }
             }
+            Error::InvalidOptions(reason) => write!(f, "Invalid options: {}", reason),
         }
     }
 }
