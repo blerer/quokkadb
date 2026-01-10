@@ -8,6 +8,7 @@ use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use crate::io::serializable::Serializable;
+use crate::options::options::DatabaseOptions;
 
 /// Represents the persisted physical state of the LSM tree, excluding memtables.
 ///
@@ -281,6 +282,24 @@ impl Level {
                 let mut copy = sstables.iter().cloned().collect::<Vec<_>>();
                 copy.push(sst);
                 Level::new(*level, copy, size)
+            }
+        }
+    }
+
+    pub fn compaction_score(&self, db_options: &DatabaseOptions) -> f64 {
+        match &self {
+            Overlapping { level: _, sstables: _, size } => {
+                let trigger = db_options.level0_file_num_compaction_trigger;
+                let base_bytes = db_options.max_bytes_for_level_base.to_bytes() as f64;
+                let file_score = self.sst_count() as f64 / trigger as f64;
+                let size_score = *size as f64 / base_bytes;
+                file_score.max(size_score)
+            }
+            NonOverlapping { level, sstables: _, size } => {
+                let base_bytes = db_options.max_bytes_for_level_base.to_bytes() as f64;
+                let multiplier = db_options.max_bytes_for_level_multiplier;
+                let target_bytes = base_bytes * multiplier.powi((level - 1) as i32);
+                *size as f64 / target_bytes
             }
         }
     }
@@ -859,5 +878,205 @@ mod tests {
             max_seq,
             size,
         ))
+    }
+
+    mod compaction_score_tests {
+        use super::*;
+        use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
+
+        fn test_db_options() -> DatabaseOptions {
+            // level0_file_num_compaction_trigger = 4
+            // max_bytes_for_level_base = 64 MiB
+            // max_bytes_for_level_multiplier = 10.0
+            DatabaseOptions::default()
+                .with_level0_file_num_compaction_trigger(4)
+                .with_max_bytes_for_level_base(StorageQuantity::new(64, StorageUnit::Mebibytes))
+                .with_max_bytes_for_level_multiplier(10.0)
+        }
+
+        #[test]
+        fn test_l0_compaction_score_by_file_count() {
+            let opts = test_db_options();
+
+            // 2 files, small total size -> file_score = 2/4 = 0.5, size_score ~ 0
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 10, 100, 200, 1000),
+                create_sstable(2, 0, 11, 20, 201, 300, 1000),
+            ], 2000);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
+
+            // 4 files -> file_score = 4/4 = 1.0
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 10, 100, 200, 1000),
+                create_sstable(2, 0, 11, 20, 201, 300, 1000),
+                create_sstable(3, 0, 21, 30, 301, 400, 1000),
+                create_sstable(4, 0, 31, 40, 401, 500, 1000),
+            ], 4000);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
+
+            // 8 files -> file_score = 8/4 = 2.0
+            let sstables: Vec<_> = (1..=8)
+                .map(|i| create_sstable(i, 0, (i * 10) as i32, (i * 10 + 9) as i32, i * 100, i * 100 + 99, 1000))
+                .collect();
+            let level = Level::new(0, sstables, 8000);
+            let score = level.compaction_score(&opts);
+            assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
+        }
+
+        #[test]
+        fn test_l0_compaction_score_by_size() {
+            let opts = test_db_options();
+            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64; // 64 MiB
+
+            // 1 file but size = base_bytes -> size_score = 1.0, file_score = 0.25
+            // max(0.25, 1.0) = 1.0
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 100, 100, 200, base_bytes),
+            ], base_bytes);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
+
+            // 1 file, size = 2 * base_bytes -> size_score = 2.0
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 100, 100, 200, base_bytes * 2),
+            ], base_bytes * 2);
+            let score = level.compaction_score(&opts);
+            assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
+
+            // 2 files, size = 0.5 * base_bytes -> size_score = 0.5, file_score = 0.5
+            let half_size = base_bytes / 2;
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 50, 100, 200, half_size / 2),
+                create_sstable(2, 0, 51, 100, 201, 300, half_size / 2),
+            ], half_size);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
+        }
+
+        #[test]
+        fn test_l0_compaction_score_max_of_file_and_size() {
+            let opts = test_db_options();
+            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
+
+            // 6 files (file_score = 1.5), size = 0.5 * base (size_score = 0.5)
+            // max(1.5, 0.5) = 1.5
+            let half_size = base_bytes / 2;
+            let per_file = half_size / 6;
+            let sstables: Vec<_> = (1..=6)
+                .map(|i| create_sstable(i, 0, (i * 10) as i32, (i * 10 + 9) as i32, i * 100, i * 100 + 99, per_file))
+                .collect();
+            let level = Level::new(0, sstables, half_size);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.5).abs() < 0.001, "Expected ~1.5, got {}", score);
+
+            // 2 files (file_score = 0.5), size = 1.5 * base (size_score = 1.5)
+            // max(0.5, 1.5) = 1.5
+            let size = (base_bytes as f64 * 1.5) as u64;
+            let level = Level::new(0, vec![
+                create_sstable(1, 0, 1, 50, 100, 200, size / 2),
+                create_sstable(2, 0, 51, 100, 201, 300, size / 2),
+            ], size);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.5).abs() < 0.001, "Expected ~1.5, got {}", score);
+        }
+
+        #[test]
+        fn test_l1_compaction_score() {
+            let opts = test_db_options();
+            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64; // 64 MiB
+            // L1 target = base_bytes * 10^(1-1) = base_bytes
+
+            // Size = base_bytes -> score = 1.0
+            let level = Level::new(1, vec![
+                create_sstable(1, 1, 1, 100, 100, 200, base_bytes),
+            ], base_bytes);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
+
+            // Size = 0.5 * base_bytes -> score = 0.5
+            let level = Level::new(1, vec![
+                create_sstable(1, 1, 1, 100, 100, 200, base_bytes / 2),
+            ], base_bytes / 2);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
+
+            // Size = 2 * base_bytes -> score = 2.0
+            let level = Level::new(1, vec![
+                create_sstable(1, 1, 1, 100, 100, 200, base_bytes * 2),
+            ], base_bytes * 2);
+            let score = level.compaction_score(&opts);
+            assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
+        }
+
+        #[test]
+        fn test_l2_compaction_score() {
+            let opts = test_db_options();
+            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
+            let multiplier = opts.max_bytes_for_level_multiplier;
+            // L2 target = base_bytes * 10^(2-1) = base_bytes * 10
+
+            let target = (base_bytes as f64 * multiplier) as u64;
+
+            // Size = target -> score = 1.0
+            let level = Level::new(2, vec![
+                create_sstable(1, 2, 1, 100, 100, 200, target),
+            ], target);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
+
+            // Size = 0.5 * target -> score = 0.5
+            let level = Level::new(2, vec![
+                create_sstable(1, 2, 1, 100, 100, 200, target / 2),
+            ], target / 2);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
+        }
+
+        #[test]
+        fn test_l3_compaction_score() {
+            let opts = test_db_options();
+            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
+            let multiplier = opts.max_bytes_for_level_multiplier;
+            // L3 target = base_bytes * 10^(3-1) = base_bytes * 100
+
+            let target = (base_bytes as f64 * multiplier.powi(2)) as u64;
+
+            // Size = target -> score = 1.0
+            let level = Level::new(3, vec![
+                create_sstable(1, 3, 1, 100, 100, 200, target),
+            ], target);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
+
+            // Size = 1.5 * target -> score = 1.5
+            let size = (target as f64 * 1.5) as u64;
+            let level = Level::new(3, vec![
+                create_sstable(1, 3, 1, 100, 100, 200, size),
+            ], size);
+            let score = level.compaction_score(&opts);
+            assert!((score - 1.5).abs() < 0.001, "Expected ~1.5, got {}", score);
+        }
+
+        #[test]
+        fn test_empty_level_compaction_score() {
+            let opts = test_db_options();
+
+            // Empty L0 -> file_score = 0, size_score = 0
+            let level = Level::empty(0);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
+
+            // Empty L1 -> score = 0
+            let level = Level::empty(1);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
+
+            // Empty L2 -> score = 0
+            let level = Level::empty(2);
+            let score = level.compaction_score(&opts);
+            assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
+        }
     }
 }
