@@ -34,10 +34,10 @@ pub struct SSTableProperties {
     /// The type of compression used for the SSTable, represented as an 8-bit integer.
     pub compression_type: u8,
 
-    /// The smallest user key present in the SSTable, initialized to BSON MinKey.
+    /// The smallest record key present in the SSTable, initialized to BSON MinKey.
     pub min_key: Vec<u8>,
 
-    /// The largest user key present in the SSTable, initialized to BSON MaxKey.
+    /// The largest record key present in the SSTable, initialized to BSON MaxKey.
     pub max_key: Vec<u8>,
 
     /// The smallest sequence number among the entries in the SSTable,

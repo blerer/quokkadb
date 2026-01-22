@@ -4,7 +4,7 @@ use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use std::fmt;
 
 /// Top-level configuration struct containing database and SSTable tuning options.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Options {
     pub db: DatabaseOptions,
     pub sst: SSTableOptions,
@@ -80,7 +80,7 @@ impl fmt::Display for Options {
 }
 
 /// Database-level configuration settings.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DatabaseOptions {
     pub file_write_buffer_size: StorageQuantity,
 
@@ -98,7 +98,7 @@ pub struct DatabaseOptions {
     pub max_manifest_file_size: StorageQuantity,
 
     /// The maximum number of levels in the LSM tree.
-    pub max_levels: u8,
+    pub max_levels: usize,
 
     /// Number of files in L0 that triggers compaction to L1.
     pub level0_file_num_compaction_trigger: usize,
@@ -144,7 +144,7 @@ impl DatabaseOptions {
     }
 
     /// Override the maximum number of levels in the LSM tree.
-    pub fn with_max_levels(mut self, levels: u8) -> Self {
+    pub fn with_max_levels(mut self, levels: usize) -> Self {
         self.max_levels = levels;
         self
     }
@@ -250,7 +250,7 @@ impl Default for DatabaseOptions {
 }
 
 /// SSTable-specific configuration settings.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SSTableOptions {
     /// SSTable block size
     pub block_size: StorageQuantity,

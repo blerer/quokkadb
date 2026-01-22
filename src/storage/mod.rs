@@ -1,6 +1,7 @@
 mod append_log;
 mod callback;
 pub (crate) mod catalog;
+mod compaction_picker;
 mod files;
 mod flush_manager;
 pub mod internal_key;

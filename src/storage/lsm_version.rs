@@ -237,20 +237,20 @@ impl Serializable for Levels {
 pub enum Level {
     // For L0, files may overlap so we simply store a Vec.
     Overlapping {
-        level: u32,
+        level: u8,
         sstables: Vec<Arc<SSTableMetadata>>,
         size: u64, // Total size of all SSTables in this level
     },
     // For L1+ levels, files are non-overlapping and sorted by min_key.
     NonOverlapping {
-        level: u32,
+        level: u8,
         sstables: Vec<Arc<SSTableMetadata>>,
         size: u64, // Total size of all SSTables in this level
     },
 }
 
 impl Level {
-    pub fn empty(level: u32) -> Self {
+    pub fn empty(level: u8) -> Self {
         if level == 0 {
             Overlapping {
                 level: 0,
@@ -266,7 +266,7 @@ impl Level {
         }
     }
 
-    pub fn new(level: u32, mut sstables: Vec<Arc<SSTableMetadata>>, size: u64) -> Self {
+    pub fn new(level: u8, mut sstables: Vec<Arc<SSTableMetadata>>, size: u64) -> Self {
         if level == 0 {
             Overlapping { level: 0, sstables, size }
         } else {
@@ -432,7 +432,7 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
 
 impl Serializable for Level {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let level = reader.read_varint_u32()?;
+        let level = reader.read_u8()?;
         let sstables = Vec::<Arc<SSTableMetadata>>::read_from(reader)?;
         let size = sstables.iter().map(|sst| sst.size).sum();
         match level {
@@ -444,7 +444,7 @@ impl Serializable for Level {
     fn write_to(&self, writer: &mut ByteWriter) {
         match &self {
             Overlapping { level, sstables, size: _size } | NonOverlapping { level, sstables, size: _size } => {
-                writer.write_varint_u32(*level);
+                writer.write_u8(*level);
                 sstables.write_to(writer);
             }
         }
@@ -457,7 +457,7 @@ impl Serializable for Level {
 #[derive(Default, PartialEq, Eq, Hash, Debug)]
 pub struct SSTableMetadata {
     pub number: u64,
-    pub level: u32,
+    pub level: u8,
     pub min_key: Vec<u8>,
     pub max_key: Vec<u8>,
     pub min_sequence_number: u64,
@@ -468,7 +468,7 @@ pub struct SSTableMetadata {
 impl SSTableMetadata {
     pub fn new(
         number: u64,
-        level: u32,
+        level: u8,
         min_key: &[u8],
         max_key: &[u8],
         min_seq: u64,
@@ -484,6 +484,10 @@ impl SSTableMetadata {
             max_sequence_number: max_seq,
             size,
         }
+    }
+
+    pub fn record_key_range(&self) -> Interval<Vec<u8>> {
+        Interval::closed(self.min_key.clone(), self.max_key.clone())
     }
 }
 
@@ -507,7 +511,7 @@ impl Serializable for SSTableMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
             number: reader.read_varint_u64()?,
-            level: reader.read_varint_u32()?,
+            level: reader.read_u8()?,
             min_key: reader.read_length_prefixed_slice()?.to_vec(),
             max_key: reader.read_length_prefixed_slice()?.to_vec(),
             min_sequence_number: reader.read_varint_u64()?,
@@ -519,7 +523,7 @@ impl Serializable for SSTableMetadata {
     fn write_to(&self, writer: &mut ByteWriter) {
         writer
             .write_varint_u64(self.number)
-            .write_varint_u32(self.level)
+            .write_u8(self.level)
             .write_length_prefixed_slice(&self.min_key)
             .write_length_prefixed_slice(&self.max_key)
             .write_varint_u64(self.min_sequence_number)
@@ -862,7 +866,7 @@ mod tests {
 
     fn create_sstable(
         number: u64,
-        level: u32,
+        level: u8,
         min_key: i32,
         max_key: i32,
         min_seq: u64,
@@ -1078,5 +1082,6 @@ mod tests {
             let score = level.compaction_score(&opts);
             assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
         }
+
     }
 }

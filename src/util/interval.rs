@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
@@ -19,7 +20,7 @@ pub struct Interval<T> {
     end: Bound<T>,
 }
 
-impl<T> Interval<T> {
+impl<T: Debug> Interval<T> {
     pub fn new(start: Bound<T>, end: Bound<T>) -> Self {
         Self { start, end }
     }
@@ -133,7 +134,7 @@ impl<T: Clone> Interval<T> {
     }
 }
 
-impl<T: Clone + Ord> Interval<T> {
+impl<T: Clone + Ord + Debug> Interval<T> {
     /// Computes the union of two intervals.
     ///
     /// Returns `Some(Interval)` if the union results in a single continuous interval.
@@ -320,6 +321,38 @@ impl<T: Serializable> Serializable for Interval<T> {
     }
 }
 
+/// Compares two start bounds for ordering.
+///
+/// For start bounds, `Unbounded` is less than any bounded value.
+/// When values are equal, `Included` comes before `Excluded` (a smaller interval starts later).
+fn cmp_start_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
+    match (a, b) {
+        (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+        (Bound::Unbounded, _) => Ordering::Less,
+        (_, Bound::Unbounded) => Ordering::Greater,
+        (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
+        (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
+        (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Less),
+        (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Greater),
+    }
+}
+
+/// Compares two end bounds for ordering.
+///
+/// For end bounds, `Unbounded` is greater than any bounded value.
+/// When values are equal, `Included` comes after `Excluded` (a larger interval ends later).
+fn cmp_end_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
+    match (a, b) {
+        (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+        (Bound::Unbounded, _) => Ordering::Greater,
+        (_, Bound::Unbounded) => Ordering::Less,
+        (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
+        (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
+        (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Greater),
+        (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Less),
+    }
+}
+
 impl<T: Ord> PartialOrd for Interval<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -328,33 +361,81 @@ impl<T: Ord> PartialOrd for Interval<T> {
 
 impl<T: Ord> Ord for Interval<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        let start_cmp = match (&self.start, &other.start) {
-            (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
-            (Bound::Unbounded, _) => Ordering::Less,
-            (_, Bound::Unbounded) => Ordering::Greater,
-            (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
-            (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
-            (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Less),
-            (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Greater),
-        };
-
-        start_cmp.then_with(|| {
-            // reverse for end
-            match (&other.end, &self.end) {
-                (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
-                (Bound::Unbounded, _) => Ordering::Greater,
-                (_, Bound::Unbounded) => Ordering::Less,
-                (Bound::Included(v1), Bound::Included(v2)) => v1.cmp(v2),
-                (Bound::Excluded(v1), Bound::Excluded(v2)) => v1.cmp(v2),
-                (Bound::Included(v1), Bound::Excluded(v2)) => v1.cmp(v2).then(Ordering::Greater),
-                (Bound::Excluded(v1), Bound::Included(v2)) => v1.cmp(v2).then(Ordering::Less),
-            }
-        })
+        cmp_start_bounds(&self.start, &other.start)
+            .then_with(|| cmp_end_bounds(&other.end, &self.end))
     }
 }
 
+/// Checks if any interval from `candidates` overlaps with any interval from `filters`.
+///
+/// Both input vectors must be sorted by start bound and contain non-overlapping intervals.
+/// Uses a sweep line algorithm for O(n + m) time complexity.
+/// Returns early on the first overlap found.
+pub fn has_overlapping_intervals<T: Ord + Debug>(
+    filters: &[Interval<T>],
+    candidates: &[Interval<T>],
+) -> bool {
+    if filters.is_empty() || candidates.is_empty() {
+        return false;
+    }
+
+    let mut filter_idx = 0;
+    let mut candidate_idx = 0;
+
+    while filter_idx < filters.len() && candidate_idx < candidates.len() {
+        let filter = &filters[filter_idx];
+        let candidate = &candidates[candidate_idx];
+
+        // Check if candidate ends before filter starts (no overlap possible)
+        if ends_before_start(&candidate.end, &filter.start) {
+            candidate_idx += 1;
+            continue;
+        }
+
+        // Check if filter ends before candidate starts (no overlap possible)
+        if ends_before_start(&filter.end, &candidate.start) {
+            filter_idx += 1;
+            continue;
+        }
+
+        // They overlap
+        return true;
+    }
+
+    false
+}
+
+/// Returns true if `end_bound` is strictly before `start_bound` (no overlap possible).
+fn ends_before_start<T: Ord>(end_bound: &Bound<T>, start_bound: &Bound<T>) -> bool {
+    match (end_bound, start_bound) {
+        (Bound::Unbounded, _) | (_, Bound::Unbounded) => false,
+        (Bound::Included(e), Bound::Included(s)) => e < s,
+        (Bound::Included(e), Bound::Excluded(s)) => e <= s,
+        (Bound::Excluded(e), Bound::Included(s)) => e <= s,
+        (Bound::Excluded(e), Bound::Excluded(s)) => e <= s,
+    }
+}
+
+/// Merges a list of intervals into a list of non-overlapping intervals.
+pub fn merge_overlapping_intervals<T: Clone + Ord + Debug>(intervals: Vec<Interval<T>>) -> Vec<Interval<T>> {
+    let mut sorted_intervals = intervals;
+    sorted_intervals.sort();
+
+    let mut merged: Vec<Interval<T>> = Vec::new();
+    for interval in sorted_intervals {
+        if let Some(last) = merged.last_mut() {
+            if let Some(union) = last.union(&interval) {
+                *last = union;
+                continue;
+            }
+        }
+        merged.push(interval);
+    }
+    merged
+}
+
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use std::collections::BTreeMap;
 
@@ -555,5 +636,249 @@ mod tests {
         let r12 = Interval::closed_open(5, 10); // [5, 10)
         let union5 = r11.union(&r12).unwrap();
         assert_eq!(union5, Interval::open(1, 10));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_empty_inputs() {
+        let empty: Vec<Interval<i32>> = vec![];
+        let intervals = vec![Interval::closed(1, 5)];
+
+        assert!(!has_overlapping_intervals(&empty, &intervals));
+        assert!(!has_overlapping_intervals(&intervals, &empty));
+        assert!(!has_overlapping_intervals(&empty, &empty));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_no_overlap() {
+        let filters = vec![Interval::closed(1, 3), Interval::closed(10, 12)];
+        let candidates = vec![Interval::closed(5, 7), Interval::closed(15, 20)];
+
+        assert!(!has_overlapping_intervals(&filters, &candidates));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_with_overlap() {
+        let filters = vec![Interval::closed(1, 10)];
+        let candidates = vec![
+            Interval::closed(2, 4),
+            Interval::closed(5, 7),
+            Interval::closed(8, 9),
+        ];
+
+        assert!(has_overlapping_intervals(&filters, &candidates));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_partial_overlap() {
+        let filters = vec![Interval::closed(5, 15)];
+        let candidates = vec![
+            Interval::closed(1, 3),   // no overlap
+            Interval::closed(4, 6),   // overlaps
+            Interval::closed(10, 12), // overlaps
+        ];
+
+        assert!(has_overlapping_intervals(&filters, &candidates));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_multiple_filters() {
+        let filters = vec![
+            Interval::closed(1, 5),
+            Interval::closed(10, 15),
+            Interval::closed(20, 25),
+        ];
+        let candidates = vec![
+            Interval::closed(7, 8),   // no overlap
+            Interval::closed(17, 18), // no overlap
+            Interval::closed(30, 35), // no overlap
+        ];
+
+        assert!(!has_overlapping_intervals(&filters, &candidates));
+
+        let candidates_with_overlap = vec![
+            Interval::closed(7, 8),   // no overlap
+            Interval::closed(12, 14), // overlaps with [10,15]
+        ];
+
+        assert!(has_overlapping_intervals(&filters, &candidates_with_overlap));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_touching_boundaries() {
+        let filters = vec![Interval::closed(5, 10)];
+
+        // Candidate ends exactly where filter starts (inclusive-inclusive: overlaps at point)
+        let candidates1 = vec![Interval::closed(1, 5)];
+        assert!(has_overlapping_intervals(&filters, &candidates1));
+
+        // Candidate ends just before filter starts (exclusive end)
+        let candidates2 = vec![Interval::closed_open(1, 5)];
+        assert!(!has_overlapping_intervals(&filters, &candidates2));
+
+        // Filter with exclusive start
+        let filters2 = vec![Interval::open_closed(5, 10)];
+        let candidates3 = vec![Interval::closed(1, 5)];
+        assert!(!has_overlapping_intervals(&filters2, &candidates3));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_unbounded() {
+        let filters = vec![Interval::at_least(10)]; // [10, +inf)
+        let candidates = vec![
+            Interval::closed(1, 5),   // no overlap
+            Interval::closed(8, 12),  // overlaps
+        ];
+
+        assert!(has_overlapping_intervals(&filters, &candidates));
+
+        let candidates_no_overlap = vec![
+            Interval::closed(1, 5), // no overlap
+            Interval::closed(6, 9), // no overlap
+        ];
+
+        assert!(!has_overlapping_intervals(&filters, &candidates_no_overlap));
+    }
+
+    #[test]
+    fn test_has_overlapping_intervals_early_return() {
+        // Test that function returns true on first overlap without checking all
+        let filters = vec![Interval::closed(1, 100)];
+        let candidates = vec![
+            Interval::closed(5, 10),   // overlaps - should return immediately
+            Interval::closed(20, 30),  // also overlaps
+            Interval::closed(50, 60),  // also overlaps
+        ];
+
+        assert!(has_overlapping_intervals(&filters, &candidates));
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_empty() {
+        let intervals: Vec<Interval<i32>> = vec![];
+        let merged = merge_overlapping_intervals(intervals);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_single() {
+        let intervals = vec![Interval::closed(1, 5)];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![Interval::closed(1, 5)]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_no_overlap() {
+        let intervals = vec![
+            Interval::closed(1, 2),
+            Interval::closed(5, 6),
+            Interval::closed(10, 12),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![
+            Interval::closed(1, 2),
+            Interval::closed(5, 6),
+            Interval::closed(10, 12),
+        ]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_all_overlap() {
+        let intervals = vec![
+            Interval::closed(1, 5),
+            Interval::closed(3, 7),
+            Interval::closed(6, 10),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![Interval::closed(1, 10)]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_unsorted_input() {
+        let intervals = vec![
+            Interval::closed(10, 15),
+            Interval::closed(1, 3),
+            Interval::closed(5, 8),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![
+            Interval::closed(1, 3),
+            Interval::closed(5, 8),
+            Interval::closed(10, 15),
+        ]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_adjacent() {
+        let intervals = vec![
+            Interval::closed(1, 3),
+            Interval::closed(3, 5),
+            Interval::closed(5, 7),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![Interval::closed(1, 7)]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_mixed_bounds() {
+        let intervals = vec![
+            Interval::closed_open(1, 3), // [1, 3)
+            Interval::closed(3, 5),      // [3, 5]
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![Interval::closed(1, 5)]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_open_gap() {
+        let intervals = vec![
+            Interval::closed_open(1, 3), // [1, 3)
+            Interval::open(3, 5),        // (3, 5)
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![
+            Interval::closed_open(1, 3),
+            Interval::open(3, 5),
+        ]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_contained() {
+        let intervals = vec![
+            Interval::closed(1, 10),
+            Interval::closed(3, 5),
+            Interval::closed(4, 6),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![Interval::closed(1, 10)]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_with_unbounded() {
+        let intervals = vec![
+            Interval::at_least(5),  // [5, +inf)
+            Interval::closed(1, 3), // [1, 3]
+            Interval::closed(3, 6), // [3, 6]
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![
+            Interval::at_least(1), // [1, +inf)
+        ]);
+    }
+
+    #[test]
+    fn test_merge_overlapping_intervals_multiple_groups() {
+        let intervals = vec![
+            Interval::closed(1, 3),
+            Interval::closed(2, 4),
+            Interval::closed(10, 12),
+            Interval::closed(11, 15),
+            Interval::closed(20, 25),
+        ];
+        let merged = merge_overlapping_intervals(intervals);
+        assert_eq!(merged, vec![
+            Interval::closed(1, 4),
+            Interval::closed(10, 15),
+            Interval::closed(20, 25),
+        ]);
     }
 }
