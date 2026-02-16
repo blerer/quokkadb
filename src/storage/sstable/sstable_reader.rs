@@ -523,7 +523,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
 
         let col = 10;
 
@@ -583,7 +583,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(12);
 
@@ -641,7 +641,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
         let sst_file = DbFile::new_sst(12);
         let col = 32;
 
@@ -699,7 +699,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(12);
 
@@ -730,7 +730,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options.db);
+        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(1);
         let col = 32;

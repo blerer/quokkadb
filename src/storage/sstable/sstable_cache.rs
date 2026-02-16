@@ -1,6 +1,6 @@
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
 use moka::sync::Cache;
@@ -23,9 +23,9 @@ impl SSTableCache {
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
     ) -> Self {
-        let cache_size = options.max_open_files as u64;
+        let cache_size = options.max_open_files() as u64;
         let cache = Cache::new(cache_size);
         let metrics = Metrics::new(cache.clone());
         metrics.register_to(metric_registry);

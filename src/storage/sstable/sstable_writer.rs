@@ -69,16 +69,15 @@ impl<'a> SSTableWriter<'a> {
             .create(true) // Create if it doesn't exist
             .open(file_path.clone())?;
 
-        let sstable_options = &options.sst;
-        let restart_interval = sstable_options.restart_interval;
+        let restart_interval = options.restart_interval();
 
-        let compressor_type = sstable_options.compressor_type;
+        let compressor_type = options.compressor_type();
         let compressor = compressor_type.new_compressor();
         let data_block_builder = BlockBuilder::new(restart_interval, DataEntryWriter);
         let index_block_builder = BlockBuilder::new(restart_interval, IndexEntryWriter);
         let metaindex_block_builder = BlockBuilder::new(restart_interval, IndexEntryWriter);
 
-        let file_write_buffer_size = options.db.file_write_buffer_size;
+        let file_write_buffer_size = options.file_write_buffer_size();
 
         Ok(Self {
             id,
@@ -88,10 +87,10 @@ impl<'a> SSTableWriter<'a> {
             metaindex_block_builder,
             bloom_filter: BloomFilter::new(
                 expected_keys,
-                sstable_options.bloom_filter_false_positive,
+                options.bloom_filter_false_positive(),
             ),
             output: BufWriter::with_capacity(file_write_buffer_size.to_bytes(), file),
-            block_size: sstable_options.block_size.to_bytes(),
+            block_size: options.block_size().to_bytes(),
             current_block_offset: 0,
             properties_builder: SSTablePropertiesBuilder::new(
                 SSTABLE_CURRENT_VERSION,

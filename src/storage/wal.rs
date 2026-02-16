@@ -2,7 +2,7 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
 use crate::storage::write_batch::WriteBatch;
@@ -38,7 +38,7 @@ impl WriteAheadLog {
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
         directory: &Path,
         number: u64,
     ) -> Result<Self> {
@@ -56,7 +56,7 @@ impl WriteAheadLog {
     pub fn load_from(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
         file_path: &Path,
         rotated_log_files: VecDeque<(u64, PathBuf)>,
     ) -> Result<Self> {
@@ -73,7 +73,7 @@ impl WriteAheadLog {
     pub fn new_after_corruption(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
         directory: &Path,
         number: u64,
         rotated_log_files: VecDeque<(u64, PathBuf)>,
@@ -92,7 +92,7 @@ impl WriteAheadLog {
     fn new_internal(
         logger: Arc<dyn LoggerAndTracer>,
         metrics: Metrics,
-        options: &DatabaseOptions,
+        options: &Options,
         append_log: AppendLog<WalFileCreator>,
         rotated_log_files: VecDeque<(u64, PathBuf)>,
     ) -> Result<Self> {
@@ -113,7 +113,7 @@ impl WriteAheadLog {
             logger,
             metrics,
             append_log,
-            wal_bytes_per_sync: options.wal_bytes_per_sync.to_bytes(),
+            wal_bytes_per_sync: options.wal_bytes_per_sync().to_bytes(),
             pending_bytes: 0,
             rotated_log_files,
         })
@@ -333,7 +333,6 @@ impl Metrics {
 mod tests {
     use super::*;
     use crate::obs::logger;
-    use crate::options::options::DatabaseOptions;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
     use tempfile::tempdir;
@@ -343,7 +342,7 @@ mod tests {
     fn test_replay_write_ahead_log() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
-        let options = DatabaseOptions::default();
+        let options = Options::default();
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),
@@ -416,7 +415,7 @@ mod tests {
     fn test_rotate_and_drain_obsoletes_logs_with_replay_check() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
-        let options = DatabaseOptions::default();
+        let options = Options::default();
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),
@@ -490,8 +489,8 @@ mod tests {
     fn test_sync_triggered_by_pending_bytes() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let mut options = DatabaseOptions::default();
-        options.wal_bytes_per_sync = StorageQuantity::new(1, StorageUnit::Bytes); // force sync after any write
+        let options = Options::default()
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, StorageUnit::Bytes)); // force sync after any write
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),
@@ -520,7 +519,7 @@ mod tests {
     fn test_multiple_appends_and_replay() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let options = DatabaseOptions::default();
+        let options = Options::default();
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),
@@ -561,7 +560,7 @@ mod tests {
     fn test_rotate_empty_log_still_replayable() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let options = DatabaseOptions::default();
+        let options = Options::default();
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),
@@ -591,7 +590,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let options = DatabaseOptions::default();
+        let options = Options::default();
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),

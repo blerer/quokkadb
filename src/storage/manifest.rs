@@ -2,7 +2,7 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::{file_name_as_str, sync_dir};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
@@ -32,7 +32,7 @@ impl Manifest {
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
         db_dir: &Path,
         manifest_id: u64,
         snapshot: &ManifestEdit,
@@ -57,7 +57,7 @@ impl Manifest {
             logger,
             metrics,
             db_dir: db_dir.to_path_buf(),
-            rotation_threshold: options.max_manifest_file_size.to_bytes() as u64,
+            rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
             append_log,
         };
         manifest.append_edit(&snapshot)?;
@@ -69,7 +69,7 @@ impl Manifest {
     pub fn load_from(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
         manifest_path: PathBuf,
     ) -> Result<Self> {
         let db_dir = manifest_path
@@ -90,7 +90,7 @@ impl Manifest {
             logger,
             metrics,
             db_dir,
-            rotation_threshold: options.max_manifest_file_size.to_bytes() as u64,
+            rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
             append_log,
         })
     }
@@ -333,7 +333,7 @@ mod tests {
         let mut manifest = Manifest::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),
-            &DatabaseOptions::default(),
+            &Options::default(),
             path,
             1,
             &snapshot,
@@ -411,7 +411,7 @@ mod tests {
         let mut manifest = Manifest::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),
-            &DatabaseOptions::default(),
+            &Options::default(),
             path,
             1,
             &snapshot,
@@ -456,7 +456,7 @@ mod tests {
         let snapshot = Arc::new(ManifestState::new(1, 1));
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
-        let options = DatabaseOptions::default()
+        let options = Options::default()
             .with_max_manifest_file_size(StorageQuantity::new(4120, StorageUnit::Bytes));
         let mut manifest = Manifest::new(
             logger::test_instance(),
@@ -524,7 +524,7 @@ mod tests {
         let snapshot = Arc::new(ManifestState::new(1, 1));
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
-        let options = DatabaseOptions::default();
+        let options = Options::default();
         let mut manifest = Manifest::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),

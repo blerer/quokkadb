@@ -2,7 +2,7 @@ use crate::io::checksum::ChecksumStrategy;
 use crate::io::compressor::Compressor;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
 use moka::notification::RemovalCause;
@@ -23,9 +23,9 @@ impl BlockCache {
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
-        options: &DatabaseOptions,
+        options: &Options,
     ) -> Arc<Self> {
-        let cache_size = options.block_cache_size.to_bytes() as u64;
+        let cache_size = options.block_cache_size().to_bytes() as u64;
         let evictions_counter = Counter::new();
         let cache = Cache::builder()
             .max_capacity(cache_size)

@@ -8,7 +8,7 @@ use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use crate::io::serializable::Serializable;
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 
 /// Represents the persisted physical state of the LSM tree, excluding memtables.
 ///
@@ -286,18 +286,18 @@ impl Level {
         }
     }
 
-    pub fn compaction_score(&self, db_options: &DatabaseOptions) -> f64 {
+    pub fn compaction_score(&self, db_options: &Options) -> f64 {
         match &self {
             Overlapping { level: _, sstables: _, size } => {
-                let trigger = db_options.level0_file_num_compaction_trigger;
-                let base_bytes = db_options.max_bytes_for_level_base.to_bytes() as f64;
+                let trigger = db_options.level0_file_num_compaction_trigger();
+                let base_bytes = db_options.max_bytes_for_level_base().to_bytes() as f64;
                 let file_score = self.sst_count() as f64 / trigger as f64;
                 let size_score = *size as f64 / base_bytes;
                 file_score.max(size_score)
             }
             NonOverlapping { level, sstables: _, size } => {
-                let base_bytes = db_options.max_bytes_for_level_base.to_bytes() as f64;
-                let multiplier = db_options.max_bytes_for_level_multiplier;
+                let base_bytes = db_options.max_bytes_for_level_base().to_bytes() as f64;
+                let multiplier = db_options.max_bytes_for_level_multiplier();
                 let target_bytes = base_bytes * multiplier.powi((level - 1) as i32);
                 *size as f64 / target_bytes
             }
@@ -888,11 +888,11 @@ mod tests {
         use super::*;
         use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 
-        fn test_db_options() -> DatabaseOptions {
+        fn test_db_options() -> Options {
             // level0_file_num_compaction_trigger = 4
             // max_bytes_for_level_base = 64 MiB
             // max_bytes_for_level_multiplier = 10.0
-            DatabaseOptions::default()
+            Options::default()
                 .with_level0_file_num_compaction_trigger(4)
                 .with_max_bytes_for_level_base(StorageQuantity::new(64, StorageUnit::Mebibytes))
                 .with_max_bytes_for_level_multiplier(10.0)
@@ -932,7 +932,7 @@ mod tests {
         #[test]
         fn test_l0_compaction_score_by_size() {
             let opts = test_db_options();
-            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64; // 64 MiB
+            let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64; // 64 MiB
 
             // 1 file but size = base_bytes -> size_score = 1.0, file_score = 0.25
             // max(0.25, 1.0) = 1.0
@@ -962,7 +962,7 @@ mod tests {
         #[test]
         fn test_l0_compaction_score_max_of_file_and_size() {
             let opts = test_db_options();
-            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
+            let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64;
 
             // 6 files (file_score = 1.5), size = 0.5 * base (size_score = 0.5)
             // max(1.5, 0.5) = 1.5
@@ -989,7 +989,7 @@ mod tests {
         #[test]
         fn test_l1_compaction_score() {
             let opts = test_db_options();
-            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64; // 64 MiB
+            let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64; // 64 MiB
             // L1 target = base_bytes * 10^(1-1) = base_bytes
 
             // Size = base_bytes -> score = 1.0
@@ -1017,8 +1017,8 @@ mod tests {
         #[test]
         fn test_l2_compaction_score() {
             let opts = test_db_options();
-            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
-            let multiplier = opts.max_bytes_for_level_multiplier;
+            let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64;
+            let multiplier = opts.max_bytes_for_level_multiplier();
             // L2 target = base_bytes * 10^(2-1) = base_bytes * 10
 
             let target = (base_bytes as f64 * multiplier) as u64;
@@ -1041,8 +1041,8 @@ mod tests {
         #[test]
         fn test_l3_compaction_score() {
             let opts = test_db_options();
-            let base_bytes = opts.max_bytes_for_level_base.to_bytes() as u64;
-            let multiplier = opts.max_bytes_for_level_multiplier;
+            let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64;
+            let multiplier = opts.max_bytes_for_level_multiplier();
             // L3 target = base_bytes * 10^(3-1) = base_bytes * 100
 
             let target = (base_bytes as f64 * multiplier.powi(2)) as u64;

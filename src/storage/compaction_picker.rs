@@ -33,7 +33,7 @@
 //! A level needs compaction when its score exceeds 1.0.
 
 use std::ops::Bound;
-use crate::options::options::DatabaseOptions;
+use crate::options::options::Options;
 use crate::storage::lsm_version::{Level, Levels, SSTableMetadata};
 use crate::util::interval::{has_overlapping_intervals, merge_overlapping_intervals, Interval};
 use std::sync::Arc;
@@ -79,7 +79,7 @@ pub struct CompactionJob {
 #[derive(Debug, Default)]
 pub struct CompactionPicker {
     /// The database options.
-    options: DatabaseOptions,
+    options: Options,
     /// The largest level index (Lmax) in the LSM tree. Levels are indexed from 0 to Lmax.
     level_l: usize,
     /// The smallest level at which we start partitioning runs based on the file boundaries at the largest level
@@ -115,8 +115,8 @@ impl CompactionScores {
 
 impl CompactionPicker {
     /// Creates a new compaction picker.
-    pub fn new(options: &DatabaseOptions) -> Self {
-        let max_levels = options.max_levels;
+    pub fn new(options: &Options) -> Self {
+        let max_levels = options.max_levels();
         let level_l = max_levels - 1;
         assert!(max_levels >= 2, "max_levels must be at least 2 for 2L-Spooky compaction");
         let level_x = max_levels - 2; // Start partitioning from the second to last level
@@ -132,7 +132,7 @@ impl CompactionPicker {
     ///
     /// The last level always has a score of 0.0 since there is nowhere to compact to.
     fn compute_scores(&self, levels: &Levels) -> CompactionScores {
-        let max_levels = self.options.max_levels;
+        let max_levels = self.options.max_levels();
         let mut scores = Vec::with_capacity(max_levels);
 
         for level_num in 0..max_levels as usize {
@@ -512,7 +512,7 @@ impl CompactionPicker {
     /// If the max level has N SSTables, it returns N-1 boundary keys (the max_key
     /// of each SSTable except the last).
     pub fn compute_partition_boundaries(&self, levels: &Levels) -> Vec<Vec<u8>> {
-        let max_level_idx = self.options.max_levels - 1;
+        let max_level_idx = self.options.max_levels() - 1;
 
         let Some(level) = levels.level(max_level_idx) else {
             return Vec::new();
@@ -541,8 +541,8 @@ mod tests {
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use std::ops::RangeBounds;
 
-    fn test_options() -> DatabaseOptions {
-        DatabaseOptions::default()
+    fn test_options() -> Options {
+        Options::default()
             .with_max_levels(4)
             .with_level0_file_num_compaction_trigger(4)
             .with_max_bytes_for_level_base(StorageQuantity::new(64, StorageUnit::Mebibytes))
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn test_level_compaction_triggered_by_size() {
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create L1 with size > base_bytes
@@ -752,7 +752,7 @@ mod tests {
     fn test_full_compaction_l1_to_l2() {
         // With max_levels=4, L1→L2 is full compaction (output_level 2 < max_levels-1 = 3)
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
         let mut picker = CompactionPicker::new(&options);
 
         let mut levels = Levels::default();
@@ -778,8 +778,8 @@ mod tests {
         // With max_levels=4, L2→L3 is partial compaction (output_level 3 >= max_levels-1 = 3)
         // This is 2L-Spooky: only bottom two levels (L2, L3) use partial compaction
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         let mut levels = Levels::default();
@@ -806,15 +806,15 @@ mod tests {
         // Test with max_levels=6 to verify 2L-Spooky behavior:
         // L0→L1, L1→L2, L2→L3, L3→L4 = full compaction (output < 5)
         // L4→L5 = partial compaction (output >= 5)
-        let options = Arc::new(DatabaseOptions::default()
+        let options = Arc::new(Options::default()
             .with_max_levels(6)
             .with_level0_file_num_compaction_trigger(4)
             .with_max_bytes_for_level_base(StorageQuantity::new(64, StorageUnit::Mebibytes))
             .with_max_bytes_for_level_multiplier(10.0));
 
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l3_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier.powi(2)) as u64;
-        let l4_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier.powi(3)) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l3_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(2)) as u64;
+        let l4_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(3)) as u64;
 
         let mut picker = CompactionPicker::new(&options);
 
@@ -862,8 +862,8 @@ mod tests {
     #[test]
     fn test_last_level_never_selected_even_with_other_levels() {
         let options = test_options(); // max_levels = 4
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let multiplier = options.max_bytes_for_level_multiplier;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let multiplier = options.max_bytes_for_level_multiplier();
 
         let mut picker = CompactionPicker::new(&test_options());
 
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     fn test_highest_score_level_wins() {
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
         let mut picker = CompactionPicker::new(&test_options());
 
         // Create L0 with score ~1.25 (5 files, trigger=4)
@@ -1042,8 +1042,8 @@ mod tests {
     #[test]
     fn test_partial_compaction_allows_parallel_different_partitions() {
         let options = test_options(); // max_levels = 4
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create L2 with multiple files in different key ranges
@@ -1082,8 +1082,8 @@ mod tests {
     #[test]
     fn test_partial_compaction_blocks_overlapping_output_ranges() {
         let options = test_options(); // max_levels = 4
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create L2 with two non-overlapping files that map to the same L3 partition
@@ -1175,8 +1175,8 @@ mod tests {
     #[test]
     fn test_partial_compaction_oldest_file_first() {
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create L2 files with explicit sequence numbers to verify ordering
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn test_l0_compaction_score_by_size() {
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create L0 with only 2 files (below trigger of 4) but large total size
@@ -1278,8 +1278,8 @@ mod tests {
     #[test]
     fn test_partial_compaction_with_empty_output_level() {
         let options = test_options();
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         let mut levels = Levels::default();
@@ -1304,8 +1304,8 @@ mod tests {
         // If a partial compaction is running on a level, full compaction
         // involving that level should be blocked
         let options = test_options(); // max_levels = 4
-        let base_bytes = options.max_bytes_for_level_base.to_bytes() as u64;
-        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier) as u64;
+        let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+        let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
         let mut picker = CompactionPicker::new(&options);
 
         // Create a scenario where L1→L2 (full) and L2→L3 (partial) could both be triggered

@@ -62,7 +62,7 @@ impl StorageEngine {
         let sst_cache = Arc::new(SSTableCache::new(
             logger.clone(),
             metric_registry,
-            &options.db,
+            &options,
         ));
 
         info!(logger, "Starting storage engine at {}", db_dir.to_string_lossy());
@@ -87,7 +87,7 @@ impl StorageEngine {
             let original_current_log_number = manifest_state.lsm.current_log_number;
 
             let mut manifest =
-                Manifest::load_from(logger.clone(), metric_registry, &options.db, manifest_path)?;
+                Manifest::load_from(logger.clone(), metric_registry, &options, manifest_path)?;
 
             let next_file_number = manifest_state.lsm.next_file_number;
 
@@ -230,7 +230,7 @@ impl StorageEngine {
                 WriteAheadLog::load_from(
                     logger.clone(),
                     metric_registry,
-                    &options.db,
+                    &options,
                     &wal_path,
                     rotated_log_files,
                 )?
@@ -243,7 +243,7 @@ impl StorageEngine {
                 let wal = WriteAheadLog::new_after_corruption(
                     logger.clone(),
                     metric_registry,
-                    &options.db,
+                    &options,
                     db_dir,
                     log_number,
                     rotated_log_files,
@@ -324,7 +324,7 @@ impl StorageEngine {
             let manifest = Manifest::new(
                 logger.clone(),
                 metric_registry,
-                &options.db,
+                &options,
                 db_dir,
                 manifest_number,
                 &snapshot,
@@ -332,7 +332,7 @@ impl StorageEngine {
             let wal = WriteAheadLog::new(
                 logger.clone(),
                 metric_registry,
-                &options.db,
+                &options,
                 db_dir,
                 log_number,
             )?;
@@ -877,7 +877,7 @@ impl StorageEngine {
     }
 
     fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) {
-        let write_buffer_size = self.options.db.file_write_buffer_size.to_bytes();
+        let write_buffer_size = self.options.file_write_buffer_size().to_bytes();
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
             info!(self.logger, "Memtable size exceeded: size={}, limit={}", memtable_size, write_buffer_size);
@@ -907,7 +907,7 @@ impl StorageEngine {
 
         let lsm_tree = self.lsm_tree.load();
 
-        if !force_flush && lsm_tree.memtable.size() < self.options.db.file_write_buffer_size.to_bytes() {
+        if !force_flush && lsm_tree.memtable.size() < self.options.file_write_buffer_size().to_bytes() {
             // No need to rotate
             return Ok(());
         }
@@ -1090,7 +1090,7 @@ impl StorageEngine {
 
     fn add_metrics(metric_registry: &mut MetricRegistry, options: &Options, lsm_tree: Arc<ArcSwap<LsmTree>>) {
 
-        for level in 0..options.db.max_levels {
+        for level in 0..options.max_levels() {
             let level_name = format!("level_{}", level);
 
             let lsm = lsm_tree.clone();
@@ -1741,8 +1741,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+        let options = Options::lightweight()
+            .with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes));
         let engine = StorageEngine::new(
             test_instance(),
             registry,
@@ -1891,8 +1891,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+        let options = Arc::new(Options::lightweight()
+            .with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes)));
 
         let idx = 0;
 
@@ -1903,7 +1903,7 @@ mod tests {
             let old_engine = StorageEngine::new(
                 test_instance(),
                 registry,
-                Arc::new(options.clone()),
+                options.clone(),
                 &path,
             ).unwrap();
 
@@ -1939,7 +1939,7 @@ mod tests {
         let engine = StorageEngine::new(
             test_instance(),
             registry,
-            Arc::new(options),
+            options,
             &path,
         ).unwrap();
 
@@ -1966,14 +1966,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
         // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
         // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
-        options.db.max_manifest_file_size =
-            StorageQuantity::new(5, StorageUnit::Kibibytes);
+        let options = Arc::new(Options::lightweight().with_max_manifest_file_size(
+            StorageQuantity::new(5, StorageUnit::Kibibytes)));
 
         let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+            StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
 
         assert_counter_eq(registry, "manifest_rewrite", 0);
 
@@ -2017,7 +2016,7 @@ mod tests {
         let engine_restarted = StorageEngine::new(
             test_instance(),
             &mut MetricRegistry::default(),
-            Arc::new(options),
+            options,
             &db_path,
         )
         .unwrap();
@@ -2038,14 +2037,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
         // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
         // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
-        options.db.max_manifest_file_size =
-            StorageQuantity::new(5, StorageUnit::Kibibytes);
+        let options = Arc::new(Options::lightweight().with_max_manifest_file_size(
+            StorageQuantity::new(5, StorageUnit::Kibibytes)));
 
         let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+            StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
 
         let col = engine.create_collection_if_not_exists("test_manifest_rotation_error").unwrap();
 
@@ -2212,8 +2210,8 @@ mod tests {
         let path = dir.path();
         let db_path = path.to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
+        let options = Options::lightweight().with_wal_bytes_per_sync(
+            StorageQuantity::new(0, StorageUnit::Bytes)); // force syncs for each write
         let options = Arc::new(options);
 
         let idx = 0;
@@ -2276,9 +2274,8 @@ mod tests {
         let path = dir.path();
         let db_path = path.to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes); // force syncs for each write
-        let options = Arc::new(options);
+        let options = Arc::new(Options::lightweight().with_wal_bytes_per_sync(
+            StorageQuantity::new(0, StorageUnit::Bytes))); // force syncs for each write
 
         let idx = 0;
 
@@ -2363,9 +2360,8 @@ mod tests {
         let path = dir.path();
         let db_path = path.to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
-        let options = Arc::new(options);
+        let options = Arc::new(Options::lightweight().with_wal_bytes_per_sync(
+            StorageQuantity::new(0, StorageUnit::Bytes))); // force syncs for each write
 
         let idx = 0;
 
@@ -2444,9 +2440,8 @@ mod tests {
         let path = dir.path();
         let db_path = path.to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.wal_bytes_per_sync = StorageQuantity::new(0, StorageUnit::Bytes);
-        let options = Arc::new(options);
+        let options = Arc::new(Options::lightweight().with_wal_bytes_per_sync(
+            StorageQuantity::new(0, StorageUnit::Bytes)));
 
         let idx = 0;
 
@@ -2519,10 +2514,9 @@ mod tests {
         let path = dir.path();
         let db_path = path.to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
         // Set a small buffer size to trigger memtable rotation easily.
-        options.db.file_write_buffer_size = StorageQuantity::new(1, StorageUnit::Kibibytes);
-        let options = Arc::new(options);
+        let options = Arc::new(Options::lightweight().with_file_write_buffer_size(
+            StorageQuantity::new(1, StorageUnit::Kibibytes)));
 
         let idx = 0;
 
@@ -2707,12 +2701,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let mut options = Options::lightweight();
-        options.db.file_write_buffer_size = StorageQuantity::new(4, Mebibytes);
+        let options = Arc::new(Options::lightweight().with_file_write_buffer_size(
+            StorageQuantity::new(4, Mebibytes)));
         let engine = StorageEngine::new(
             test_instance(),
             registry,
-            Arc::new(options),
+            options,
             &path,
         )
             .unwrap();
