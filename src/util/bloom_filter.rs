@@ -184,7 +184,7 @@ impl<'a> BloomFilter<'a> {
 
 /// Two-phase Bloom filter builder for cases where the final number of keys is unknown up-front
 /// (e.g. compaction output). It buffers only (hash1, hash2) pairs, then allocates the bit-array
-/// when `finish()` is called.
+/// when `build()` is called.
 pub struct BloomFilterBuilder {
     false_positive_rate: f64,
     hashes: Vec<(u64, u64)>,
@@ -217,7 +217,7 @@ impl BloomFilterBuilder {
         self.hashes.is_empty()
     }
 
-    pub fn finish(self) -> BloomFilter<'static> {
+    pub fn build(&self) -> BloomFilter<'static> {
         assert!(
             !self.hashes.is_empty(),
             "cannot finish an empty BloomFilterBuilder"
@@ -233,8 +233,8 @@ impl BloomFilterBuilder {
             hash_count,
         };
 
-        for (h1, h2) in self.hashes {
-            filter.add_hashes(h1, h2);
+        for (h1, h2) in &self.hashes {
+            filter.add_hashes(*h1, *h2);
         }
 
         filter
@@ -300,7 +300,7 @@ mod tests {
         b.add(b"key2");
         b.add(b"key3");
 
-        let bloom = b.finish();
+        let bloom = b.build();
         assert!(bloom.contains(b"key1"));
         assert!(bloom.contains(b"key2"));
         assert!(bloom.contains(b"key3"));
@@ -392,7 +392,7 @@ mod tests {
     fn empty_builder_finish_should_panic() {
         let result = std::panic::catch_unwind(|| {
             let builder = BloomFilterBuilder::new(0.01);
-            builder.finish()
+            builder.build()
         });
         assert!(result.is_err(), "Should panic when finishing an empty builder");
     }
@@ -475,7 +475,7 @@ mod tests {
         assert!(bloom.contains(key3));
         assert!(bloom.contains(key4));
     }
-    
+
     #[test]
     fn very_long_key() {
         let mut bloom = BloomFilter::new(10, 0.01);
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(builder.len(), 50);
         assert!(!builder.is_empty());
 
-        let bloom = builder.finish();
+        let bloom = builder.build();
 
         for i in 0..50 {
             let key = format!("key_{}", i);

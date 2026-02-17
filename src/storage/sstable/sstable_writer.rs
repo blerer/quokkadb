@@ -9,7 +9,7 @@ use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTableProp
 use crate::storage::sstable::{
     BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION, SSTABLE_FOOTER_LENGTH,
 };
-use crate::util::bloom_filter::BloomFilter;
+use crate::util::bloom_filter::{BloomFilter, BloomFilterBuilder};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ pub struct SSTableWriter<'a> {
     data_block_builder: BlockBuilder<Vec<u8>, DataEntryWriter>,
     index_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
     metaindex_block_builder: BlockBuilder<BlockHandle, IndexEntryWriter>,
-    bloom_filter: BloomFilter<'a>,
+    bloom_filter_writer: BloomFilterWriter<'a>,
     output: BufWriter<File>,
     block_size: usize,
     current_block_offset: usize, // Tracks the file offset of the current block.
@@ -45,7 +45,9 @@ pub struct SSTableWriter<'a> {
 }
 
 impl<'a> SSTableWriter<'a> {
-    /// Creates a new SSTableWriter instance.
+
+    /// Creates a new SSTableWriter instance with an expected number of keys for Bloom filter
+    /// configuration.
     ///
     /// # Arguments
     /// - `directory`: The database directory.
@@ -55,11 +57,44 @@ impl<'a> SSTableWriter<'a> {
     ///
     /// # Returns
     /// A new instance of `SSTableWriter` configured with the provided options.
-    pub fn new(
+    pub fn new_with_expected_keys(
         directory: &Path,
         sst_file: &DbFile,
         options: &Options,
         expected_keys: usize,
+    ) -> Result<Self> {
+        let bloom_filter_writer = BloomFilterWriter::BloomFilter(BloomFilter::new(
+            expected_keys,
+            options.bloom_filter_false_positive(),
+        ));
+        Self::new_internal(directory, sst_file, options, bloom_filter_writer)
+    }
+
+    /// Creates a new SSTableWriter instance.
+    ///
+    /// # Arguments
+    /// - `directory`: The database directory.
+    /// - `sst_file`: The SSTable file to write too
+    /// - `options`: Configuration options for the SSTable and compression.
+    ///
+    /// # Returns
+    /// A new instance of `SSTableWriter` configured with the provided options.
+    pub fn new(
+        directory: &Path,
+        sst_file: &DbFile,
+        options: &Options,
+    ) -> Result<Self> {
+        let bloom_filter_writer = BloomFilterWriter::BloomFilterBuilder(BloomFilterBuilder::new(
+            options.bloom_filter_false_positive(),
+        ));
+        Self::new_internal(directory, sst_file, options, bloom_filter_writer)
+    }
+
+    fn new_internal(
+        directory: &Path,
+        sst_file: &DbFile,
+        options: &Options,
+        bloom_filter_writer: BloomFilterWriter<'a>,
     ) -> Result<Self> {
         let id = sst_file.number;
         let file_path = directory.join(sst_file.filename());
@@ -85,10 +120,7 @@ impl<'a> SSTableWriter<'a> {
             data_block_builder,
             index_block_builder,
             metaindex_block_builder,
-            bloom_filter: BloomFilter::new(
-                expected_keys,
-                options.bloom_filter_false_positive(),
-            ),
+            bloom_filter_writer,
             output: BufWriter::with_capacity(file_write_buffer_size.to_bytes(), file),
             block_size: options.block_size().to_bytes(),
             current_block_offset: 0,
@@ -119,7 +151,7 @@ impl<'a> SSTableWriter<'a> {
         self.properties_builder.with_entry(&internal_key, value.len());
 
         self.data_block_builder.add(&internal_key, value.to_vec())?;
-        self.bloom_filter.add(&extract_record_key(internal_key));
+        self.bloom_filter_writer.add(&extract_record_key(internal_key));
 
         Ok(())
     }
@@ -198,7 +230,7 @@ impl<'a> SSTableWriter<'a> {
     /// The Bloom filter is a probabilistic data structure that reduces the number of disk reads
     /// during key lookups by quickly ruling out non-existent keys.
     fn write_bloom_filter(&mut self) -> Result<BlockHandle> {
-        let data = self.bloom_filter.to_block();
+        let data = self.bloom_filter_writer.to_block();
         self.properties_builder.with_filter_block(data.len());
         self.finalize_and_write_block(data)
     }
@@ -280,5 +312,31 @@ impl<'a> SSTableWriter<'a> {
     fn write_block_handle(&self, handle: &BlockHandle, buffer: &mut Vec<u8>) {
         varint::write_u64(handle.offset, buffer);
         varint::write_u64(handle.size, buffer);
+    }
+}
+
+/// An enum to abstract over the Bloom filter implementation used in the SSTableWriter.
+/// This allows the SSTableWriter to use either a BloomFilter or a BloomFilterBuilder, depending on the context.
+enum BloomFilterWriter<'a> {
+    BloomFilter(BloomFilter<'a>),
+    BloomFilterBuilder(BloomFilterBuilder),
+}
+
+impl <'a> BloomFilterWriter<'a> {
+
+    /// Adds a key to the Bloom filter.
+    fn add(&mut self, key: &[u8]) {
+        match self {
+            BloomFilterWriter::BloomFilter(filter) => filter.add(key),
+            BloomFilterWriter::BloomFilterBuilder(builder) => builder.add(key),
+        }
+    }
+
+    /// Converts the Bloom filter to a byte block that can be written to disk.
+    fn to_block(&self) -> Vec<u8> {
+        match self {
+            BloomFilterWriter::BloomFilter(filter) => filter.to_block(),
+            BloomFilterWriter::BloomFilterBuilder(builder) => builder.build().to_block(),
+        }
     }
 }

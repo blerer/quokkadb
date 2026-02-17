@@ -536,7 +536,7 @@ mod tests {
 
         let sst_file = DbFile::new_sst(12);
 
-        let mut writer = SSTableWriter::new(&path, &sst_file, &options, inserts.len()).unwrap();
+        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, inserts.len()).unwrap();
 
         let mut seq = 15;
         for op in inserts.iter() {
@@ -604,7 +604,7 @@ mod tests {
         ];
 
         let len = entries.len();
-        let mut writer = SSTableWriter::new(&path, &sst_file, &options, len).unwrap();
+        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len).unwrap();
 
         for entry in entries.iter() {
             writer.add(&entry.0, &entry.1).unwrap();
@@ -654,7 +654,7 @@ mod tests {
             delete_rec(col, 5, 8), // seq 8
         ];
 
-        let mut writer = SSTableWriter::new(&path, &sst_file, &options, entries.len()).unwrap();
+        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, entries.len()).unwrap();
         // Add in decreasing sequence number order, which is increasing internal key order.
         for entry in entries.iter().rev() {
             writer.add(&entry.0, &entry.1).unwrap();
@@ -706,7 +706,7 @@ mod tests {
         let col = 32;
 
         let len = 1000i32;
-        let mut writer = SSTableWriter::new(&path, &sst_file, &options, len as usize).unwrap();
+        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len as usize).unwrap();
 
         for i in 0..len {
             let entry = put_rec(col, i, i as u32, i as u64);
@@ -735,7 +735,7 @@ mod tests {
         let sst_file = DbFile::new_sst(1);
         let col = 32;
 
-        let mut writer = SSTableWriter::new(&path, &sst_file, &options, 1000).unwrap();
+        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, 1000).unwrap();
 
         for i in 1..=1001 { // We need to start at 1 as 0 would be skipped
 

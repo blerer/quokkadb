@@ -144,7 +144,7 @@ impl Memtable {
             ));
         }
 
-        let mut writer = SSTableWriter::new(directory, sst_file, options, self.skiplist.len())?;
+        let mut writer = SSTableWriter::new_with_expected_keys(directory, sst_file, options, self.skiplist.len())?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
         }
