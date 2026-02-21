@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+# Find the real cargo binary, excluding this script's directory
+REAL_CARGO=$(PATH=$(echo "$PATH" | sed -e "s|$(pwd):||g" -e "s|:$(pwd)||g") which cargo)
+
+# Check if we are running 'cargo test'
+if [[ "$1" == "test" ]]; then
+    shift
+    args=()
+    tests=()
+    has_dash_dash=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --)
+                has_dash_dash=true
+                args+=("$1")
+                shift
+                args+=("$@")
+                break
+                ;;
+            -*)
+                args+=("$1")
+                ;;
+            *)
+                tests+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ${#tests[@]} -gt 1 ]] && [[ "$has_dash_dash" == false ]]; then
+        # Join multiple test names with |
+        IFS="|"
+        combined_test="${tests[*]}"
+        unset IFS
+        exec "$REAL_CARGO" test "${args[@]}" "$combined_test"
+    else
+        # Reconstruct original call if 0 or 1 test name, or if -- was used
+        exec "$REAL_CARGO" test "${args[@]}" "${tests[@]}"
+    fi
+else
+    # Pass through all other commands
+    exec "$REAL_CARGO" "$@"
+fi

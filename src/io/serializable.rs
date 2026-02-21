@@ -18,6 +18,16 @@ pub trait Serializable {
     fn write_to(&self, writer: &mut ByteWriter);
 }
 
+impl Serializable for u8 {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        reader.read_u8()
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_u8(*self);
+    }
+}
+
 impl Serializable for i32 {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         reader.read_varint_i32()

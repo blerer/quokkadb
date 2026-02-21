@@ -329,7 +329,7 @@ mod tests {
     fn test_rebuild_lsm_tree_from_valid_manifest() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1)));
+        let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
         let mut manifest = Manifest::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),
@@ -406,7 +406,7 @@ mod tests {
     fn test_manifest_new_and_append_edit() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1)));
+        let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
 
         let mut manifest = Manifest::new(
             logger::test_instance(),
@@ -453,11 +453,11 @@ mod tests {
         let current_path = path.join("CURRENT");
         assert!(!current_path.exists());
 
-        let snapshot = Arc::new(ManifestState::new(1, 1));
+        let snapshot = Arc::new(ManifestState::new(1, 1, 4));
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
         let options = Options::default()
-            .with_max_manifest_file_size(StorageQuantity::new(4120, StorageUnit::Bytes));
+            .with_max_manifest_file_size(StorageQuantity::new(4130, StorageUnit::Bytes));
         let mut manifest = Manifest::new(
             logger::test_instance(),
             &mut MetricRegistry::default(),
@@ -521,7 +521,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path();
 
-        let snapshot = Arc::new(ManifestState::new(1, 1));
+        let snapshot = Arc::new(ManifestState::new(1, 1, 4));
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
         let options = Options::default();

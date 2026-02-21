@@ -112,6 +112,10 @@ impl AtomicGauge {
         Arc::new(AtomicGauge::default())
     }
 
+    pub fn set(&self, value: u64) {
+        self.atomic.store(value, Ordering::Relaxed);
+    }
+
     pub fn inc(&self) {
         self.inc_by(1);
     }

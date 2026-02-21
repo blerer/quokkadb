@@ -8,7 +8,7 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::internal_key::encode_internal_key_range;
 
 use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator};
-use crate::storage::lsm_version::Levels;
+use crate::storage::lsm_version::{DropMetadata, Levels};
 use crate::storage::Direction;
 use std::collections::VecDeque;
 use std::io::Result;
@@ -25,9 +25,14 @@ pub struct LsmTree {
 }
 
 impl LsmTree {
-    pub fn new(current_log_number: u64, next_file_number: u64, next_seq: u64) -> Self {
+    pub fn new(
+        current_log_number: u64,
+        next_file_number: u64,
+        next_seq: u64,
+        max_levels: usize
+    ) -> Self {
         LsmTree {
-            manifest: Arc::new(ManifestState::new(current_log_number, next_file_number)),
+            manifest: Arc::new(ManifestState::new(current_log_number, next_file_number, max_levels)),
             memtable: Arc::new(Memtable::new(current_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
@@ -149,7 +154,7 @@ impl LsmTree {
             }
         }
 
-        for sst in self.manifest.find(&record_key, snapshot, min_snapshot) {
+        for sst in self.manifest.find_sstables(&record_key, snapshot, min_snapshot) {
             let file = db_dir.join(DbFile::new_sst(sst.number).filename());
             let sst_reader = sstable_cache.get(&file)?;
             if let Some((internal_key, value)) = sst_reader.read(&record_key, snapshot, min_snapshot)? {
@@ -210,7 +215,7 @@ impl LsmTree {
             encode_record_key_range(collection, index, user_key_range);
 
         // SSTable iterators
-        for sst_meta in self.manifest.find_range(&record_key_interval, snapshot) {
+        for sst_meta in self.manifest.find_sstables_in_range(&record_key_interval, snapshot) {
             let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
             let sst_reader = sstable_cache.get(&file_path)?;
             iterators.push(sst_reader.range_scan(
@@ -238,5 +243,9 @@ impl LsmTree {
 
     pub fn levels(&self) -> Arc<Levels> {
         self.manifest.lsm.sst_levels.clone()
+    }
+
+    pub fn get_drops_before_or_at(&self, sequence: u64) -> Vec<Arc<DropMetadata>> {
+        self.manifest.get_drops_before_or_at(sequence)
     }
 }

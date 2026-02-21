@@ -319,6 +319,7 @@ impl StorageEngine {
                 log_number,
                 next_file_number.load(Ordering::Relaxed),
                 next_seq_number.load(Ordering::Relaxed),
+                options.max_levels(),
             ));
             let snapshot = ManifestEdit::Snapshot(lsm_tree.manifest.clone());
             let manifest = Manifest::new(
@@ -388,8 +389,11 @@ impl StorageEngine {
         let sst_file = DbFile::new_sst(
             next_file_number.fetch_add(1, Ordering::Relaxed)
         );
+
+        let imm_memtable = lsm_tree.imm_memtables[0].clone();
+
         let sst = Arc::new(
-            lsm_tree.imm_memtables[0].flush(&db_dir, &sst_file, &options)?);
+            imm_memtable.flush(&db_dir, &sst_file, &options)?);
 
         let edit = ManifestEdit::Flush {
             oldest_log_number: lsm_tree.imm_memtables[0].log_number,
@@ -3004,12 +3008,26 @@ mod tests {
         let result = engine.read(col_id, 0, &user_key(1), None).unwrap();
         assert!(result.is_some());
 
+        // Verify no pending drops before dropping
+        let lsm_tree = engine.lsm_tree();
+        assert!(lsm_tree.get_drops_before_or_at(u64::MAX).is_empty());
+
         // Drop the collection
+        let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
         engine.drop_collection("test_collection").unwrap();
 
         // Verify collection is no longer accessible by name
         let catalog = engine.catalog();
         assert!(catalog.get_collection_by_name("test_collection").is_none());
+
+        // Verify DropMetadata is registered in pending_drops
+        let lsm_tree = engine.lsm_tree();
+        let pending_drops = lsm_tree.get_drops_before_or_at(u64::MAX);
+        assert_eq!(pending_drops.len(), 1);
+        let drop_metadata = &pending_drops[0];
+        assert_eq!(drop_metadata.collection, col_id);
+        assert_eq!(drop_metadata.index, 0);
+        assert_eq!(drop_metadata.drop_sequence_number, drop_seq);
     }
 
     #[test]
@@ -3142,7 +3160,7 @@ mod tests {
         let options = Arc::new(Options::lightweight());
 
         // First run - create and drop a collection
-        let col_id = {
+        let (col_id, drop_seq) = {
             let engine = StorageEngine::new(
                 test_instance(),
                 &mut MetricRegistry::default(),
@@ -3154,11 +3172,18 @@ mod tests {
             let col_id = engine.create_collection("to_drop", CollectionOptions::default()).unwrap();
             engine.create_collection("to_keep", CollectionOptions::default()).unwrap();
 
+            let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
             engine.drop_collection("to_drop").unwrap();
+
+            // Verify DropMetadata is registered before shutdown
+            let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+            assert_eq!(pending_drops.len(), 1);
+            assert_eq!(pending_drops[0].collection, col_id);
+            assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
 
             engine.shutdown().unwrap();
 
-            col_id
+            (col_id, drop_seq)
         };
 
         // Second run - verify drop persisted
@@ -3174,6 +3199,12 @@ mod tests {
             let catalog = engine.catalog();
             assert!(catalog.get_collection_by_name("to_drop").is_none());
             assert!(catalog.get_collection_by_name("to_keep").is_some());
+
+            // Verify DropMetadata persisted across restart
+            let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+            assert_eq!(pending_drops.len(), 1);
+            assert_eq!(pending_drops[0].collection, col_id);
+            assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
 
             // Writing to dropped collection should fail
             let result = engine.write(WriteBatch::new(vec![put_op(col_id, 1, 1)]));
@@ -3266,8 +3297,18 @@ mod tests {
         assert!(engine.read(col_id_1, 0, &user_key(2), None).unwrap().is_some());
         assert!(engine.read(col_id_1, 0, &user_key(3), None).unwrap().is_some());
 
+        // Verify no pending drops before dropping
+        assert!(engine.lsm_tree().get_drops_before_or_at(u64::MAX).is_empty());
+
         // Drop the collection
+        let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
         engine.drop_collection("test_collection").unwrap();
+
+        // Verify DropMetadata is registered
+        let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+        assert_eq!(pending_drops.len(), 1);
+        assert_eq!(pending_drops[0].collection, col_id_1);
+        assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
 
         // Recreate the collection
         let col_id_2 = engine.create_collection("test_collection", CollectionOptions::default()).unwrap();
@@ -3280,6 +3321,13 @@ mod tests {
         // Write and flush new data
         engine.write(WriteBatch::new(vec![put_op(col_id_2, 1, 999)])).unwrap();
         engine.flush().unwrap();
+
+        // After flush, DropMetadata should be removed since the SSTable max_seq > drop_seq
+        // The flush creates an SSTable with sequence numbers up to the current sequence,
+        // which is after the drop_seq, so the drop should be cleared from pending_drops
+        let pending_drops_after_flush = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+        assert!(pending_drops_after_flush.is_empty(),
+            "Expected pending_drops to be empty after flush, got {:?}", pending_drops_after_flush);
 
         // New data should be visible
         let (_, new_val) = engine.read(col_id_2, 0, &user_key(1), None).unwrap().unwrap();

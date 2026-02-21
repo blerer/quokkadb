@@ -2,7 +2,7 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::catalog::{Catalog, CollectionOptions};
 use crate::util::interval::Interval;
-use crate::storage::lsm_version::{LsmVersion, SSTableMetadata};
+use crate::storage::lsm_version::{DropMetadata, LsmVersion, SSTableMetadata};
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
@@ -21,9 +21,9 @@ pub struct ManifestState {
 }
 
 impl ManifestState {
-    pub fn new(current_log_number: u64, next_file_number: u64) -> Self {
+    pub fn new(current_log_number: u64, next_file_number: u64, max_levels: usize) -> Self {
         ManifestState {
-            lsm: Arc::new(LsmVersion::new(current_log_number, next_file_number)),
+            lsm: Arc::new(LsmVersion::new(current_log_number, next_file_number, max_levels)),
             catalog: Arc::new(Catalog::new()),
         }
     }
@@ -49,7 +49,7 @@ impl ManifestState {
                                                                            options.clone())),
             },
             ManifestEdit::DropCollection { id, dropped_at } => ManifestState {
-                lsm: self.lsm.clone(),
+                lsm: Arc::new(self.lsm.add_collection_drop(*id, *dropped_at)),
                 catalog: Arc::new(self.catalog.drop_collection(*id, *dropped_at)),
             },
             ManifestEdit::RenameCollection { id, new_name } => ManifestState {
@@ -74,21 +74,26 @@ impl ManifestState {
         }
     }
 
-    pub fn find<'a>(
+    /// Returns the drops with a sequence number smaller or equal to the given sequence_number.
+    pub fn get_drops_before_or_at(&self, sequence_number: u64) -> Vec<Arc<DropMetadata>> {
+        self.lsm.get_drops_before_or_at(sequence_number)
+    }
+
+    pub fn find_sstables<'a>(
         &'a self,
         record_key: &'a [u8],
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.lsm.find(record_key, snapshot, min_snapshot)
+        self.lsm.find_sstables(record_key, snapshot, min_snapshot)
     }
 
-    pub fn find_range<'a>(
+    pub fn find_sstables_in_range<'a>(
         &'a self,
         record_key_range: &'a Interval<Vec<u8>>,
         snapshot: u64,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.lsm.find_range(record_key_range, snapshot)
+        self.lsm.find_sstables_in_range(record_key_range, snapshot)
     }
 }
 
@@ -278,8 +283,8 @@ impl fmt::Display for ManifestEdit {
                 sst,
             } => write!(
                 f,
-                "Flush {{ oldest_log_number: {}, sst: {:?} }}",
-                oldest_log_number, sst
+                "Flush {{ oldest_log_number: {}, sst: {:?}}}",
+                oldest_log_number, sst,
             ),
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => write!(
                 f,
@@ -332,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_apply_rename_collection() {
-        let tree = ManifestState::new(1, 2);
+        let tree = ManifestState::new(1, 2, 3);
 
         let tree = tree.apply(&ManifestEdit::CreateCollection {
             name: "old_name".to_string(),
@@ -380,6 +385,7 @@ mod tests {
             200,
             1024,
         ));
+
         let edit = ManifestEdit::Flush {
             oldest_log_number: 8,
             sst: sst.clone(),
@@ -390,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_apply_create_and_drop_collection() {
-        let tree = ManifestState::new(1, 2);
+        let tree = ManifestState::new(1, 2, 3);
 
         let tree = tree.apply(&ManifestEdit::CreateCollection {
             name: "docs".to_string(),
@@ -413,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_apply_wal_and_manifest_rotation() {
-        let tree = ManifestState::new(1, 2);
+        let tree = ManifestState::new(1, 2, 3);
 
         let tree = tree.apply(&ManifestEdit::WalRotation { log_number: 99, next_seq: 567 });
         assert_eq!(tree.lsm.current_log_number, 99);
@@ -427,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_apply_files_detected_on_restart() {
-        let tree = ManifestState::new(1, 2);
+        let tree = ManifestState::new(1, 2, 3);
         let tree = tree.apply(&ManifestEdit::FilesDetectedOnRestart {
             next_file_number: 200,
         });

@@ -135,6 +135,26 @@ impl<T: Clone> Interval<T> {
 }
 
 impl<T: Clone + Ord + Debug> Interval<T> {
+    /// Computes the smallest interval that contains both `self` and `other`.
+    ///
+    /// Unlike `union`, this always succeeds even if the intervals are disjoint.
+    /// The result spans from the minimum start bound to the maximum end bound.
+    pub fn span(&self, other: &Self) -> Self {
+        let start = if cmp_start_bounds(&self.start, &other.start) == Ordering::Less {
+            self.start.clone()
+        } else {
+            other.start.clone()
+        };
+
+        let end = if cmp_end_bounds(&self.end, &other.end) == Ordering::Greater {
+            self.end.clone()
+        } else {
+            other.end.clone()
+        };
+
+        Interval::new(start, end)
+    }
+
     /// Computes the union of two intervals.
     ///
     /// Returns `Some(Interval)` if the union results in a single continuous interval.
@@ -205,6 +225,71 @@ impl<T: Clone + PartialOrd> Interval<T> {
         match (&self.start, &self.end) {
             (Bound::Included(s), Bound::Included(e)) => s == e,
             _ => false,
+        }
+    }
+
+    /// Checks if this interval completely contains another interval.
+    ///
+    /// Returns `true` if `other` is entirely within the bounds of `self`.
+    /// An interval `[a, b]` contains `[c, d]` if `a <= c` and `d <= b`
+    /// (with appropriate handling for inclusive/exclusive bounds).
+    pub fn contains_interval(&self, other: &Self) -> bool
+    where
+        T: Ord,
+    {
+        let start_ok = cmp_start_bounds(&self.start, &other.start) != Ordering::Greater;
+        let end_ok = cmp_end_bounds(&self.end, &other.end) != Ordering::Less;
+        start_ok && end_ok
+    }
+
+    /// Removes an included interval from this interval.
+    ///
+    /// Returns an iterator yielding 0, 1, or 2 intervals:
+    /// - 0 intervals if `other` equals `self`
+    /// - 1 interval if `other` shares a boundary with `self`
+    /// - 2 intervals if `other` is strictly inside `self`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `other` is not fully contained within `self`.
+    pub fn remove_included_interval(&self, other: &Self) -> Vec<Self>
+    where
+        T: Ord + Debug,
+    {
+        assert!(
+            self.contains_interval(other),
+            "Cannot remove interval {:?} from {:?}: not contained",
+            other,
+            self
+        );
+
+        let start_eq = cmp_start_bounds(&self.start, &other.start) == Ordering::Equal;
+        let end_eq = cmp_end_bounds(&self.end, &other.end) == Ordering::Equal;
+
+        match (start_eq, end_eq) {
+            (true, true) => {
+                // other == self, nothing remains
+                vec![]
+            }
+            (true, false) => {
+                // other starts at self.start, remainder is after other.end
+                let new_start = flip_bound(&other.end);
+                vec![Interval::new(new_start, self.end.clone())]
+            }
+            (false, true) => {
+                // other ends at self.end, remainder is before other.start
+                let new_end = flip_bound(&other.start);
+                vec![Interval::new(self.start.clone(), new_end)]
+            }
+            (false, false) => {
+                // other is strictly inside, two remainders
+                let left_end = flip_bound(&other.start);
+                let right_start = flip_bound(&other.end);
+                vec![
+                    Interval::new(self.start.clone(), left_end),
+                    Interval::new(right_start, self.end.clone()),
+                ]
+            }
         }
     }
 
@@ -321,11 +406,24 @@ impl<T: Serializable> Serializable for Interval<T> {
     }
 }
 
+/// Flips the inclusivity of a bound.
+///
+/// - `Included(v)` becomes `Excluded(v)`
+/// - `Excluded(v)` becomes `Included(v)`
+/// - `Unbounded` remains `Unbounded`
+fn flip_bound<T: Clone>(bound: &Bound<T>) -> Bound<T> {
+    match bound {
+        Bound::Included(v) => Bound::Excluded(v.clone()),
+        Bound::Excluded(v) => Bound::Included(v.clone()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
 /// Compares two start bounds for ordering.
 ///
 /// For start bounds, `Unbounded` is less than any bounded value.
 /// When values are equal, `Included` comes before `Excluded` (a smaller interval starts later).
-fn cmp_start_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
+pub fn cmp_start_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
     match (a, b) {
         (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
         (Bound::Unbounded, _) => Ordering::Less,
@@ -341,7 +439,7 @@ fn cmp_start_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
 ///
 /// For end bounds, `Unbounded` is greater than any bounded value.
 /// When values are equal, `Included` comes after `Excluded` (a larger interval ends later).
-fn cmp_end_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
+pub fn cmp_end_bounds<T: Ord>(a: &Bound<T>, b: &Bound<T>) -> Ordering {
     match (a, b) {
         (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
         (Bound::Unbounded, _) => Ordering::Greater,
@@ -880,5 +978,328 @@ mod test {
             Interval::closed(10, 15),
             Interval::closed(20, 25),
         ]);
+    }
+
+    #[test]
+    fn test_contains_interval_basic() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(3, 7);
+        assert!(outer.contains_interval(&inner));
+        assert!(!inner.contains_interval(&outer));
+    }
+
+    #[test]
+    fn test_contains_interval_equal() {
+        let r1 = Interval::closed(1, 5);
+        let r2 = Interval::closed(1, 5);
+        assert!(r1.contains_interval(&r2));
+        assert!(r2.contains_interval(&r1));
+    }
+
+    #[test]
+    fn test_contains_interval_same_start() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(1, 5);
+        assert!(outer.contains_interval(&inner));
+        assert!(!inner.contains_interval(&outer));
+    }
+
+    #[test]
+    fn test_contains_interval_same_end() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(5, 10);
+        assert!(outer.contains_interval(&inner));
+        assert!(!inner.contains_interval(&outer));
+    }
+
+    #[test]
+    fn test_contains_interval_mixed_bounds() {
+        let closed = Interval::closed(1, 10);
+        let open = Interval::open(1, 10);
+        assert!(closed.contains_interval(&open));
+        assert!(!open.contains_interval(&closed));
+
+        let open_closed = Interval::open_closed(1, 10);
+        let closed_open = Interval::closed_open(1, 10);
+        assert!(!open_closed.contains_interval(&closed_open));
+        assert!(!closed_open.contains_interval(&open_closed));
+    }
+
+    #[test]
+    fn test_contains_interval_unbounded() {
+        let all: Interval<i32> = Interval::all();
+        let bounded = Interval::closed(1, 10);
+        assert!(all.contains_interval(&bounded));
+        assert!(!bounded.contains_interval(&all));
+
+        let at_least = Interval::at_least(5);
+        let at_most = Interval::at_most(10);
+        assert!(!at_least.contains_interval(&at_most));
+        assert!(!at_most.contains_interval(&at_least));
+
+        let inner = Interval::closed(5, 10);
+        assert!(at_least.contains_interval(&inner));
+        assert!(at_most.contains_interval(&inner));
+    }
+
+    #[test]
+    fn test_contains_interval_disjoint() {
+        let r1 = Interval::closed(1, 5);
+        let r2 = Interval::closed(6, 10);
+        assert!(!r1.contains_interval(&r2));
+        assert!(!r2.contains_interval(&r1));
+    }
+
+    #[test]
+    fn test_contains_interval_partial_overlap() {
+        let r1 = Interval::closed(1, 7);
+        let r2 = Interval::closed(5, 10);
+        assert!(!r1.contains_interval(&r2));
+        assert!(!r2.contains_interval(&r1));
+    }
+
+    #[test]
+    fn test_contains_interval_point() {
+        let outer = Interval::closed(1, 10);
+        let point = Interval::closed(5, 5);
+        assert!(outer.contains_interval(&point));
+        assert!(!point.contains_interval(&outer));
+    }
+
+    #[test]
+    fn test_contains_interval_boundary_exclusive() {
+        let outer = Interval::open(1, 10);
+        let at_boundary = Interval::closed(1, 5);
+        assert!(!outer.contains_interval(&at_boundary));
+
+        let inside = Interval::closed(2, 9);
+        assert!(outer.contains_interval(&inside));
+    }
+
+    #[test]
+    fn test_remove_included_interval_equal() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(1, 10);
+        let result = outer.remove_included_interval(&inner);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_remove_included_interval_same_start() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(1, 5);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Interval::open_closed(5, 10));
+    }
+
+    #[test]
+    fn test_remove_included_interval_same_end() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(5, 10);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Interval::closed_open(1, 5));
+    }
+
+    #[test]
+    fn test_remove_included_interval_middle() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(4, 6);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Interval::closed_open(1, 4));
+        assert_eq!(result[1], Interval::open_closed(6, 10));
+    }
+
+    #[test]
+    fn test_remove_included_interval_open_bounds() {
+        let outer = Interval::open(1, 10);
+        let inner = Interval::open(3, 7);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Interval::open_closed(1, 3));
+        assert_eq!(result[1], Interval::closed_open(7, 10));
+    }
+
+    #[test]
+    fn test_remove_included_interval_mixed_bounds() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::open_closed(3, 7);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Interval::closed(1, 3));
+        assert_eq!(result[1], Interval::open_closed(7, 10));
+    }
+
+    #[test]
+    fn test_remove_included_interval_unbounded_start() {
+        let outer: Interval<i32> = Interval::at_most(10);
+        let inner = Interval::closed(5, 10);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Interval::less_than(5));
+    }
+
+    #[test]
+    fn test_remove_included_interval_unbounded_end() {
+        let outer: Interval<i32> = Interval::at_least(1);
+        let inner = Interval::closed(1, 5);
+        let result = outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], Interval::greater_than(5));
+    }
+
+    #[test]
+    fn test_remove_included_interval_from_all() {
+        let outer: Interval<i32> = Interval::all();
+        let inner = Interval::closed(3, 7);
+        let result= outer.remove_included_interval(&inner);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], Interval::less_than(3));
+        assert_eq!(result[1], Interval::greater_than(7));
+    }
+
+    #[test]
+    #[should_panic(expected = "not contained")]
+    fn test_remove_included_interval_not_contained() {
+        let outer = Interval::closed(1, 5);
+        let inner = Interval::closed(3, 10);
+        let _ = outer.remove_included_interval(&inner);
+    }
+
+    #[test]
+    #[should_panic(expected = "not contained")]
+    fn test_remove_included_interval_disjoint() {
+        let outer = Interval::closed(1, 5);
+        let inner = Interval::closed(10, 15);
+        let _ = outer.remove_included_interval(&inner);
+    }
+
+    #[test]
+    fn test_span_overlapping() {
+        let r1 = Interval::closed(1, 5);
+        let r2 = Interval::closed(3, 7);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::closed(1, 7));
+    }
+
+    #[test]
+    fn test_span_disjoint() {
+        let r1 = Interval::closed(1, 3);
+        let r2 = Interval::closed(7, 10);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::closed(1, 10));
+    }
+
+    #[test]
+    fn test_span_adjacent() {
+        let r1 = Interval::closed_open(1, 5);
+        let r2 = Interval::closed(5, 10);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::closed(1, 10));
+    }
+
+    #[test]
+    fn test_span_contained() {
+        let outer = Interval::closed(1, 10);
+        let inner = Interval::closed(3, 7);
+        let span = outer.span(&inner);
+        assert_eq!(span, Interval::closed(1, 10));
+
+        let span_reverse = inner.span(&outer);
+        assert_eq!(span_reverse, Interval::closed(1, 10));
+    }
+
+    #[test]
+    fn test_span_same_interval() {
+        let r = Interval::closed(5, 10);
+        let span = r.span(&r);
+        assert_eq!(span, Interval::closed(5, 10));
+    }
+
+    #[test]
+    fn test_span_point_intervals() {
+        let p1 = Interval::closed(3, 3);
+        let p2 = Interval::closed(7, 7);
+        let span = p1.span(&p2);
+        assert_eq!(span, Interval::closed(3, 7));
+    }
+
+    #[test]
+    fn test_span_mixed_bounds() {
+        // Open vs closed bounds
+        let r1 = Interval::open(1, 5);
+        let r2 = Interval::closed(3, 7);
+        let span = r1.span(&r2);
+        // Start should be open(1) since it's "smaller" than closed(3)
+        // End should be closed(7) since it's "larger" than open(5)
+        assert_eq!(span, Interval::open_closed(1, 7));
+
+        let r3 = Interval::closed(1, 5);
+        let r4 = Interval::open(3, 7);
+        let span2 = r3.span(&r4);
+        // Start should be closed(1), end should be open(7)
+        assert_eq!(span2, Interval::closed_open(1, 7));
+    }
+
+    #[test]
+    fn test_span_same_value_different_bounds() {
+        // When start values are equal, closed is "smaller"
+        let r1 = Interval::closed(5, 10);
+        let r2 = Interval::open(5, 15);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::closed_open(5, 15));
+
+        // When end values are equal, closed is "larger"
+        let r3 = Interval::closed(1, 10);
+        let r4 = Interval::closed(5, 10);
+        let span2 = r3.span(&r4);
+        assert_eq!(span2, Interval::closed(1, 10));
+    }
+
+    #[test]
+    fn test_span_unbounded_start() {
+        let r1: Interval<i32> = Interval::at_most(5);
+        let r2 = Interval::closed(3, 10);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::at_most(10));
+    }
+
+    #[test]
+    fn test_span_unbounded_end() {
+        let r1 = Interval::closed(1, 5);
+        let r2: Interval<i32> = Interval::at_least(3);
+        let span = r1.span(&r2);
+        assert_eq!(span.start_bound(), Bound::Included(&1));
+        assert_eq!(span.end_bound(), Bound::Unbounded);
+    }
+
+    #[test]
+    fn test_span_both_unbounded() {
+        let r1: Interval<i32> = Interval::at_most(5);
+        let r2: Interval<i32> = Interval::at_least(3);
+        let span = r1.span(&r2);
+        assert_eq!(span, Interval::all());
+     }
+
+    #[test]
+    fn test_span_with_all() {
+        let all: Interval<i32> = Interval::all();
+        let r = Interval::closed(5, 10);
+        let span = all.span(&r);
+        assert_eq!(span, Interval::all());
+
+        let span_reverse = r.span(&all);
+        assert_eq!(span_reverse, Interval::all());
+    }
+
+    #[test]
+    fn test_span_commutative() {
+        let r1 = Interval::open_closed(1, 5);
+        let r2 = Interval::closed_open(8, 12);
+        let span1 = r1.span(&r2);
+        let span2 = r2.span(&r1);
+        assert_eq!(span1, span2);
     }
 }
