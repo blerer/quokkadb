@@ -25,6 +25,7 @@ use crate::query::Parameters;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::storage::storage_engine::StorageEngine;
 
+#[derive(Clone)]
 pub struct QuokkaDB {
     options: Arc<Options>,
     db_impl: Arc<DbImpl>,

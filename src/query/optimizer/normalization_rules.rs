@@ -65,7 +65,7 @@ use crate::util::bson_utils;
 const MAX_OR_CARTESIAN_PRODUCT: usize = 64;
 
 
-pub trait NormalisationRule {
+pub trait NormalisationRule: Send + Sync {
     fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan>;
 }
 
