@@ -794,6 +794,21 @@ impl DropMetadata {
         })
     }
 
+    pub fn key_range_ref(&self) -> Interval<&[u8]> {
+        Interval::new(
+            match self.key_range.start_bound() {
+                Bound::Included(v) => Bound::Included(v.as_slice()),
+                Bound::Excluded(v) => Bound::Excluded(v.as_slice()),
+                Bound::Unbounded => Bound::Unbounded,
+            },
+            match self.key_range.end_bound() {
+                Bound::Included(v) => Bound::Included(v.as_slice()),
+                Bound::Excluded(v) => Bound::Excluded(v.as_slice()),
+                Bound::Unbounded => Bound::Unbounded,
+            },
+        )
+    }
+
     /// Splits the drop metadata into two non-overlapping drops at the given split key.
     /// The split key must be within the drop's key range. The resulting drops will have the same
     /// drop_sequence_number as the original one, and their key ranges will be adjusted accordingly.

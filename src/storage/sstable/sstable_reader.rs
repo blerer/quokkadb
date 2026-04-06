@@ -14,7 +14,7 @@ use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterato
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
 #[cfg(windows)]
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use ErrorKind::InvalidData;
@@ -408,47 +408,80 @@ impl Iterator for SSTableRangeScanIterator {
     }
 }
 
+/// Hint mode for SharedFile I/O behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileAccessHint {
+    /// Normal buffered I/O (default OS behavior).
+    #[default]
+    Normal,
+    /// Minimize OS cache pollution: use POSIX_FADV_RANDOM on open,
+    /// and POSIX_FADV_DONTNEED after each read (Unix only; no-op on Windows).
+    MinimizeCachePollution,
+}
+
 #[derive(Clone, Debug)]
 pub struct SharedFile {
     pub(crate) path: PathBuf,
     file: Arc<RwLock<File>>,
+    hint: FileAccessHint,
 }
 
 impl SharedFile {
+    /// Open a file with default (normal) access hints.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_hint(path, FileAccessHint::Normal)
+    }
+
+    /// Open a file with the specified access hint.
+    ///
+    /// With `FileAccessHint::MinimizeCachePollution`:
+    /// - On Unix: applies `POSIX_FADV_RANDOM` at open time to disable readahead,
+    ///   and `POSIX_FADV_DONTNEED` after each `read_block` to evict pages.
+    /// - On Windows: currently a no-op (behaves like Normal).
+    pub fn open_with_hint(path: &Path, hint: FileAccessHint) -> Result<Self> {
         let file = File::open(path)?;
+
+        #[cfg(unix)]
+        if hint == FileAccessHint::MinimizeCachePollution {
+            Self::fadvise_random(&file)?;
+        }
+
         Ok(SharedFile {
             path: path.to_path_buf(),
             file: Arc::new(RwLock::new(file)),
+            hint,
         })
     }
 
-    /// Read a block of data from the cached FD (Opens a new FD if locked on Windows)
+    /// Read a block of data from the cached FD (Opens a new FD if locked on Windows).
+    /// If opened with `MinimizeCachePollution`, advises the OS to drop pages after reading.
     pub fn read_block(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0; size];
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
-            let file = self.file.read().unwrap(); // Read lock (non-blocking)
+            let file = self.file.read().unwrap();
             file.read_at(&mut buffer, offset)?;
+
+            if self.hint == FileAccessHint::MinimizeCachePollution {
+                Self::fadvise_dontneed(&file, offset, size)?;
+            }
         }
 
         #[cfg(windows)]
         {
-            // Try getting a write lock (since seek modifies state)
             let file_guard = self.file.try_write();
 
             if let Ok(mut file) = file_guard {
-                // FD is free → Use cached FD
                 file.seek(SeekFrom::Start(offset))?;
                 file.read_exact(&mut buffer)?;
             } else {
-                // FD is locked → Open a new FD for this read (no caching)
-                let mut temp_file = File::open(Path::new(self.path))?;
+                let mut temp_file = File::open(&self.path)?;
                 temp_file.seek(SeekFrom::Start(offset))?;
                 temp_file.read_exact(&mut buffer)?;
             }
+            // Windows: no equivalent DONTNEED hint available via std
         }
 
         Ok(buffer)
@@ -457,6 +490,29 @@ impl SharedFile {
     pub fn len(&self) -> Result<u64> {
         let file = self.file.read().unwrap();
         Ok(file.metadata()?.len())
+    }
+
+    /// Returns the access hint this file was opened with.
+    pub fn hint(&self) -> FileAccessHint {
+        self.hint
+    }
+
+    // -------------------------------------------------------------------------
+    // Unix-specific fadvise helpers (using rustix)
+    // -------------------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn fadvise_random(file: &File) -> Result<()> {
+        use rustix::fs::{fadvise, Advice};
+        fadvise(file, 0, 0, Advice::Random)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn fadvise_dontneed(file: &File, offset: u64, size: usize) -> Result<()> {
+        use rustix::fs::{fadvise, Advice};
+        fadvise(file, offset, size as u64, Advice::DontNeed)?;
+        Ok(())
     }
 }
 

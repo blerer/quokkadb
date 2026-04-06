@@ -1,6 +1,17 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::{Bound, RangeBounds};
+
+/// Describes the position of a value relative to an interval.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum IntervalPosition {
+    /// The value is strictly before the interval's start bound.
+    Before,
+    /// The value is within the interval (satisfies both bounds).
+    Contained,
+    /// The value is strictly after the interval's end bound.
+    After,
+}
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
@@ -218,6 +229,7 @@ impl<T: Clone + Ord + Debug> Interval<T> {
 }
 
 impl<T: Clone + PartialOrd> Interval<T> {
+
     /// Checks if the interval represents a single point (e.g., `[a, a]`).
     ///
     /// An interval is a point if its start and end bounds are inclusive and equal.
@@ -372,6 +384,40 @@ impl<T: Clone + PartialOrd> Interval<T> {
     }
 }
 
+impl<T: Clone + PartialOrd> Interval<Vec<T>> {
+    /// Determines the position of a value relative to this interval.
+    ///
+    /// Returns:
+    /// - `IntervalPosition::Before` if the value is strictly before the interval's start
+    /// - `IntervalPosition::Contained` if the value is within the interval
+    /// - `IntervalPosition::After` if the value is strictly after the interval's end
+    pub fn position_of(&self, value: &[T]) -> IntervalPosition {
+        // Check if value is before the start bound
+        let before_start = match &self.start {
+            Bound::Included(start) => value < start,
+            Bound::Excluded(start) => value <= start,
+            Bound::Unbounded => false,
+        };
+
+        if before_start {
+            return IntervalPosition::Before;
+        }
+
+        // Check if value is after the end bound
+        let after_end = match &self.end {
+            Bound::Included(end) => value > end,
+            Bound::Excluded(end) => value >= end,
+            Bound::Unbounded => false,
+        };
+
+        if after_end {
+            return IntervalPosition::After;
+        }
+
+        IntervalPosition::Contained
+    }
+}
+
 impl<T> RangeBounds<T> for Interval<T> {
     fn start_bound(&self) -> Bound<&T> {
         match &self.start {
@@ -512,24 +558,6 @@ fn ends_before_start<T: Ord>(end_bound: &Bound<T>, start_bound: &Bound<T>) -> bo
         (Bound::Excluded(e), Bound::Included(s)) => e <= s,
         (Bound::Excluded(e), Bound::Excluded(s)) => e <= s,
     }
-}
-
-/// Merges a list of intervals into a list of non-overlapping intervals.
-pub fn merge_overlapping_intervals<T: Clone + Ord + Debug>(intervals: Vec<Interval<T>>) -> Vec<Interval<T>> {
-    let mut sorted_intervals = intervals;
-    sorted_intervals.sort();
-
-    let mut merged: Vec<Interval<T>> = Vec::new();
-    for interval in sorted_intervals {
-        if let Some(last) = merged.last_mut() {
-            if let Some(union) = last.union(&interval) {
-                *last = union;
-                continue;
-            }
-        }
-        merged.push(interval);
-    }
-    merged
 }
 
 #[cfg(test)]
@@ -848,136 +876,6 @@ mod test {
         ];
 
         assert!(has_overlapping_intervals(&filters, &candidates));
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_empty() {
-        let intervals: Vec<Interval<i32>> = vec![];
-        let merged = merge_overlapping_intervals(intervals);
-        assert!(merged.is_empty());
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_single() {
-        let intervals = vec![Interval::closed(1, 5)];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![Interval::closed(1, 5)]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_no_overlap() {
-        let intervals = vec![
-            Interval::closed(1, 2),
-            Interval::closed(5, 6),
-            Interval::closed(10, 12),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![
-            Interval::closed(1, 2),
-            Interval::closed(5, 6),
-            Interval::closed(10, 12),
-        ]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_all_overlap() {
-        let intervals = vec![
-            Interval::closed(1, 5),
-            Interval::closed(3, 7),
-            Interval::closed(6, 10),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![Interval::closed(1, 10)]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_unsorted_input() {
-        let intervals = vec![
-            Interval::closed(10, 15),
-            Interval::closed(1, 3),
-            Interval::closed(5, 8),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![
-            Interval::closed(1, 3),
-            Interval::closed(5, 8),
-            Interval::closed(10, 15),
-        ]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_adjacent() {
-        let intervals = vec![
-            Interval::closed(1, 3),
-            Interval::closed(3, 5),
-            Interval::closed(5, 7),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![Interval::closed(1, 7)]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_mixed_bounds() {
-        let intervals = vec![
-            Interval::closed_open(1, 3), // [1, 3)
-            Interval::closed(3, 5),      // [3, 5]
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![Interval::closed(1, 5)]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_open_gap() {
-        let intervals = vec![
-            Interval::closed_open(1, 3), // [1, 3)
-            Interval::open(3, 5),        // (3, 5)
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![
-            Interval::closed_open(1, 3),
-            Interval::open(3, 5),
-        ]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_contained() {
-        let intervals = vec![
-            Interval::closed(1, 10),
-            Interval::closed(3, 5),
-            Interval::closed(4, 6),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![Interval::closed(1, 10)]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_with_unbounded() {
-        let intervals = vec![
-            Interval::at_least(5),  // [5, +inf)
-            Interval::closed(1, 3), // [1, 3]
-            Interval::closed(3, 6), // [3, 6]
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![
-            Interval::at_least(1), // [1, +inf)
-        ]);
-    }
-
-    #[test]
-    fn test_merge_overlapping_intervals_multiple_groups() {
-        let intervals = vec![
-            Interval::closed(1, 3),
-            Interval::closed(2, 4),
-            Interval::closed(10, 12),
-            Interval::closed(11, 15),
-            Interval::closed(20, 25),
-        ];
-        let merged = merge_overlapping_intervals(intervals);
-        assert_eq!(merged, vec![
-            Interval::closed(1, 4),
-            Interval::closed(10, 15),
-            Interval::closed(20, 25),
-        ]);
     }
 
     #[test]
@@ -1301,5 +1199,167 @@ mod test {
         let span1 = r1.span(&r2);
         let span2 = r2.span(&r1);
         assert_eq!(span1, span2);
+    }
+
+    #[test]
+    fn test_position_of_closed_interval() {
+        let interval = Interval::closed(vec![3], vec![7]);
+
+        assert_eq!(interval.position_of(&[1]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[2]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[3]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[7]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[8]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[10]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_open_interval() {
+        let interval = Interval::open(vec![3], vec![7]);
+
+        assert_eq!(interval.position_of(&[2]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[3]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[7]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[8]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_open_closed_interval() {
+        let interval = Interval::open_closed(vec![3], vec![7]);
+
+        assert_eq!(interval.position_of(&[2]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[3]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[7]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[8]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_closed_open_interval() {
+        let interval = Interval::closed_open(vec![3], vec![7]);
+
+        assert_eq!(interval.position_of(&[2]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[3]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[7]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[8]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_unbounded_start() {
+        let interval: Interval<Vec<i32>> = Interval::at_most(vec![5]);
+
+        assert_eq!(interval.position_of(&[1]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_unbounded_end() {
+        let interval: Interval<Vec<i32>> = Interval::at_least(vec![5]);
+
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[10]), IntervalPosition::Contained);
+    }
+
+    #[test]
+    fn test_position_of_greater_than() {
+        let interval: Interval<Vec<i32>> = Interval::greater_than(vec![5]);
+
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::Contained);
+    }
+
+    #[test]
+    fn test_position_of_less_than() {
+        let interval: Interval<Vec<i32>> = Interval::less_than(vec![5]);
+
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_all() {
+        let interval: Interval<Vec<i32>> = Interval::all();
+
+        assert_eq!(interval.position_of(&[i32::MIN]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[0]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[i32::MAX]), IntervalPosition::Contained);
+    }
+
+    #[test]
+    fn test_position_of_point_interval() {
+        let interval = Interval::closed(vec![5], vec![5]);
+
+        assert_eq!(interval.position_of(&[4]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[6]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_multi_element_vec() {
+        let interval = Interval::closed(vec![1, 5], vec![1, 10]);
+
+        assert_eq!(interval.position_of(&[1, 4]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[1, 5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 7]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 10]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 11]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_lexicographic_ordering() {
+        let interval = Interval::closed(vec![2, 0], vec![3, 0]);
+
+        assert_eq!(interval.position_of(&[1, 100]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[2, 0]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[2, 50]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[3, 0]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[3, 1]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[4, 0]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_different_length_slices() {
+        let interval = Interval::closed(vec![1, 2, 3], vec![1, 2, 5]);
+
+        assert_eq!(interval.position_of(&[1, 2]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&[1, 2, 3]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 2, 4]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 2, 5]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&[1, 2, 5, 0]), IntervalPosition::After);
+        assert_eq!(interval.position_of(&[1, 3]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_position_of_empty_slice() {
+        let interval = Interval::closed(vec![1], vec![5]);
+
+        assert_eq!(interval.position_of(&[]), IntervalPosition::Before);
+
+        let interval_from_empty = Interval::closed(vec![], vec![5]);
+        assert_eq!(interval_from_empty.position_of(&[]), IntervalPosition::Contained);
+    }
+
+    #[test]
+    fn test_position_of_string_slices() {
+        let interval = Interval::closed(
+            vec!["apple".to_string()],
+            vec!["cherry".to_string()]
+        );
+
+        assert_eq!(interval.position_of(&["aardvark".to_string()]), IntervalPosition::Before);
+        assert_eq!(interval.position_of(&["apple".to_string()]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&["banana".to_string()]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&["cherry".to_string()]), IntervalPosition::Contained);
+        assert_eq!(interval.position_of(&["date".to_string()]), IntervalPosition::After);
     }
 }

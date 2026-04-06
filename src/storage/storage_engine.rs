@@ -1017,13 +1017,15 @@ impl StorageEngine {
                             oldest_log_number,
                             sst: flushed,
                         };
-                        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+                        let lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
 
                         let obsolete_log_files = wal_and_manifest.wal.drain_obsolete_logs(oldest_log_number)?;
 
                         drop(wal_and_manifest); // we do not need the manifest lock for deleting obsolete log files
 
                         self.delete_obsolete_log_files(obsolete_log_files)?;
+
+                        self.schedule_compaction_if_needed(&lsm_tree);
                     }
                     SSTableOperation::Compaction { added: _, removed: _ } => {}
                 }
@@ -1031,6 +1033,10 @@ impl StorageEngine {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn schedule_compaction_if_needed(self: &Arc<Self>, _lsm_tree: &LsmTree) {
+
     }
 
     fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {

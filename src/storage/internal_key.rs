@@ -114,6 +114,18 @@ impl InternalKeyBound {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    pub fn max_value() -> Self {
+        let max_user_key = Bson::MaxKey.try_into_key().unwrap();
+        let max_record_key = encode_record_key(u32::MAX, u32::MAX, &max_user_key);
+        InternalKeyBound(encode_internal_key(&max_record_key, MAX_SEQUENCE_NUMBER, OperationType::MaxKey))
+    }
+
+    pub fn min_value() -> Self {
+        let min_user_key = Bson::MinKey.try_into_key().unwrap();
+        let min_record_key = encode_record_key(0, 0, &min_user_key);
+        InternalKeyBound(encode_internal_key(&min_record_key, 0, OperationType::MinKey))
+    }
 }
 
 /// Represents a range of internal keys, which can be used for range scans.
@@ -126,6 +138,13 @@ pub struct InternalKeyRange {
 impl InternalKeyRange {
     pub fn new(start: InternalKeyBound, end: InternalKeyBound) -> Self {
         InternalKeyRange { start, end }
+    }
+
+    pub fn all() -> Rc<Self> {
+        Rc::new(InternalKeyRange {
+            start: InternalKeyBound::min_value(),
+            end: InternalKeyBound::max_value(),
+        })
     }
 
     pub fn start_bound(&self) -> &InternalKeyBound {
