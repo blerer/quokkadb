@@ -141,11 +141,16 @@ impl<'a> SSTableWriter<'a> {
     /// # Arguments
     /// - `internal_key`: The internal key as a byte slice.
     /// - `value`: The value as a byte slice.
-    pub fn add(&mut self, internal_key: &[u8], value: &[u8]) -> Result<()> {
+    ///
+    /// # Returns
+    /// - `Ok(true)` if the block was flushed after adding the entry, `Ok(false)` otherwise.
+    pub fn add(&mut self, internal_key: &[u8], value: &[u8]) -> Result<bool> {
+        let mut flushed = false;
         if self.data_block_builder.estimated_size_in_bytes() + internal_key.len() + value.len()
             >= self.block_size
         {
-            self.flush_data_block()?
+            self.flush_data_block()?;
+            flushed = true;
         }
 
         self.properties_builder.with_entry(&internal_key, value.len());
@@ -153,7 +158,7 @@ impl<'a> SSTableWriter<'a> {
         self.data_block_builder.add(&internal_key, value.to_vec())?;
         self.bloom_filter_writer.add(&extract_record_key(internal_key));
 
-        Ok(())
+        Ok(flushed)
     }
 
     /// Finalizes the SSTable by flushing all remaining data and writing metadata.
@@ -187,6 +192,45 @@ impl<'a> SSTableWriter<'a> {
             properties.max_sequence,
             size,
         ))
+    }
+
+    /// Cheap, rough approximation of the final SSTable size (in bytes) if the table were to be
+    /// finished "soon".
+    ///
+    /// This method is intended for compaction output sizing decisions. It does not perform any I/O,
+    /// does not flush the underlying writer, and does not run compression for buffered blocks.
+    ///
+    /// The returned size is approximate and should be used with slack.
+    pub fn estimated_size(&self) -> usize {
+        let written = self.current_block_offset;
+
+        let compression_ratio = self.properties_builder.estimated_compression_ratio();
+
+        let pending_data_block = (self.data_block_builder.estimated_size_in_bytes() as f64
+            * compression_ratio)
+            .ceil() as usize;
+
+        let pending_index_block = (self.index_block_builder.estimated_size_in_bytes() as f64
+            * compression_ratio)
+            .ceil() as usize;
+
+        let pending_metaindex_block = (self.metaindex_block_builder.estimated_size_in_bytes() as f64
+            * compression_ratio)
+            .ceil() as usize;
+
+        let pending_filter_block = (self.bloom_filter_writer.estimated_block_size_in_bytes() as f64
+            * compression_ratio)
+            .ceil() as usize;
+
+        const PROPERTIES_BLOCK_ESTIMATE: usize = 512;
+
+        written
+            + pending_data_block
+            + pending_index_block
+            + pending_filter_block
+            + PROPERTIES_BLOCK_ESTIMATE
+            + pending_metaindex_block
+            + (SSTABLE_FOOTER_LENGTH as usize)
     }
 
     /// Flushes the current data block to the output file.
@@ -322,13 +366,20 @@ enum BloomFilterWriter<'a> {
     BloomFilterBuilder(BloomFilterBuilder),
 }
 
-impl <'a> BloomFilterWriter<'a> {
-
+impl<'a> BloomFilterWriter<'a> {
     /// Adds a key to the Bloom filter.
     fn add(&mut self, key: &[u8]) {
         match self {
             BloomFilterWriter::BloomFilter(filter) => filter.add(key),
             BloomFilterWriter::BloomFilterBuilder(builder) => builder.add(key),
+        }
+    }
+
+    /// Cheap estimate for the Bloom filter block size (uncompressed).
+    fn estimated_block_size_in_bytes(&self) -> usize {
+        match self {
+            BloomFilterWriter::BloomFilter(filter) => filter.estimated_block_size_in_bytes(),
+            BloomFilterWriter::BloomFilterBuilder(builder) => builder.estimated_block_size_in_bytes(),
         }
     }
 

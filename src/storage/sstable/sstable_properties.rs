@@ -79,12 +79,7 @@ impl SSTableProperties {
     /// # Returns
     /// - `f64`: The compression ratio.
     pub fn compression_ratio(&self) -> f64 {
-        assert!(
-            self.data_size > 0,
-            "Data size must be greater than zero to calculate compression ratio."
-        );
-        let uncompressed_size = self.raw_key_size + self.raw_value_size;
-        uncompressed_size as f64 / self.data_size as f64
+        compute_compression_ratio(self.raw_key_size , self.raw_value_size, self.data_size)
     }
 
     pub fn to_vec(&self) -> std::io::Result<Vec<u8>> {
@@ -172,6 +167,19 @@ impl SSTablePropertiesBuilder {
         self
     }
 
+    pub fn estimated_compression_ratio(&self) -> f64 {
+        if self.data_size == 0 {
+            return 1.0; // Avoid division by zero, assume no compression
+        }
+        let ratio = compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size);
+        if ratio.is_finite() && ratio > 0.0 {
+            // Avoid extreme under-estimates that could lead to huge overshoots.
+            ratio.clamp(0.05, 1.0)
+        } else {
+            1.0
+        }
+    }
+
     /// Builds the immutable `SSTableProperties` instance.
     pub fn build(&self) -> SSTableProperties {
         SSTableProperties {
@@ -190,6 +198,18 @@ impl SSTablePropertiesBuilder {
             filter_size: self.filter_size,
         }
     }
+}
+
+/// Calculates the compression ratio given the raw key size, raw value size, and data size.
+/// The compression ratio is defined as the ratio of the uncompressed size (raw key size + raw value size)
+/// to the compressed size (data size).
+fn compute_compression_ratio(raw_key_size: usize, raw_value_size: usize, data_size: usize) -> f64 {
+    assert!(
+        data_size > 0,
+        "Data size must be greater than zero to calculate compression ratio."
+    );
+    let uncompressed_size = raw_key_size + raw_value_size;
+    uncompressed_size as f64 / data_size as f64
 }
 
 #[cfg(test)]

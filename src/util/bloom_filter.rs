@@ -3,6 +3,7 @@ use crate::io::varint;
 use crate::util::murmur_hash64::murmur_hash64a;
 use std::f64::consts::LN_2;
 use std::io::Error;
+use crate::io::varint::compute_u64_vint_size;
 
 /// A Bloom Filter is a probabilistic data structure that efficiently tests for the existence of an element.
 /// It may yield false positives but guarantees no false negatives. This implementation uses MurmurHash3 for hashing.
@@ -47,6 +48,25 @@ impl<'a> BloomFilter<'a> {
         let hash_count = (((size as f64 / expected_items as f64) * LN_2).ceil() as usize).max(1);
         let byte_size = (size + 7) >> 3;
         (size, hash_count, byte_size)
+    }
+
+    /// Cheap estimate of the serialized Bloom filter block size (uncompressed).
+    ///
+    /// The serialized format is:
+    /// varint(hash_count) + varint(size_in_bits) + bit_array_bytes
+    pub fn estimated_block_size_in_bytes(&self) -> usize {
+        match self {
+            BloomFilter::Writable {
+                bit_array,
+                size,
+                hash_count,
+            } => {
+                compute_u64_vint_size(*hash_count as u64) + compute_u64_vint_size(*size as u64) + bit_array.len()
+            }
+            BloomFilter::ReadOnly { .. } => {
+                panic!("Cannot estimate block size for a read-only BloomFilter")
+            }
+        }
     }
 
     /// Creates a new BloomFilter with dynamically calculated size and hash functions.
@@ -198,11 +218,32 @@ impl BloomFilterBuilder {
         }
     }
 
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate
+    }
+
     pub fn with_capacity(false_positive_rate: f64, capacity: usize) -> Self {
         Self {
             false_positive_rate,
             hashes: Vec::with_capacity(capacity),
         }
+    }
+
+    /// Cheap estimate of the serialized Bloom filter block size (uncompressed) that `build()` will
+    /// produce.
+    ///
+    /// The serialized format is:
+    /// varint(hash_count) + varint(size_in_bits) + bit_array_bytes
+    pub fn estimated_block_size_in_bytes(&self) -> usize {
+        let expected_items = self.len();
+        if expected_items == 0 {
+            return 0;
+        }
+
+        let (size_bits, hash_count, byte_size) =
+            BloomFilter::compute_params(expected_items, self.false_positive_rate);
+
+        compute_u64_vint_size(hash_count as u64) + compute_u64_vint_size(size_bits as u64) + byte_size
     }
 
     pub fn add(&mut self, item: &[u8]) {
