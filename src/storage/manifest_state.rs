@@ -70,7 +70,16 @@ impl ManifestState {
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number} => ManifestState {
                 lsm: Arc::new(self.lsm.with_ignored_empty_memtable(*oldest_log_number)),
                 catalog: self.catalog.clone(),
-            }
+            },
+            ManifestEdit::Compaction {
+                output_level,
+                removed_sstables,
+                added_sstables,
+                drops,
+            } => ManifestState {
+                lsm: Arc::new(self.lsm.with_compaction(*output_level, removed_sstables, added_sstables, drops)),
+                catalog: self.catalog.clone(),
+            },
         }
     }
 
@@ -150,6 +159,15 @@ pub enum ManifestEdit {
     IgnoringEmptyMemtable {
         oldest_log_number: u64,
     },
+
+    /// Records a compaction that has been performed, the SSTables removed and added, and any drops
+    /// that were applied.
+    Compaction {
+        output_level: usize,
+        removed_sstables: Vec<Arc<SSTableMetadata>>,
+        added_sstables: Vec<Arc<SSTableMetadata>>,
+        drops: Vec<Arc<DropMetadata>>,
+    },
 }
 
 impl ManifestEdit {
@@ -192,6 +210,18 @@ impl ManifestEdit {
             }
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => {
                 writer.write_u8(8).write_varint_u64(*oldest_log_number);
+            }
+            ManifestEdit::Compaction {
+                output_level,
+                removed_sstables,
+                added_sstables,
+                drops,
+            } => {
+                writer.write_u8(9);
+                writer.write_u8(*output_level as u8);
+                Vec::<Arc<SSTableMetadata>>::write_to(removed_sstables, &mut writer);
+                Vec::<Arc<SSTableMetadata>>::write_to(added_sstables, &mut writer);
+                Vec::<Arc<DropMetadata>>::write_to(drops, &mut writer);
             }
         }
         writer.take_buffer()
@@ -246,6 +276,18 @@ impl ManifestEdit {
                 let oldest_log_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::IgnoringEmptyMemtable { oldest_log_number })
             }
+            9 => {
+                let output_level = reader.read_u8()? as usize;
+                let removed_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
+                let added_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
+                let drops = Vec::<Arc<DropMetadata>>::read_from(&reader)?;
+                Ok(ManifestEdit::Compaction {
+                    output_level,
+                    removed_sstables,
+                    added_sstables,
+                    drops,
+                })
+            }
             _ => Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("ManifestEdit: {}", edit),
@@ -295,6 +337,16 @@ impl fmt::Display for ManifestEdit {
                 f,
                 "IgnoringEmptyMemtable {{ oldest_log_number: {} }}",
                 oldest_log_number
+            ),
+            ManifestEdit::Compaction {
+                output_level,
+                removed_sstables,
+                added_sstables,
+                drops,
+            } => write!(
+                f,
+                "Compaction {{ output_level: {}, removed_sstables: {:?}, added_sstables: {:?}, drops: {:?} }}",
+                output_level, removed_sstables, added_sstables, drops
             ),
         }
     }
@@ -389,6 +441,38 @@ mod tests {
         let edit = ManifestEdit::Flush {
             oldest_log_number: 8,
             sst: sst.clone(),
+        };
+
+        check_edit_serialization_roundtrip(edit);
+    }
+
+    fn test_compaction_serialization() {
+        let sst1 = Arc::new(SSTableMetadata::new(
+            1,
+            0,
+            &record_key(1),
+            &record_key(250),
+            100,
+            200,
+            1024,
+        ));
+        let sst2 = Arc::new(SSTableMetadata::new(
+            2,
+            0,
+            &record_key(251),
+            &record_key(500),
+            101,
+            201,
+            2048,
+        ));
+        let drop1 = DropMetadata::new(10, 0, 150);
+        let drop2 = DropMetadata::new(20,  0,160);
+
+        let edit = ManifestEdit::Compaction {
+            output_level: 1,
+            removed_sstables: vec![sst1.clone()],
+            added_sstables: vec![sst2.clone()],
+            drops: vec![drop1, drop2],
         };
 
         check_edit_serialization_roundtrip(edit);

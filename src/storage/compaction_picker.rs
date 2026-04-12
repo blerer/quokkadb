@@ -82,6 +82,8 @@ pub struct CompactionJob {
 /// - **Partial compaction**: Parallel compactions are allowed for different partitions.
 ///   Only overlapping ranges are blocked.
 pub struct CompactionPicker {
+    /// Logger for events and diagnostics.
+    logger: Arc<dyn LoggerAndTracer>,
     /// The database options.
     options: Options,
     /// The largest level index (Lmax) in the LSM tree. Levels are indexed from 0 to Lmax.
@@ -92,8 +94,10 @@ pub struct CompactionPicker {
     compacting_ranges: Vec<Vec<Interval<Vec<u8>>>>,
     /// Metrics for compaction operations.
     metrics: Metrics,
-    /// Logger for events and diagnostics.
-    logger: Arc<dyn LoggerAndTracer>,
+    /// The number of thread used by the compaction manager
+    nbr_of_threads: u8,
+    /// The number of running compaction
+    nbr_of_running_compactions: u8,
 }
 
 /// Result of computing compaction scores for all levels.
@@ -128,6 +132,7 @@ impl CompactionPicker {
         metric_registry: &mut MetricRegistry,
         options: &Options,
     ) -> Self {
+        let nbr_of_threads = options.compaction_threads() as u8;
         let max_levels = options.max_levels();
         let level_l = max_levels - 1;
         assert!(max_levels >= 2, "max_levels must be at least 2 for 2L-Spooky compaction");
@@ -138,12 +143,14 @@ impl CompactionPicker {
         info!(logger, "CompactionPicker initialized, max_levels={}, level_x={}", max_levels, level_x);
 
         CompactionPicker {
+            logger,
             options: options.clone(),
             level_l,
             level_x,
             compacting_ranges: vec![Vec::new(); max_levels],
             metrics,
-            logger,
+            nbr_of_threads,
+            nbr_of_running_compactions: 0,
         }
     }
 
@@ -200,6 +207,14 @@ impl CompactionPicker {
     /// (successfully or not). This design prevents race conditions between picking
     /// and marking, following the pattern used by RocksDB and Pebble.
     pub fn pick_compaction(&mut self, levels: &Levels) -> Option<CompactionJob> {
+
+        if self.nbr_of_running_compactions >= self.nbr_of_threads {
+            self.metrics.jobs_skipped_level_compacting.inc();
+            event!(self.logger, "compaction_skipped reason=max_parallelism_reached, running_compactions={}, max_threads={}",
+                self.nbr_of_running_compactions, self.nbr_of_threads);
+            return None;
+        }
+
         event!(self.logger, "compaction_picking start");
         let scores = self.compute_scores(levels);
 
@@ -408,7 +423,8 @@ impl CompactionPicker {
     /// Marks a compaction job as active.
     ///
     /// Call this when a compaction job is scheduled to track ranges for parallelism control.
-    pub fn mark_compacting(&mut self, job: &CompactionJob) {
+    fn mark_compacting(&mut self, job: &CompactionJob) {
+        self.nbr_of_running_compactions += 1;
         let level = job.input_level as usize;
         let ranges = self.compacting_ranges.get_mut(level).unwrap();
         ranges.push(job.input_key_range.clone());
@@ -439,6 +455,7 @@ impl CompactionPicker {
             ranges.remove(pos);
         }
         self.metrics.record_active(level, -1);
+        self.nbr_of_running_compactions -= 1;
     }
 
     /// Finds the partition index (0 to N) for a given key based on provided boundaries.
@@ -664,6 +681,7 @@ mod tests {
             .with_level0_file_num_compaction_trigger(4)
             .with_max_bytes_for_level_base(StorageQuantity::new(64, StorageUnit::Mebibytes))
             .with_max_bytes_for_level_multiplier(10.0)
+            .with_compaction_threads(4)
     }
 
     fn test_picker(options: &Options) -> CompactionPicker {

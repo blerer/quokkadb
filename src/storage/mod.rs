@@ -20,6 +20,7 @@ mod iterators;
 #[cfg(test)]
 pub(crate) mod test_utils;
 mod compaction_iterator;
+mod compaction_manager;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Direction {

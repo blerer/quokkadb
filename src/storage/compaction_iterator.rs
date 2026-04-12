@@ -2,8 +2,6 @@ use std::io::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::obs::logger::LoggerAndTracer;
-use crate::storage::compaction_picker::CompactionJob;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{extract_record_key, InternalKeyRange};
 use crate::storage::iterators::{ForwardIterator, MergeIterator};
@@ -12,6 +10,8 @@ use crate::storage::Direction;
 use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
 use crate::util::interval::{Interval, IntervalPosition};
 
+/// An iterator that merges records from multiple SSTables while applying drops to skip deleted
+/// records during compaction.
 pub struct CompactionIterator<'a> {
     record_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
     drop_iter: Box<dyn Iterator<Item = Arc<DropMetadata>>>,
@@ -19,18 +19,23 @@ pub struct CompactionIterator<'a> {
 }
 
 impl<'a> CompactionIterator<'a> {
+
+    /// Creates a new `CompactionIterator` for the given compaction job. It initializes iterators
+    /// for the input and output SSTables, applies drops to skip deleted records, and merges
+    /// records from multiple SSTables if necessary.
     pub fn new(
-        _logger: Arc<dyn LoggerAndTracer>,
-        db_dir: PathBuf,
+        db_dir: &PathBuf,
         sst_cache: Arc<SSTableCache>,
-        compaction_job: CompactionJob,
+        input_files: &[Arc<SSTableMetadata>],
+        output_files: &[Arc<SSTableMetadata>],
+        drops: &[Arc<DropMetadata>],
     ) -> Result<Box<Self>> {
         // drops should be sorted and should be non overlapping after compaction picker's merge/split logic
-        let drops = compaction_job.drops;
+        let drops :Vec<Arc<DropMetadata>> = drops.iter().cloned().collect();
 
-        let sources: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> = compaction_job
-            .input_files
-            .into_iter().chain(compaction_job.output_files.into_iter())
+        let sources: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> =
+            input_files
+            .into_iter().chain(output_files.into_iter())
             .filter(|sst| !sst_skippable_due_to_drops(sst.as_ref(), &drops))
             .map(|sst| {
                 let file_path = db_dir.join(DbFile::new_sst(sst.number).filename());
@@ -71,31 +76,20 @@ impl<'a> Iterator for CompactionIterator<'a> {
                     {
                         match &self.current_drop_interval {
                             Some(interval) => {
-                                println!("Checking key {:?} against drop interval {:?}]",
-                                         extract_record_key(&key),
-                                         interval);
                                 match interval.position_of(extract_record_key(&key)) {
                                     IntervalPosition::Before => {
-                                        println!("Key {:?} is before the drop interval, returning it",
-                                                 extract_record_key(&key));
                                         return Some(Ok((key, value)))
                                     },
                                     IntervalPosition::Contained => {
-                                        println!("Key {:?} is contained in the drop interval, skipping it",
-                                                 extract_record_key(&key));
                                         break
                                     }, // if the record is contained in the drop, we skip it and move to the next record
                                     IntervalPosition::After => {
-                                        println!("Key {:?} is after the drop interval, moving to the next drop",
-                                                 extract_record_key(&key));
                                         // if the record is after the drop, we move to the next drop and check again
                                         self.current_drop_interval = self.drop_iter.next().map_or(None, |drop| Some(drop.record_key_range()));
                                     },
                                 }
                             },
                             None => {
-                                println!("Key {:?} has no more drops to check against, returning it",
-                                         extract_record_key(&key));
                                 return Some(Ok((key, value)))
                             },
                         }
@@ -111,6 +105,7 @@ impl<'a> Iterator for CompactionIterator<'a> {
     }
 }
 
+/// Determines if an SSTable can be skipped during compaction because it is fully covered by one of the drops.
 fn sst_skippable_due_to_drops(sst: &SSTableMetadata, drops: &[Arc<DropMetadata>]) -> bool {
 
     if drops.is_empty() {
@@ -151,23 +146,6 @@ mod tests {
         Arc::new(writer.finish().unwrap())
     }
 
-    fn create_compaction_job(
-        input_files: Vec<Arc<SSTableMetadata>>,
-        output_files: Vec<Arc<SSTableMetadata>>,
-        drops: Vec<Arc<DropMetadata>>,
-    ) -> CompactionJob {
-        CompactionJob {
-            input_level: 0,
-            output_level: 1,
-            input_files,
-            output_files,
-            drops,
-            input_key_range: Interval::all(),
-            output_key_range: Interval::all(),
-            partitions_grid: None,
-        }
-    }
-
     fn setup_cache() -> Arc<SSTableCache> {
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
@@ -193,10 +171,8 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let job = create_compaction_job(vec![sst], vec![], vec![]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[]).unwrap();
 
         for expected in &entries {
             let actual = iter.next().unwrap().unwrap();
@@ -228,10 +204,8 @@ mod tests {
         ];
         let sst2 = write_sst(path, 2, &entries2, &options);
 
-        let job = create_compaction_job(vec![sst1], vec![sst2], vec![]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[]).unwrap();
 
         // Should be merged in sorted order
         let expected_keys: Vec<i32> = vec![1, 2, 3, 4, 5, 6];
@@ -267,10 +241,8 @@ mod tests {
         // Create a drop that covers collection 1
         let drop = DropMetadata::new(col_1, 0, 100);
 
-        let job = create_compaction_job(vec![sst], vec![], vec![drop]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
 
         let expected_entries = vec![
             put_rec(col_2, 1, 1, 11),
@@ -312,9 +284,7 @@ mod tests {
         let drop_3 = DropMetadata::new(col_3, 0, 101)
             .split_at(&record_key(col_3, 50)).0;
 
-        let job = create_compaction_job(vec![sst], vec![], vec![drop_1, drop_3]);
-
-        let mut iter = CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+        let mut iter = CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop_1, drop_3]).unwrap();
 
         let expected_entries = vec![
             put_rec(col_2, 1, 1, 11),
@@ -346,10 +316,8 @@ mod tests {
         // Create a drop that covers all keys
         let drop = DropMetadata::new(COL, 0, 100);
 
-        let job = create_compaction_job(vec![sst], vec![], vec![drop]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
 
         assert!(iter.next().is_none());
     }
@@ -383,10 +351,8 @@ mod tests {
         // Create a drop that fully covers SST 1
         let drop = DropMetadata::new(col_1, 0, 100);
 
-        let job = create_compaction_job(vec![sst1, sst2], vec![], vec![drop]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1, sst2], &[], &[drop]).unwrap();
 
         // SST 1 should be skipped entirely, only entries from SST 2 should be returned
         for expected in &entries2 {
@@ -412,10 +378,8 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let job = create_compaction_job(vec![sst], vec![], vec![]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[]).unwrap();
 
         // All entries including deletes should be present
         for expected in &entries {
@@ -441,10 +405,8 @@ mod tests {
         let entries2 = vec![put_rec(COL, 1, 2, 20)];
         let sst2 = write_sst(path, 2, &entries2, &options);
 
-        let job = create_compaction_job(vec![sst1], vec![sst2], vec![]);
-
         let mut iter =
-            CompactionIterator::new(test_instance(), path.to_path_buf(), sst_cache, job).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[]).unwrap();
 
         // ForwardIterator should deduplicate, keeping only the newest version (seq 20)
         let (key, value) = iter.next().unwrap().unwrap();

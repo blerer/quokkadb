@@ -21,6 +21,7 @@ pub struct Options {
     level0_file_num_compaction_trigger: usize,
     max_bytes_for_level_base: StorageQuantity,
     max_bytes_for_level_multiplier: f64,
+    compaction_threads: usize,
 
     // SSTable format options
     block_size: StorageQuantity,
@@ -44,6 +45,7 @@ impl Default for Options {
             level0_file_num_compaction_trigger: 4,
             max_bytes_for_level_base: StorageQuantity::new(64, StorageUnit::Mebibytes),
             max_bytes_for_level_multiplier: 10.0,
+            compaction_threads: 1,
 
             // SSTable format defaults
             block_size: StorageQuantity::new(4, StorageUnit::Kibibytes),
@@ -73,6 +75,7 @@ impl Options {
             level0_file_num_compaction_trigger: 4,
             max_bytes_for_level_base: StorageQuantity::new(256, StorageUnit::Mebibytes),
             max_bytes_for_level_multiplier: 10.0,
+            compaction_threads: 2,
             block_size: StorageQuantity::new(8, StorageUnit::Kibibytes),
             restart_interval: 16,
             bloom_filter_false_positive: 0.005,
@@ -92,6 +95,7 @@ impl Options {
             level0_file_num_compaction_trigger: 8,
             max_bytes_for_level_base: StorageQuantity::new(512, StorageUnit::Mebibytes),
             max_bytes_for_level_multiplier: 10.0,
+            compaction_threads: 2,
             block_size: StorageQuantity::new(16, StorageUnit::Kibibytes),
             restart_interval: 32,
             bloom_filter_false_positive: 0.001,
@@ -153,6 +157,12 @@ impl Options {
     /// Override the level size multiplier.
     pub fn with_max_bytes_for_level_multiplier(mut self, multiplier: f64) -> Self {
         self.max_bytes_for_level_multiplier = multiplier;
+        self
+    }
+
+    /// Override the number of threads used for compaction.
+    pub fn with_compaction_threads(mut self, threads: usize) -> Self {
+        self.compaction_threads = threads;
         self
     }
 
@@ -219,6 +229,10 @@ impl Options {
         self.max_bytes_for_level_multiplier
     }
 
+    pub fn compaction_threads(&self) -> usize {
+        self.compaction_threads
+    }
+
     pub fn block_size(&self) -> StorageQuantity {
         self.block_size
     }
@@ -270,6 +284,11 @@ impl Options {
                 "max_bytes_for_level_multiplier must be greater than 1.0".into(),
             ));
         }
+        if self.compaction_threads == 0 {
+            return Err(Error::InvalidOptions(
+                "compaction_threads must be greater than 0".into(),
+            ));
+        }
         if self.block_size.to_bytes() == 0 {
             return Err(Error::InvalidOptions(
                 "block_size must be greater than 0".into(),
@@ -313,6 +332,7 @@ impl fmt::Display for Options {
             "  Max Bytes for Level Multiplier: {:?}",
             self.max_bytes_for_level_multiplier
         )?;
+        writeln!(f, "  Compaction Threads: {:?}", self.compaction_threads)?;
         writeln!(f, "SSTable Options:")?;
         writeln!(f, "  Block Size: {:?}", self.block_size)?;
         writeln!(f, "  Restart Interval: {:?}", self.restart_interval)?;

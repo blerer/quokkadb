@@ -3,6 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::util::interval::Interval;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Result;
 use std::iter::once;
@@ -120,6 +121,38 @@ impl LsmVersion {
         }
     }
 
+    pub fn with_compaction(&self,
+                           output_level: usize,
+                           removed_sstables: &Vec<Arc<SSTableMetadata>>,
+                           added_sstables: &Vec<Arc<SSTableMetadata>>,
+                           drops: &Vec<Arc<DropMetadata>>
+    ) -> LsmVersion {
+
+        let input_level = output_level - 1;
+
+        let (removed_from_input, removed_from_output): (HashSet<_>, HashSet<_>) = removed_sstables
+            .into_iter()
+            .cloned()
+            .partition(|sst| sst.level == input_level as u8);
+
+        let drops : HashSet<Arc<DropMetadata>> = drops.into_iter().cloned().collect();
+
+        let next_file_number = self.next_file_number.max(added_sstables.iter().map(|sst| sst.number).max().unwrap_or(0) + 1);
+
+        let sst_levels = Arc::new(self.sst_levels.remove(input_level, &removed_from_input, &drops)
+            .remove(output_level, &removed_from_output, &HashSet::new())
+            .add(output_level, added_sstables.into_iter().cloned(), drops));
+
+        LsmVersion {
+            current_log_number: self.current_log_number,
+            oldest_log_number: self.oldest_log_number,
+            last_sequence_number: self.last_sequence_number,
+            next_file_number,
+            sst_levels,
+            pending_drops: self.pending_drops.clone(),
+        }
+    }
+
     pub fn add_collection_drop(&self, collection: u32, sequence_number: u64) -> LsmVersion {
         let drop = DropMetadata::new(collection, 0, sequence_number);
         self.add_drop(drop)
@@ -222,6 +255,13 @@ impl Levels {
     {
         let mut new_levels: Vec<_>  = self.levels.iter().cloned().collect();
         new_levels[level] = Arc::new(self.levels[level].add(sstables, drops));
+        Levels { levels: new_levels }
+    }
+
+    pub fn remove(&self, level: usize, sstables: &HashSet<Arc<SSTableMetadata>>, drops: &HashSet<Arc<DropMetadata>>) -> Self
+    {
+        let mut new_levels: Vec<_>  = self.levels.iter().cloned().collect();
+        new_levels[level] = Arc::new(self.levels[level].remove(sstables, drops));
         Levels { levels: new_levels }
     }
 
@@ -350,12 +390,28 @@ impl Level {
                 let new_sstables: Vec<_> = new_sstables.into_iter().collect();
                 let new_size = size + new_sstables.iter().map(|sst| sst.size).sum::<u64>();
                 sstables_copy.extend(new_sstables);
+                sstables_copy.sort_by(|a, b| a.min_key.cmp(&b.min_key));
 
                 let mut all_drops: Vec<_> = drops.iter().cloned().collect();
                 all_drops.extend(new_drops);
                 let merged_drops = merge_and_split_drops(all_drops);
 
                 Level::new(*level, sstables_copy, merged_drops, new_size)
+            }
+        }
+    }
+
+    fn remove(&self, sstables_to_remove: &HashSet<Arc<SSTableMetadata>>, drops_to_remove: &HashSet<Arc<DropMetadata>>) -> Self
+    {
+        match &self {
+            Overlapping { level, sstables, drops, size }
+            | NonOverlapping { level, sstables, drops, size } => {
+                let new_sstables = sstables.iter().cloned().filter(|sst| !sstables_to_remove.contains(sst)).collect::<Vec<_>>();
+                let new_size = size - sstables.iter().map(|sst| sst.size).sum::<u64>();
+
+                let new_drops: Vec<_> = drops.iter().cloned().filter(|drop| !drops_to_remove.contains(drop)).collect();
+
+                Level::new(*level, new_sstables, new_drops, new_size)
             }
         }
     }
@@ -709,7 +765,7 @@ impl Ord for SSTableMetadata {
 ///        be discarded as all the data associated to it have been removed.
 /// When the full drop range has been discarded the schema metadata (collection or index) to which
 /// that drop is associated can be removed from the schema.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct DropMetadata {
     pub collection: u32,
     pub index: u32,

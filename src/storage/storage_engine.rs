@@ -8,7 +8,7 @@ use crate::storage::catalog::{Catalog, CollectionOptions};
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
 use crate::storage::lsm_tree::LsmTree;
-use crate::storage::lsm_version::SSTableMetadata;
+use crate::storage::lsm_version::{DropMetadata, Levels, SSTableMetadata};
 use crate::storage::manifest::Manifest;
 use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use crate::storage::compaction_manager::CompactionManager;
 
 struct WalAndManifest {
     wal: WriteAheadLog,
@@ -41,11 +42,12 @@ pub(crate) struct StorageEngine {
     queue: Mutex<VecDeque<Arc<Writer>>>,
     db_mutex: Mutex<WalAndManifest>,
     lsm_tree: Arc<ArcSwap<LsmTree>>,
-    next_file_number: AtomicU64, // The counter used to create the file ids
+    next_file_number: Arc<AtomicU64>, // The counter used to create the file ids
     next_seq_number: AtomicU64,  // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
     sst_cache: Arc<SSTableCache>,
     flush_manager: FlushManager,
+    compaction_manager: CompactionManager,
     async_callback: OnceLock<Arc<Callback<Result<SSTableOperation>>>>,
     error_mode: AtomicBool,
     #[cfg(test)]
@@ -96,7 +98,7 @@ impl StorageEngine {
             // If a file with a higher number that the next_file number has been detected we need to update
             // the Lsm tree in-memory and on-disk (MANIFEST file)
             let next_file_number =
-                AtomicU64::new(if next_file_number < scan_results.next_file_number {
+                Arc::new(AtomicU64::new(if next_file_number < scan_results.next_file_number {
 
                     info!(logger,
                         "Files with higher numbers have been detected. Updating next_file_number to {}",
@@ -110,7 +112,7 @@ impl StorageEngine {
                     scan_results.next_file_number
                 } else {
                     next_file_number
-                });
+                }));
 
             // We will keep track of the rotated log files while replaying the wal files.
             let mut rotated_log_files =
@@ -285,13 +287,21 @@ impl StorageEngine {
                 sst_cache.clone(),
             )?;
 
+            let compaction_manager = CompactionManager::new(
+                logger.clone(),
+                metric_registry,
+                options.clone(),
+                &db_dir,
+                sst_cache.clone(),
+                next_file_number.clone(),
+            )?;
+
+            let levels = &lsm_tree.levels();
             let lsm_tree = Arc::new(ArcSwap::new(Arc::new(lsm_tree)));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
-            info!(logger, "Storage engine started",);
-
-            Ok(Arc::new(StorageEngine {
-                logger,
+            let engine = Arc::new(StorageEngine {
+                logger: logger.clone(),
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
@@ -305,13 +315,20 @@ impl StorageEngine {
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
                 sst_cache,
                 flush_manager,
+                compaction_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_precondition_checks: AtomicU8::new(0),
-            }))
+            });
+
+            info!(logger, "Storage engine started");
+
+            engine.schedule_compaction_if_needed(levels);
+
+            Ok(engine)
         } else {
-            let next_file_number = AtomicU64::new(1);
+            let next_file_number = Arc::new(AtomicU64::new(1));
             let next_seq_number = AtomicU64::new(1);
             let manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
             let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
@@ -345,6 +362,15 @@ impl StorageEngine {
                 sst_cache.clone(),
             )?;
 
+            let compaction_manager = CompactionManager::new(
+                logger.clone(),
+                metric_registry,
+                options.clone(),
+                &db_dir,
+                sst_cache.clone(),
+                next_file_number.clone(),
+            )?;
+
             let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
@@ -365,6 +391,7 @@ impl StorageEngine {
                 last_visible_seq: AtomicU64::new(0),
                 sst_cache,
                 flush_manager,
+                compaction_manager,
                 async_callback: OnceLock::new(),
                 error_mode: AtomicBool::new(false),
                 #[cfg(test)]
@@ -996,7 +1023,7 @@ impl StorageEngine {
     ) -> Result<()> {
         match operation {
             Ok(operation) => {
-                match operation {
+                let lsm_tree = match operation {
                     SSTableOperation::Flush {
                         log_number,
                         flushed,
@@ -1025,18 +1052,39 @@ impl StorageEngine {
 
                         self.delete_obsolete_log_files(obsolete_log_files)?;
 
-                        self.schedule_compaction_if_needed(&lsm_tree);
+                        lsm_tree
                     }
-                    SSTableOperation::Compaction { added: _, removed: _ } => {}
-                }
+                    SSTableOperation::Compaction {
+                        output_level,
+                        removed_sstables,
+                        added_sstables,
+                        drops } => {
+
+                        // We want to perform the changes within the manifest lock to avoid concurrent updates to
+                        // the LSM tree
+                        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+
+                        let lsm_tree = self.lsm_tree.load();
+
+                        let edit = ManifestEdit::Compaction {
+                            output_level,
+                            removed_sstables,
+                            added_sstables,
+                            drops,
+                        };
+
+                        self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?
+                    }
+                };
+                self.schedule_compaction_if_needed(&lsm_tree.levels());
                 Ok(())
             }
             Err(error) => Err(error),
         }
     }
 
-    fn schedule_compaction_if_needed(self: &Arc<Self>, _lsm_tree: &LsmTree) {
-
+    fn schedule_compaction_if_needed(self: &Arc<Self>, levels: &Levels) {
+        self.compaction_manager.schedule_compaction_if_needed(levels, self.get_async_callback());
     }
 
     fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {
@@ -1303,14 +1351,18 @@ impl Writer {
     }
 }
 
+/// Represents the type of operation that was performed on the SSTables, which is used to update the LSM tree accordingly.
+/// This is the type of the result returned by the flush and compaction tasks through the callback, to update the LSM tree with the new SSTables.
 pub enum SSTableOperation {
     Flush {
         log_number: u64,
         flushed: Arc<SSTableMetadata>,
     },
     Compaction {
-        added: Vec<Arc<SSTableMetadata>>,
-        removed: Vec<Arc<SSTableMetadata>>,
+        output_level: usize,
+        removed_sstables: Vec<Arc<SSTableMetadata>>,
+        added_sstables: Vec<Arc<SSTableMetadata>>,
+        drops: Vec<Arc<DropMetadata>>,
     },
 }
 
