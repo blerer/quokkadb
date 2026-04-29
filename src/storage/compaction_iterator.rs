@@ -124,7 +124,6 @@ mod tests {
     use crate::storage::files::DbFile;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::{delete_rec, put_rec, record_key};
-    use crate::util::interval::Interval;
     use tempfile::tempdir;
 
     const COL: u32 = 10;
@@ -239,7 +238,7 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         // Create a drop that covers collection 1
-        let drop = DropMetadata::new(col_1, 0, 100);
+        let drop = DropMetadata::new_collection_drop(col_1, 100);
 
         let mut iter =
             CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
@@ -279,10 +278,10 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         // Create a drop that covers collection 1
-        let drop_1 = DropMetadata::new(col_1, 0, 100);
+        let drop_1 = DropMetadata::new_collection_drop(col_1, 100);
         // Create a drop that covers part of collection 3
-        let drop_3 = DropMetadata::new(col_3, 0, 101)
-            .split_at(&record_key(col_3, 50)).0;
+        let drop_3 = DropMetadata::new_collection_drop(col_3, 101)
+            .split_at(&record_key(col_3, 50)).expect_two().0;
 
         let mut iter = CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop_1, drop_3]).unwrap();
 
@@ -314,7 +313,7 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         // Create a drop that covers all keys
-        let drop = DropMetadata::new(COL, 0, 100);
+        let drop = DropMetadata::new_collection_drop(COL, 100);
 
         let mut iter =
             CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
@@ -349,7 +348,7 @@ mod tests {
         let sst2 = write_sst(path, 2, &entries2, &options);
 
         // Create a drop that fully covers SST 1
-        let drop = DropMetadata::new(col_1, 0, 100);
+        let drop = DropMetadata::new_collection_drop(col_1, 100);
 
         let mut iter =
             CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1, sst2], &[], &[drop]).unwrap();
@@ -429,7 +428,7 @@ mod tests {
         );
 
         // Drop that fully covers the SST
-        let drop = DropMetadata::new(COL, 0, 300);
+        let drop = DropMetadata::new_collection_drop(COL, 300);
 
         assert!(sst_skippable_due_to_drops(&sst, &[drop]));
     }
@@ -446,13 +445,11 @@ mod tests {
             1000,
         );
 
-        // Drop that only partially covers the SST
-        let drop = Arc::new(DropMetadata {
-            collection: COL,
-            index: 0,
-            key_range: Interval::closed(record_key(COL, 5), record_key(COL, 15)),
-            drop_sequence_number: 300,
-        });
+        // Drop that only partially covers the SST: take a full collection drop then split.
+        let full = DropMetadata::new_collection_drop(COL, 300);
+        let (left, _right) = full.split_at(&record_key(COL, 15)).expect_two();
+        let (_discard, mid) = left.split_at(&record_key(COL, 5)).expect_two();
+        let drop = mid;
 
         assert!(!sst_skippable_due_to_drops(&sst, &[drop]));
     }
@@ -469,13 +466,11 @@ mod tests {
             1000,
         );
 
-        // Drop that doesn't overlap with the SST
-        let drop = Arc::new(DropMetadata {
-            collection: COL,
-            index: 0,
-            key_range: Interval::closed(record_key(COL, 30), record_key(COL, 40)),
-            drop_sequence_number: 300,
-        });
+        // Drop that doesn't overlap with the SST: take a full collection drop then split.
+        let full = DropMetadata::new_collection_drop(COL, 300);
+        let (left, _right) = full.split_at(&record_key(COL, 40)).expect_two();
+        let (_discard, mid) = left.split_at(&record_key(COL, 30)).expect_two();
+        let drop = mid;
 
         assert!(!sst_skippable_due_to_drops(&sst, &[drop]));
     }
@@ -507,16 +502,13 @@ mod tests {
             1000,
         );
 
-        // First drop doesn't cover SST
-        let drop1 = Arc::new(DropMetadata {
-            collection: COL,
-            index: 0,
-            key_range: Interval::closed(record_key(COL, 1), record_key(COL, 5)),
-            drop_sequence_number: 300,
-        });
+        // First drop doesn't cover SST: take a full collection drop then split.
+        let full1 = DropMetadata::new_collection_drop(COL, 300);
+        let (left, _right) = full1.split_at(&record_key(COL, 5)).expect_two();
+        let (_discard, drop1) = left.split_at(&record_key(COL, 1)).expect_two();
 
         // Second drop fully covers SST
-        let drop2 = DropMetadata::new(COL, 0, 301);
+        let drop2 = DropMetadata::new_collection_drop(COL, 301);
 
         assert!(sst_skippable_due_to_drops(&sst, &[drop1, drop2]));
     }

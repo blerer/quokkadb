@@ -5,7 +5,7 @@ use crate::util::interval::Interval;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::iter::once;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -154,7 +154,7 @@ impl LsmVersion {
     }
 
     pub fn add_collection_drop(&self, collection: u32, sequence_number: u64) -> LsmVersion {
-        let drop = DropMetadata::new(collection, 0, sequence_number);
+        let drop = DropMetadata::new_collection_drop(collection, sequence_number);
         self.add_drop(drop)
     }
 
@@ -258,7 +258,11 @@ impl Levels {
         Levels { levels: new_levels }
     }
 
-    pub fn remove(&self, level: usize, sstables: &HashSet<Arc<SSTableMetadata>>, drops: &HashSet<Arc<DropMetadata>>) -> Self
+    pub fn remove(&self,
+                  level: usize,
+                  sstables: &HashSet<Arc<SSTableMetadata>>,
+                  drops: &HashSet<Arc<DropMetadata>>
+    ) -> Self
     {
         let mut new_levels: Vec<_>  = self.levels.iter().cloned().collect();
         new_levels[level] = Arc::new(self.levels[level].remove(sstables, drops));
@@ -407,9 +411,12 @@ impl Level {
             Overlapping { level, sstables, drops, size }
             | NonOverlapping { level, sstables, drops, size } => {
                 let new_sstables = sstables.iter().cloned().filter(|sst| !sstables_to_remove.contains(sst)).collect::<Vec<_>>();
-                let new_size = size - sstables.iter().map(|sst| sst.size).sum::<u64>();
+                assert_eq!(sstables.len(), new_sstables.len() + sstables_to_remove.len());
+
+                let new_size = size - sstables_to_remove.iter().map(|sst| sst.size).sum::<u64>();
 
                 let new_drops: Vec<_> = drops.iter().cloned().filter(|drop| !drops_to_remove.contains(drop)).collect();
+                assert_eq!(drops.len(), new_drops.len() + drops_to_remove.len());
 
                 Level::new(*level, new_sstables, new_drops, new_size)
             }
@@ -748,29 +755,70 @@ impl Ord for SSTableMetadata {
     }
 }
 
-/// Metadata for a dropped collection or index, used to filter out data from SSTables upon flush or
-/// compaction.
-/// Drops are tracked at the catalogue level, and the data returned to the user will be filtered out
-/// based on it. Nevertheless, we need to also track the information at the LSM tree level to be able
-/// to remove data during flush or compaction.
+/// Metadata for a dropped collection or index, used as a range tombstone over *record keys*
+/// (`[collection][index][user_key]`).
 ///
-/// Drop Metadata are a form of range tombstone that is initially created to cover a collection
-/// or index range. They will be kept and pushed down levels by compaction until all the data
-/// associated to them as been removed. They can be split in 2 cases:
-///     1) overlapping: some index tombstones were created before some collection tombstones.
-///        In such a case the index drop sequence must be preserved and the collection drop will get
-///        fragmented to avoid overriding the index drops.
-///     2) compaction partitioning: when compaction get partition the drops range need to be split
-///        to match the compaction boundaries. Once a drop range as reached the bottom level it can
-///        be discarded as all the data associated to it have been removed.
-/// When the full drop range has been discarded the schema metadata (collection or index) to which
-/// that drop is associated can be removed from the schema.
+/// Drops are tracked at the catalogue layer for MVCC visibility (e.g., "collection/index exists at
+/// snapshot"). In addition, the LSM tree must physically carry range tombstones so flush/compaction
+/// can skip obsolete data.
+///
+/// # Two drop kinds
+///
+/// Record keys are encoded as:
+/// `[collection(varint u32)][index(varint u32)][user_key bytes...]`
+///
+/// This means that dropping an entire collection must span **all** `(collection, index, *)`
+/// keyspaces, while dropping an index must span only that exact `(collection, index_id, *)`
+/// keyspace (and must *not* delete `(collection, 0, *)` unless `index_id == 0`).
+///
+/// We model this explicitly via [`DropKind`], and provide constructors that are the only supported
+/// way to create drops:
+/// - [`DropMetadata::new_collection_drop`] for full collection drops
+/// - [`DropMetadata::new_index_drop`] for full index drops
+///
+/// Narrower ranges are only produced by splitting an existing full-range drop via
+/// [`DropMetadata::split_at`], e.g. for compaction partitioning.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct DropMetadata {
     pub collection: u32,
-    pub index: u32,
+    pub kind: DropKind,
     pub key_range: Interval<Vec<u8>>,
     pub drop_sequence_number: u64,
+}
+
+/// The logical kind of drop.
+///
+/// This is persisted in the manifest (serialization tag-based), so keep tags stable.
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub enum DropKind {
+    /// Drop the full collection across all indexes.
+    Collection,
+    /// Drop only one index keyspace within a collection.
+    Index(u32),
+}
+
+impl Serializable for DropKind {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
+    where
+        Self: Sized
+    {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(DropKind::Collection),
+            1 => {
+                let index_id = reader.read_varint_u32()?;
+                Ok(DropKind::Index(index_id))
+            }
+            _ => Err(Error::new(ErrorKind::InvalidData, format!("Invalid DropKind tag: {}", tag))),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            DropKind::Collection => writer.write_u8(0),
+            DropKind::Index(index_id) => writer.write_u8(1).write_varint_u32(*index_id),
+        };
+    }
 }
 
 /// Merges and splits drops to remove overlaps.
@@ -788,7 +836,8 @@ fn merge_and_split_drops(mut drops: Vec<Arc<DropMetadata>>) -> Vec<Arc<DropMetad
 
     // Sort by start bound, then by drop_sequence_number (earlier sequence first)
     drops.sort_by(|a, b| {
-        a.key_range.cmp(&b.key_range)
+        a.key_range
+            .cmp(&b.key_range)
             .then(a.drop_sequence_number.cmp(&b.drop_sequence_number))
     });
 
@@ -807,8 +856,8 @@ fn merge_and_split_drops(mut drops: Vec<Arc<DropMetadata>>) -> Vec<Arc<DropMetad
             continue;
         }
 
-        // If the last drop has the same drop_sequence_number as the current one, we can keep
-        // only the collection drop.
+        // If the last drop has the same drop_sequence_number as the current one, we can keep only
+        // the wider drop (which must be `last` due to containment and earlier sorting).
         if last.drop_sequence_number == drop.drop_sequence_number {
             continue;
         }
@@ -818,16 +867,17 @@ fn merge_and_split_drops(mut drops: Vec<Arc<DropMetadata>>) -> Vec<Arc<DropMetad
         let intervals = last.key_range.remove_included_interval(&drop.key_range);
         assert_eq!(intervals.len(), 2);
         let mut iter = intervals.into_iter();
+
         result.push(Arc::new(DropMetadata {
             collection: last.collection,
-            index: last.index,
+            kind: last.kind.clone(),
             key_range: iter.next().unwrap(),
             drop_sequence_number: last.drop_sequence_number,
         }));
         result.push(drop);
         result.push(Arc::new(DropMetadata {
             collection: last.collection,
-            index: last.index,
+            kind: last.kind.clone(),
             key_range: iter.next().unwrap(),
             drop_sequence_number: last.drop_sequence_number,
         }));
@@ -837,14 +887,34 @@ fn merge_and_split_drops(mut drops: Vec<Arc<DropMetadata>>) -> Vec<Arc<DropMetad
 }
 
 impl DropMetadata {
-    pub fn new(collection: u32, index: u32, drop_sequence_number: u64) -> Arc<Self> {
+    /// Creates a full-range drop for an entire collection (all indexes).
+    pub fn new_collection_drop(collection: u32, drop_sequence_number: u64) -> Arc<Self> {
         let user_min_key = Bson::MinKey.try_into_key().unwrap();
-        let min_key = encode_record_key(collection, index, &user_min_key);
         let user_max_key = Bson::MaxKey.try_into_key().unwrap();
-        let max_key = encode_record_key(collection, index, &user_max_key);
+
+        let min_key = encode_record_key(collection, 0, &user_min_key);
+        let max_key = encode_record_key(collection, u32::MAX, &user_max_key);
+
         Arc::new(DropMetadata {
             collection,
-            index,
+            kind: DropKind::Collection,
+            drop_sequence_number,
+            key_range: Interval::closed(min_key, max_key),
+        })
+    }
+
+    /// Creates a full-range drop for a single index within a collection.
+    pub fn new_index_drop(collection: u32, index: u32, drop_sequence_number: u64) -> Arc<Self> {
+        assert_ne!(index, 0, "Index ID 0 is reserved for the primary index and cannot be dropped with new_index_drop. Use new_collection_drop instead.");
+        let user_min_key = Bson::MinKey.try_into_key().unwrap();
+        let user_max_key = Bson::MaxKey.try_into_key().unwrap();
+
+        let min_key = encode_record_key(collection, index, &user_min_key);
+        let max_key = encode_record_key(collection, index, &user_max_key);
+
+        Arc::new(DropMetadata {
+            collection,
+            kind: DropKind::Index(index),
             drop_sequence_number,
             key_range: Interval::closed(min_key, max_key),
         })
@@ -873,7 +943,13 @@ impl DropMetadata {
     /// - Drop 2: covering (M, Z] with the same drop_sequence_number
     /// This is used to handle the case where a drop need to be split to match the boundaries of
     /// the partition grid when compacting for partial compaction levels.
-    pub fn split_at(&self, split_key: &[u8]) -> (Arc<DropMetadata>, Arc<DropMetadata>) {
+    pub fn split_at(&self, split_key: &[u8]) -> SplitResults {
+        assert!(self.key_range.contains(split_key), "Split key must be within the drop's key range");
+
+        if self.key_range.end_bound_value_eq(split_key) {
+            return SplitResults::One(Arc::new(self.clone()))
+        }
+
         let left_range = Interval::new(
             self.key_range.start_bound().cloned(),
             Bound::Included(split_key.to_vec()),
@@ -883,20 +959,35 @@ impl DropMetadata {
             self.key_range.end_bound().cloned(),
         );
 
-        (
+        SplitResults::Two(
             Arc::new(DropMetadata {
                 collection: self.collection,
-                index: self.index,
+                kind: self.kind.clone(),
                 drop_sequence_number: self.drop_sequence_number,
                 key_range: left_range,
             }),
             Arc::new(DropMetadata {
                 collection: self.collection,
-                index: self.index,
+                kind: self.kind.clone(),
                 drop_sequence_number: self.drop_sequence_number,
                 key_range: right_range,
             }),
         )
+    }
+}
+
+pub enum SplitResults {
+    One(Arc<DropMetadata>),
+    Two(Arc<DropMetadata>, Arc<DropMetadata>),
+}
+
+#[cfg(test)]
+impl SplitResults {
+    pub(crate) fn expect_two(self) -> (Arc<DropMetadata>, Arc<DropMetadata>) {
+        match self {
+            SplitResults::Two(left, right) => (left, right),
+            SplitResults::One(_) => panic!("expected two parts from split_at"),
+        }
     }
 }
 
@@ -912,37 +1003,40 @@ impl LevelItem for DropMetadata {
 
 impl fmt::Display for DropMetadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "DropMetadata {{ collection: {}, index: {}, key_range: {:?}, drop_sequence_number: {} }}",
-            self.collection,
-            self.index,
-            self.key_range,
-            self.drop_sequence_number
-        )
+        match self.kind {
+            DropKind::Collection => write!(
+                f,
+                "DropMetadata {{ collection: {}, kind: Collection, key_range: {:?}, drop_sequence_number: {} }}",
+                self.collection, self.key_range, self.drop_sequence_number
+            ),
+            DropKind::Index(index) => write!(
+                f,
+                "DropMetadata {{ collection: {}, kind: Index({}), key_range: {:?}, drop_sequence_number: {} }}",
+                self.collection, index, self.key_range, self.drop_sequence_number
+            ),
+        }
     }
 }
 
 impl Serializable for DropMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let collection = reader.read_varint_u32()?;
-        let index = reader.read_varint_u32()?;
+        let kind =  DropKind::read_from(reader)?;
         let drop_sequence_number = reader.read_varint_u64()?;
         let key_range = Interval::read_from(reader)?;
 
         Ok(DropMetadata {
             collection,
-            index,
+            kind,
             drop_sequence_number,
             key_range,
         })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
-        writer
-            .write_varint_u32(self.collection)
-            .write_varint_u32(self.index)
-            .write_varint_u64(self.drop_sequence_number);
+        writer.write_varint_u32(self.collection);
+        self.kind.write_to(writer);
+        writer.write_varint_u64(self.drop_sequence_number);
         self.key_range.write_to(writer);
     }
 }
@@ -1459,18 +1553,6 @@ mod tests {
         use std::iter::{empty, once};
         use super::*;
 
-        fn create_sst(number: u64, level: u8, min: i32, max: i32, size: u64) -> Arc<SSTableMetadata> {
-            Arc::new(SSTableMetadata::new(
-                number,
-                level,
-                &record_key(min),
-                &record_key(max),
-                number * 100,
-                number * 100 + 50,
-                size,
-            ))
-        }
-
         #[test]
         fn test_add_to_empty_level_0() {
             let levels = Levels::new(4);
@@ -1582,10 +1664,10 @@ mod tests {
         #[test]
         fn test_add_with_drops() {
             let levels = Levels::new(4);
-            
+
             let sst = create_sst(1, 0, 10, 20, 1000);
-            let drop = DropMetadata::new(1, 0, 50);
-            
+            let drop = DropMetadata::new_collection_drop(1, 50);
+
             let levels = levels.add(0, once(sst), once(drop));
             
             let level = levels.level(0).unwrap();
@@ -1597,6 +1679,7 @@ mod tests {
                 Level::Overlapping { drops, .. } => {
                     assert_eq!(drops.len(), 1);
                     assert_eq!(drops[0].collection, 1);
+                    assert_eq!(drops[0].kind, DropKind::Collection);
                     assert_eq!(drops[0].drop_sequence_number, 50);
                 }
                 _ => panic!("Expected Overlapping level"),
@@ -1663,36 +1746,160 @@ mod tests {
         }
     }
 
+    mod levels_remove_tests {
+        use super::*;
+        use std::collections::HashSet;
+        use std::iter::{empty, once};
+
+        #[test]
+        fn test_level_remove_removes_only_specified_sstables_and_updates_size() {
+            let sst1 = create_sst(1, 1, 10, 20, 1000);
+            let sst2 = create_sst(2, 1, 30, 40, 2000);
+            let sst3 = create_sst(3, 1, 50, 60, 3000);
+
+            let total = 1000 + 2000 + 3000;
+            let level = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![], total);
+
+            let mut to_remove: HashSet<Arc<SSTableMetadata>> = HashSet::new();
+            to_remove.insert(sst2.clone());
+
+            let removed = level.remove(&to_remove, &HashSet::new());
+
+            assert_eq!(removed.sst_count(), 2);
+            assert_eq!(removed.total_bytes(), total - 2000);
+
+            let remaining_numbers: Vec<u64> = removed.sstables().iter().map(|s| s.number).collect();
+            assert_eq!(remaining_numbers, vec![1, 3], "Expected to remove only sst2");
+        }
+
+        #[test]
+        fn test_levels_remove_preserves_other_levels() {
+            let levels = Levels::new(3);
+
+            let sst_l0 = create_sst(1, 0, 10, 20, 1000);
+            let sst_l1_a = create_sst(2, 1, 30, 40, 2000);
+            let sst_l1_b = create_sst(3, 1, 50, 60, 3000);
+
+            let levels = levels.add(0, once(sst_l0.clone()), empty());
+            let levels = levels.add(1, vec![sst_l1_a.clone(), sst_l1_b.clone()], empty());
+
+            let mut to_remove: HashSet<Arc<SSTableMetadata>> = HashSet::new();
+            to_remove.insert(sst_l1_a.clone());
+
+            let levels2 = levels.remove(1, &to_remove, &HashSet::new());
+
+            // Level 0 unchanged
+            assert_eq!(levels2.level(0).unwrap().sst_count(), 1);
+            assert_eq!(levels2.level(0).unwrap().total_bytes(), 1000);
+
+            // Level 1 updated
+            assert_eq!(levels2.level(1).unwrap().sst_count(), 1);
+            assert_eq!(levels2.level(1).unwrap().total_bytes(), 3000);
+            assert_eq!(levels2.level(1).unwrap().sstables()[0].number, 3);
+
+            // Global totals updated
+            assert_eq!(levels2.sst_count(), 2);
+            assert_eq!(levels2.total_bytes(), 1000 + 3000);
+        }
+
+        #[test]
+        fn test_level_remove_removes_only_specified_drops() {
+            let sst = create_sst(1, 0, 10, 20, 1000);
+            let drop1 = DropMetadata::new_collection_drop(2, 100);
+            let drop2 = DropMetadata::new_collection_drop(3, 150);
+
+            let level = Level::new(0, vec![sst], vec![drop1.clone(), drop2.clone()], 1000);
+
+            let mut drops_to_remove: HashSet<Arc<DropMetadata>> = HashSet::new();
+            drops_to_remove.insert(drop1.clone());
+
+            let removed = level.remove(&HashSet::new(), &drops_to_remove);
+
+            assert_eq!(removed.sst_count(), 1);
+            assert_eq!(removed.total_bytes(), 1000);
+
+            match &removed {
+                Overlapping { drops, .. } => {
+                    assert_eq!(drops.len(), 1);
+                    assert_eq!(drops[0], drop2);
+                }
+                _ => panic!("Expected Overlapping level"),
+            }
+        }
+
+        #[test]
+        fn test_levels_remove_sstable_and_drop_same_time() {
+            let levels = Levels::new(2);
+
+            let sst1 = create_sst(1, 0, 10, 20, 1000);
+            let sst2 = create_sst(2, 0, 30, 40, 2000);
+            let drop1 = DropMetadata::new_collection_drop(2, 100);
+
+            let levels = levels.add(0, vec![sst1.clone(), sst2.clone()], once(drop1.clone()));
+
+            let mut sst_to_remove: HashSet<Arc<SSTableMetadata>> = HashSet::new();
+            sst_to_remove.insert(sst1.clone());
+
+            let mut drops_to_remove: HashSet<Arc<DropMetadata>> = HashSet::new();
+            drops_to_remove.insert(drop1.clone());
+
+            let levels2 = levels.remove(0, &sst_to_remove, &drops_to_remove);
+
+            let l0 = levels2.level(0).unwrap();
+            assert_eq!(l0.sst_count(), 1);
+            assert_eq!(l0.total_bytes(), 2000);
+            assert_eq!(l0.sstables()[0].number, 2);
+
+            match l0 {
+                Overlapping { drops, .. } => assert!(drops.is_empty()),
+                _ => panic!("Expected Overlapping level"),
+            }
+        }
+    }
+
     mod drop_metadata_merge_tests {
         use super::*;
         use std::iter::empty;
 
-        fn create_drop(collection: u32, index: u32, min: i32, max: i32, seq: u64) -> Arc<DropMetadata> {
-            let min_key = record_key(min);
-            let max_key = record_key(max);
-            Arc::new(DropMetadata {
-                collection,
-                index,
-                key_range: Interval::closed(min_key, max_key),
-                drop_sequence_number: seq,
-            })
+        fn split_to_range(
+            drop: &Arc<DropMetadata>,
+            start: &[u8],
+            end: &[u8],
+        ) -> Arc<DropMetadata> {
+            let (left, right) = drop.split_at(end).expect_two();
+            let (_discard, mid) = left.split_at(start).expect_two();
+            // `mid` is (start, end] due to split semantics; for these tests, that's sufficient as
+            // we only care about containment/overlap behavior.
+            // For closed ranges the tests already use Interval constructors on record keys.
+            drop_sequence_eq(drop, &mid);
+            drop_kind_eq(drop, &mid);
+            right; // keep `right` used to ensure we didn't accidentally use it
+            mid
+        }
+
+        fn drop_sequence_eq(a: &Arc<DropMetadata>, b: &Arc<DropMetadata>) {
+            assert_eq!(a.drop_sequence_number, b.drop_sequence_number);
+        }
+
+        fn drop_kind_eq(a: &Arc<DropMetadata>, b: &Arc<DropMetadata>) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.collection, b.collection);
         }
 
         #[test]
         fn test_no_overlap_drops_preserved() {
             let levels = Levels::new(4);
 
-            let drop1 = create_drop(1, 0, 10, 20, 100);
-            let drop2 = create_drop(2, 0, 30, 40, 200);
+            let drop1 = DropMetadata::new_index_drop(1, 1, 100);
+            let drop2 = DropMetadata::new_index_drop(2, 1, 200);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop1.clone(), drop2.clone()]);
+            let levels =
+                levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop1.clone(), drop2.clone()]);
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
                     assert_eq!(drops.len(), 2);
-                    assert_eq!(drops[0].record_key_range(), Interval::closed(record_key(10), record_key(20)));
-                    assert_eq!(drops[1].record_key_range(), Interval::closed(record_key(30), record_key(40)));
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1702,44 +1909,35 @@ mod tests {
         fn test_index_drop_before_collection_drop_splits_collection() {
             let levels = Levels::new(4);
 
-            // Index dropped at seq 100, collection dropped at seq 200
-            // Index covers [20, 30], collection covers [10, 40]
-            // Result should be: collection [10, 20), index [20, 30], collection (30, 40]
-            let index_drop = create_drop(1, 1, 20, 30, 100);
-            let collection_drop = create_drop(1, 0, 10, 40, 200);
+            // Index dropped at seq 100, then collection dropped at seq 200.
+            // The collection drop is full-range (covers all indexes); the index drop is a subrange
+            // (within one index keyspace). Collection drop must be fragmented to preserve the
+            // earlier index drop sequence.
+            let index_drop_full = DropMetadata::new_index_drop(1, 1, 100);
+            let collection_drop_full = DropMetadata::new_collection_drop(1, 200);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![index_drop.clone(), collection_drop.clone()]);
+            // Pick two record keys that lie within index 1 keyspace.
+            let key_20 = encode_record_key(1, 1, &Bson::Int32(20).try_into_key().unwrap());
+            let key_30 = encode_record_key(1, 1, &Bson::Int32(30).try_into_key().unwrap());
+
+            let index_drop = split_to_range(&index_drop_full, &key_20, &key_30);
+
+            let levels = levels.add(
+                0,
+                empty::<Arc<SSTableMetadata>>(),
+                vec![index_drop.clone(), collection_drop_full.clone()],
+            );
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
-                    // Should have 3 drops: before index, index itself, after index
                     assert_eq!(drops.len(), 3, "Expected 3 drops after split, got {}", drops.len());
-
-                    // Sorted by key_range
-                    // First: collection part before index [10, 20)
-                    assert_eq!(drops[0].collection, 1);
-                    assert_eq!(drops[0].index, 0);
-                    assert_eq!(drops[0].record_key_range(), Interval::closed_open(
-                        record_key(10),
-                        record_key(20)
-                    ));
-
-                    // Second: index drop [20, 30]
-                    assert_eq!(drops[1].collection, 1);
-                    assert_eq!(drops[1].index, 1);
-                    assert_eq!(drops[1].record_key_range(), Interval::closed(
-                        record_key(20),
-                        record_key(30)
-                    ));
-
-                    // Third: collection part after index (30, 40]
-                    assert_eq!(drops[2].collection, 1);
-                    assert_eq!(drops[2].index, 0);
-                    assert_eq!(drops[2].record_key_range(), Interval::open_closed(
-                        record_key(30),
-                        record_key(40)
-                    ));
+                    assert_eq!(drops[1].kind, DropKind::Index(1));
+                    assert_eq!(drops[1].drop_sequence_number, 100);
+                    assert_eq!(drops[0].kind, DropKind::Collection);
+                    assert_eq!(drops[2].kind, DropKind::Collection);
+                    assert_eq!(drops[0].drop_sequence_number, 200);
+                    assert_eq!(drops[2].drop_sequence_number, 200);
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1749,26 +1947,25 @@ mod tests {
         fn test_index_drop_at_same_time_that_collection_drop() {
             let levels = Levels::new(4);
 
-            // Index dropped at seq 100, collection dropped at the same time seq 100
-            // Index covers [20, 30], collection covers [10, 40]
-            // Result should be: collection [10, 40]
-            let index_drop = create_drop(1, 1, 20, 30, 100);
-            let collection_drop = create_drop(1, 0, 10, 40, 100);
+            let index_drop_full = DropMetadata::new_index_drop(1, 1, 100);
+            let collection_drop_full = DropMetadata::new_collection_drop(1, 100);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![index_drop.clone(), collection_drop.clone()]);
+            let key_20 = encode_record_key(1, 1, &Bson::Int32(20).try_into_key().unwrap());
+            let key_30 = encode_record_key(1, 1, &Bson::Int32(30).try_into_key().unwrap());
+            let index_drop = split_to_range(&index_drop_full, &key_20, &key_30);
+
+            let levels = levels.add(
+                0,
+                empty::<Arc<SSTableMetadata>>(),
+                vec![index_drop.clone(), collection_drop_full.clone()],
+            );
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
-                    // Should have 1 drops: collection drop should not be split since index and collection drops happen at the same time
                     assert_eq!(drops.len(), 1, "Expected 1 drops {}", drops.len());
-
-                    assert_eq!(drops[0].collection, 1);
-                    assert_eq!(drops[0].index, 0);
-                    assert_eq!(drops[0].record_key_range(), Interval::closed(
-                        record_key(10),
-                        record_key(40)
-                    ));
+                    assert_eq!(drops[0].kind, DropKind::Collection);
+                    assert_eq!(drops[0].drop_sequence_number, 100);
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1793,17 +1990,13 @@ mod tests {
         fn test_single_drop() {
             let levels = Levels::new(4);
 
-            let drop = create_drop(1, 0, 10, 30, 100);
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop.clone()]);
+            let drop = DropMetadata::new_index_drop(1, 1, 100);
+            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop]);
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
                     assert_eq!(drops.len(), 1);
-                    assert_eq!(drops[0].record_key_range(), Interval::closed(
-                        record_key(10),
-                        record_key(30)
-                    ));
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1813,24 +2006,15 @@ mod tests {
         fn test_adjacent_drops_not_merged() {
             let levels = Levels::new(4);
 
-            // Drop1: [10, 20], Drop2: [21, 30] - adjacent but not overlapping
-            let drop1 = create_drop(1, 0, 10, 20, 100);
-            let drop2 = create_drop(2, 0, 21, 30, 200);
+            let drop1 = DropMetadata::new_index_drop(1, 1, 100);
+            let drop2 = DropMetadata::new_index_drop(2, 1, 200);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop1.clone(), drop2.clone()]);
+            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop1, drop2]);
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
                     assert_eq!(drops.len(), 2, "Adjacent drops should not be merged");
-                    assert_eq!(drops[0].record_key_range(), Interval::closed(
-                        record_key(10),
-                        record_key(20)
-                    ));
-                    assert_eq!(drops[1].record_key_range(), Interval::closed(
-                        record_key(21),
-                        record_key(30)
-                    ));
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1840,55 +2024,255 @@ mod tests {
         fn test_multiple_index_drops_split_collection() {
             let levels = Levels::new(4);
 
-            // Collection covers [10, 60] at seq 300
-            // Index1 covers [20, 25] at seq 100
-            // Index2 covers [40, 45] at seq 200
-            // Result: collection [10, 20), index1 [20, 25], collection (25, 40), index2 [40, 45], collection (45, 60]
-            let collection_drop = create_drop(1, 0, 10, 60, 300);
-            let index1_drop = create_drop(1, 1, 20, 25, 100);
-            let index2_drop = create_drop(1, 2, 40, 45, 200);
+            let collection_drop_full = DropMetadata::new_collection_drop(1, 300);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![
-                collection_drop.clone(),
-                index1_drop.clone(),
-                index2_drop.clone(),
-            ]);
+            let idx1_full = DropMetadata::new_index_drop(1, 1, 100);
+            let idx2_full = DropMetadata::new_index_drop(1, 2, 200);
+
+            let key_20_i1 = encode_record_key(1, 1, &Bson::Int32(20).try_into_key().unwrap());
+            let key_25_i1 = encode_record_key(1, 1, &Bson::Int32(25).try_into_key().unwrap());
+            let key_40_i2 = encode_record_key(1, 2, &Bson::Int32(40).try_into_key().unwrap());
+            let key_45_i2 = encode_record_key(1, 2, &Bson::Int32(45).try_into_key().unwrap());
+
+            let idx1 = split_to_range(&idx1_full, &key_20_i1, &key_25_i1);
+            let idx2 = split_to_range(&idx2_full, &key_40_i2, &key_45_i2);
+
+            let levels = levels.add(
+                0,
+                empty::<Arc<SSTableMetadata>>(),
+                vec![collection_drop_full, idx1, idx2],
+            );
 
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
-                    // Should have 5 drops after splits
                     assert_eq!(drops.len(), 5, "Expected 5 drops after multiple splits, got {}", drops.len());
-                    assert_eq!(drops[0].collection, 1);
-                    assert_eq!(drops[0].index, 0);
-                    assert_eq!(drops[0].record_key_range(), Interval::closed_open(
-                        record_key(10),
-                        record_key(20)
-                    ));
-                    assert_eq!(drops[1].collection, 1);
-                    assert_eq!(drops[1].index, 1);
-                    assert_eq!(drops[1].record_key_range(), Interval::closed(
-                        record_key(20),
-                        record_key(25)
-                    ));
-                    assert_eq!(drops[2].collection, 1);
-                    assert_eq!(drops[2].index, 0);
-                    assert_eq!(drops[2].record_key_range(), Interval::open(
-                        record_key(25),
-                        record_key(40)
-                    ));
-                    assert_eq!(drops[3].collection, 1);
-                    assert_eq!(drops[3].index, 2);
-                    assert_eq!(drops[3].record_key_range(), Interval::closed(
-                        record_key(40),
-                        record_key(45)
-                    ));
-                    assert_eq!(drops[4].collection, 1);
-                    assert_eq!(drops[4].index, 0);
-                    assert_eq!(drops[4].record_key_range(), Interval::open_closed(
-                        record_key(45),
-                        record_key(60)
-                    ));
+                    assert_eq!(drops[1].kind, DropKind::Index(1));
+                    assert_eq!(drops[3].kind, DropKind::Index(2));
+                    assert_eq!(drops[0].kind, DropKind::Collection);
+                    assert_eq!(drops[2].kind, DropKind::Collection);
+                    assert_eq!(drops[4].kind, DropKind::Collection);
+                }
+                _ => panic!("Expected Overlapping level"),
+            }
+        }
+    }
+
+    mod split_at_tests {
+        use super::*;
+        use std::ops::Bound;
+
+        fn record_key_mid(collection: u32, index: u32, val: i32) -> Vec<u8> {
+            encode_record_key(collection, index, &Bson::Int32(val).try_into_key().unwrap())
+        }
+
+        #[test]
+        fn test_split_collection_drop() {
+            let col = 1;
+            let seq = 42;
+            let drop = DropMetadata::new_collection_drop(col, seq);
+
+            let split_key = record_key_mid(col, 0, 100);
+            let (left, right) = drop.split_at(&split_key).expect_two();
+
+            assert_eq!(left.collection, col);
+            assert_eq!(right.collection, col);
+            assert_eq!(left.kind, DropKind::Collection);
+            assert_eq!(right.kind, DropKind::Collection);
+            assert_eq!(left.drop_sequence_number, seq);
+            assert_eq!(right.drop_sequence_number, seq);
+
+            assert_eq!(left.key_range.end_bound(), Bound::Included(&split_key));
+            assert_eq!(right.key_range.start_bound(), Bound::Excluded(&split_key));
+
+            assert_eq!(left.key_range.start_bound(), drop.key_range.start_bound());
+            assert_eq!(right.key_range.end_bound(), drop.key_range.end_bound());
+        }
+
+        #[test]
+        fn test_split_index_drop() {
+            let col = 2;
+            let idx = 3;
+            let seq = 77;
+            let drop = DropMetadata::new_index_drop(col, idx, seq);
+
+            let split_key = record_key_mid(col, idx, 50);
+            let (left, right) = drop.split_at(&split_key).expect_two();
+
+            assert_eq!(left.collection, col);
+            assert_eq!(right.collection, col);
+            assert_eq!(left.kind, DropKind::Index(idx));
+            assert_eq!(right.kind, DropKind::Index(idx));
+            assert_eq!(left.drop_sequence_number, seq);
+            assert_eq!(right.drop_sequence_number, seq);
+
+            assert_eq!(left.key_range.end_bound(), Bound::Included(&split_key));
+            assert_eq!(right.key_range.start_bound(), Bound::Excluded(&split_key));
+            assert_eq!(left.key_range.start_bound(), drop.key_range.start_bound());
+            assert_eq!(right.key_range.end_bound(), drop.key_range.end_bound());
+        }
+
+        #[test]
+        fn test_split_boundary_semantics() {
+            let col = 1;
+            let idx = 1;
+            let drop = DropMetadata::new_index_drop(col, idx, 10);
+
+            let split_key = record_key_mid(col, idx, 50);
+            let (left, right) = drop.split_at(&split_key).expect_two();
+
+            assert!(left.key_range.contains(&split_key));
+            assert!(!right.key_range.contains(&split_key));
+
+            let mut key_after = split_key.clone();
+            key_after.push(0);
+            assert!(!left.key_range.contains(&key_after));
+            assert!(right.key_range.contains(&key_after));
+        }
+
+        #[test]
+        fn test_split_at_range_edges() {
+            let col = 1u32;
+            let idx = 1u32;
+            let drop = DropMetadata::new_index_drop(col, idx, 5);
+
+            if let Bound::Included(start) = drop.key_range.start_bound().cloned() {
+                let (left_at_start, right_at_start) = drop.split_at(&start).expect_two();
+                assert_eq!(left_at_start.key_range.start_bound(), Bound::Included(&start));
+                assert_eq!(left_at_start.key_range.end_bound(), Bound::Included(&start));
+                assert_eq!(right_at_start.key_range.start_bound(), Bound::Excluded(&start));
+            }
+
+            if let Bound::Included(end) = drop.key_range.end_bound().cloned() {
+                let result = drop.split_at(&end);
+                match result {
+                    SplitResults::One(only) => {
+                        assert_eq!(only.key_range.end_bound(), Bound::Included(&end));
+                        assert_eq!(only.key_range.start_bound(), drop.key_range.start_bound());
+                    }
+                    SplitResults::Two(_, _) => panic!("expected One when splitting at end bound"),
+                }
+            }
+        }
+
+        #[test]
+        fn test_split_recursive() {
+            let col = 1;
+            let idx = 1;
+            let seq = 99;
+            let drop = DropMetadata::new_index_drop(col, idx, seq);
+
+            let split_key1 = record_key_mid(col, idx, 30);
+            let split_key2 = record_key_mid(col, idx, 70);
+
+            let (part1, remainder) = drop.split_at(&split_key1).expect_two();
+            let (part2, part3) = remainder.split_at(&split_key2).expect_two();
+
+            for part in [&part1, &part2, &part3] {
+                assert_eq!(part.collection, col);
+                assert_eq!(part.kind, DropKind::Index(idx));
+                assert_eq!(part.drop_sequence_number, seq);
+            }
+
+            assert_eq!(part1.key_range.start_bound(), drop.key_range.start_bound());
+            assert_eq!(part1.key_range.end_bound(), Bound::Included(&split_key1));
+
+            assert_eq!(part2.key_range.start_bound(), Bound::Excluded(&split_key1));
+            assert_eq!(part2.key_range.end_bound(), Bound::Included(&split_key2));
+
+            assert_eq!(part3.key_range.start_bound(), Bound::Excluded(&split_key2));
+            assert_eq!(part3.key_range.end_bound(), drop.key_range.end_bound());
+
+            assert!(!part1.key_range.contains(&split_key2));
+            assert!(!part2.key_range.contains(&split_key1));
+        }
+
+        #[test]
+        #[should_panic(expected = "Split key must be within the drop's key range")]
+        fn test_split_panics_outside_range() {
+            let col = 1;
+            let idx = 5;
+            let drop = DropMetadata::new_index_drop(col, idx, 1);
+
+            let outside_key = encode_record_key(col, 6, &Bson::Int32(1).try_into_key().unwrap());
+            let _ = drop.split_at(&outside_key);
+        }
+    }
+
+    mod pending_drops_invariant_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn test_with_flushed_sstable_partitions_pending_drops_and_preserves_sorted_order() {
+            let version = LsmVersion::new(1, 10, 2);
+
+            // Add drops in increasing order (the expected invariant).
+            let version = version.add_collection_drop(10, 100);
+            let version = version.add_collection_drop(20, 200);
+            let version = version.add_collection_drop(30, 300);
+
+            // Flush an SSTable up to seq=200: drops <= 200 should move into L0, >200 remain pending.
+            let sst = Arc::new(SSTableMetadata::new(
+                1,
+                0,
+                &record_key(1),
+                &record_key(100),
+                1,
+                200,
+                1024,
+            ));
+            let version2 = version.with_flushed_sstable(1, &sst);
+
+            // Pending drops keep only seq 300.
+            assert_eq!(version2.pending_drops.len(), 1);
+            assert_eq!(version2.pending_drops[0].drop_sequence_number, 300);
+
+            // Pending drops remain sorted.
+            let seqs: Vec<u64> = version2.pending_drops.iter().map(|d| d.drop_sequence_number).collect();
+            assert_eq!(seqs, vec![300]);
+
+            // Flushed drops should be added to level 0.
+            let l0 = version2.sst_levels.level(0).unwrap();
+            match l0 {
+                Overlapping { drops, .. } => {
+                    let drop_seqs: Vec<u64> = drops.iter().map(|d| d.drop_sequence_number).collect();
+                    assert_eq!(drop_seqs, vec![100, 200]);
+                }
+                _ => panic!("Expected Overlapping level"),
+            }
+
+            // get_drops_before_or_at should reflect only pending drops.
+            let drops = version2.get_drops_before_or_at(u64::MAX);
+            assert_eq!(drops.len(), 1);
+            assert_eq!(drops[0].drop_sequence_number, 300);
+        }
+
+        #[test]
+        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops() {
+            let version = LsmVersion::new(1, 10, 2);
+
+            let version = version.add_collection_drop(10, 100);
+            let version = version.add_collection_drop(20, 200);
+
+            let sst = Arc::new(SSTableMetadata::new(
+                1,
+                0,
+                &record_key(1),
+                &record_key(100),
+                1,
+                500,
+                1024,
+            ));
+            let version2 = version.with_flushed_sstable(1, &sst);
+
+            assert!(version2.pending_drops.is_empty());
+
+            let l0 = version2.sst_levels.level(0).unwrap();
+            match l0 {
+                Overlapping { drops, .. } => {
+                    let drop_seqs: Vec<u64> = drops.iter().map(|d| d.drop_sequence_number).collect();
+                    assert_eq!(drop_seqs, vec![100, 200]);
                 }
                 _ => panic!("Expected Overlapping level"),
             }
@@ -1992,11 +2376,10 @@ mod tests {
 
         #[test]
         fn test_span_single_drop() {
-            let drop = DropMetadata::new(1, 0, 100);
+            let drop = DropMetadata::new_collection_drop(1, 100);
             let items = vec![drop.as_ref()];
             let result = span(items);
             assert!(result.is_some());
-            // DropMetadata creates a closed interval from MinKey to MaxKey for the collection
         }
 
         #[test]
@@ -2007,7 +2390,7 @@ mod tests {
                 &record_key(20),
                 100, 200, 1000,
             ));
-            let drop = DropMetadata::new(1, 0, 300);
+            let drop = DropMetadata::new_collection_drop(1, 300);
 
             // Test with Arc<dyn LevelItem>
             let items: Vec<Arc<dyn LevelItem>> = vec![
@@ -2288,5 +2671,17 @@ mod tests {
             assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
         }
 
+    }
+
+    fn create_sst(number: u64, level: u8, min: i32, max: i32, size: u64) -> Arc<SSTableMetadata> {
+        Arc::new(SSTableMetadata::new(
+            number,
+            level,
+            &record_key(min),
+            &record_key(max),
+            number * 100,
+            number * 100 + 50,
+            size,
+        ))
     }
 }

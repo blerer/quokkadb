@@ -101,6 +101,11 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
 
     /// Estimate the current uncompressed block size in bytes.
     pub fn estimated_size_in_bytes(&self) -> usize {
+
+        if self.is_empty() {
+            return 0;
+        }
+
         self.data.len()
             + (self.restarts.len() * size_of::<u32>()) // restart array size
             + size_of::<usize>() // size of the array size (usize)

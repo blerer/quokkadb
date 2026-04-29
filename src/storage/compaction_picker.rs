@@ -669,6 +669,7 @@ mod tests {
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::ops::RangeBounds;
+    use crate::storage::lsm_version::{DropKind, SplitResults};
 
     /// Default collection ID used for test SSTables and drops.
     const DEFAULT_COLLECTION: u32 = 1;
@@ -1200,7 +1201,7 @@ mod tests {
         // Drop with excluded start at boundary 10 should be in partition 1, not 0
         let drop_excluded_start = Arc::new(DropMetadata {
             collection: 1,
-            index: 0,
+            kind: DropKind::Collection,
             key_range: Interval::open_closed(record_key(10), record_key(15)),
             drop_sequence_number: 100,
         });
@@ -1211,7 +1212,7 @@ mod tests {
         // Drop with excluded end at boundary 20 should be in partition 1, not spanning to 2
         let drop_excluded_end = Arc::new(DropMetadata {
             collection: 1,
-            index: 0,
+            kind: DropKind::Collection,
             key_range: Interval::closed_open(record_key(15), record_key(20)),
             drop_sequence_number: 100,
         });
@@ -1223,7 +1224,7 @@ mod tests {
         // (Excluded(10), Excluded(20)) should be in partition 1 only
         let drop_both_excluded = Arc::new(DropMetadata {
             collection: 1,
-            index: 0,
+            kind: DropKind::Collection,
             key_range: Interval::open(record_key(10), record_key(20)),
             drop_sequence_number: 100,
         });
@@ -1235,7 +1236,7 @@ mod tests {
         // Should stay in partition 0
         let drop_p0_excluded_end = Arc::new(DropMetadata {
             collection: 1,
-            index: 0,
+            kind: DropKind::Collection,
             key_range: Interval::closed_open(record_key(5), record_key(10)),
             drop_sequence_number: 100,
         });
@@ -1417,9 +1418,9 @@ mod tests {
                 .collect();
 
             // Drops with key ranges that don't overlap with SSTables
-            // Note: DropMetadata::new for a collection covers MinKey to MaxKey for that collection.
-            let drop_2 = DropMetadata::new(col_2, 0, 100);
-            let drop_3 = DropMetadata::new(col_3, 0, 100);
+            // Note: index=0 historically meant "drop entire collection".
+            let drop_2 = DropMetadata::new_collection_drop(col_2, 100);
+            let drop_3 = DropMetadata::new_collection_drop(col_3, 100);
             let l0_drops = vec![
                 drop_2.clone(),  // Outside SSTable range
                 drop_3.clone(),  // Outside SSTable range
@@ -1525,9 +1526,9 @@ mod tests {
                 .collect();
 
             // Create drops in L0.
-            // DropMetadata::new(col, ...) creates an interval spanning [MinKey(col), MaxKey(col)].
-            let drop_1 = DropMetadata::new(col, idx, 100);
-            let drop_2 = DropMetadata::new(col_2, idx, 200);
+            // Historically index=0 meant "drop entire collection".
+            let drop_1 = DropMetadata::new_collection_drop(col, 100);
+            let drop_2 = DropMetadata::new_collection_drop(col_2, 200);
             let l0_drops = vec![
                 drop_1.clone(),
                 drop_2.clone(),
@@ -1559,12 +1560,11 @@ mod tests {
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
 
-            // Drop in L0 (input level) - uses same collection/index as SSTables
-            let l0_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            // Drop in L0 (input level) - historically index=0 meant "drop entire collection"
+            let l0_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // Drop in L1 (output level) - should be ignored
-            // Uses same collection/index to be in the same key space
-            let l1_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 200)];
+            let l1_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 200)];
 
             let l1_ssts = vec![create_sst(10, 1, 5, 60, 1000)];
 
@@ -1591,9 +1591,9 @@ mod tests {
                 create_sst(2, 1, 31, 50, base_bytes),
             ];
 
-            // Drops in L1 - use different (collection, index) to ensure valid non-overlapping drops
-            let drop1 = DropMetadata::new(100, 0, 100);
-            let drop2 = DropMetadata::new(101, 0, 200);
+            // Drops in L1 - historically index=0 meant "drop entire collection"
+            let drop1 = DropMetadata::new_collection_drop(100, 100);
+            let drop2 = DropMetadata::new_collection_drop(101, 200);
             let l1_drops = vec![drop1.clone(), drop2.clone()];
 
             // L2 files
@@ -1813,8 +1813,8 @@ mod tests {
             let l2_ssts = vec![create_sst(1, 2, 10, 30, l2_target * 2)];
 
             // Create a single full-range drop and split it at the L3 partition boundary (key 50)
-            let full_drop = DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100);
-            let (drop_p0, drop_p1) = full_drop.split_at(&record_key(50));
+            let full_drop = DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100);
+            let (drop_p0, drop_p1) = full_drop.split_at(&record_key(50)).expect_two();
             let l2_drops = vec![drop_p0.clone(), drop_p1];
 
             // L3 files defining partitions: partition 0 is keys <= 50, partition 1 is keys > 50
@@ -1846,8 +1846,8 @@ mod tests {
             // L2 has an SSTable in partition 1 (keys > 50) and a drop fragment in partition 0 (keys <= 50).
             // We give the SSTable (seq 100) an older sequence number than the drop (seq 200)
             // so the picker selects the SSTable partition (partition 1).
-            let full_drop = DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 200);
-            let (drop_p0, _) = full_drop.split_at(&record_key(50));
+            let full_drop = DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 200);
+            let (drop_p0, _) = full_drop.split_at(&record_key(50)).expect_two();
             let l2_drops = vec![drop_p0];
 
             // create_sst(1, ..) uses seq 100.
@@ -1884,7 +1884,7 @@ mod tests {
             let l2_ssts = vec![create_sst(1, 2, 10, 30, l2_target * 2)];
 
             // Drop spanning partitions 0 and 1 (uses same collection/index as SSTables)
-            let l2_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // L3 files defining partitions
             let l3_ssts = vec![
@@ -1913,8 +1913,9 @@ mod tests {
 
             // L2 file in partition 1 (uses default collection/index)
             let l2_ssts = vec![create_sst(1, 2, 60, 80, l2_target * 2)];
-            // Drop uses same collection/index as SSTables
-            let l2_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            // Drop uses same collection/index as SSTables.
+            // Historically index=0 meant "drop entire collection".
+            let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // L3 with stable partitions
             let l3_ssts = vec![
@@ -1953,7 +1954,7 @@ mod tests {
             // Original partition was [0, 100], now split into [0, 50] and [51, 100]
             let l2_ssts = vec![create_sst(1, 2, 30, 70, l2_target * 2)];
             // Drop uses same collection/index as SSTables
-            let l2_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // L3 with new split partitions
             let l3_ssts = vec![
@@ -1994,7 +1995,7 @@ mod tests {
             // and this key range maps to the last (unbounded) partition
             let l2_ssts = vec![create_sst(1, 2, 60, 80, l2_target * 2)];
             // Drop uses same collection/index as SSTables
-            let l2_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // L3 with only one partition (the middle one was deleted)
             let l3_ssts = vec![
@@ -2025,7 +2026,7 @@ mod tests {
 
             // Drop exactly at boundary [50, 50] - should be in partition 0
             // Uses same collection/index as SSTables
-            let l2_drops = vec![DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100)];
+            let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
             // L3 files defining partitions at 50
             let l3_ssts = vec![
@@ -2058,10 +2059,11 @@ mod tests {
             let l2_ssts = vec![create_sst(1, 2, 10, 30, l2_target * 2)];
 
             // Create a single full drop and split it into 3 fragments all within partition 0
-            let full_drop = DropMetadata::new(DEFAULT_COLLECTION, DEFAULT_INDEX, 100);
-            let (left_of_50, _) = full_drop.split_at(&record_key(50));
-            let (frag1, rem) = left_of_50.split_at(&record_key(20));
-            let (frag2, frag3) = rem.split_at(&record_key(35));
+            // Historically index=0 meant "drop entire collection".
+            let full_drop = DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100);
+            let (left_of_50, _) = full_drop.split_at(&record_key(50)).expect_two();
+            let (frag1, rem) = left_of_50.split_at(&record_key(20)).expect_two();
+            let (frag2, frag3) = rem.split_at(&record_key(35)).expect_two();
 
             let l2_drops = vec![frag1.clone(), frag2.clone(), frag3.clone()];
 
@@ -2096,8 +2098,8 @@ mod tests {
             let l2_sst = create_sst(1, 2, 10, 30, l2_target * 2);
 
             // Drops for different (collection, index) pairs.
-            let drop1 = DropMetadata::new(100, 0, 100);
-            let drop2 = DropMetadata::new(101, 0, 150);
+            let drop1 = DropMetadata::new_collection_drop(100, 100);
+            let drop2 = DropMetadata::new_collection_drop(101, 150);
 
             // L3 is empty - single partition
             let levels = Levels::new(options.max_levels())
@@ -2134,8 +2136,8 @@ mod tests {
             // But we need an SSTable somewhere to trigger compaction score > 1
             // Put an SSTable in partition 2 and a drop in partition 0
             // Both use same collection/index
-            let drop =
-                DropMetadata::new(col, idx, 100).split_at(&record_key_for(col, idx, 50)).0; // drop [0, 50]
+            let (drop, _) =
+                DropMetadata::new_collection_drop(col, 100).split_at(&record_key_for(col, idx, 50)).expect_two(); // drop [0, 50]
             let size = l2_target * 2;
             let l2_ssts = vec![create_sst_for(
                 2,
@@ -2212,7 +2214,7 @@ mod tests {
                 &record_key_for(col, idx, 70),
                 size,
             );
-            let drop = DropMetadata::new(col, idx, 100);
+            let drop = DropMetadata::new_collection_drop(col, 100);
             let l2_drops = vec![drop.clone()];
 
             // L3 with new split partitions
@@ -2277,7 +2279,8 @@ mod tests {
                 size,
             );
             let l2_ssts = vec![l2_sst.clone()];
-            let drop = DropMetadata::new(col, idx, 100).split_at(&record_key_for(col, idx, 50)).1; // drop (50, max]
+            let (_, drop) =
+                DropMetadata::new_collection_drop(col, 100).split_at(&record_key_for(col, idx, 50)).expect_two(); // drop (50, max]
             let l2_drops = vec![drop.clone()];
 
             // L3 with only partition 0 (the original partition 1 was deleted)
@@ -2332,9 +2335,9 @@ mod tests {
             // Multiple drops from different collections, all with keys in partition 0
             // Each drop uses its own collection but same key range structure
 
-            let drop_col_1 = DropMetadata::new(1, 0, 100);
-            let drop_col_2 = DropMetadata::new(2, 0, 150);
-            let drop_col_3 = DropMetadata::new(3, 0, 200);
+            let drop_col_1 = DropMetadata::new_collection_drop(1, 100);
+            let drop_col_2 = DropMetadata::new_collection_drop(2, 150);
+            let drop_col_3 = DropMetadata::new_collection_drop(3, 200);
             let l2_drops = vec![
                 drop_col_1.clone(),
                 drop_col_2.clone(),
@@ -2405,7 +2408,7 @@ mod tests {
 
             // Drop for a specific index (index = 1, not 0) but same collection
             // Key range overlaps with partition 0
-            let idx_drop = DropMetadata::new(10, 1, 100);
+            let idx_drop = DropMetadata::new_index_drop(10, 1, 100);
 
             // L3 files defining partitions
             let l3_sst_1 =
@@ -2476,7 +2479,8 @@ mod tests {
             );
 
             // Drop in same partition but different key range - still should be included since it's in the same partition
-            let l2_drop = DropMetadata::new(col, idx_2, 100); // drop with different index but same collection
+            // This test is "index-specific drop", so keep it as an index drop (index != 0).
+            let l2_drop = DropMetadata::new_index_drop(col, idx_2, 100);
 
             // L3 files defining partitions
             // Partition 0: keys up to (col_2, idx, 50)
@@ -2539,7 +2543,7 @@ mod tests {
 
             // Drop for collection 2 with same user key values
             // Due to different collection prefix, its encoded key range will be different
-            let l2_drops = vec![DropMetadata::new(2, 0, 100)];
+            let l2_drops = vec![DropMetadata::new_collection_drop(2, 100)];
 
             // L3 files defining partitions using collection 1
             let collection = 1;

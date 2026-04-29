@@ -203,6 +203,10 @@ impl<'a> SSTableWriter<'a> {
     /// The returned size is approximate and should be used with slack.
     pub fn estimated_size(&self) -> usize {
         let written = self.current_block_offset;
+        
+        if written == 0 && self.data_block_builder.is_empty() {
+            return 0;
+        }
 
         let compression_ratio = self.properties_builder.estimated_compression_ratio();
 

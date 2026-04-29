@@ -13,8 +13,10 @@ use std::io::Result;
 use crate::obs::metrics::MetricRegistry;
 use crate::storage::compaction_iterator::CompactionIterator;
 use crate::storage::files::DbFile;
-use crate::storage::lsm_version::Levels;
+use crate::storage::internal_key::extract_record_key;
+use crate::storage::lsm_version::{DropMetadata, LevelItem, Levels, SplitResults};
 use crate::storage::sstable::sstable_writer::SSTableWriter;
+use crate::util::interval::IntervalPosition;
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -170,30 +172,103 @@ fn perform_compaction(options: &Options,
 
     let mut added = Vec::new();
 
-    let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
-    let mut sstable_writer = SSTableWriter::new(db_dir, &sst_file, options)?;
+    let mut sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
+    let mut boundary_idx: usize = 0;
 
     for entry in compaction_iter {
         let (internal_key, value) = entry?;
 
-        if sstable_writer.add(&internal_key, &value)? {
-            if sstable_writer.estimated_size() >= sst_max_size {
-                added.push(Arc::new(sstable_writer.finish()?));
-                let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
-                sstable_writer = SSTableWriter::new(db_dir, &sst_file, options)?;
+        if let Some(boundaries) = &job.partitions_grid {
+            let record_key = extract_record_key(&internal_key);
+            while boundary_idx < boundaries.len() && record_key > boundaries[boundary_idx].as_slice() {
+                if sstable_writer.estimated_size() != 0 {
+                    added.push(Arc::new(sstable_writer.finish()?));
+                    sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
+                }
+                boundary_idx += 1;
             }
         }
-    }
-    added.push(Arc::new(sstable_writer.finish()?));
 
-    let removed = job.input_files.iter().cloned().chain(job.output_files.iter().cloned()).collect();
+        sstable_writer.add(&internal_key, &value)?;
+
+        if sstable_writer.estimated_size() >= sst_max_size {
+            added.push(Arc::new(sstable_writer.finish()?));
+            sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
+        }
+    }
+
+   added.push(Arc::new(sstable_writer.finish()?));
+
+    let removed = job.input_files.iter()
+            .cloned()
+            .chain(job.output_files.iter().cloned())
+            .collect();
 
     Ok(SSTableOperation::Compaction {
         output_level: job.output_level as usize,
         added_sstables: added,
         removed_sstables: removed,
-        drops: job.drops.clone(),
+        drops: split_drops_if_needed(&job),
     })
+}
+
+/// Splits the drops, so that they match the output partitions
+fn split_drops_if_needed(job: &&CompactionJob) -> Vec<Arc<DropMetadata>> {
+    // Drop are sorted by min key, so we can iterate on them and partition at the same time.
+    if let Some(boundaries) = &job.partitions_grid {
+        let mut output_drops = Vec::new();
+        if boundaries.is_empty() || job.drops.is_empty() {
+            output_drops
+        } else {
+            let mut partition_idx = 0;
+            let mut drop_iter = job.drops.iter();
+            let mut current_drop = drop_iter.next().cloned();
+
+            while current_drop.is_some() && partition_idx < boundaries.len() {
+                let drop = current_drop.unwrap();
+                match drop.record_key_range().position_of(&boundaries[partition_idx]) {
+                    IntervalPosition::Before => {
+                        // drop is after the partition, we should move to the next partition
+                        partition_idx += 1;
+                        current_drop = Some(drop);
+                    },
+                    IntervalPosition::Contained => {
+                        // drop contains the partition end, we need to split it and include only
+                        // the part within the partition
+                        match drop.split_at(&boundaries[partition_idx]) {
+                            SplitResults::One(only) => {
+                                output_drops.push(only);
+                                partition_idx += 1;
+                                current_drop = drop_iter.next().cloned();
+                            }
+                            SplitResults::Two(left, right) => {
+                                output_drops.push(left);
+                                partition_idx += 1;
+                                current_drop = Some(right);
+                            }
+                        }
+                    },
+                    IntervalPosition::After => {
+                        // drop is before the partition end, so it belongs to the current partition.
+                        output_drops.push(drop);
+                        current_drop = drop_iter.next().cloned();
+                    }
+                }
+            }
+            output_drops
+        }
+    } else {
+        job.drops.clone()
+    }
+}
+
+fn new_sstable_writer<'a>(
+    options: &'a Options,
+    db_dir: &'a PathBuf,
+    next_file_number: &'a AtomicU64
+) -> Result<SSTableWriter<'a>> {
+    let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
+    Ok(SSTableWriter::new(db_dir, &sst_file, options)?)
 }
 
 fn compute_sst_max_size(options: &Options, level: u8) -> usize {

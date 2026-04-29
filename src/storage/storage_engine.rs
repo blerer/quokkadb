@@ -1493,6 +1493,7 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
     use crate::storage::internal_key::encode_record_key;
+    use crate::storage::lsm_version::DropKind;
 
     mod scan_tests {
         use super::*;
@@ -3084,7 +3085,7 @@ mod tests {
         assert_eq!(pending_drops.len(), 1);
         let drop_metadata = &pending_drops[0];
         assert_eq!(drop_metadata.collection, col_id);
-        assert_eq!(drop_metadata.index, 0);
+        assert_eq!(drop_metadata.kind, DropKind::Collection);
         assert_eq!(drop_metadata.drop_sequence_number, drop_seq);
     }
 

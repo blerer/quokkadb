@@ -416,6 +416,17 @@ impl<T: Clone + PartialOrd> Interval<Vec<T>> {
 
         IntervalPosition::Contained
     }
+
+    pub fn contains(&self, item: &[T]) -> bool {
+        self.position_of(item) == IntervalPosition::Contained
+    }
+
+    pub fn end_bound_value_eq(&self,value: &[T]) -> bool {
+        match &self.end {
+            Bound::Included(end) | Bound::Excluded(end) => value == end,
+            Bound::Unbounded => false,
+        }
+    }
 }
 
 impl<T> RangeBounds<T> for Interval<T> {
@@ -1361,5 +1372,37 @@ mod test {
         assert_eq!(interval.position_of(&["banana".to_string()]), IntervalPosition::Contained);
         assert_eq!(interval.position_of(&["cherry".to_string()]), IntervalPosition::Contained);
         assert_eq!(interval.position_of(&["date".to_string()]), IntervalPosition::After);
+    }
+
+    #[test]
+    fn test_end_bound_value_eq_included() {
+        let interval = Interval {
+            start: Bound::Included(vec![1, 2]),
+            end: Bound::Included(vec![3, 4]),
+        };
+        assert!(interval.end_bound_value_eq(&[3, 4]));
+        assert!(!interval.end_bound_value_eq(&[1, 2]));
+        assert!(!interval.end_bound_value_eq(&[4, 5]));
+    }
+
+    #[test]
+    fn test_end_bound_value_eq_excluded() {
+        let interval = Interval {
+            start: Bound::Included(vec![0]),
+            end: Bound::Excluded(vec![10]),
+        };
+        assert!(interval.end_bound_value_eq(&[10]));
+        assert!(!interval.end_bound_value_eq(&[0]));
+        assert!(!interval.end_bound_value_eq(&[9]));
+    }
+
+    #[test]
+    fn test_end_bound_value_eq_unbounded() {
+        let interval = Interval {
+            start: Bound::Included(vec![0]),
+            end: Bound::Unbounded,
+        };
+        assert!(!interval.end_bound_value_eq(&[0]));
+        assert!(!interval.end_bound_value_eq(&[10]));
     }
 }

@@ -465,8 +465,8 @@ mod tests {
             201,
             2048,
         ));
-        let drop1 = DropMetadata::new(10, 0, 150);
-        let drop2 = DropMetadata::new(20,  0,160);
+        let drop1 = DropMetadata::new_collection_drop(10, 150);
+        let drop2 = DropMetadata::new_index_drop(20,  1,160);
 
         let edit = ManifestEdit::Compaction {
             output_level: 1,
