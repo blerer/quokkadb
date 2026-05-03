@@ -884,6 +884,7 @@ impl StorageEngine {
         info!(self.logger, "Shutting down storage engine");
         self.flush()?;
         info!(self.logger, "Storage engine flush completed successfully");
+        self.compaction_manager.shutdown();
         Ok(())
     }
 

@@ -45,6 +45,14 @@ impl<'a> CompactionIterator<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        if sources.is_empty() {
+            return Ok(Box::new(Self {
+                record_iter: Box::new(std::iter::empty()),
+                drop_iter: Box::new(std::iter::empty()),
+                current_drop_interval: None,
+            }))
+        }
+
         let record_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> = if sources.len() == 1 {
             // if there's only one source, we can skip the merge iterator and just apply the drops directly
             Box::new(sources.into_iter().next().unwrap())

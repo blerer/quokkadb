@@ -2132,8 +2132,8 @@ mod tests {
 
         #[test]
         fn test_split_at_range_edges() {
-            let col = 1u32;
-            let idx = 1u32;
+            let col = 1;
+            let idx = 1;
             let drop = DropMetadata::new_index_drop(col, idx, 5);
 
             if let Bound::Included(start) = drop.key_range.start_bound().cloned() {

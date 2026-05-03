@@ -669,7 +669,7 @@ mod tests {
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::ops::RangeBounds;
-    use crate::storage::lsm_version::{DropKind, SplitResults};
+    use crate::storage::lsm_version::DropKind;
 
     /// Default collection ID used for test SSTables and drops.
     const DEFAULT_COLLECTION: u32 = 1;
@@ -1011,14 +1011,6 @@ mod tests {
     /// Creates an interval using the default collection and index encoding.
     fn interval(min: u32, max: u32) -> Interval<Vec<u8>> {
         Interval::closed(record_key(min), record_key(max))
-    }
-
-    /// Creates an interval for a specific collection and index.
-    fn interval_for(collection: u32, index: u32, min: u32, max: u32) -> Interval<Vec<u8>> {
-        Interval::closed(
-            record_key_for(collection, index, min),
-            record_key_for(collection, index, max),
-        )
     }
 
     fn span_vec(items: Vec<Arc<dyn LevelItem>>) -> Interval<Vec<u8>> {
