@@ -49,9 +49,12 @@ pub(crate) struct StorageEngine {
     flush_manager: FlushManager,
     compaction_manager: CompactionManager,
     async_callback: OnceLock<Arc<Callback<Result<SSTableOperation>>>>,
+    obsolete_sstables: Mutex<VecDeque<Arc<SSTableMetadata>>>,
     error_mode: AtomicBool,
     #[cfg(test)]
     fail_next_precondition_checks: AtomicU8,
+    #[cfg(test)]
+    disable_auto_compaction: AtomicBool,
 }
 
 impl StorageEngine {
@@ -76,7 +79,6 @@ impl StorageEngine {
         // Otherwise, it is the first time that we start this database and need to create a
         // new manifest and wal.
         if let Some(manifest_path) = manifest_path {
-
             let manifest_state = Manifest::rebuild_manifest_state(&manifest_path)?;
             let mut last_seq_nbr = manifest_state.lsm.last_sequence_number;
 
@@ -99,7 +101,6 @@ impl StorageEngine {
             // the Lsm tree in-memory and on-disk (MANIFEST file)
             let next_file_number =
                 Arc::new(AtomicU64::new(if next_file_number < scan_results.next_file_number {
-
                     info!(logger,
                         "Files with higher numbers have been detected. Updating next_file_number to {}",
                         scan_results.next_file_number);
@@ -121,7 +122,6 @@ impl StorageEngine {
             let mut previous = None;
 
             while let Some((log_number, wal_path)) = wal_files_iter.next() {
-
                 info!(logger, "Replaying operations from {}", wal_path.to_string_lossy());
 
                 // The initial memtable will be associated with the oldest_log_number. For
@@ -237,7 +237,6 @@ impl StorageEngine {
                     rotated_log_files,
                 )?
             } else {
-
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
 
                 info!(logger, "Latest wal was corrupted. Starting from a clean wal file: {}", log_number);
@@ -266,7 +265,6 @@ impl StorageEngine {
                         &next_file_number
                     )?;
                 } else {
-
                     info!(logger, "Ignoring empty memtable: {}", lsm_tree.imm_memtables[0].log_number);
 
                     // Drop the empty memtable
@@ -278,6 +276,22 @@ impl StorageEngine {
                 }
                 wal
             };
+
+            // Delete SST files that are on disk but not referenced by the manifest.
+            // These are leftovers from a compaction that was interrupted before the
+            // old input files could be deleted.
+            let live_ssts = lsm_tree.levels().live_sst_numbers();
+            let mut deleted_orphaned_ssts = Vec::new();
+            for (number, path) in &scan_results.sst_files {
+                if !live_ssts.contains(number) {
+                    info!(logger, "Deleting orphaned SST file at startup: {}", path.to_string_lossy());
+                    fs::remove_file(path)?;
+                    deleted_orphaned_ssts.push(path.clone());
+                }
+            }
+            if !deleted_orphaned_ssts.is_empty() {
+                sync_dir(db_dir)?;
+            }
 
             let flush_manager = FlushManager::new(
                 logger.clone(),
@@ -317,9 +331,12 @@ impl StorageEngine {
                 flush_manager,
                 compaction_manager,
                 async_callback: OnceLock::new(),
+                obsolete_sstables: Mutex::new(VecDeque::new()),
                 error_mode: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_precondition_checks: AtomicU8::new(0),
+                #[cfg(test)]
+                disable_auto_compaction: AtomicBool::new(false),
             });
 
             info!(logger, "Storage engine started");
@@ -393,9 +410,12 @@ impl StorageEngine {
                 flush_manager,
                 compaction_manager,
                 async_callback: OnceLock::new(),
+                obsolete_sstables: Mutex::new(VecDeque::new()),
                 error_mode: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_precondition_checks: AtomicU8::new(0),
+                #[cfg(test)]
+                disable_auto_compaction: AtomicBool::new(false),
             }))
         }
     }
@@ -408,7 +428,6 @@ impl StorageEngine {
         lsm_tree: &mut LsmTree,
         next_file_number: &AtomicU64
     ) -> StorageResult<LsmTree> {
-
         info!(logger, "Flushing data from {}", lsm_tree.imm_memtables[0].log_number);
 
         // Flush the current memtable to a sst file before processing the next
@@ -493,7 +512,7 @@ impl StorageEngine {
 
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<()> {
         self.check_error_mode()?;
-        let id =  self.catalog().get_collection_by_name(name).map(|c| c.id);
+        let id = self.catalog().get_collection_by_name(name).map(|c| c.id);
 
         if id.is_none() {
             // Collection does not exist, nothing to do
@@ -563,7 +582,6 @@ impl StorageEngine {
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch) -> StorageResult<()> {
-
         self.check_error_mode()?;
 
         let writer = Arc::new(Writer::new(batch));
@@ -679,13 +697,11 @@ impl StorageEngine {
         self: &Arc<Self>,
         catalog: Arc<Catalog>,
         writers: &mut Vec<Arc<Writer>>) -> Vec<Arc<Writer>> {
-
         let seq = self.next_seq_number.load(Ordering::Relaxed);
 
         let mut successful_writers = Vec::with_capacity(writers.len());
 
         for writer in writers {
-
             let rs = self.check_writer_collections_exist(&catalog, writer.batch(), seq);
 
             if let Err(error) = rs {
@@ -711,7 +727,6 @@ impl StorageEngine {
         batch: &WriteBatch,
         seq: u64,
     ) -> StorageResult<()> {
-
         for &(col, idx) in batch.required_collections() {
             let collection = catalog.get_collection_at(col, seq).ok_or(
                 StorageError::CollectionNotFound {
@@ -773,7 +788,6 @@ impl StorageEngine {
         user_key: &Vec<u8>,
         since: u64
     ) -> StorageError {
-
         StorageError::VersionConflict {
             user_key: user_key.clone(),
             reason:
@@ -805,7 +819,6 @@ impl StorageEngine {
         snapshot: u64,
         min_snapshot: Option<u64>
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-
         let lsm_tree = self.lsm_tree.load();
 
         lsm_tree.read(
@@ -826,7 +839,7 @@ impl StorageEngine {
         user_key_range: &R,
         snapshot: Option<u64>,
         direction: Direction,
-    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>
+    ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, Vec<u8>)>>>>
     where
         R: RangeBounds<Vec<u8>>,
     {
@@ -850,8 +863,8 @@ impl StorageEngine {
         // so the LsmTree will live as long as the iterator.
         let static_iterator = unsafe {
             std::mem::transmute::<
-                Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>,
-                Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
+                Box<dyn Iterator<Item=Result<(Vec<u8>, Vec<u8>)>>>,
+                Box<dyn Iterator<Item=Result<(Vec<u8>, Vec<u8>)>> + 'static>,
             >(iter_with_lifetime)
         };
 
@@ -952,12 +965,10 @@ impl StorageEngine {
             drop(wal_and_manifest);
 
             self.wait_for_pending_flushes()
-
         } else {
-
             let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
             let rs = wal_and_manifest.wal.rotate(new_log_number);
-            if rs .is_err() {
+            if rs.is_err() {
                 error!(self.logger, "An error occurred during wal rotation: {}", rs.as_ref().err().unwrap());
                 self.error_mode.store(true, Ordering::Relaxed);
                 rs?;
@@ -991,9 +1002,8 @@ impl StorageEngine {
 
             self.schedule_flush(memtable, callback.clone())?;
 
-            // Once the flush task within the flush manager queue, we can release
-            // the manifest lock to schedule the flush.
             drop(wal_and_manifest);
+            self.delete_obsolete_sst_files()?;
 
             if callback.is_blocking() {
                 callback.await_blocking()
@@ -1052,20 +1062,37 @@ impl StorageEngine {
                         drop(wal_and_manifest); // we do not need the manifest lock for deleting obsolete log files
 
                         self.delete_obsolete_log_files(obsolete_log_files)?;
-
                         lsm_tree
                     }
                     SSTableOperation::Compaction {
                         output_level,
                         removed_sstables,
                         added_sstables,
-                        drops } => {
+                        drops
+                    } => {
 
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
                         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
                         let lsm_tree = self.lsm_tree.load();
+
+                        for sst in &removed_sstables {
+                            let sst_path = self.db_dir.join(DbFile::new_sst(sst.number).filename());
+                            self.sst_cache.evict(&sst_path);
+                        }
+
+                        {
+                            event!(
+                                self.logger,
+                                "Marking sst tables {:?} as obsoletes",
+                                removed_sstables.iter()
+                                    .map(|sst| sst.number)
+                                    .collect::<Vec<u64>>());
+
+                            let mut obsolete = self.obsolete_sstables.lock().unwrap();
+                            obsolete.extend(removed_sstables.iter().cloned());
+                        }
 
                         let edit = ManifestEdit::Compaction {
                             output_level,
@@ -1078,6 +1105,8 @@ impl StorageEngine {
                     }
                 };
                 self.schedule_compaction_if_needed(&lsm_tree.levels());
+                drop(lsm_tree);
+                self.delete_obsolete_sst_files()?;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -1085,6 +1114,10 @@ impl StorageEngine {
     }
 
     fn schedule_compaction_if_needed(self: &Arc<Self>, levels: &Levels) {
+        #[cfg(test)]
+        if self.disable_auto_compaction.load(Ordering::Relaxed) {
+            return;
+        }
         self.compaction_manager.schedule_compaction_if_needed(levels, self.get_async_callback());
     }
 
@@ -1092,6 +1125,29 @@ impl StorageEngine {
         for obsolete in obsolete_log_files {
             debug!(self.logger, "Deleting obsolete log file: {}", obsolete.to_string_lossy());
             remove_file(obsolete)?;
+        }
+        sync_dir(&self.db_dir)?;
+        Ok(())
+    }
+
+    fn delete_obsolete_sst_files(&self) -> Result<()> {
+        let mut obsolete = self.obsolete_sstables.lock().unwrap();
+
+        let mut to_delete = Vec::new();
+
+        while matches!(obsolete.front(), Some(sst) if Arc::strong_count(sst) == 1) {
+            to_delete.push(obsolete.pop_front().unwrap());
+        }
+        drop(obsolete);
+
+        if to_delete.is_empty() {
+            return Ok(());
+        }
+
+        for sst in to_delete {
+            let path = self.db_dir.join(DbFile::new_sst(sst.number).filename());
+            debug!(self.logger, "Deleting obsolete sst file: {}", path.to_string_lossy());
+            remove_file(path)?;
         }
         sync_dir(&self.db_dir)?;
         Ok(())
@@ -1134,7 +1190,6 @@ impl StorageEngine {
         }
 
         self.lsm_tree.store(new_tree.clone());
-
         Ok(new_tree)
     }
 
@@ -1148,7 +1203,6 @@ impl StorageEngine {
     }
 
     fn add_metrics(metric_registry: &mut MetricRegistry, options: &Options, lsm_tree: Arc<ArcSwap<LsmTree>>) {
-
         for level in 0..options.max_levels() {
             let level_name = format!("level_{}", level);
 
@@ -1175,12 +1229,12 @@ impl StorageEngine {
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge("sstable_count",
-            DerivedGauge::new(Arc::new(move || { lsm.load().levels().sst_count() as u64 })),
+                                       DerivedGauge::new(Arc::new(move || { lsm.load().levels().sst_count() as u64 })),
         );
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge("stable_size",
-            DerivedGauge::new(Arc::new(move || { lsm.load().levels().total_bytes() })),
+                                       DerivedGauge::new(Arc::new(move || { lsm.load().levels().total_bytes() })),
         );
 
         let lsm = lsm_tree.clone();
@@ -1194,7 +1248,7 @@ impl StorageEngine {
                                            let lsm_tree = lsm.load();
                                            (lsm_tree.memtable.size()
                                                + lsm_tree.imm_memtables.iter().map(|m| m.size()).sum::<usize>())
-                                           as u64
+                                               as u64
                                        })),
         );
 
@@ -1203,35 +1257,58 @@ impl StorageEngine {
                                        DerivedGauge::new(Arc::new(move || { (lsm_tree.load().imm_memtables.len() + 1) as u64 })),
         );
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl StorageEngine {
+
     pub fn wal_return_error_on_write(&self, value: bool) {
         self.db_mutex.lock().unwrap().wal.return_error_on_append(value);
     }
 
-    #[cfg(test)]
     pub fn manifest_return_error_on_write(&self, value: bool) {
         self.db_mutex.lock().unwrap().manifest.return_error_on_append(value);
     }
 
-    #[cfg(test)]
     pub fn wal_return_error_on_rotate(&self, value: bool) {
         self.db_mutex.lock().unwrap().wal.return_error_on_rotate(value);
     }
 
-    #[cfg(test)]
     pub fn manifest_return_error_on_rotate(&self, value: bool) {
         self.db_mutex.lock().unwrap().manifest.return_error_on_rotate(value);
     }
 
-    #[cfg(test)]
     pub fn lsm_tree(&self) -> Arc<LsmTree> {
         self.lsm_tree.load_full()
     }
 
-    #[cfg(test)]
     pub fn fail_next_precondition_checks(&self, count: u8) {
         let _ = self.fail_next_precondition_checks.store(count, Ordering::Relaxed);
+    }
+
+    pub fn disable_auto_compaction(&self) {
+        self.disable_auto_compaction.store(true, Ordering::Relaxed);
+    }
+
+    pub fn compact(self: &Arc<Self>) -> StorageResult<()> {
+        let engine = self.clone();
+        let callback = Callback::new_blocking(Box::new(move |result| {
+            let rs = engine.update_lsm_tree_sstables(result);
+            if rs.is_err() {
+                engine.error_mode.store(true, Ordering::Relaxed);
+            }
+            rs
+        }));
+
+        let levels = self.lsm_tree.load().levels();
+        let scheduled = self.compaction_manager.schedule_single_compaction(&levels, &callback);
+        drop(levels); // We need to release levels to allow obsolete Arc<SSTableMetadata> to be dropped and the files to be deleted after compaction
+
+        if scheduled {
+            callback.await_blocking().map_err(StorageError::Io)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1247,6 +1324,9 @@ struct StartupScanResult {
 
     /// WAL files that are obsolete and can be deleted.
     obsolete_wal_files: Vec<(u64, PathBuf)>,
+
+    /// SST files found on disk (number, full path).
+    sst_files: Vec<(u64, PathBuf)>,
 
     /// The next unused file number. This is computed as one greater
     /// than the highest file number seen among MANIFEST, WAL, and SST files.
@@ -1277,6 +1357,7 @@ struct StartupScanResult {
 fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> StorageResult<StartupScanResult> {
     let mut wal_files = Vec::new();
     let mut obsolete_wal_files = Vec::new();
+    let mut sst_files = Vec::new();
     let mut max_file_num = 0;
 
     for entry in fs::read_dir(dir)? {
@@ -1293,6 +1374,10 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> StorageResult<Startu
                     obsolete_wal_files.push((db_file.number, path.clone()));
                 }
             }
+
+            if db_file.file_type == FileType::SST {
+                sst_files.push((db_file.number, path.clone()));
+            }
         }
     }
 
@@ -1301,6 +1386,7 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> StorageResult<Startu
     Ok(StartupScanResult {
         wal_files,
         obsolete_wal_files,
+        sst_files,
         next_file_number: max_file_num + 1,
     })
 }
@@ -1548,6 +1634,22 @@ mod tests {
             assert_eq!(ids, vec![1, 999, 1000, 1_000_000]);
 
             assert_eq!(result.next_file_number, 1_000_001);
+        }
+
+        #[test]
+        fn test_scan_db_directory_collects_sst_files() {
+            let dir = tempdir().unwrap();
+            let base = dir.path();
+
+            touch_file(&base.join("000010.sst"));
+            touch_file(&base.join("000020.sst"));
+            touch_file(&base.join("000003.log"));
+
+            let result = scan_db_directory(base, 0).unwrap();
+
+            let mut sst_ids: Vec<u64> = result.sst_files.iter().map(|(id, _)| *id).collect();
+            sst_ids.sort();
+            assert_eq!(sst_ids, vec![10, 20]);
         }
     }
 
@@ -2038,6 +2140,8 @@ mod tests {
         let engine =
             StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
 
+        engine.disable_auto_compaction();
+
         assert_counter_eq(registry, "manifest_rewrite", 0);
 
         let col = engine.create_collection_if_not_exists("test_manifest_rotation").unwrap();
@@ -2201,6 +2305,125 @@ mod tests {
             .unwrap();
         let (_expected_key, expected_val2) = put_rec(col, 2, 2, 2);
         assert_eq!(val2, expected_val2);
+    }
+
+    #[test]
+    fn test_obsolete_sst_deletion_after_compaction() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let registry = &mut MetricRegistry::default();
+        let options = Arc::new(
+            Options::lightweight()
+                .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes))
+                .with_level0_file_num_compaction_trigger(2),
+        );
+
+        let engine = StorageEngine::new(test_instance(), registry, options, &path).unwrap();
+        engine.disable_auto_compaction();
+        let col = engine
+            .create_collection_if_not_exists("test_obsolete_sst_deletion_after_compaction")
+            .unwrap();
+
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+            .unwrap();
+        engine.flush().unwrap();
+
+        let l0_before = engine
+            .lsm_tree()
+            .levels()
+            .level(0)
+            .unwrap()
+            .sstables()
+            .iter()
+            .map(|sst| sst.number)
+            .collect::<Vec<_>>();
+        assert_eq!(l0_before.len(), 1);
+        let first_sst_path = path.join(DbFile::new_sst(l0_before[0]).filename());
+        assert!(first_sst_path.exists());
+
+        engine
+            .write(WriteBatch::new(vec![put_op(col, 2, 1)]))
+            .unwrap();
+        engine.flush().unwrap();
+
+        engine.compact().unwrap();
+
+        assert!(
+            !first_sst_path.exists(),
+            "expected obsolete SSTable file to be deleted: {}",
+            first_sst_path.to_string_lossy()
+        );
+
+        assert!(engine.read(col, 0, &user_key(1), None).unwrap().is_some());
+        assert!(engine.read(col, 0, &user_key(2), None).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_orphaned_sst_cleanup_on_startup() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Arc::new(Options::lightweight());
+
+        let (col, real_sst_paths) = {
+            let engine = StorageEngine::new(
+                test_instance(),
+                &mut MetricRegistry::default(),
+                options.clone(),
+                &path,
+            )
+            .unwrap();
+
+            let col = engine
+                .create_collection_if_not_exists("test_orphaned_sst_cleanup_on_startup")
+                .unwrap();
+
+            engine
+                .write(WriteBatch::new(vec![put_op(col, 1, 1)]))
+                .unwrap();
+            engine.flush().unwrap();
+
+            let live_sst_numbers = engine.lsm_tree().levels().live_sst_numbers();
+            assert!(!live_sst_numbers.is_empty());
+
+            let real_sst_paths = live_sst_numbers
+                .iter()
+                .map(|number| path.join(DbFile::new_sst(*number).filename()))
+                .collect::<Vec<_>>();
+
+            drop(engine);
+
+            (col, real_sst_paths)
+        };
+
+        let orphan_1 = path.join(DbFile::new_sst(999_998).filename());
+        let orphan_2 = path.join(DbFile::new_sst(999_999).filename());
+        fs::File::create(&orphan_1).unwrap();
+        fs::File::create(&orphan_2).unwrap();
+        assert!(orphan_1.exists());
+        assert!(orphan_2.exists());
+
+        let engine_restarted = StorageEngine::new(
+            test_instance(),
+            &mut MetricRegistry::default(),
+            options,
+            &path,
+        )
+        .unwrap();
+
+        assert!(!orphan_1.exists());
+        assert!(!orphan_2.exists());
+
+        for real_sst_path in &real_sst_paths {
+            assert!(real_sst_path.exists(), "expected live SST to exist: {}", real_sst_path.to_string_lossy());
+        }
+
+        let (_key, val) = engine_restarted
+            .read(col, 0, &user_key(1), None)
+            .unwrap()
+            .unwrap();
+        let (_, expected_val) = put_rec(col, 1, 1, 1);
+        assert_eq!(val, expected_val);
     }
 
     #[test]
@@ -3663,7 +3886,6 @@ mod tests {
         let batch_fail =
             WriteBatch::new_with_preconditions(vec![put_op(col, 1, 2)], preconditions_fail);
         let result_fail = engine.write(batch_fail);
-        println!("Result fail: {:?}", result_fail);
         assert!(result_fail.is_err());
         let err_fail = result_fail.err().unwrap();
         assert!(err_fail

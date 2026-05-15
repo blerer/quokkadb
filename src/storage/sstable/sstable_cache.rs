@@ -80,6 +80,12 @@ impl SSTableCache {
         sstable_reader.map_err(|arc_err| Error::new(arc_err.kind(), arc_err.to_string()))
         // Clone so each thread gets its own Result<Arc<Vec<u8>>>
     }
+
+    pub fn evict(&self, file: &Path) {
+        let key = file.to_string_lossy().into_owned();
+        self.cache.invalidate(&key);
+        event!(self.logger, "evict file={}", &key);
+    }
 }
 
 struct Metrics {

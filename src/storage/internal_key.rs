@@ -155,6 +155,7 @@ impl InternalKeyRange {
         &self.end
     }
 
+    #[cfg(test)]
     pub fn contains(&self, internal_key: &[u8]) -> bool {
         !self.start.is_greater_than(internal_key) && !self.end.is_less_than(internal_key)
     }

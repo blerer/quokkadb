@@ -54,7 +54,6 @@ impl<'a> CompactionIterator<'a> {
         }
 
         let record_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> = if sources.len() == 1 {
-            // if there's only one source, we can skip the merge iterator and just apply the drops directly
             Box::new(sources.into_iter().next().unwrap())
         } else {
             Box::new(MergeIterator::new(sources, Direction::Forward)?)
@@ -90,9 +89,8 @@ impl<'a> Iterator for CompactionIterator<'a> {
                                     },
                                     IntervalPosition::Contained => {
                                         break
-                                    }, // if the record is contained in the drop, we skip it and move to the next record
+                                    },
                                     IntervalPosition::After => {
-                                        // if the record is after the drop, we move to the next drop and check again
                                         self.current_drop_interval = self.drop_iter.next().map_or(None, |drop| Some(drop.record_key_range()));
                                     },
                                 }
@@ -104,7 +102,6 @@ impl<'a> Iterator for CompactionIterator<'a> {
                     }
                 },
                 Err(e) => {
-                    // If there's an error, we return it
                     return Some(Err(e))
                 }
             }

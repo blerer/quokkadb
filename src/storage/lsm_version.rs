@@ -292,6 +292,13 @@ impl Levels {
         self.levels.iter().map(|level| level.sst_count()).sum()
     }
 
+    pub fn live_sst_numbers(&self) -> HashSet<u64> {
+        self.levels
+            .iter()
+            .flat_map(|level| level.sstables().iter().map(|sst| sst.number))
+            .collect()
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.levels.iter().map( |level| level.total_bytes()).sum()
     }
@@ -1720,6 +1727,48 @@ mod tests {
             
             assert_eq!(levels.level(0).unwrap().sst_count(), 0);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 0);
+        }
+
+        #[test]
+        fn test_live_sst_numbers_empty_levels() {
+            let levels = Levels::new(4);
+            let live_numbers = levels.live_sst_numbers();
+            assert!(live_numbers.is_empty());
+        }
+
+        #[test]
+        fn test_live_sst_numbers_after_adding_sstables_in_different_levels() {
+            let levels = Levels::new(4);
+
+            let sst0 = create_sst(10, 0, 10, 20, 1000);
+            let levels = levels.add(0, once(sst0), empty());
+
+            let sst2 = create_sst(20, 2, 30, 40, 2000);
+            let levels = levels.add(2, once(sst2), empty());
+
+            let live_numbers = levels.live_sst_numbers();
+            assert_eq!(live_numbers.len(), 2);
+            assert!(live_numbers.contains(&10));
+            assert!(live_numbers.contains(&20));
+        }
+
+        #[test]
+        fn test_live_sst_numbers_after_removing_sstable() {
+            let levels = Levels::new(4);
+
+            let sst1 = create_sst(1, 0, 10, 20, 1000);
+            let sst2 = create_sst(2, 0, 30, 40, 2000);
+            let levels = levels.add(0, vec![sst1.clone(), sst2.clone()], empty());
+
+            let mut to_remove: HashSet<Arc<SSTableMetadata>> = HashSet::new();
+            to_remove.insert(sst1);
+
+            let levels = levels.remove(0, &to_remove, &HashSet::new());
+            let live_numbers = levels.live_sst_numbers();
+
+            assert_eq!(live_numbers.len(), 1);
+            assert!(!live_numbers.contains(&1));
+            assert!(live_numbers.contains(&2));
         }
 
         #[test]

@@ -115,7 +115,7 @@ impl CompactionScores {
             .scores
             .iter()
             .enumerate()
-            .filter(|(_, &score)| score > 1.0)
+            .filter(|(_, &score)| score >= 1.0)
             .map(|(level, &score)| (level, score))
             .collect();
 
@@ -291,6 +291,8 @@ impl CompactionPicker {
                 }
             }
         }
+
+        event!(self.logger, "compaction_skipped reason=no_level_need_compaction");
 
         None
     }
@@ -743,19 +745,37 @@ mod tests {
     }
 
     #[test]
-    fn test_l0_compaction_triggered_by_file_count() {
+    fn test_l0_no_compaction_below_trigger() {
         let options = test_options();
         let mut picker = test_picker(&options);
 
-        // Create L0 with 5 files (trigger is 4)
-        let l0_ssts: Vec<_> = (1..=5)
+        // Create L0 with 3 files (trigger is 4, so below trigger — no compaction)
+        let l0_ssts: Vec<_> = (1..=3)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
         let levels = Levels::new(options.max_levels())
             .add(0, l0_ssts, empty());
 
         let scores = picker.compute_scores(&levels);
-        assert!(scores.scores[0] > 1.0);
+        assert!(scores.scores[0] < 1.0, "Score below trigger should be < 1.0");
+        assert_eq!(scores.levels_needing_compaction().count(), 0);
+        assert!(picker.pick_compaction(&levels).is_none());
+    }
+
+    #[test]
+    fn test_l0_compaction_triggered_by_file_count() {
+        let options = test_options();
+        let mut picker = test_picker(&options);
+
+        // Create L0 with 4 files (trigger is 4, so exactly at trigger should compact)
+        let l0_ssts: Vec<_> = (1..=4)
+            .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
+            .collect();
+        let levels = Levels::new(options.max_levels())
+            .add(0, l0_ssts, empty());
+
+        let scores = picker.compute_scores(&levels);
+        assert!(scores.scores[0] >= 1.0);
         let levels_needing: Vec<_> = scores.levels_needing_compaction().collect();
         assert_eq!(levels_needing, vec![0]);
 
@@ -897,7 +917,7 @@ mod tests {
         let options = test_options();
         let mut picker = test_picker(&options);
 
-        let l0_ssts: Vec<_> = (1..=5)
+        let l0_ssts: Vec<_> = (1..=4)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
         let levels = Levels::new(options.max_levels())
@@ -1060,6 +1080,7 @@ mod tests {
         let mut picker = test_picker(&options);
 
         // Create L0 with score ~1.25 (5 files, trigger=4)
+        // (5 files is fine here — we just want L0 score > 1.0 and less than L1's)
         let l0_ssts: Vec<_> = (1..=5)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
@@ -1265,7 +1286,7 @@ mod tests {
         let options = test_options();
         let mut picker = test_picker(&options);
 
-        let l0_ssts: Vec<_> = (1..=5)
+        let l0_ssts: Vec<_> = (1..=4)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
         let levels = Levels::new(options.max_levels())
