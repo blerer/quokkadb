@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use crate::storage::compaction_manager::CompactionManager;
+use crate::storage::compaction_picker::CompactionJob;
 
 struct WalAndManifest {
     wal: WriteAheadLog,
@@ -1065,7 +1066,7 @@ impl StorageEngine {
                         lsm_tree
                     }
                     SSTableOperation::Compaction {
-                        output_level,
+                        compaction_job,
                         removed_sstables,
                         added_sstables,
                         drops
@@ -1094,6 +1095,7 @@ impl StorageEngine {
                             obsolete.extend(removed_sstables.iter().cloned());
                         }
 
+                        let output_level = compaction_job.output_level as usize;
                         let edit = ManifestEdit::Compaction {
                             output_level,
                             removed_sstables,
@@ -1101,7 +1103,9 @@ impl StorageEngine {
                             drops,
                         };
 
-                        self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?
+                        let new_lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+                        self.compaction_manager.unmark_compacting(&compaction_job);
+                        new_lsm_tree
                     }
                 };
                 self.schedule_compaction_if_needed(&lsm_tree.levels());
@@ -1446,7 +1450,7 @@ pub enum SSTableOperation {
         flushed: Arc<SSTableMetadata>,
     },
     Compaction {
-        output_level: usize,
+        compaction_job: CompactionJob,
         removed_sstables: Vec<Arc<SSTableMetadata>>,
         added_sstables: Vec<Arc<SSTableMetadata>>,
         drops: Vec<Arc<DropMetadata>>,

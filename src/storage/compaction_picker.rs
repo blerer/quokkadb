@@ -287,6 +287,8 @@ impl CompactionPicker {
                     event!(self.logger, "compaction_picking done type=full, input_level={}, output_level={}, input_files={}, output_files={}",
                         input_level, output_level, job.input_files.len(), job.output_files.len());
 
+                    println!("{:?}", self.compacting_ranges);
+
                     return Some(job);
                 }
             }
@@ -855,6 +857,34 @@ mod tests {
         // output_key_range spans all overlapping L1 files
         assert_eq!(job.output_key_range, Interval::closed(record_key(5), record_key(60)));
     }
+
+    #[test]
+    fn test_l0_compaction_rejected_due_to_compacting_level() {
+        let options = test_options();
+        let mut picker = test_picker(&options);
+
+        let l0_ssts: Vec<_> = (1..=5)
+            .map(|i| create_sst(i, 0, 100, 110, 1000))
+            .collect();
+        let l1_ssts = Vec::new();
+
+        let levels = Levels::new(options.max_levels())
+            .add(0, l0_ssts, empty())
+            .add(1, l1_ssts.clone(), empty());
+
+        let job = picker.pick_compaction(&levels).unwrap();
+
+        let l0_ssts: Vec<_> = (1..=6)
+            .map(|i| create_sst(i, 0, 100, 110, 1000))
+            .collect();
+
+        let levels = Levels::new(options.max_levels())
+            .add(0, l0_ssts, empty())
+            .add(1, l1_ssts, empty());
+
+        assert!(picker.pick_compaction(&levels).is_none());// Mark the job as compacting to block the level
+    }
+
 
     #[test]
     fn test_l0_compaction_finds_overlapping_l1_files() {
