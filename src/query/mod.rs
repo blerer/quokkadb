@@ -892,7 +892,7 @@ impl BsonValue {
         self.0.clone()
     }
 
-    pub fn as_ref(&self) -> BsonValueRef {
+    pub fn as_ref(&self) -> BsonValueRef<'_> {
         BsonValueRef(&self.0)
     }
 }

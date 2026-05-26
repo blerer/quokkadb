@@ -27,7 +27,7 @@ pub fn to_updater(
             UpdateOp::Set { path, value } => {
                 let value_bson = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
-                    _ => panic!("Non-literal value in $set after validation"),
+                    _ => unreachable!("Non-literal value in $set after validation"),
                 };
                 operations.push(Box::new(to_set_operation(
                     path.clone(),
@@ -39,7 +39,7 @@ pub fn to_updater(
                 if insert {
                     let value_bson = match value.as_ref() {
                         Expr::Literal(v) => v.to_bson(),
-                        _ => panic!("Non-literal value in $setOnInsert after validation"),
+                        _ => unreachable!("Non-literal value in $setOnInsert after validation"),
                     };
                     operations.push(Box::new(to_set_operation(
                         path.clone(),
@@ -67,7 +67,7 @@ pub fn to_updater(
                         EachOrSingle::Single(expr) => {
                             let value = match expr.as_ref() {
                                 Expr::Literal(v) => v,
-                                _ => panic!("Non-literal value in $push after validation"),
+                                _ => unreachable!("Non-literal value in $push after validation"),
                             };
                             EachOrSingle::Single(value.to_bson())
                         }
@@ -76,7 +76,7 @@ pub fn to_updater(
                                 .iter()
                                 .map(|value_expr| match value_expr.as_ref() {
                                     Expr::Literal(v) => v.to_bson(),
-                                    _ => panic!(
+                                    _ => unreachable!(
                                         "Non-literal value in $push with $each after validation"
                                     ),
                                 })
@@ -101,7 +101,7 @@ pub fn to_updater(
             UpdateOp::Inc { path, amount } => {
                 let amount_bson = match amount.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
-                    _ => panic!("Non-literal value in $inc after validation"),
+                    _ => unreachable!("Non-literal value in $inc after validation"),
                 };
                 operations.push(Box::new(to_inc_operation(
                     path.clone(),
@@ -112,7 +112,7 @@ pub fn to_updater(
             UpdateOp::Min { path, value } => {
                 let new_value = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
-                    _ => panic!("Non-literal value in $min after validation"),
+                    _ => unreachable!("Non-literal value in $min after validation"),
                 };
                 operations.push(Box::new(to_min_operation(
                     path.clone(),
@@ -123,7 +123,7 @@ pub fn to_updater(
             UpdateOp::Max { path, value } => {
                 let new_value = match value.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
-                    _ => panic!("Non-literal value in $max after validation"),
+                    _ => unreachable!("Non-literal value in $max after validation"),
                 };
                 operations.push(Box::new(to_max_operation(
                     path.clone(),
@@ -134,7 +134,7 @@ pub fn to_updater(
             UpdateOp::Mul { path, factor } => {
                 let factor_bson = match factor.as_ref() {
                     Expr::Literal(v) => v.to_bson(),
-                    _ => panic!("Non-literal value in $mul after validation"),
+                    _ => unreachable!("Non-literal value in $mul after validation"),
                 };
                 operations.push(Box::new(to_mul_operation(
                     path.clone(),
@@ -150,7 +150,7 @@ pub fn to_updater(
                     .iter()
                     .map(|value_expr| match value_expr.as_ref() {
                         Expr::Literal(v) => v.clone(),
-                        _ => panic!("Non-literal value in $pullAll after validation"),
+                        _ => unreachable!("Non-literal value in $pullAll after validation"),
                     })
                     .collect();
                 operations.push(Box::new(to_pull_all_operation(path.clone(), bson_values)));
@@ -182,7 +182,7 @@ pub fn to_updater(
                     EachOrSingle::Single(expr) => {
                         vec![{ match expr.as_ref() {
                             Expr::Literal(v) => v.clone(),
-                            _ => panic!("Non-literal value in $addToSet after validation"),
+                            _ => unreachable!("Non-literal value in $addToSet after validation"),
                         }}]
                     }
                     EachOrSingle::Each(exprs) => {
@@ -190,7 +190,7 @@ pub fn to_updater(
                             .iter()
                             .map(|value_expr| match value_expr.as_ref() {
                                 Expr::Literal(v) => v.clone(),
-                                _ => panic!(
+                                _ => unreachable!(
                                     "Non-literal value in $addToSet with $each after validation"
                                 ),
                             })
@@ -921,7 +921,7 @@ fn to_pull_operation(
         PullCriterion::Equals(expr) => {
             let val_to_remove = match expr.as_ref() {
                 Expr::Literal(v) => v.to_bson(),
-                _ => panic!("Non-literal value in $pull criterion after validation"),
+                _ => unreachable!("Non-literal value in $pull criterion after validation"),
             };
             Box::new(move |item: &Bson| item == &val_to_remove)
         }

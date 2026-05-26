@@ -12,12 +12,12 @@ use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
 use bson::{doc, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex};
-use crate::query::update::{UpdateExpr, UpdateOp, UpdatePathComponent};
+use crate::query::update::UpdateExpr;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -56,7 +56,7 @@ impl QueryExecutor {
             }
             _ => {
                 // Other plans, should be cached
-                panic!("Direct execution not supported for plan: {:?}", plan);
+                unreachable!("Direct execution not supported for plan: {:?}", plan);
             }
         }
     }
@@ -162,7 +162,7 @@ impl QueryExecutor {
                 Ok(iter)
             }
             _ => {
-                panic!("Non-parametrized physical plan: {:?}", plan);
+                unreachable!("Non-parametrized physical plan: {:?}", plan);
             }
         }
     }
@@ -189,7 +189,6 @@ impl QueryExecutor {
         let mut next = iter.next();
 
         if next.is_some() {
-
             let updater = updates::to_updater(&update, false)?;
 
             while let Some(doc_result) = next {
@@ -205,7 +204,7 @@ impl QueryExecutor {
                     user_key.clone(),
                     bson::to_vec(&new_doc)?,
                 ));
-                preconditions.push(Precondition::MustNotExist {
+                preconditions.push(Precondition::VersionMatch {
                     collection,
                     index: 0,
                     user_key,
@@ -213,31 +212,16 @@ impl QueryExecutor {
                 modified_count += 1;
                 next = iter.next();
             }
+        } else if upsert {
+            let (new_doc, generated_id) = self.perform_upsert(&query, update, parameters)?;
+            upserted_id = Some(generated_id.clone());
 
+            let user_key = generated_id.try_into_key()?;
+            operations.push(Operation::new_put(collection, 0, user_key.clone(), bson::to_vec(&new_doc)?));
+            preconditions.push(Precondition::VersionMatch { collection, index: 0, user_key });
         } else {
-
-            let updater = updates::to_updater(&update, true)?;
-
-            if upsert {
-                let (new_doc, generated_id) = self.create_upsert_document(&query, parameters, &updater)?;
-                upserted_id = Some(generated_id.clone());
-
-                let user_key = generated_id.try_into_key()?;
-                operations.push(Operation::new_put(
-                    collection,
-                    0,
-                    user_key.clone(),
-                    bson::to_vec(&new_doc)?,
-                ));
-                preconditions.push(Precondition::MustNotExist {
-                    collection,
-                    index: 0,
-                    user_key,
-                });
-            } else {
-                let result = doc! { "matched_count": matched_count, "modified_count": 0 };
-                return Ok(Box::new(std::iter::once(Ok(result))));
-            }
+            let result = doc! { "matched_count": matched_count, "modified_count": 0 };
+            return Ok(Box::new(std::iter::once(Ok(result))));
         }
 
         let batch = WriteBatch::new_with_preconditions(
@@ -278,69 +262,23 @@ impl QueryExecutor {
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
 
-                let operation = Operation::new_put(
-                    collection,
-                    0,
-                    user_key.clone(),
-                    bson::to_vec(&new_doc)?,
-                );
-
-                let precondition = Precondition::MustNotExist {
-                    collection,
-                    index: 0,
-                    user_key,
-                };
-
-                let preconditions = Preconditions::new(snapshot, vec![precondition]);
-                let write_batch =
-                    WriteBatch::new_with_preconditions(vec![operation], preconditions);
-
-                match self.storage_engine.write(write_batch) {
+                match self.write_document(collection, snapshot, user_key, bson::to_vec(&new_doc)?) {
                     Ok(_) => doc! { "matched_count": 1, "modified_count": 1 },
-                    Err(e @ StorageError::VersionConflict { .. }) => {
-                        if start_time.elapsed() >= MAX_RETRY_DURATION {
-                            return Err(e.into());
-                        }
-                        std::thread::sleep(calculate_backoff(attempt));
-                        attempt += 1;
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
                     }
-                    Err(e) => return Err(e.into()),
                 }
             } else if upsert {
-                let updater = updates::to_updater(&update, true)?;
-                let (new_doc, upserted_id) = self.create_upsert_document(&query, parameters, &updater)?;
-
+                let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
                 let user_key = upserted_id.clone().try_into_key()?;
 
-                let operation = Operation::new_put(
-                    collection,
-                    0,
-                    user_key.clone(),
-                    bson::to_vec(&new_doc)?,
-                );
-
-                let precondition = Precondition::MustNotExist {
-                    collection,
-                    index: 0,
-                    user_key,
-                };
-
-                let preconditions = Preconditions::new(snapshot, vec![precondition]);
-                let write_batch =
-                    WriteBatch::new_with_preconditions(vec![operation], preconditions);
-
-                match self.storage_engine.write(write_batch) {
+                match self.write_document(collection, snapshot, user_key, bson::to_vec(&new_doc)?) {
                     Ok(_) => doc! { "matched_count": 0, "modified_count": 0, "upserted_id": upserted_id },
-                    Err(e @ StorageError::VersionConflict { .. }) => {
-                        if start_time.elapsed() >= MAX_RETRY_DURATION {
-                            return Err(e.into());
-                        }
-                        std::thread::sleep(calculate_backoff(attempt));
-                        attempt += 1;
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
                     }
-                    Err(e) => return Err(e.into()),
                 }
             } else {
                 doc! { "matched_count": 0, "modified_count": 0 }
@@ -369,7 +307,7 @@ impl QueryExecutor {
                 return Err(Self::duplicate_key_error(&id));
             }
 
-            let precondition = Precondition::MustNotExist {
+            let precondition = Precondition::VersionMatch {
                 collection,
                 index: 0,
                 user_key,
@@ -435,7 +373,7 @@ impl QueryExecutor {
             let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
-                preconditions_vec.push(Precondition::MustNotExist {
+                preconditions_vec.push(Precondition::VersionMatch {
                     collection,
                     index: 0,
                     user_key: user_key.clone(),
@@ -552,7 +490,7 @@ impl QueryExecutor {
         let keys_array = if let BsonValue(Bson::Array(arr)) = keys_values {
             arr
         } else {
-            panic!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
+            unreachable!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
         };
 
         let mut keys_as_bson_values: Vec<BsonValue> =
@@ -639,7 +577,7 @@ impl QueryExecutor {
                             None => Box::new(std::iter::once(Ok(doc)))
                         }
                     }
-                    _ => panic!("Unexpected operation type: {:?}", op),
+                    _ => unreachable!("Unexpected operation type: {:?}", op),
                 }
             }
             None => Box::new(std::iter::empty()),
@@ -681,7 +619,7 @@ impl QueryExecutor {
                                 Ok(doc) => doc
                             }
                         },
-                        _ => panic!("Unexpected operation type: {:?}", op),
+                        _ => unreachable!("Unexpected operation type: {:?}", op),
                     }
                 }
                 Err(e) => return Some(Err(e.into())),
@@ -698,6 +636,18 @@ impl QueryExecutor {
                 None => Some(Ok(doc))
             }
         })))
+    }
+
+    /// Builds the upsert updater, creates the new document from the query's equality
+    /// conditions and the update expression, and returns `(new_doc, id)`.
+    fn perform_upsert(
+        &self,
+        query: &Arc<PhysicalPlan>,
+        update: &UpdateExpr,
+        parameters: &Parameters,
+    ) -> Result<(Document, Bson)> {
+        let updater = updates::to_updater(update, true)?;
+        self.create_upsert_document(query, parameters, &updater)
     }
 
     /// Creates a new document for an upsert operation by:
@@ -731,64 +681,55 @@ impl QueryExecutor {
         query: &PhysicalPlan,
         parameters: &Parameters,
     ) -> Result<Document> {
-
-        let mut ops: Vec<UpdateOp> = Vec::new();
-        self.extract_equality_conditions(query, parameters, &mut ops)?;
-
-        let update_expr = UpdateExpr { ops, array_filters: BTreeMap::new() };
-        let updater = updates::to_updater(&update_expr, false)?;
-
-        Ok(updater(Document::new())?)
+        let mut doc = Document::new();
+        self.extract_equality_conditions(query, parameters, &mut doc);
+        Ok(doc)
     }
 
-    /// Extracts equality conditions from a query plan to build a base document for upsert.
-    fn extract_equality_conditions(&self,
-                                   query: &PhysicalPlan,
-                                   parameters: &Parameters,
-                                   ops: &mut Vec<UpdateOp>
-    ) -> Result<()> {
-
+    /// Extracts equality conditions from a query plan into a document.
+    fn extract_equality_conditions(
+        &self,
+        query: &PhysicalPlan,
+        parameters: &Parameters,
+        doc: &mut Document,
+    ) {
         match query {
             PhysicalPlan::PointSearch { key, filter, .. } => {
-                ops.push(UpdateOp::Set {
-                    path: vec![UpdatePathComponent::FieldName("_id".to_string())],
-                    value: Arc::new(Expr::Literal(Self::bind_parameter(key, parameters))),
-                });
-
+                let BsonValue(id) = Self::bind_parameter(key, parameters);
+                doc.insert("_id", id);
                 if let Some(filter_expr) = filter {
-                    self.extract_equality_from_expr(filter_expr, parameters, ops);
+                    self.extract_equality_from_expr(filter_expr, parameters, doc);
                 }
             }
             PhysicalPlan::CollectionScan { filter, .. } => {
                 if let Some(filter_expr) = filter {
-                    self.extract_equality_from_expr(filter_expr, parameters, ops);
+                    self.extract_equality_from_expr(filter_expr, parameters, doc);
                 }
             }
             PhysicalPlan::Filter { input, predicate } => {
-                self.extract_equality_conditions(input, parameters, ops)?;
-                self.extract_equality_from_expr(predicate, parameters, ops);
+                self.extract_equality_conditions(input, parameters, doc);
+                self.extract_equality_from_expr(predicate, parameters, doc);
             }
             PhysicalPlan::Limit { input, .. } => {
-                self.extract_equality_conditions(input, parameters, ops)?;
+                self.extract_equality_conditions(input, parameters, doc);
             }
-            _ => {},
+            _ => {}
         }
-        Ok(())
     }
 
-    /// Extracts equality conditions from an expression tree.
-    fn extract_equality_from_expr(&self, expr: &Expr, parameters: &Parameters, operations: &mut Vec<UpdateOp>) {
+    /// Extracts equality conditions from an expression tree into a document.
+    fn extract_equality_from_expr(&self, expr: &Expr, parameters: &Parameters, doc: &mut Document) {
         match expr {
             Expr::And(exprs) => {
                 for e in exprs {
-                    self.extract_equality_from_expr(e, parameters, operations);
+                    self.extract_equality_from_expr(e, parameters, doc);
                 }
             }
             Expr::FieldFilters { field, filters } => {
                 if let Expr::Field(path) = field.as_ref() {
                     for filter in filters {
                         if let Some(value) = self.extract_point_value(filter, parameters) {
-                            operations.push(self.to_set_operation(path, value));
+                            set_path_value(doc, path, value.0);
                         }
                     }
                 }
@@ -816,43 +757,22 @@ impl QueryExecutor {
         }
     }
 
-    /// Converts a path and value into a set update operation.
-    fn to_set_operation(&self, path: &[PathComponent], value: BsonValue) -> UpdateOp {
-        let mut update_path = Vec::with_capacity(path.len());
-        for component in path {
-            match component {
-                PathComponent::FieldName(name) => update_path.push(UpdatePathComponent::FieldName(name.clone())),
-                PathComponent::ArrayElement(idx) => update_path.push(UpdatePathComponent::ArrayElement(*idx)),
-            }
-        }
-        UpdateOp::Set {
-            path: update_path,
-            value: Arc::new(Expr::Literal(value)),
-        }
-    }
-
-    /// Sets a value at a nested path in a document, creating intermediate documents as needed.
-    fn set_nested_value(&self, doc: &mut Document, path: &[PathComponent], value: Bson) {
-        if path.is_empty() {
-            return;
-        }
-
-        if path.len() == 1 {
-            if let PathComponent::FieldName(name) = &path[0] {
-                doc.insert(name.clone(), value);
-            }
-            return;
-        }
-
-        if let PathComponent::FieldName(name) = &path[0] {
-            let nested = doc
-                .entry(name.clone())
-                .or_insert_with(|| Bson::Document(Document::new()));
-            
-            if let Bson::Document(nested_doc) = nested {
-                self.set_nested_value(nested_doc, &path[1..], value);
-            }
-        }
+    
+    /// Writes a single document to storage as a put operation with a `MustNotExist` precondition.
+    fn write_document(
+        &self,
+        collection: u32,
+        snapshot: u64,
+        user_key: Vec<u8>,
+        data: Vec<u8>,
+    ) -> std::result::Result<(), StorageError> {
+        let operation = Operation::new_put(collection, 0, user_key.clone(), data);
+        let precondition = Precondition::VersionMatch { collection, index: 0, user_key };
+        let batch = WriteBatch::new_with_preconditions(
+            vec![operation],
+            Preconditions::new(snapshot, vec![precondition]),
+        );
+        self.storage_engine.write(batch)
     }
 
     fn bind_key_range_parameters(range: &Interval<Arc<Expr>>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
@@ -875,7 +795,7 @@ impl QueryExecutor {
         if let Expr::Placeholder(idx) = expr {
             Ok(parameters.get(*idx).try_into_key()?)
         } else {
-            panic!("Expecting placeholder but was: {:?}", expr);
+            unreachable!("Expecting placeholder but was: {:?}", expr);
         }
     }
 
@@ -883,8 +803,53 @@ impl QueryExecutor {
         if let Expr::Placeholder(idx) = expr {
             parameters.get(*idx).clone()
         } else {
-            panic!("Expecting placeholder but was: {:?}", expr)
+            unreachable!("Expecting placeholder but was: {:?}", expr)
         }
+    }
+}
+
+/// Inserts `value` at `path` inside `doc`, creating intermediate documents as needed.
+/// Array-element path components are skipped since upsert base documents are plain documents.
+fn set_path_value(doc: &mut Document, path: &[PathComponent], value: Bson) {
+    match path {
+        [] => {}
+        [PathComponent::FieldName(name)] => {
+            doc.insert(name.clone(), value);
+        }
+        [PathComponent::FieldName(name), rest @ ..] => {
+            let nested = doc
+                .entry(name.clone())
+                .or_insert_with(|| Bson::Document(Document::new()));
+            if let Bson::Document(nested_doc) = nested {
+                set_path_value(nested_doc, rest, value);
+            }
+        }
+        _ => {} // skip array-element components
+    }
+}
+
+/// Handles a storage write error inside a retry loop.
+///
+/// If the error is a `VersionConflict` and the deadline has not been reached,
+/// sleeps for the appropriate backoff duration, increments `attempt`, and returns
+/// `Ok(())` so the caller can `continue` to the next iteration.
+///
+/// Otherwise returns the error converted to [`crate::error::Error`].
+fn on_version_conflict(
+    e: StorageError,
+    start_time: &Instant,
+    attempt: &mut u32,
+) -> Result<()> {
+    match e {
+        StorageError::VersionConflict { .. } => {
+            if start_time.elapsed() >= Duration::from_secs(5) {
+                return Err(e.into());
+            }
+            std::thread::sleep(calculate_backoff(*attempt));
+            *attempt += 1;
+            Ok(())
+        }
+        _ => Err(e.into()),
     }
 }
 

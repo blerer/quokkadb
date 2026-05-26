@@ -752,7 +752,7 @@ impl StorageEngine {
     fn check_writer_preconditions(self: &Arc<Self>, seq: u64, preconditions: &Preconditions) -> StorageResult<()> {
         for precondition in preconditions.conditions() {
             match precondition {
-                Precondition::MustNotExist {
+                Precondition::VersionMatch {
                     collection,
                     index,
                     user_key,
@@ -3852,7 +3852,7 @@ mod tests {
 
         // 4. Try to write key2 again with a precondition based on the old snapshot.
         // This should fail because key2 was created *after* snapshot1.
-        let precondition = Precondition::MustNotExist {
+        let precondition = Precondition::VersionMatch {
             collection: col,
             index: idx,
             user_key: user_key(2),
@@ -3869,7 +3869,7 @@ mod tests {
 
         // 5. Take a new snapshot and try to write a new key. This should succeed.
         let snapshot2 = engine.last_visible_sequence();
-        let precondition_ok = Precondition::MustNotExist {
+        let precondition_ok = Precondition::VersionMatch {
             collection: col,
             index: idx,
             user_key: user_key(3),
@@ -3881,7 +3881,7 @@ mod tests {
 
         // 6. Try to write an existing key (key1) again. This should fail because the key
         // already exists, and the `read_since` check will find it.
-        let precondition_fail = Precondition::MustNotExist {
+        let precondition_fail = Precondition::VersionMatch {
             collection: col,
             index: idx,
             user_key: user_key(1),

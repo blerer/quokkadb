@@ -151,7 +151,7 @@ pub fn to_value_filter(
         Expr::FieldFilters { field, filters } => {
             let path = match field.as_ref() {
                 Expr::Field(path) => path.clone(),
-                _ => panic!("Expected a field expression"),
+                _ => unreachable!("Expected a field expression"),
             };
             let value_filters = to_value_filters(filters, parameters);
             Box::new(move |field_value| {
@@ -172,7 +172,7 @@ pub fn to_value_filter(
             let comparison_value = match value.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
                 Expr::Literal(val) => val.clone(),
-                _ => panic!("Comparison value must be a placeholder or a literal but was {:?}", value),
+                _ => unreachable!("Comparison value must be a placeholder or a literal but was {:?}", value),
             };
             Box::new(move |field_value| compare_value(operator, comparison_value.as_ref(), field_value))
         }
@@ -236,7 +236,7 @@ pub fn to_value_filter(
         Expr::Type { bson_type, negated } => {
             let type_spec = match bson_type.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-                _ => panic!("$type value must be a placeholder"),
+                _ => unreachable!("$type value must be a placeholder"),
             };
             let negated = *negated;
             // Precompute the type filter function
@@ -260,9 +260,9 @@ pub fn to_value_filter(
                 Expr::Placeholder(idx) => match &parameters.get(*idx).0 {
                     Bson::Int32(i) => *i as usize,
                     Bson::Int64(i) => *i as usize,
-                    _ => panic!("$size must be an integer"),
+                    _ => unreachable!("$size must be an integer"),
                 },
-                _ => panic!("$size value must be a placeholder"),
+                _ => unreachable!("$size value must be a placeholder"),
             };
             let negated = *negated;
             Box::new(move |field_value| {
@@ -281,9 +281,9 @@ pub fn to_value_filter(
             let comparison_array = match value.as_ref() {
                 Expr::Placeholder(idx) => match &parameters.get(*idx).0 {
                     Bson::Array(arr) => arr.clone(),
-                    _ => panic!("$all value must be an array placeholder"),
+                    _ => unreachable!("$all value must be an array placeholder"),
                 },
-                _ => panic!("$all value must be a placeholder"),
+                _ => unreachable!("$all value must be a placeholder"),
             };
 
             Box::new(move |field_value| {
@@ -313,7 +313,7 @@ pub fn to_value_filter(
             let filters = to_value_filters(children, parameters);
             Box::new(move |field_value| !filters.iter().any(|f| f(field_value)))
         }
-        _ => panic!("Unsupported value filter: {:?}", filter),
+        _ => unreachable!("Unsupported value filter: {:?}", filter),
     }
 }
 
@@ -333,7 +333,7 @@ fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool
 fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) ->Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
         Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-        _ => panic!("Interval bound must be a placeholder"),
+        _ => unreachable!("Interval bound must be a placeholder"),
     };
     match bound {
         Bound::Included(expr) => Bound::Included(get_value(expr)),
@@ -376,7 +376,7 @@ pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Docume
         Expr::FieldFilters { field, filters } => {
             let path = match field.as_ref() {
                 Expr::Field(path) => path.clone(),
-                _ => panic!("Expected a field expression"),
+                _ => unreachable!("Expected a field expression"),
             };
             let value_filters = to_value_filters(filters, parameters);
             Box::new(move |doc: &Document| {
@@ -384,7 +384,7 @@ pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Docume
                 value_filters.iter().all(|f| f(field_value))
             })
         },
-        _ => panic!("Unsupported top-level filter: {:?}", expr),
+        _ => unreachable!("Unsupported top-level filter: {:?}", expr),
     }
 }
 

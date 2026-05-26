@@ -6,7 +6,7 @@ use std::io::Result;
 
 #[derive(Debug, PartialEq)]
 pub enum Precondition {
-    MustNotExist {
+    VersionMatch {
         collection: u32,
         index: u32,
         user_key: Vec<u8>,

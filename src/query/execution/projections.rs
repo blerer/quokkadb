@@ -38,7 +38,7 @@ fn build_projector(
                         let projector = build_projector(proj_expr, parameters)?;
                         Ok((name.clone(), projector))
                     } else {
-                        panic!("Expected field name in projection");
+                        unreachable!("Expected field name in projection");
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -52,7 +52,7 @@ fn build_projector(
                         let projector = build_projector(proj_expr, parameters)?;
                         Ok((*idx, projector))
                     } else {
-                        panic!("Expected array index in projection");
+                        unreachable!("Expected array index in projection");
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -206,7 +206,7 @@ impl Projector {
                             }
                         },
                         _ => {
-                            panic!("Unexpected projector: {}", self)
+                            unreachable!("Unexpected projector: {}", self)
                         }
                     }
                 }
