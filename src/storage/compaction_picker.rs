@@ -49,6 +49,8 @@ use crate::{event, info};
 /// and metadata about the compaction bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionJob {
+    /// Unique identifier for this compaction job, used for log/trace correlation.
+    pub id: u64,
     /// The source level (e.g., 0 for L0 → L1 compaction).
     pub input_level: u8,
     /// The target level (e.g., 1 for L0 → L1 compaction).
@@ -98,6 +100,8 @@ pub struct CompactionPicker {
     nbr_of_threads: u8,
     /// The number of running compaction
     nbr_of_running_compactions: u8,
+    /// Monotonically increasing counter used to assign unique IDs to compaction jobs.
+    next_job_id: u64,
 }
 
 /// Result of computing compaction scores for all levels.
@@ -151,6 +155,7 @@ impl CompactionPicker {
             metrics,
             nbr_of_threads,
             nbr_of_running_compactions: 0,
+            next_job_id: 0,
         }
     }
 
@@ -257,10 +262,10 @@ impl CompactionPicker {
                     self.metrics.record_picked_from_level(input_level);
                     self.metrics.input_files_count.record(job.input_files.len() as u64);
 
-                    info!(self.logger, "Picked partial compaction L{}->L{}, input_files={}, output_files={}",
-                        input_level, output_level, job.input_files.len(), job.output_files.len());
-                    event!(self.logger, "compaction_picking done type=partial, input_level={}, output_level={}, input_files={}, output_files={}",
-                        input_level, output_level, job.input_files.len(), job.output_files.len());
+                    info!(self.logger, "Picked partial compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
+                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
+                    event!(self.logger, "compaction_picking done type=partial, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
+                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
 
                     return Some(job);
                 } else {
@@ -282,10 +287,10 @@ impl CompactionPicker {
                     self.metrics.record_picked_from_level(input_level);
                     self.metrics.input_files_count.record(job.input_files.len() as u64);
 
-                    info!(self.logger, "Picked full compaction L{}->L{}, input_files={}, output_files={}",
-                        input_level, output_level, job.input_files.len(), job.output_files.len());
-                    event!(self.logger, "compaction_picking done type=full, input_level={}, output_level={}, input_files={}, output_files={}",
-                        input_level, output_level, job.input_files.len(), job.output_files.len());
+                    info!(self.logger, "Picked full compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
+                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
+                    event!(self.logger, "compaction_picking done type=full, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
+                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
 
                     println!("{:?}", self.compacting_ranges);
 
@@ -323,13 +328,16 @@ impl CompactionPicker {
     /// all overlapping files in the target level. This is simpler than partial
     /// compaction and ensures all data is properly merged.
     fn pick_full_compaction(
-        &self,
+        &mut self,
         input: &Level,
         output: &Level,
         input_level: usize,
         output_level: usize,
         partitions_grid: Option<Vec<Vec<u8>>>,
     ) -> Option<CompactionJob> {
+
+        let id = self.next_job_id;
+        self.next_job_id += 1;
 
         // We want to use the range including all the items in the input level. This will be used to
         // find all overlapping files in the output level.
@@ -353,6 +361,7 @@ impl CompactionPicker {
             .unwrap_or_else(|| input_key_range.clone());
 
         Some(CompactionJob {
+            id,
             input_level: input_level as u8,
             output_level: output_level as u8,
             input_files,
@@ -369,7 +378,7 @@ impl CompactionPicker {
     /// Partial compaction limits the scope to files within the same partition.
     /// Partitions are determined by the max level's SSTable boundaries.
     fn pick_partial_compaction(
-        &self,
+        &mut self,
         input: &Level,
         output: &Level,
         input_level: usize,
@@ -378,6 +387,9 @@ impl CompactionPicker {
     ) -> Option<CompactionJob> {
         assert!(matches!(input, NonOverlapping {..}),
                 "Expected NonOverlapping level for partial compaction, found Overlapping");
+
+        let id = self.next_job_id;
+        self.next_job_id += 1;
 
         // We want to pick the oldest items that can be compacted to have a deterministic pick order
         // and avoid starvation.
@@ -410,6 +422,7 @@ impl CompactionPicker {
             let output_files = output.find_sstables_in_range(&partition_key_range, u64::MAX);
 
             return Some(CompactionJob {
+                id,
                 input_level: input_level as u8,
                 output_level: output_level as u8,
                 input_files,
@@ -872,7 +885,7 @@ mod tests {
             .add(0, l0_ssts, empty())
             .add(1, l1_ssts.clone(), empty());
 
-        let job = picker.pick_compaction(&levels).unwrap();
+        let _job = picker.pick_compaction(&levels).unwrap();
 
         let l0_ssts: Vec<_> = (1..=6)
             .map(|i| create_sst(i, 0, 100, 110, 1000))
@@ -1519,6 +1532,7 @@ mod tests {
 
             // Manually create a partial compaction job to simulate L2→L3 running
             let partial_job = CompactionJob {
+                id: 0,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![create_sst(2, 2, 10, 30, l2_target * 2)],
@@ -2152,6 +2166,7 @@ mod tests {
 
             // Single partition means all drops should be included.
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![l2_sst],
@@ -2223,6 +2238,7 @@ mod tests {
             let job = picker.pick_compaction(&levels).unwrap();
 
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![],
@@ -2284,6 +2300,7 @@ mod tests {
             let job = picker.pick_compaction(&levels).unwrap();
 
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 // The SST [30, 70] spans both partitions
@@ -2343,6 +2360,7 @@ mod tests {
             let job = picker.pick_compaction(&levels).unwrap();
 
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![l2_sst],
@@ -2486,6 +2504,7 @@ mod tests {
             // Partition 0 boundary is (col 11, idx 0, 50)
             let expected_partition_range = Interval::new(Bound::Unbounded, Bound::Included(record_key_for(11, 0, 50)));
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![l2_sst_10],
@@ -2553,6 +2572,7 @@ mod tests {
             // (col 10, idx 1) < (col 11, idx 50).
             let expected_partition_range = Interval::new(Bound::Unbounded, Bound::Included(boundary_key.clone()));
             assert_eq!(job, CompactionJob {
+                id: job.id,
                 input_level: 2,
                 output_level: 3,
                 input_files: vec![l2_sst],

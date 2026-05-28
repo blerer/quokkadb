@@ -87,7 +87,8 @@ impl CompactionManager {
         while let Some(job) = self.compaction_picker.lock().unwrap().pick_compaction(levels) {
             debug!(
                 self.logger,
-                "compaction job picked, input_level={}, output_level={}, input_files={}",
+                "compaction job picked, job_id={}, input_level={}, output_level={}, input_files={}",
+                job.id,
                 job.input_level,
                 job.output_level,
                 job.input_files.len()
@@ -188,7 +189,8 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
                 let CompactionTask { compaction_job, callback}  =  task;
                 event!(
                     logger,
-                    "compaction start, input_level={}, output_level={}, input_files={}, output_files={}",
+                    "compaction start, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
+                    compaction_job.id,
                     compaction_job.input_level,
                     compaction_job.output_level,
                     compaction_job.input_files.len(),
@@ -207,7 +209,8 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
                         {
                             event!(
                                 logger,
-                                "compaction done, input_level={}, output_level={}, added={}, removed={}, drops={}",
+                                "compaction done, job_id={}, input_level={}, output_level={}, added={}, removed={}, drops={}",
+                                compaction_job.id,
                                 compaction_job.input_level,
                                 compaction_job.output_level,
                                 added_sstables.len(),
@@ -476,6 +479,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 0,
             output_level: 1,
             input_files: vec![input_sst.clone()],
@@ -486,11 +490,11 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 1);
+        assert_eq!(compaction_job, job);
         assert_eq!(added.len(), 1, "Should produce exactly one output SST");
         assert_eq!(added[0].number, 10);
         assert_eq!(removed.len(), 1, "Input SST should be removed");
@@ -539,6 +543,7 @@ mod tests {
         );
 
         let job = CompactionJob {
+            id: 0,
             input_level: 0,
             output_level: 1,
             input_files: vec![input1.clone(), input2.clone()],
@@ -549,11 +554,11 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 1);
+        assert_eq!(compaction_job, job);
         assert!(!added.is_empty());
 
         let removed_numbers: Vec<u64> = removed.iter().map(|s| s.number).collect();
@@ -583,6 +588,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 50);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 0,
             output_level: 1,
             input_files: vec![input_sst],
@@ -627,6 +633,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst.clone()],
@@ -638,11 +645,11 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 2);
+        assert_eq!(compaction_job, job);
         assert!(!added.is_empty());
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].number, input_sst.number);
@@ -668,6 +675,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 99);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst],
@@ -713,6 +721,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst.clone()],
@@ -723,11 +732,11 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 2);
+        assert_eq!(compaction_job, job);
         assert_eq!(added.len(), 2, "One boundary should produce two output SSTables");
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].number, input_sst.number);
@@ -761,6 +770,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst],
@@ -771,11 +781,11 @@ mod tests {
             partitions_grid: Some(vec![b1.clone(), b2.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, _removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 2);
+        assert_eq!(compaction_job, job);
         assert_eq!(added.len(), 3, "Two boundaries should produce three output SSTables");
         assert!(added[0].max_key <= b1);
         assert!(added[1].min_key > b1);
@@ -802,6 +812,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst],
@@ -847,6 +858,7 @@ mod tests {
         let full_drop = DropMetadata::new_collection_drop(col, 10);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 1,
             output_level: 2,
             input_files: vec![input_sst],
@@ -896,6 +908,7 @@ mod tests {
 
         // Single partition (no boundaries) — everything goes into one SST.
         let job = CompactionJob {
+            id: 0,
             input_level: 2,
             output_level: 3,
             input_files: vec![input_sst.clone()],
@@ -906,11 +919,11 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 3);
+        assert_eq!(compaction_job, job);
         assert_eq!(added.len(), 1);
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].number, input_sst.number);
@@ -940,6 +953,7 @@ mod tests {
         let output_sst = write_sst(dir.path(), 2, &output_entries, &options);
 
         let job = CompactionJob {
+            id: 0,
             input_level: 2,
             output_level: 3,
             input_files: vec![input_sst.clone()],
@@ -950,11 +964,11 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
+        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
             .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
-        assert_eq!(compaction_job.output_level, 3);
+        assert_eq!(compaction_job, job);
         assert_eq!(added.len(), 2, "Boundary should split into two output SSTables");
         assert_eq!(removed.len(), 2, "Both input and output SSTables should be removed");
 
@@ -989,6 +1003,7 @@ mod tests {
             .expect_two();
 
         let job = CompactionJob {
+            id: 0,
             input_level: 2,
             output_level: 3,
             input_files: vec![input_sst],
@@ -1046,6 +1061,7 @@ mod tests {
             partitions_grid: Option<Vec<Vec<u8>>>,
         ) -> CompactionJob {
             CompactionJob {
+                id: 0,
                 input_level: 0,
                 output_level: 1,
                 input_files: vec![],
