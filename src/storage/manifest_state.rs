@@ -65,7 +65,7 @@ impl ManifestState {
                 catalog: self.catalog.clone(),
             },
             ManifestEdit::Snapshot(_) => {
-                panic!("Snapshots should not be applied to an LSMTree");
+                unreachable!("Snapshots should not be applied to an LSMTree");
             },
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number} => ManifestState {
                 lsm: Arc::new(self.lsm.with_ignored_empty_memtable(*oldest_log_number)),

@@ -264,7 +264,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 Expr::Field(path) => {
                     include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;
                 }
-                _ => panic!("Invalid projection value for field '{}': expected field or positional field", key),
+                _ => unreachable!("Invalid projection value for field '{}': expected field or positional field", key),
             },
             Bson::Int32(0) | Bson::Int64(0) => match field {
                 Expr::Field(path) => {
@@ -276,7 +276,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                         key
                     )));
                 }
-                _ => panic!("Invalid projection value for field '{}': expected field", key),
+                _ => unreachable!("Invalid projection value for field '{}': expected field", key),
             },
             Bson::Document(projection_doc) => {
                 let path = match field {
@@ -287,7 +287,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                             key
                         )));
                     }
-                    _ => panic!("Invalid projection value for field '{}': expected field", key),
+                    _ => unreachable!("Invalid projection value for field '{}': expected field", key),
                 };
 
                 if projection_doc.len() != 1 {

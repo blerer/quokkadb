@@ -569,7 +569,7 @@ impl Serializable for ProjectionExpr {
             2 => Ok(ProjectionExpr::Field),
             3 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
             4 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
-            _ => panic!("Invalid tag for ProjectionExpr: {}", tag),
+            _ => unreachable!("Invalid tag for ProjectionExpr: {}", tag),
         }
     }
 
@@ -613,7 +613,7 @@ impl Serializable for Projection {
         match tag {
             0 => Ok(Projection::Include(Arc::<ProjectionExpr>::read_from(reader)?)),
             1 => Ok(Projection::Exclude(Arc::<ProjectionExpr>::read_from(reader)?)),
-            _ => panic!("Invalid tag for Projection: {}", tag),
+            _ => unreachable!("Invalid tag for Projection: {}", tag),
         }
     }
 

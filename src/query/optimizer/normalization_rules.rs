@@ -182,7 +182,7 @@ impl SimplifyLogicalOperators {
                     expr.clone()
                 },
             Expr::Nor(_) => {
-                panic!("De Morgan's Law should have been applied before this rule")
+                unreachable!("De Morgan's Law should have been applied before this rule")
             }
             _ => expr.clone(),
         }
@@ -449,7 +449,7 @@ impl CoalesceFieldPredicates {
                                     }
                                     previous = Some(merged);
                                 }
-                                _ => panic!("Unexpected expression before IN clause: {:?}", expr),
+                                _ => unreachable!("Unexpected expression before IN clause: {:?}", expr),
                             }
                         } else {
 
@@ -462,7 +462,7 @@ impl CoalesceFieldPredicates {
                                     }));
 
                             } else {
-                                panic!("IN operator requires an array literal as its value");
+                                unreachable!("IN operator requires an array literal as its value");
                             }
                         }
                     }
@@ -480,7 +480,7 @@ impl CoalesceFieldPredicates {
                                     }
                                     previous = Some(merged);
                                 }
-                                _ => panic!("Unexpected expression before an interval clause: {:?}", expr),
+                                _ => unreachable!("Unexpected expression before an interval clause: {:?}", expr),
                             }
                         } else {
                             previous = Some(f.clone());
@@ -622,14 +622,14 @@ fn coalesce_in_disjunctions(left: &Arc<Expr>, right: &Arc<Expr>) -> Option<Arc<E
         Expr::Comparison { operator: ComparisonOperator::In, value: left_value },
         Expr::Comparison { operator: ComparisonOperator::In, value: right_value }
     ) = (left.as_ref(), right.as_ref()) else {
-        panic!("coalesce_in_disjunctions should only be called with two IN expressions");
+        unreachable!("coalesce_in_disjunctions should only be called with two IN expressions");
     };
 
     let (
         Expr::Literal(BsonValue(Bson::Array(left_arr))),
         Expr::Literal(BsonValue(Bson::Array(right_arr)))
     ) = (left_value.as_ref(), right_value.as_ref()) else {
-        panic!("IN values must be arrays");
+        unreachable!("IN values must be arrays");
     };
 
     let mut combined: BTreeSet<BsonValueRef> = left_arr.into_iter().map(|e| BsonValueRef(e)).collect();
@@ -647,14 +647,14 @@ fn coalesce_in_with_in(left: &Arc<Expr>, right: &Arc<Expr>) -> Arc<Expr> {
         Expr::Comparison { operator: ComparisonOperator::In, value: left_value },
         Expr::Comparison { operator: ComparisonOperator::In, value: right_value }
     ) = (left.as_ref(), right.as_ref()) else {
-        panic!("merge_in_with_in should only be called with two IN expressions");
+        unreachable!("merge_in_with_in should only be called with two IN expressions");
     };
 
     let (
         Expr::Literal(BsonValue(Bson::Array(left_arr))),
         Expr::Literal(BsonValue(Bson::Array(right_arr)))
     ) = (left_value.as_ref(), right_value.as_ref()) else {
-        panic!("IN values must be arrays");
+        unreachable!("IN values must be arrays");
     };
 
     let set: HashSet<_> = left_arr.into_iter().map(BsonValueRef).collect();
@@ -701,7 +701,7 @@ fn coalesce_in_with_interval(left: &Arc<Expr>, right: &Arc<Expr>) -> Arc<Expr> {
         }
         _ => {}
     }
-    panic!("merge_in_with_interval should only be called with IN and Interval expressions");
+    unreachable!("merge_in_with_interval should only be called with IN and Interval expressions");
 }
 
 /// Normalization rule to eliminate redundant filters.

@@ -211,7 +211,7 @@ impl Serializable for IdCreationStrategy {
             0 => Ok(IdCreationStrategy::Generated),
             1 => Ok(IdCreationStrategy::Manual),
             2 => Ok(IdCreationStrategy::Mixed),
-            _ => panic!("Invalid IdCreationStrategy byte: {}", byte),
+            _ => unreachable!("Invalid IdCreationStrategy byte: {}", byte),
         }
     }
 
@@ -434,7 +434,7 @@ impl Serializable for Order {
         match byte {
             0 => Ok(Order::Ascending),
             1 => Ok(Order::Descending),
-            _ => panic!("Invalid Order byte: {}", byte),
+            _ => unreachable!("Invalid Order byte: {}", byte),
         }
     }
 

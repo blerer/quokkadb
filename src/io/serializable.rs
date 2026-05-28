@@ -80,7 +80,7 @@ where
         } else if presence == 0 {
             Ok(None)
         } else {
-            panic!("Invalid option presence byte")
+            unreachable!("Invalid option presence byte")
         }
     }
 
@@ -180,7 +180,7 @@ where
             0 => Ok(Bound::Unbounded),
             1 => Ok(Bound::Included(T::read_from(reader)?)),
             2 => Ok(Bound::Excluded(T::read_from(reader)?)),
-            _ => panic!("Invalid Bound type"),
+            _ => unreachable!("Invalid Bound type"),
         }
     }
 
