@@ -237,7 +237,7 @@ fn perform_compaction(options: &Options,
                       job: CompactionJob,
                       next_file_number: &AtomicU64) -> Result<SSTableOperation>{
 
-    let sst_max_size = compute_sst_max_size(options, job.output_level);
+    let sst_max_size = options.target_file_size_for_level(job.output_level);
 
     let compaction_iter = CompactionIterator::new(
         db_dir,
@@ -360,36 +360,6 @@ fn new_sstable_writer<'a>(
 ) -> Result<SSTableWriter<'a>> {
     let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
     Ok(SSTableWriter::new(db_dir, &sst_file, options)?)
-}
-
-fn compute_sst_max_size(options: &Options, level: u8) -> usize {
-    // L0 is special/overlapping, but compaction writes into L1+.
-    // Still handle it defensively by treating it as L1 sizing.
-    let effective_level = level.max(1);
-
-    let base_bytes = options.max_bytes_for_level_base().to_bytes() as f64;
-    let multiplier = options.max_bytes_for_level_multiplier();
-
-    // L1 target is `base`, L2 is `base * multiplier`, etc.
-    let target_level_bytes =
-        base_bytes * multiplier.powi((effective_level.saturating_sub(1)) as i32);
-
-    // Aim for ~10 SSTables per level at steady state.
-    let mut per_sst_bytes = (target_level_bytes / 10.0) as usize;
-
-    // Clamp to avoid pathological values (too small => too many files).
-    let min_bytes = options.file_write_buffer_size().to_bytes().max(1 << 20); // at least 1 MiB
-    let max_bytes = target_level_bytes.max(1.0) as usize;
-
-    if per_sst_bytes < min_bytes {
-        per_sst_bytes = min_bytes;
-    }
-    if per_sst_bytes > max_bytes {
-        per_sst_bytes = max_bytes;
-    }
-
-    // Never return 0.
-    per_sst_bytes.max(1)
 }
 
 #[cfg(test)]
@@ -1029,26 +999,6 @@ mod tests {
         // so split_drops_if_needed should return it as-is (it ends at the boundary).
         assert_eq!(drops.len(), 1);
         assert_eq!(drops[0], drop_p0);
-    }
-
-    /// compute_sst_max_size is defensive about L0: treats it like L1.
-    #[test]
-    fn test_compute_sst_max_size_l0_treated_as_l1() {
-        let options = Options::lightweight();
-        let size_l0 = compute_sst_max_size(&options, 0);
-        let size_l1 = compute_sst_max_size(&options, 1);
-        assert_eq!(size_l0, size_l1, "L0 and L1 should produce the same sst_max_size");
-    }
-
-    /// Higher levels produce larger SST size targets.
-    #[test]
-    fn test_compute_sst_max_size_grows_with_level() {
-        let options = Options::lightweight();
-        let size_l1 = compute_sst_max_size(&options, 1);
-        let size_l2 = compute_sst_max_size(&options, 2);
-        let size_l3 = compute_sst_max_size(&options, 3);
-        assert!(size_l2 >= size_l1, "L2 target should be >= L1");
-        assert!(size_l3 >= size_l2, "L3 target should be >= L2");
     }
 
     mod split_drops_tests {

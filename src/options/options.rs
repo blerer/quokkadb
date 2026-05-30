@@ -22,6 +22,7 @@ pub struct Options {
     max_bytes_for_level_base: StorageQuantity,
     max_bytes_for_level_multiplier: f64,
     compaction_threads: usize,
+    max_target_file_size: StorageQuantity,
 
     // SSTable format options
     block_size: StorageQuantity,
@@ -46,6 +47,7 @@ impl Default for Options {
             max_bytes_for_level_base: StorageQuantity::new(64, StorageUnit::Mebibytes),
             max_bytes_for_level_multiplier: 10.0,
             compaction_threads: 1,
+            max_target_file_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
 
             // SSTable format defaults
             block_size: StorageQuantity::new(4, StorageUnit::Kibibytes),
@@ -80,6 +82,7 @@ impl Options {
             restart_interval: 16,
             bloom_filter_false_positive: 0.005,
             compressor_type: CompressorType::LZ4,
+            max_target_file_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
         }
     }
 
@@ -100,6 +103,7 @@ impl Options {
             restart_interval: 32,
             bloom_filter_false_positive: 0.001,
             compressor_type: CompressorType::LZ4,
+            max_target_file_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
         }
     }
 }
@@ -189,6 +193,15 @@ impl Options {
         self.compressor_type = comp;
         self
     }
+
+    /// Override the maximum target file size for compactions. This is an upper bound on the
+    /// size of SSTables produced by compactions, regardless of the level.
+    /// It can be used to prevent excessively large SSTables in deeper levels when the level size
+    /// multiplier is high.
+    pub fn with_max_target_file_size(mut self, size: StorageQuantity) -> Self {
+        self.max_target_file_size = size;
+        self
+    }
 }
 
 // Accessors
@@ -227,6 +240,70 @@ impl Options {
 
     pub fn max_bytes_for_level_multiplier(&self) -> f64 {
         self.max_bytes_for_level_multiplier
+    }
+
+    pub fn max_target_file_size(&self) -> StorageQuantity {
+        self.max_target_file_size
+    }
+
+
+    /// Returns the target SSTable size, in bytes, for the given LSM level.
+      ///
+    /// The base size is derived from the existing compaction options instead of
+    /// introducing another independent knob:
+    ///
+    /// ```text
+    /// base_target_file_size = max_bytes_for_level_base / level0_file_num_compaction_trigger
+    /// ```
+    ///
+    /// `max_bytes_for_level_base` is the target size of L1. Dividing it by the
+    /// L0 compaction trigger gives the size of the files/partitions that should
+    /// approximately fill L1 after an L0 -> L1 compaction. L0 and L1 therefore
+    /// use the same base target size.
+    ///
+    /// For deeper levels, the target file size grows by the square root of the
+    /// level-size multiplier:
+    ///
+    /// ```text
+    /// file_size_multiplier = sqrt(max_bytes_for_level_multiplier)
+    /// ```
+    ///
+    /// This is a compromise between two extremes:
+    ///
+    /// * If file sizes did not grow, deeper levels would contain many small
+    ///   SSTables, increasing metadata, manifest, cache and file-descriptor
+    ///   pressure.
+    /// * If file sizes grew at the same rate as the level size, each level would
+    ///   keep roughly the same number of SSTables, but deep compactions would
+    ///   become very coarse and bursty.
+    ///
+    /// Using the square root lets deeper levels use larger SSTables while still
+    /// allowing the number of SSTables per level to grow gradually. With the
+    /// default level multiplier of 10, file sizes grow by about 3.16x per level
+    /// and the number of SSTables grows by about 3.16x per level as well.
+    ///
+    /// Level numbering follows the rest of the LSM code:
+    ///
+    /// * `level == 0`: L0 target file size.
+    /// * `level == 1`: L1 target file size.
+    /// * `level >= 2`: deeper-level target file size.
+    ///
+    /// The returned value is always at least one block, so a very small
+    /// configuration cannot produce SSTables smaller than the configured block
+    /// size.
+    pub (crate) fn target_file_size_for_level(&self, level: u8) -> u64 {
+        assert_ne!(level, 0, "L0 file size is determined indirectly by file_write_buffer_size, not this method");
+
+        let base_target_file_size = self.max_bytes_for_level_base.to_bytes()
+            / self.level0_file_num_compaction_trigger;
+
+        let base_target_file_size = base_target_file_size.max(self.block_size.to_bytes());
+
+        let file_size_multiplier = self.max_bytes_for_level_multiplier.sqrt();
+        let exponent = (level - 1) as i32;
+        let target = ((base_target_file_size as f64) * file_size_multiplier.powi(exponent)) as u64;
+
+        target.min(self.max_target_file_size.to_bytes() as u64)
     }
 
     pub fn compaction_threads(&self) -> usize {
@@ -305,6 +382,87 @@ impl Options {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_options() -> Options {
+        Options::default()
+    }
+
+    /// Returns the base target file size for the default Options.
+    /// base = max_bytes_for_level_base / level0_file_num_compaction_trigger
+    ///      = 64 MiB / 4 = 16 MiB
+    /// That is larger than block_size (4 KiB), so the floor does not apply.
+    fn default_base_bytes() -> u64 {
+        let opts = base_options();
+        (opts.max_bytes_for_level_base.to_bytes() / opts.level0_file_num_compaction_trigger) as u64
+    }
+
+    #[test]
+    fn l1_returns_base_size() {
+        let opts = base_options();
+        let base = default_base_bytes();
+        assert_eq!(opts.target_file_size_for_level(1), base);
+    }
+
+    #[test]
+    fn l2_scales_by_sqrt_of_multiplier() {
+        let opts = base_options();
+        let base = default_base_bytes();
+        let expected = ((base as f64) * opts.max_bytes_for_level_multiplier.sqrt()) as u64;
+        assert_eq!(opts.target_file_size_for_level(2), expected);
+    }
+
+    #[test]
+    fn l3_scales_by_multiplier_itself() {
+        // sqrt(m)^2 == m, so L3 = base * multiplier.
+        // Raise max_target_file_size so the cap does not interfere:
+        // base = 16 MiB, multiplier = 10, so L3 uncapped = ~160 MiB.
+        let opts = base_options()
+            .with_max_target_file_size(StorageQuantity::new(256, StorageUnit::Mebibytes));
+        let base = default_base_bytes();
+        let expected = ((base as f64) * opts.max_bytes_for_level_multiplier.sqrt().powi(2)) as u64;
+        assert_eq!(opts.target_file_size_for_level(3), expected);
+    }
+
+    #[test]
+    fn deeper_levels_are_monotonically_increasing() {
+        let opts = base_options();
+        let sizes: Vec<u64> = (1u8..=5).map(|l| opts.target_file_size_for_level(l)).collect();
+        for window in sizes.windows(2) {
+            assert!(window[0] <= window[1], "sizes should be non-decreasing: {:?}", sizes);
+        }
+    }
+
+    #[test]
+    fn block_size_floor_is_applied() {
+        // Make max_bytes_for_level_base tiny so base < block_size.
+        let opts = Options::default()
+            .with_max_bytes_for_level_base(StorageQuantity::new(1, StorageUnit::Kibibytes))
+            .with_level0_file_num_compaction_trigger(4);
+        // base = 1 KiB / 4 = 256 bytes, which is less than block_size (4 KiB).
+        let block = opts.block_size().to_bytes() as u64;
+        assert_eq!(opts.target_file_size_for_level(1), block);
+    }
+
+    #[test]
+    fn max_target_file_size_caps_deep_levels() {
+        // Set a very small cap so it is reached quickly.
+        let cap = StorageQuantity::new(20, StorageUnit::Mebibytes);
+        let opts = Options::default().with_max_target_file_size(cap);
+        let cap_bytes = cap.to_bytes() as u64;
+        // L3 with default multiplier = base * 10 = 160 MiB, well above 20 MiB.
+        assert_eq!(opts.target_file_size_for_level(3), cap_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "L0 file size is determined indirectly by file_write_buffer_size")]
+    fn panics_on_level_zero() {
+        base_options().target_file_size_for_level(0);
     }
 }
 

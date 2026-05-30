@@ -201,8 +201,8 @@ impl<'a> SSTableWriter<'a> {
     /// does not flush the underlying writer, and does not run compression for buffered blocks.
     ///
     /// The returned size is approximate and should be used with slack.
-    pub fn estimated_size(&self) -> usize {
-        let written = self.current_block_offset;
+    pub fn estimated_size(&self) -> u64 {
+        let written = self.current_block_offset as u64;
         
         if written == 0 && self.data_block_builder.is_empty() {
             return 0;
@@ -212,21 +212,21 @@ impl<'a> SSTableWriter<'a> {
 
         let pending_data_block = (self.data_block_builder.estimated_size_in_bytes() as f64
             * compression_ratio)
-            .ceil() as usize;
+            .ceil() as u64;
 
         let pending_index_block = (self.index_block_builder.estimated_size_in_bytes() as f64
             * compression_ratio)
-            .ceil() as usize;
+            .ceil() as u64;
 
         let pending_metaindex_block = (self.metaindex_block_builder.estimated_size_in_bytes() as f64
             * compression_ratio)
-            .ceil() as usize;
+            .ceil() as u64;
 
         let pending_filter_block = (self.bloom_filter_writer.estimated_block_size_in_bytes() as f64
             * compression_ratio)
-            .ceil() as usize;
+            .ceil() as u64;
 
-        const PROPERTIES_BLOCK_ESTIMATE: usize = 512;
+        const PROPERTIES_BLOCK_ESTIMATE: u64 = 512;
 
         written
             + pending_data_block
@@ -234,7 +234,7 @@ impl<'a> SSTableWriter<'a> {
             + pending_filter_block
             + PROPERTIES_BLOCK_ESTIMATE
             + pending_metaindex_block
-            + (SSTABLE_FOOTER_LENGTH as usize)
+            + (SSTABLE_FOOTER_LENGTH)
     }
 
     /// Flushes the current data block to the output file.
