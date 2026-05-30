@@ -562,8 +562,11 @@ impl CompactionPicker {
     /// single partition (no boundaries). This approach ensures stable partition
     /// shapes even when compaction merges files into previously empty levels.
     ///
-    /// If the max level has N SSTables, it returns N-1 boundary keys (the max_key
-    /// of each SSTable except the last).
+    /// A boundary is only emitted after SSTable `i` if SSTable `i+1` is at least
+    /// 50% of the target SSTable size for the max level. SSTables below this
+    /// threshold are folded into the preceding partition, which breaks the
+    /// reinforcing cycle where tiny files produce tiny partitions that produce
+    /// more tiny files.
     pub fn compute_partition_boundaries(&self, levels: &Levels) -> Vec<Vec<u8>> {
         let max_level_idx = self.options.max_levels() - 1;
 
@@ -576,11 +579,18 @@ impl CompactionPicker {
                 if sstables.len() <= 1 {
                     return Vec::new();
                 }
-                // Return the max_key of all but the last SSTable.
+
+                let max_level = max_level_idx as u8;
+                let target_size = self.options.target_file_size_for_level(max_level);
+                let min_partition_size = target_size / 2;
+
+                // Emit a boundary after SSTable i only if SSTable i+1 is large enough
+                // to deserve its own partition. Small SSTables are absorbed into the
+                // preceding partition so compaction can grow them to a healthy size.
                 sstables
-                    .iter()
-                    .take(sstables.len() - 1)
-                    .map(|sst| sst.max_key.clone())
+                    .windows(2)
+                    .filter(|w| w[1].size >= min_partition_size)
+                    .map(|w| w[0].max_key.clone())
                     .collect()
             }
             Overlapping { .. } => Vec::new(),
@@ -744,6 +754,14 @@ mod tests {
             &record_key_for(DEFAULT_COLLECTION, DEFAULT_INDEX, max),
             size,
         )
+    }
+
+    /// Returns the minimum SSTable size (in bytes) required for a file in `level` to earn
+    /// its own partition boundary (i.e., 50 % of the level's target file size).
+    ///
+    /// Use this in tests that populate the max level and need boundaries to be emitted.
+    fn min_boundary_size(options: &Options, level: u8) -> u64 {
+        options.target_file_size_for_level(level) / 2
     }
 
     #[test]
@@ -993,11 +1011,12 @@ mod tests {
         // L2 with size > target to trigger compaction
         let l2_ssts = vec![create_sst(1, 2, 10, 30, 2 * l2_target)];
 
-        // L3 files that define partitions
+        // L3 files that define partitions — must be >= min_boundary_size to emit boundaries
+        let l3_min = min_boundary_size(&options, 3);
         let l3_ssts = vec![
-            create_sst(10, 3, 0, 20, 1000),
-            create_sst(11, 3, 21, 40, 1000),
-            create_sst(12, 3, 41, 60, 1000),
+            create_sst(10, 3, 0, 20, l3_min),
+            create_sst(11, 3, 21, 40, l3_min),
+            create_sst(12, 3, 41, 60, l3_min),
         ];
 
         let levels = Levels::new(options.max_levels())
@@ -1037,6 +1056,7 @@ mod tests {
         // Verify L3→L4 uses full compaction (output_level 4 < max_levels-1 = 5)
         let mut levels = Levels::new(options.max_levels());
         levels = levels.add(3, once(create_sst(1, 3, 10, 30, l3_target * 2)), empty());
+        // L4 is the max level here for boundaries; size doesn't matter for this assertion
         levels = levels.add(4, once(create_sst(10, 4, 5, 25, 1000)), empty());
 
         let job = picker.pick_compaction(&levels).unwrap();
@@ -1053,10 +1073,11 @@ mod tests {
         // Verify L4→L5 uses partial compaction (output_level 5 >= max_levels-1 = 5)
         // L4 SSTable [10, 30] spans partitions 0 (keys ≤ 20) and 1 (keys > 20)
         // Since partition 1 is the last partition, the range is unbounded on both ends
+        let l5_min = min_boundary_size(&options, 5);
         let mut levels = Levels::new(options.max_levels());
         levels = levels.add(4, once(create_sst(1, 4, 10, 30, l4_target * 2)), empty());
-        levels = levels.add(5, once(create_sst(10, 5, 0, 20, 1000)), empty());
-        levels = levels.add(5, once(create_sst(11, 5, 21, 40, 1000)), empty());
+        levels = levels.add(5, once(create_sst(10, 5, 0, 20, l5_min)), empty());
+        levels = levels.add(5, once(create_sst(11, 5, 21, 40, l5_min)), empty());
 
         let job = picker.pick_compaction(&levels).unwrap();
         assert_eq!(job.input_level, 4);
@@ -1151,6 +1172,7 @@ mod tests {
     fn test_compute_partition_boundaries() {
         let options = test_options();
         let picker = test_picker(&options); // max_levels = 4, so max level is L3
+        let l3_min = min_boundary_size(&options, 3);
 
         // Case 1: Max level (L3) is empty -> single partition (no boundaries)
         let l0_ssts = vec![create_sst(1, 0, 0, 100, 1000)];
@@ -1172,10 +1194,10 @@ mod tests {
         let levels = levels.add(2, l2_ssts, empty());
         assert!(picker.compute_partition_boundaries(&levels).is_empty());
 
-        // Case 3: L3 (max level) has 2 SSTables -> 1 boundary
+        // Case 3: L3 (max level) has 2 large SSTables -> 1 boundary
         let l3_ssts = vec![
-            create_sst(7, 3, 0, 45, 1000),
-            create_sst(8, 3, 46, 100, 1000),
+            create_sst(7, 3, 0, 45, l3_min),
+            create_sst(8, 3, 46, 100, l3_min),
         ];
         let levels = levels.add(3, l3_ssts, empty());
 
@@ -1183,8 +1205,8 @@ mod tests {
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0], record_key(45));
 
-        // Case 4: L3 (max level) has 3 SSTables -> 2 boundaries
-        let levels = levels.add(3, vec![create_sst(9, 3, 101, 150, 1000)], empty());
+        // Case 4: L3 (max level) has 3 large SSTables -> 2 boundaries
+        let levels = levels.add(3, vec![create_sst(9, 3, 101, 150, l3_min)], empty());
 
         let boundaries = picker.compute_partition_boundaries(&levels);
         assert_eq!(boundaries.len(), 2);
@@ -1193,8 +1215,37 @@ mod tests {
 
         // Case 5: Max level has only 1 SSTable -> single partition (no boundaries)
         let levels_single = Levels::new(options.max_levels())
-            .add(3, vec![create_sst(1, 3, 0, 100, 1000)], empty());
+            .add(3, vec![create_sst(1, 3, 0, 100, l3_min)], empty());
         assert!(picker.compute_partition_boundaries(&levels_single).is_empty());
+
+        // Case 6: L3 has 2 SSTables but both are too small -> no boundaries emitted
+        let levels_small = Levels::new(options.max_levels())
+            .add(3, vec![
+                create_sst(1, 3, 0, 45, 1000),
+                create_sst(2, 3, 46, 100, 1000),
+            ], empty());
+        assert!(picker.compute_partition_boundaries(&levels_small).is_empty(),
+            "Small SSTables below threshold should not emit boundaries");
+
+        // Case 7: Mixed: first SSTable large, second small -> no boundary (second is small)
+        let levels_mixed = Levels::new(options.max_levels())
+            .add(3, vec![
+                create_sst(1, 3, 0, 45, l3_min),
+                create_sst(2, 3, 46, 100, 1000),
+            ], empty());
+        assert!(picker.compute_partition_boundaries(&levels_mixed).is_empty(),
+            "Boundary should not be emitted before a small SSTable");
+
+        // Case 8: Mixed: first SSTable small, second large -> 1 boundary
+        // (the second SSTable is large enough to deserve its own partition)
+        let levels_mixed2 = Levels::new(options.max_levels())
+            .add(3, vec![
+                create_sst(1, 3, 0, 45, 1000),
+                create_sst(2, 3, 46, 100, l3_min),
+            ], empty());
+        let boundaries = picker.compute_partition_boundaries(&levels_mixed2);
+        assert_eq!(boundaries.len(), 1, "Boundary should be emitted before the large SSTable");
+        assert_eq!(boundaries[0], record_key(45));
     }
 
     #[test]
@@ -1684,6 +1735,7 @@ mod tests {
             let options = test_options(); // max_levels = 4
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // Create L2 with multiple files in different key ranges
@@ -1695,9 +1747,9 @@ mod tests {
 
             // L3 files that define partitions: [0-50], [51-100], [101-150]
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
-                create_sst(12, 3, 101, 150, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
+                create_sst(12, 3, 101, 150, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1735,6 +1787,7 @@ mod tests {
             let options = test_options(); // max_levels = 4
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // Create L2 with two non-overlapping files that map to the same L3 partition
@@ -1748,8 +1801,8 @@ mod tests {
 
             // L3 files that define partitions: boundary at key 45
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 45, 1000),
-                create_sst(11, 3, 46, 100, 1000),
+                create_sst(10, 3, 0, 45, l3_min),
+                create_sst(11, 3, 46, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1779,6 +1832,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // Create L2 files with explicit sequence numbers to verify ordering
@@ -1798,9 +1852,9 @@ mod tests {
 
             // L3 files defining partitions
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
-                create_sst(12, 3, 101, 150, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
+                create_sst(12, 3, 101, 150, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1864,6 +1918,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file in partition 0 (keys <= 50)
@@ -1876,8 +1931,8 @@ mod tests {
 
             // L3 files defining partitions: partition 0 is keys <= 50, partition 1 is keys > 50
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1898,6 +1953,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 has an SSTable in partition 1 (keys > 50) and a drop fragment in partition 0 (keys <= 50).
@@ -1912,8 +1968,8 @@ mod tests {
 
             // L3 files defining partitions
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1935,6 +1991,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file in partition 0
@@ -1945,8 +2002,8 @@ mod tests {
 
             // L3 files defining partitions
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -1966,6 +2023,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file in partition 1 (uses default collection/index)
@@ -1976,8 +2034,8 @@ mod tests {
 
             // L3 with stable partitions
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -2005,6 +2063,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file that was originally in one partition but now spans two
@@ -2015,8 +2074,8 @@ mod tests {
 
             // L3 with new split partitions
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),   // Partition 0
-                create_sst(11, 3, 51, 100, 1000), // Partition 1
+                create_sst(10, 3, 0, 50, l3_min),   // Partition 0
+                create_sst(11, 3, 51, 100, l3_min), // Partition 1
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -2054,9 +2113,9 @@ mod tests {
             // Drop uses same collection/index as SSTables
             let l2_drops = vec![DropMetadata::new_collection_drop(DEFAULT_COLLECTION, 100)];
 
-            // L3 with only one partition (the middle one was deleted)
+            // L3 with only one partition (the middle one was deleted) - single SST has no boundary
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000), // Only partition 0
+                create_sst(10, 3, 0, 50, min_boundary_size(&options, 3)), // Only partition 0
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -2076,6 +2135,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file clearly in partition 0
@@ -2087,8 +2147,8 @@ mod tests {
 
             // L3 files defining partitions at 50
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -2110,6 +2170,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let mut picker = test_picker(&options);
 
             // L2 file in partition 0 (keys <= 50)
@@ -2126,8 +2187,8 @@ mod tests {
 
             // L3 files defining partitions (partition 0 is keys <= 50)
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
 
             let levels = Levels::new(options.max_levels())
@@ -2207,27 +2268,28 @@ mod tests {
             let l2_drops = vec![drop.clone()]; // partition 0
 
             // L3 files defining partitions: 0=[0,50], 1=[51,100], 2=[101,150]
-            let l3_sst_0 = create_sst_for(
-                10,
-                3,
-                &record_key_for(col, idx, 0),
-                &record_key_for(col, idx, 50),
-                1000,
-            );
-            let l3_sst_1 = create_sst_for(
-                11,
-                3,
-                &record_key_for(col, idx, 51),
-                &record_key_for(col, idx, 100),
-                1000,
-            );
-            let l3_sst_2 = create_sst_for(
-                12,
-                3,
-                &record_key_for(col, idx, 101),
-                &record_key_for(col, idx, 150),
-                1000,
-            );
+                let l3_min = min_boundary_size(&options, 3);
+                let l3_sst_0 = create_sst_for(
+                    10,
+                    3,
+                    &record_key_for(col, idx, 0),
+                    &record_key_for(col, idx, 50),
+                    l3_min,
+                );
+                let l3_sst_1 = create_sst_for(
+                    11,
+                    3,
+                    &record_key_for(col, idx, 51),
+                    &record_key_for(col, idx, 100),
+                    l3_min,
+                );
+                let l3_sst_2 = create_sst_for(
+                    12,
+                    3,
+                    &record_key_for(col, idx, 101),
+                    &record_key_for(col, idx, 150),
+                    l3_min,
+                );
             let l3_ssts = vec![l3_sst_0.clone(), l3_sst_1, l3_sst_2];
 
             let levels = Levels::new(options.max_levels())
@@ -2277,19 +2339,20 @@ mod tests {
             let l2_drops = vec![drop.clone()];
 
             // L3 with new split partitions
+            let l3_min = min_boundary_size(&options, 3);
             let l3_sst_0 = create_sst_for(
                 10,
                 3,
                 &record_key_for(col, idx, 0),
                 &record_key_for(col, idx, 50),
-                1000,
+                l3_min,
             );   // Partition 0
             let l3_sst_1 = create_sst_for(
                 11,
                 3,
                 &record_key_for(col, idx, 51),
                 &record_key_for(col, idx, 100),
-                1000,
+                l3_min,
             ); // Partition 1
             let l3_ssts = vec![l3_sst_0.clone(), l3_sst_1.clone()];
 
@@ -2349,7 +2412,7 @@ mod tests {
                 3,
                 &record_key_for(col, idx, 0),
                 &record_key_for(col, idx, 50),
-                1000,
+                min_boundary_size(&options, 3),
             ); // Only partition 0
             let l3_ssts = vec![l3_sst.clone(),];
 
@@ -2406,22 +2469,23 @@ mod tests {
             ];
 
             // L3 files defining partitions - use collection 1 to match SSTable
-            let collection = 2;
-            let l3_sst_10 = create_sst_for(
-                10,
-                3,
-                &record_key_for(collection, 0, 0),
-                &record_key_for(collection, 0, 50),
-                1000,
-            ); // Partition 0
-            let collection = 3;
-            let l3_sst_11 = create_sst_for(
-                11,
-                3,
-                &record_key_for(collection, 0, 51),
-                &record_key_for(collection, 0, 100),
-                1000,
-            ); // Partition 1
+                let l3_min = min_boundary_size(&options, 3);
+                let collection = 2;
+                let l3_sst_10 = create_sst_for(
+                    10,
+                    3,
+                    &record_key_for(collection, 0, 0),
+                    &record_key_for(collection, 0, 50),
+                    l3_min,
+                ); // Partition 0
+                let collection = 3;
+                let l3_sst_11 = create_sst_for(
+                    11,
+                    3,
+                    &record_key_for(collection, 0, 51),
+                    &record_key_for(collection, 0, 100),
+                    l3_min,
+                ); // Partition 1
             let l3_ssts = vec![
                 l3_sst_10.clone(),
                 l3_sst_11.clone(),
@@ -2472,6 +2536,7 @@ mod tests {
             let idx_drop = DropMetadata::new_index_drop(10, 1, 100);
 
             // L3 files defining partitions
+            let l3_min = min_boundary_size(&options, 3);
             let l3_sst_1 =
                 Arc::new(SSTableMetadata::new(
                     1,
@@ -2480,7 +2545,7 @@ mod tests {
                     &record_key_for(11, 0, 50),
                     100,
                     150,
-                    1000,
+                    l3_min,
                 ));
 
             let l3_sst_2 =
@@ -2491,7 +2556,7 @@ mod tests {
                     &record_key_for(11, 1, 50),
                     100,
                     150,
-                    1000,
+                    l3_min,
                 ));
 
             let levels = Levels::new(options.max_levels())
@@ -2546,20 +2611,21 @@ mod tests {
 
             // L3 files defining partitions
             // Partition 0: keys up to (col_2, idx, 50)
+            let l3_min = min_boundary_size(&options, 3);
             let boundary_key = record_key_for(col_2, idx, 50);
             let l3_10_sst = create_sst_for(
                 10,
                 3,
                 &record_key_for(col, idx, 1),
                 &boundary_key,
-                1000
+                l3_min
             );
             let l3_11_sst = create_sst_for(
                 11,
                 3,
                 &record_key_for(col_2, idx, 51),
                 &record_key_for(col_2, idx, 3000),
-                1000
+                l3_min
             );
 
             let levels = Levels::new(options.max_levels())
@@ -2609,6 +2675,7 @@ mod tests {
             let l2_drops = vec![DropMetadata::new_collection_drop(2, 100)];
 
             // L3 files defining partitions using collection 1
+            let l3_min = min_boundary_size(&options, 3);
             let collection = 1;
             let collection1 = 1;
             let l3_ssts = vec![
@@ -2617,14 +2684,14 @@ mod tests {
                     3,
                     &record_key_for(collection1, 0, 0),
                     &record_key_for(collection1, 0, 50),
-                    1000,
+                    l3_min,
                 ),
                 create_sst_for(
                     11,
                     3,
                     &record_key_for(collection, 0, 51),
                     &record_key_for(collection, 0, 100),
-                    1000,
+                    l3_min,
                 ),
             ];
 
@@ -2681,6 +2748,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let (mut picker, registry) = test_picker_with_registry(&options);
 
             // L0→L1 is full compaction
@@ -2698,8 +2766,8 @@ mod tests {
             // L2→L3 is partial compaction
             let l2_ssts = vec![create_sst(100, 2, 10, 30, l2_target * 2)];
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
             ];
             let levels = Levels::new(options.max_levels())
                 .add(2, l2_ssts, empty())
@@ -2736,6 +2804,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let (mut picker, registry) = test_picker_with_registry(&options);
 
             // Two L2 files mapping to the same partition
@@ -2744,8 +2813,8 @@ mod tests {
                 create_sst(2, 2, 35, 44, l2_target),
             ];
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 45, 1000),
-                create_sst(11, 3, 46, 100, 1000),
+                create_sst(10, 3, 0, 45, l3_min),
+                create_sst(11, 3, 46, 100, l3_min),
             ];
             let levels = Levels::new(options.max_levels())
                 .add(2, l2_ssts, empty())
@@ -2855,6 +2924,7 @@ mod tests {
             let options = test_options();
             let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
             let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
             let (mut picker, registry) = test_picker_with_registry(&options);
 
             // Create L2 files in different partitions for parallel compaction
@@ -2863,9 +2933,9 @@ mod tests {
                 create_sst(2, 2, 110, 130, l2_target),
             ];
             let l3_ssts = vec![
-                create_sst(10, 3, 0, 50, 1000),
-                create_sst(11, 3, 51, 100, 1000),
-                create_sst(12, 3, 101, 150, 1000),
+                create_sst(10, 3, 0, 50, l3_min),
+                create_sst(11, 3, 51, 100, l3_min),
+                create_sst(12, 3, 101, 150, l3_min),
             ];
             let levels = Levels::new(options.max_levels())
                 .add(2, l2_ssts, empty())
