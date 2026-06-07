@@ -1,19 +1,19 @@
-pub (crate) mod buffer;
-pub (crate) mod byte_reader;
-pub (crate) mod byte_writer;
-pub (crate) mod checksum;
-pub (crate) mod compressor;
-pub (crate) mod varint;
-pub (crate) mod serializable;
-pub (crate) mod bitset;
+pub(crate) mod bitset;
+pub(crate) mod buffer;
+pub(crate) mod byte_reader;
+pub(crate) mod byte_writer;
+pub(crate) mod checksum;
+pub(crate) mod compressor;
+pub(crate) mod serializable;
+pub(crate) mod varint;
 
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
+use crate::warn;
 use std::fs::{File, OpenOptions};
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, ptr};
-use crate::warn;
 
 /// A trait for reading little-endian integers directly from byte slices
 /// without additional allocations. These methods perform **zero-copy**
@@ -199,7 +199,10 @@ pub fn mark_file_as_corrupted(logger: Arc<dyn LoggerAndTracer>, file_path: &Path
         sync_dir(parent)?;
     }
 
-    warn!(logger, "Marked WAL file as corrupted: {:?} -> {:?}", file_path, corrupted_path);
+    warn!(
+        logger,
+        "Marked WAL file as corrupted: {:?} -> {:?}", file_path, corrupted_path
+    );
 
     Ok(())
 }
@@ -232,6 +235,14 @@ pub fn truncate_file(file_path: &Path, size: u64) -> Result<()> {
     file.sync_all()?; // Ensure metadata and contents are flushed
 
     Ok(())
+}
+
+pub fn unexpected_eof(error: impl std::fmt::Display) -> Error {
+    Error::new(ErrorKind::UnexpectedEof, error.to_string())
+}
+
+pub fn invalid_data(error: impl std::fmt::Display) -> Error {
+    Error::new(ErrorKind::InvalidData, error.to_string())
 }
 
 #[cfg(test)]

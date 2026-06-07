@@ -988,6 +988,10 @@ impl BsonKey for BsonValue {
     fn try_into_key(&self) -> Result<Vec<u8>> {
         self.0.try_into_key()
     }
+
+    fn try_into_key_with_type(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.0.try_into_key_with_type()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

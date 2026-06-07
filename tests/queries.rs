@@ -612,6 +612,157 @@ fn test_id_in_query_with_other_filters() {
 }
 
 #[test]
+fn test_point_query_cross_numeric_types() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // _id values are stored as i32. Query with f64 equivalent.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": 5.0_f64 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[5]);
+
+    // Query with i64 equivalent.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": 5_i64 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[5]);
+}
+
+#[test]
+fn test_point_query_cross_numeric_types_on_non_id_field() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // "qty" is stored as i32. Query with f64 equivalent (qty: 25 -> _id: 1).
+    let results: Vec<Document> = collection
+        .find(doc! { "qty": 25.0_f64 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[1]);
+
+    // Query with i64 equivalent.
+    let results: Vec<Document> = collection
+        .find(doc! { "qty": 25_i64 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[1]);
+}
+
+#[test]
+fn test_range_query_cross_numeric_types() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // _id stored as i32. Range query with f64 bounds.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$gte": 3.0_f64, "$lt": 6.0_f64 } })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[3, 4, 5]);
+
+    // Range query with i64 bounds.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$gte": 3_i64, "$lt": 6_i64 } })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[3, 4, 5]);
+}
+
+#[test]
+fn test_in_query_cross_numeric_types() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // $in with mixed numeric types against i32 _id values.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [1.0_f64, 3_i64, 5] } })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[1, 3, 5]);
+}
+
+#[test]
+fn test_point_query_f64_stored_queried_as_i32() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+    let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+    let collection = db.collection("float_ids");
+
+    // Store documents with f64 _id values that are whole numbers.
+    collection
+        .insert_many(vec![
+            doc! { "_id": 10.0_f64, "name": "ten" },
+            doc! { "_id": 20.0_f64, "name": "twenty" },
+            doc! { "_id": 30.0_f64, "name": "thirty" },
+        ])
+        .unwrap();
+
+    // Query with i32 equivalent.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": 20 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("name").unwrap(), "twenty");
+
+    // Query with i64 equivalent.
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": 20_i64 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("name").unwrap(), "twenty");
+}
+
+#[test]
+fn test_comparison_query_cross_numeric_types_on_field() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    // qty is i32. Query $gt with f64 — qty > 75.0 should match qty=85 (_id=7) and qty=100 (_id=3).
+    let results: Vec<Document> = collection
+        .find(doc! { "qty": { "$gt": 75.0_f64 } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[3, 7]);
+
+    // qty > 75 as i64
+    let results: Vec<Document> = collection
+        .find(doc! { "qty": { "$gt": 75_i64 } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[3, 7]);
+}
+
+#[test]
 fn test_id_in_with_range_queries() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

@@ -418,7 +418,12 @@ impl Level {
             Overlapping { level, sstables, drops, size }
             | NonOverlapping { level, sstables, drops, size } => {
                 let new_sstables = sstables.iter().cloned().filter(|sst| !sstables_to_remove.contains(sst)).collect::<Vec<_>>();
-                assert_eq!(sstables.len(), new_sstables.len() + sstables_to_remove.len());
+
+                assert_eq!(sstables.len(), new_sstables.len() + sstables_to_remove.len(),
+                           "unexpected issue with sstables removal. [previous: {:?}, new: {:?}, removed: {:?}]",
+                           sstables,
+                           new_sstables,
+                           sstables_to_remove);
 
                 let new_size = size - sstables_to_remove.iter().map(|sst| sst.size).sum::<u64>();
 

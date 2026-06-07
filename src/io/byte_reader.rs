@@ -28,24 +28,18 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
     }
 
     pub fn read_u32_le(&self) -> Result<u32> {
-        let pos = self.position.get();
-        let value = self.buffer.as_ref().read_u32_le(pos);
-        self.position.set(pos + 4);
-        Ok(value)
+        let bytes = self.read_fixed_slice(4)?;
+        Ok(bytes.read_u32_le(0))
     }
 
     pub fn read_u32_be(&self) -> Result<u32> {
-        let pos = self.position.get();
-        let value = self.buffer.as_ref().read_u32_be(pos);
-        self.position.set(pos + 4);
-        Ok(value)
+        let bytes = self.read_fixed_slice(4)?;
+        Ok(bytes.read_u32_be(0))
     }
 
     pub fn read_u64_be(&self) -> Result<u64> {
-        let pos = self.position.get();
-        let value = self.buffer.as_ref().read_u64_be(pos);
-        self.position.set(pos + 8);
-        Ok(value)
+        let bytes = self.read_fixed_slice(8)?;
+        Ok(bytes.read_u64_be(0))
     }
 
     pub fn peek_i32_le(&self) -> Result<i32> {
@@ -53,17 +47,13 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
     }
 
     pub fn read_i32_le(&self) -> Result<i32> {
-        let pos = self.position.get();
-        let value = self.buffer.as_ref().read_i32_le(pos);
-        self.position.set(pos + 4);
-        Ok(value)
+        let bytes = self.read_fixed_slice(4)?;
+        Ok(bytes.read_i32_le(0))
     }
 
     pub fn read_i64_le(&self) -> Result<i64> {
-        let pos = self.position.get();
-        let value = self.buffer.as_ref().read_i64_le(pos);
-        self.position.set(pos + 8);
-        Ok(value)
+        let bytes = self.read_fixed_slice(8)?;
+        Ok(bytes.read_i64_le(0))
     }
 
     pub fn read_length_prefixed_slice(&self) -> Result<&[u8]> {
@@ -169,8 +159,8 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::io::varint::{write_u64, write_u32, write_i64}; // Adjust path as needed
+    use crate::io::varint::{write_i64, write_u32, write_u64};
+    use std::sync::Arc; // Adjust path as needed
 
     #[test]
     fn test_read_varint_u64() {
@@ -197,8 +187,18 @@ mod tests {
     #[test]
     fn test_read_varint_i64() {
         let values = [
-            0i64, -0i64, 127, -127, 128, -128, 16_383, -16_384,
-            16_384, -16_384, i64::MIN, i64::MAX,
+            0i64,
+            -0i64,
+            127,
+            -127,
+            128,
+            -128,
+            16_383,
+            -16_384,
+            16_384,
+            -16_384,
+            i64::MIN,
+            i64::MAX,
         ];
         for &value in &values {
             let mut buf = Vec::new();
