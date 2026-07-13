@@ -1,7 +1,9 @@
 use crate::error::{Error, Result};
+use crate::query::execution::filters;
+use crate::query::execution::updates::Mode::{CreateIfMissing, Get};
 use crate::query::update::{
-    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr, UpdateOp,
-    UpdatePath, UpdatePathComponent,
+    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
+    UpdateOp, UpdatePath, UpdatePathComponent,
 };
 use crate::query::{get_path_value, BsonValue, BsonValueRef, Expr, Parameters};
 use crate::util::bson_utils::{
@@ -11,14 +13,11 @@ use bson::{Bson, Document};
 use std::cmp::PartialEq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use crate::query::execution::filters;
-use crate::query::execution::updates::Mode::{CreateIfMissing, Get};
 
 pub fn to_updater(
     update: &UpdateExpr,
     insert: bool,
 ) -> Result<Box<dyn Fn(Document) -> Result<Document> + Send + Sync>> {
-
     let array_filters = Arc::new(to_value_filters(&update.array_filters));
 
     let mut operations: Vec<Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync>> = vec![];
@@ -55,7 +54,6 @@ pub fn to_updater(
                 }
             }
             UpdateOp::Rename { from, to } => {
-
                 // cannot rename root document
                 if !from.is_empty() {
                     operations.push(Box::new(to_rename_operation(from.clone(), to.clone())));
@@ -177,25 +175,26 @@ pub fn to_updater(
                 )));
             }
             UpdateOp::AddToSet { path, values } => {
-
                 let values_to_add = match values {
                     EachOrSingle::Single(expr) => {
-                        vec![{ match expr.as_ref() {
-                            Expr::Literal(v) => v.clone(),
-                            _ => unreachable!("Non-literal value in $addToSet after validation"),
-                        }}]
-                    }
-                    EachOrSingle::Each(exprs) => {
-                        exprs
-                            .iter()
-                            .map(|value_expr| match value_expr.as_ref() {
+                        vec![{
+                            match expr.as_ref() {
                                 Expr::Literal(v) => v.clone(),
-                                _ => unreachable!(
-                                    "Non-literal value in $addToSet with $each after validation"
-                                ),
-                            })
-                            .collect()
+                                _ => {
+                                    unreachable!("Non-literal value in $addToSet after validation")
+                                }
+                            }
+                        }]
                     }
+                    EachOrSingle::Each(exprs) => exprs
+                        .iter()
+                        .map(|value_expr| match value_expr.as_ref() {
+                            Expr::Literal(v) => v.clone(),
+                            _ => unreachable!(
+                                "Non-literal value in $addToSet with $each after validation"
+                            ),
+                        })
+                        .collect(),
                 };
                 let values_to_add = dedup_values(&values_to_add);
                 operations.push(Box::new(to_add_to_set_operation(
@@ -215,8 +214,11 @@ pub fn to_updater(
     }))
 }
 
-fn to_value_filters(array_filters: &BTreeMap<String, Arc<Expr>>) -> BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
-    let mut filters_map: BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> = BTreeMap::new();
+fn to_value_filters(
+    array_filters: &BTreeMap<String, Arc<Expr>>,
+) -> BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
+    let mut filters_map: BTreeMap<String, Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> =
+        BTreeMap::new();
     let params = Parameters::new();
     for (identifier, expr) in array_filters {
         let filter_fn = filters::to_value_filter(expr.clone(), &params);
@@ -434,7 +436,9 @@ where
 
 fn validate_non_empty_path(path: &UpdatePath) -> Result<()> {
     if path.is_empty() {
-        Err(Error::InvalidRequest("Update path cannot be empty".to_string()))
+        Err(Error::InvalidRequest(
+            "Update path cannot be empty".to_string(),
+        ))
     } else {
         Ok(())
     }
@@ -455,20 +459,30 @@ where
             doc.insert(name.clone(), new_val);
         }
         (BsonComponent::Array(arr), UpdatePathComponent::ArrayElement(idx)) => {
-            let existing = if *idx < arr.len() { Some(&arr[*idx]) } else { None };
+            let existing = if *idx < arr.len() {
+                Some(&arr[*idx])
+            } else {
+                None
+            };
             let new_val = mutator(existing)?;
             while arr.len() <= *idx {
                 arr.push(Bson::Null);
             }
             arr[*idx] = new_val;
         }
-        (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::FieldName(name)) => {
+        (
+            BsonComponent::MissingField { parent, field_name },
+            UpdatePathComponent::FieldName(name),
+        ) => {
             let new_val = mutator(None)?;
             let mut new_doc = Document::new();
             new_doc.insert(name.clone(), new_val);
             parent.insert(field_name, Bson::Document(new_doc));
         }
-        (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::ArrayElement(idx)) => {
+        (
+            BsonComponent::MissingField { parent, field_name },
+            UpdatePathComponent::ArrayElement(idx),
+        ) => {
             let new_val = mutator(None)?;
             let mut new_arr = Vec::new();
             while new_arr.len() < *idx {
@@ -532,7 +546,6 @@ where
     Ok(())
 }
 
-
 fn to_unset_operation(path: UpdatePath) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
     move |doc: &mut Document| {
         if path.is_empty() {
@@ -579,7 +592,6 @@ fn to_rename_operation(
     to: UpdatePath,
 ) -> impl Fn(&mut Document) -> Result<()> + Send + Sync {
     move |doc: &mut Document| {
-
         // --- Extract value from 'from' path ---
         let from_parent_path = &from[..from.len() - 1];
         let from_last_component = &from[from.len() - 1];
@@ -587,8 +599,7 @@ fn to_rename_operation(
         let value_to_move = {
             let root_component_for_from = BsonComponent::Document(doc);
             // Rename does not support positional operators, so we use an empty filter map.
-            let from_parent_component =
-                traverse(root_component_for_from, from_parent_path, Get)?;
+            let from_parent_component = traverse(root_component_for_from, from_parent_path, Get)?;
 
             if let Some(parent) = from_parent_component {
                 match (parent, from_last_component) {
@@ -604,7 +615,8 @@ fn to_rename_operation(
                     (BsonComponent::Array(_), _) => {
                         return Err(Error::InvalidRequest(
                             "the source for $rename must be a document field, not inside an array"
-                                .to_string()));
+                                .to_string(),
+                        ));
                     }
                     // Path doesn't fully exist, so it's a no-op.
                     (BsonComponent::MissingField { .. }, _) => None,
@@ -728,7 +740,10 @@ where
                         Ok(())
                     }
                 }
-                (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::FieldName(name)) => {
+                (
+                    BsonComponent::MissingField { parent, field_name },
+                    UpdatePathComponent::FieldName(name),
+                ) => {
                     let mut arr = vec![];
                     mutator(&mut arr)?;
                     let mut new_doc = Document::new();
@@ -736,7 +751,10 @@ where
                     parent.insert(field_name, Bson::Document(new_doc));
                     Ok(())
                 }
-                (BsonComponent::MissingField { parent, field_name }, UpdatePathComponent::ArrayElement(idx)) => {
+                (
+                    BsonComponent::MissingField { parent, field_name },
+                    UpdatePathComponent::ArrayElement(idx),
+                ) => {
                     let mut arr = vec![];
                     mutator(&mut arr)?;
                     let mut new_arr = Vec::new();
@@ -747,7 +765,10 @@ where
                     parent.insert(field_name, Bson::Array(new_arr));
                     Ok(())
                 }
-                (BsonComponent::MissingArrayElement { parent, index }, UpdatePathComponent::FieldName(name)) => {
+                (
+                    BsonComponent::MissingArrayElement { parent, index },
+                    UpdatePathComponent::FieldName(name),
+                ) => {
                     while parent.len() <= index {
                         parent.push(Bson::Null);
                     }
@@ -758,7 +779,10 @@ where
                     parent[index] = Bson::Document(new_doc);
                     Ok(())
                 }
-                (BsonComponent::MissingArrayElement { parent, index }, UpdatePathComponent::ArrayElement(idx)) => {
+                (
+                    BsonComponent::MissingArrayElement { parent, index },
+                    UpdatePathComponent::ArrayElement(idx),
+                ) => {
                     while parent.len() <= index {
                         parent.push(Bson::Null);
                     }
@@ -813,7 +837,10 @@ fn to_push_operation(
     to_array_modifier_operation(path, mutator, "$push", array_filters)
 }
 
-fn to_push_fn(values: Vec<Bson>, position: Option<i32>) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> {
+fn to_push_fn(
+    values: Vec<Bson>,
+    position: Option<i32>,
+) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> {
     Box::new(move |arr: &mut Vec<Bson>| {
         if !values.is_empty() {
             let temp_values = values.clone();
@@ -841,16 +868,12 @@ fn to_push_fn(values: Vec<Bson>, position: Option<i32>) -> Box<dyn Fn(&mut Vec<B
 fn to_sort_fn(sort: Option<PushSort>) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> {
     if let Some(sort) = sort {
         match sort {
-            PushSort::Ascending => {
-                Box::new(move |arr: &mut Vec<Bson>| {
-                    arr.sort_by(|a, b| BsonValueRef(a).cmp(&BsonValueRef(b)))
-                })
-            }
-            PushSort::Descending => {
-                Box::new(move |arr: &mut Vec<Bson>| {
-                    arr.sort_by(|a, b| BsonValueRef(b).cmp(&BsonValueRef(a)))
-                })
-            }
+            PushSort::Ascending => Box::new(move |arr: &mut Vec<Bson>| {
+                arr.sort_by(|a, b| BsonValueRef(a).cmp(&BsonValueRef(b)))
+            }),
+            PushSort::Descending => Box::new(move |arr: &mut Vec<Bson>| {
+                arr.sort_by(|a, b| BsonValueRef(b).cmp(&BsonValueRef(a)))
+            }),
             PushSort::ByFields(fields) => {
                 use crate::query::PathComponent;
                 use std::cmp::Ordering;
@@ -906,7 +929,6 @@ fn to_slice_fn(slice: Option<i32>) -> Box<dyn Fn(&mut Vec<Bson>) + Send + Sync> 
         Box::new(|_| {})
     }
 }
-
 
 /// The $pull operation removes all instances of a value or values that match a specified condition
 /// from an existing array. If the target field does not exist or is not an array, the operation
@@ -1120,11 +1142,12 @@ impl<'a> BsonComponent<'a> {
                     "Cannot use array index {} to index into a document",
                     index
                 ))),
-                c @ UpdatePathComponent::AllElements
-                | c @ UpdatePathComponent::Filtered(_) => Err(Error::InvalidRequest(format!(
-                    "Cannot apply positional operator ('{}') to a document",
-                    c
-                ))),
+                c @ UpdatePathComponent::AllElements | c @ UpdatePathComponent::Filtered(_) => {
+                    Err(Error::InvalidRequest(format!(
+                        "Cannot apply positional operator ('{}') to a document",
+                        c
+                    )))
+                }
             },
             BsonComponent::Array(arr) => match path_component {
                 UpdatePathComponent::ArrayElement(index) => {
@@ -1155,10 +1178,7 @@ impl<'a> BsonComponent<'a> {
                     c
                 ))),
             },
-            BsonComponent::MissingField {
-                parent,
-                field_name,
-            } => match path_component {
+            BsonComponent::MissingField { parent, field_name } => match path_component {
                 UpdatePathComponent::FieldName(name) => {
                     let new_doc = Document::new();
                     parent.insert(&field_name, Bson::Document(new_doc));
@@ -1306,7 +1326,8 @@ where
                 }
                 _ => {
                     // Not a positional operator, treat as a standard step on an array.
-                    if let Some(next_component) = BsonComponent::Array(arr).step(current_pc, mode)?
+                    if let Some(next_component) =
+                        BsonComponent::Array(arr).step(current_pc, mode)?
                     {
                         traverse_and_apply(
                             next_component,
@@ -1342,8 +1363,7 @@ fn traverse<'a>(
         // Positional operators are not supported in this traversal mode.
         if matches!(
             path_component,
-            UpdatePathComponent::AllElements
-                | UpdatePathComponent::Filtered(_)
+            UpdatePathComponent::AllElements | UpdatePathComponent::Filtered(_)
         ) {
             return Err(Error::InvalidRequest(format!(
                 "Positional operator {} not supported in this context",
@@ -1392,10 +1412,7 @@ mod tests {
 
     #[test]
     fn test_set_nested() {
-        let update_expr = update([set(
-            [field("a"), field("b")],
-            10,
-        )]);
+        let update_expr = update([set([field("a"), field("b")], 10)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! {};
@@ -1413,36 +1430,42 @@ mod tests {
 
     #[test]
     fn test_set_nested_within_array() {
-        let update_expr = update([set(
-            [field("a"), index(2), field("b")],
-            30,
-        )]);
+        let update_expr = update([set([field("a"), index(2), field("b")], 30)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "a": [{"b" : 0},  {"b" : 10}, { "b": 20 }]};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [{"b" : 0},  {"b" : 10}, { "b": 30 }]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [{"b" : 0},  {"b" : 10}, { "b": 30 }]}
+        );
 
         let doc = doc! { "a": []};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [Bson::Null,  Bson::Null, { "b": 30 }]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [Bson::Null,  Bson::Null, { "b": 30 }]}
+        );
 
         let doc = doc! {};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [Bson::Null,  Bson::Null, { "b": 30 }]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [Bson::Null,  Bson::Null, { "b": 30 }]}
+        );
     }
 
     #[test]
     fn test_set_array_nested_within_array() {
-        let update_expr = update([set(
-            [field("a"), index(2), index(1)],
-            30,
-        )]);
+        let update_expr = update([set([field("a"), index(2), index(1)], 30)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "a": [[1, 2, 3], [4, 5, 6], [7, 8, 9]]};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [[1, 2, 3],  [4, 5, 6], [7, 30, 9]]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [[1, 2, 3],  [4, 5, 6], [7, 30, 9]]}
+        );
 
         let doc = doc! { "a": [[1, 2, 3], [4, 5, 6], [7]]};
         let updated_doc = updater(doc).unwrap();
@@ -1450,15 +1473,24 @@ mod tests {
 
         let doc = doc! { "a": [[1, 2, 3], [4, 5, 6]]};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [[1, 2, 3],  [4, 5, 6], [Bson::Null, 30]]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [[1, 2, 3],  [4, 5, 6], [Bson::Null, 30]]}
+        );
 
         let doc = doc! { "a": []};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [Bson::Null,  Bson::Null, [Bson::Null, 30]]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [Bson::Null,  Bson::Null, [Bson::Null, 30]]}
+        );
 
         let doc = doc! {};
         let updated_doc = updater(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "a": [Bson::Null,  Bson::Null, [Bson::Null, 30]]});
+        assert_eq!(
+            updated_doc,
+            doc! { "a": [Bson::Null,  Bson::Null, [Bson::Null, 30]]}
+        );
     }
 
     #[test]
@@ -1565,10 +1597,7 @@ mod tests {
 
     #[test]
     fn test_rename_simple() {
-        let update_expr = update([rename(
-            [field("a")],
-            [field("c")],
-        )]);
+        let update_expr = update([rename([field("a")], [field("c")])]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "a": 1, "b": 2 };
@@ -1578,10 +1607,7 @@ mod tests {
 
     #[test]
     fn test_rename_non_existent() {
-        let update_expr = update([rename(
-            [field("a")],
-            [field("c")],
-        )]);
+        let update_expr = update([rename([field("a")], [field("c")])]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "b": 2 };
@@ -1591,10 +1617,7 @@ mod tests {
 
     #[test]
     fn test_rename_nested() {
-        let update_expr = update([rename(
-            [field("a"), field("b")],
-            [field("a"), field("c")],
-        )]);
+        let update_expr = update([rename([field("a"), field("b")], [field("a"), field("c")])]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "a": { "b": 1 }, "d": 4 };
@@ -1735,7 +1758,9 @@ mod tests {
 
         let updated = updater(doc! {}).unwrap();
         match updated.get("a") {
-            Some(Bson::Document(inner)) => assert!(matches!(inner.get("b"), Some(Bson::DateTime(_)))),
+            Some(Bson::Document(inner)) => {
+                assert!(matches!(inner.get("b"), Some(Bson::DateTime(_))))
+            }
             other => panic!("expected document at 'a', got {:?}", other),
         }
     }
@@ -1829,13 +1854,11 @@ mod tests {
     // -----------------------------
     // $push
     // -----------------------------
-    use crate::query::update_fn::{push_single, push_spec, push_each_spec, by_fields_sort};
+    use crate::query::update_fn::{by_fields_sort, push_each_spec, push_single, push_spec};
 
     #[test]
     fn test_push_simple_and_create_array() {
-        let update_expr = update([
-            push_single([field("a")], 1),
-        ]);
+        let update_expr = update([push_single([field("a")], 1)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         // create
@@ -1849,21 +1872,23 @@ mod tests {
 
     #[test]
     fn test_push_literal_document_with_modifier_like_key() {
-        let update_expr = update([
-            push_single([field("items")], doc! { "name": "item1", "$slice": 5 }),
-        ]);
+        let update_expr = update([push_single(
+            [field("items")],
+            doc! { "name": "item1", "$slice": 5 },
+        )]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let updated = updater(doc! { "items": [] }).unwrap();
-        assert_eq!(updated, doc! { "items": [ { "name": "item1", "$slice": 5 } ] });
+        assert_eq!(
+            updated,
+            doc! { "items": [ { "name": "item1", "$slice": 5 } ] }
+        );
     }
 
     #[test]
     fn test_push_with_position_each() {
         let spec = push_each_spec([10, 11], Some(1), None, None);
-        let update_expr = update([
-            push_spec([field("a")], spec),
-        ]);
+        let update_expr = update([push_spec([field("a")], spec)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let updated = updater(doc! { "a": [1, 2, 3] }).unwrap();
@@ -1873,9 +1898,7 @@ mod tests {
     #[test]
     fn test_push_with_negative_position_each() {
         let spec = push_each_spec([10, 11], Some(-2), None, None);
-        let update_expr = update([
-            push_spec([field("a")], spec),
-        ]);
+        let update_expr = update([push_spec([field("a")], spec)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let updated = updater(doc! { "a": [1, 2, 3] }).unwrap();
@@ -1885,9 +1908,7 @@ mod tests {
     #[test]
     fn test_push_with_negative_position_greater_then_array_length_each() {
         let spec = push_each_spec([10, 11], Some(-5), None, None);
-        let update_expr = update([
-            push_spec([field("a")], spec),
-        ]);
+        let update_expr = update([push_spec([field("a")], spec)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let updated = updater(doc! { "a": [1, 2, 3] }).unwrap();
@@ -1901,22 +1922,24 @@ mod tests {
             [doc! { "wk": 5, "score": 8 }, doc! { "wk": 6, "score": 7 }],
             None,
             Some(-2),
-            Some(by_fields_sort(std::collections::BTreeMap::from([("score".into(), -1)]))),
+            Some(by_fields_sort(std::collections::BTreeMap::from([(
+                "score".into(),
+                -1,
+            )]))),
         );
-        let update_expr = update([
-            push_spec([field("quizzes")], spec),
-        ]);
+        let update_expr = update([push_spec([field("quizzes")], spec)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let updated = updater(doc! { "quizzes": [ { "wk": 4, "score": 9 } ] }).unwrap();
-        assert_eq!(updated, doc! { "quizzes": [ { "wk": 5, "score": 8 }, { "wk": 6, "score": 7 } ] });
+        assert_eq!(
+            updated,
+            doc! { "quizzes": [ { "wk": 5, "score": 8 }, { "wk": 6, "score": 7 } ] }
+        );
     }
 
     #[test]
     fn test_push_on_non_array_errors() {
-        let update_expr = update([
-            push_single([field("a")], 1),
-        ]);
+        let update_expr = update([push_single([field("a")], 1)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let result = updater(doc! { "a": "oops" });
@@ -1961,20 +1984,21 @@ mod tests {
 
     #[test]
     fn test_push_creates_nested_path() {
-        let update_expr = update([
-            push_single([field("metadata"), field("history")], "event1"),
-        ]);
+        let update_expr = update([push_single([field("metadata"), field("history")], "event1")]);
 
         let updater = to_updater(&update_expr, false).unwrap();
         let updated = updater(doc! { "_id": 1,
-            "item": "journal",
-            "dim_cm": [ 14, 21 ] }).unwrap();
+        "item": "journal",
+        "dim_cm": [ 14, 21 ] })
+        .unwrap();
 
-        assert_eq!(updated,
-                   doc! { "_id": 1,
-                       "item": "journal",
-                       "dim_cm": [ 14, 21 ],
-                       "metadata": { "history": ["event1"] } });
+        assert_eq!(
+            updated,
+            doc! { "_id": 1,
+            "item": "journal",
+            "dim_cm": [ 14, 21 ],
+            "metadata": { "history": ["event1"] } }
+        );
     }
 
     // -----------------------------
@@ -2020,7 +2044,7 @@ mod tests {
     // -----------------------------
     // $pull and $pullAll
     // -----------------------------
-    use crate::query::{expr_fn as ef};
+    use crate::query::expr_fn as ef;
 
     #[test]
     fn test_pull_equals_scalar() {
@@ -2051,7 +2075,9 @@ mod tests {
         let update_expr = update([pull_matches([field("quizzes")], criterion)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
-        let updated = updater(doc! { "quizzes": [ { "score": 8, "wk": 5 }, { "score": 7, "wk": 6 } ] }).unwrap();
+        let updated =
+            updater(doc! { "quizzes": [ { "score": 8, "wk": 5 }, { "score": 7, "wk": 6 } ] })
+                .unwrap();
         assert_eq!(updated, doc! { "quizzes": [ { "score": 7, "wk": 6 } ] });
     }
 
@@ -2100,12 +2126,7 @@ mod tests {
     #[test]
     fn test_bit_on_missing_defaults_to_zero() {
         // OR 0b0010 to missing field => 0b0010
-        let update_expr = update([bit(
-            [field("a")],
-            None,
-            Some(0b0010),
-            None,
-        )]);
+        let update_expr = update([bit([field("a")], None, Some(0b0010), None)]);
         let updater = to_updater(&update_expr, false).unwrap();
         let updated = updater(doc! {}).unwrap();
         assert_eq!(updated, doc! { "a": 0b0010 });
@@ -2122,39 +2143,39 @@ mod tests {
     // -----------------------------
     // Positional operators: $[] and $[id] with arrayFilters
     // -----------------------------
-    use crate::query::update_fn::{all, update_with_filters, filter};
+    use crate::query::update_fn::{all, filter, update_with_filters};
 
     #[test]
     fn test_positional_all_elements_set_field() {
         // $set: { "grades.$[].mean": 100 }
-        let update_expr = update([set(
-            [field("grades"), all(), field("mean")],
-            100,
-        )]);
+        let update_expr = update([set([field("grades"), all(), field("mean")], 100)]);
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "grades": [ { "mean": 70 }, { "mean": 80 } ] };
         let updated = updater(doc).unwrap();
-        assert_eq!(updated, doc! { "grades": [ { "mean": 100 }, { "mean": 100 } ] });
+        assert_eq!(
+            updated,
+            doc! { "grades": [ { "mean": 100 }, { "mean": 100 } ] }
+        );
     }
 
     #[test]
     fn test_filtered_positional_with_array_filters() {
         // $set: { "grades.$[elem].mean": 100 }, arrayFilters: [{ "elem.grade": { "$gte": 85 } }]
-        let ops = [set(
-            [field("grades"), filter("elem"), field("mean")],
-            100,
-        )];
+        let ops = [set([field("grades"), filter("elem"), field("mean")], 100)];
         let filters = [(
             "elem".to_string(),
-            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))])
+            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))]),
         )];
         let update_expr = Arc::new(update_with_filters(ops, filters));
         let updater = to_updater(&update_expr, false).unwrap();
 
         let doc = doc! { "grades": [ { "grade": 90, "mean": 70 }, { "grade": 80, "mean": 60 } ] };
         let updated = updater(doc).unwrap();
-        assert_eq!(updated, doc! { "grades": [ { "grade": 90, "mean": 100 }, { "grade": 80, "mean": 60 } ] });
+        assert_eq!(
+            updated,
+            doc! { "grades": [ { "grade": 90, "mean": 100 }, { "grade": 80, "mean": 60 } ] }
+        );
     }
 
     #[test]
@@ -2187,15 +2208,26 @@ mod tests {
         let updater = to_updater(&update_expr, false).unwrap();
         let doc = doc! { "grades": [ { "scores": [70] }, { "scores": [80] } ] };
         let updated = updater(doc).unwrap();
-        assert_eq!(updated, doc! { "grades": [ { "scores": [70, 100] }, { "scores": [80, 100] } ] });
+        assert_eq!(
+            updated,
+            doc! { "grades": [ { "scores": [70, 100] }, { "scores": [80, 100] } ] }
+        );
     }
 
     #[test]
     fn test_nested_positional_operators_set() {
         // $set: { "schools.$[].classes.$[].students.$[].passed": true }
         let update_expr = update([set(
-            [field("schools"), all(), field("classes"), all(), field("students"), all(), field("passed")],
-            true
+            [
+                field("schools"),
+                all(),
+                field("classes"),
+                all(),
+                field("students"),
+                all(),
+                field("passed"),
+            ],
+            true,
         )]);
         let updater = to_updater(&update_expr, false).unwrap();
         let doc = doc! {
@@ -2210,17 +2242,20 @@ mod tests {
             ]
         };
         let updated = updater(doc).unwrap();
-        assert_eq!(updated, doc! {
-            "schools": [
-                { "classes": [
-                    { "students": [ {"name": "A", "passed": true}, {"name": "B", "passed": true} ] },
-                    { "students": [ {"name": "C", "passed": true} ] }
-                ] },
-                { "classes": [
-                    { "students": [ {"name": "D", "passed": true} ] }
-                ] }
-            ]
-        });
+        assert_eq!(
+            updated,
+            doc! {
+                "schools": [
+                    { "classes": [
+                        { "students": [ {"name": "A", "passed": true}, {"name": "B", "passed": true} ] },
+                        { "students": [ {"name": "C", "passed": true} ] }
+                    ] },
+                    { "classes": [
+                        { "students": [ {"name": "D", "passed": true} ] }
+                    ] }
+                ]
+            }
+        );
     }
 
     #[test]
@@ -2312,7 +2347,10 @@ mod tests {
         let updater_insert = to_updater(&update_expr, true).unwrap();
         let doc = doc! {};
         let updated_doc = updater_insert(doc).unwrap();
-        assert_eq!(updated_doc, doc! { "updated": true, "created_at": "2024-01-01" });
+        assert_eq!(
+            updated_doc,
+            doc! { "updated": true, "created_at": "2024-01-01" }
+        );
 
         // On update: only $set applies
         let updater_update = to_updater(&update_expr, false).unwrap();
@@ -2366,7 +2404,7 @@ mod tests {
         let ops = [set([field("grades"), filter("elem"), field("mean")], 100)];
         let filters = [(
             "elem".to_string(),
-            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))])
+            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(85))]),
         )];
         let update_expr = Arc::new(update_with_filters(ops, filters));
         let updater = to_updater(&update_expr, false).unwrap();
@@ -2378,18 +2416,24 @@ mod tests {
             Bson::Null
         ]};
         let updated = updater(doc).unwrap();
-        assert_eq!(updated, doc! { "grades": [
-            { "grade": 90, "mean": 100 },
-            "not a document",
-            { "grade": 80, "mean": 60 },
-            Bson::Null
-        ]});
+        assert_eq!(
+            updated,
+            doc! { "grades": [
+                { "grade": 90, "mean": 100 },
+                "not a document",
+                { "grade": 80, "mean": 60 },
+                Bson::Null
+            ]}
+        );
     }
 
     #[test]
     fn test_filtered_positional_with_no_matches_is_noop() {
         let ops = [set([field("grades"), filter("elem"), field("mean")], 100)];
-        let filters = [("elem".to_string(), ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(95))]))];
+        let filters = [(
+            "elem".to_string(),
+            ef::field_filters(ef::field(["grade"]), [ef::gte(ef::lit(95))]),
+        )];
         let update_expr = Arc::new(update_with_filters(ops, filters));
         let updater = to_updater(&update_expr, false).unwrap();
 

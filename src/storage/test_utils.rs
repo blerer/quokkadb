@@ -1,17 +1,21 @@
+use crate::obs::logger::test_instance;
 use crate::obs::metrics::MetricRegistry;
+use crate::options::options::Options;
+use crate::storage::internal_key::encode_record_key;
+use crate::storage::operation::Operation;
 use crate::storage::storage_engine::{StorageEngine, StorageResult};
+use crate::util::bson_utils::BsonKey;
+use bson::{doc, to_vec, Bson, Document};
 use std::fmt::Debug;
 use std::io::Result;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
-use bson::{doc, to_vec, Bson, Document};
-use crate::obs::logger::test_instance;
-use crate::options::options::Options;
-use crate::storage::internal_key::encode_record_key;
-use crate::storage::operation::Operation;
-use crate::util::bson_utils::BsonKey;
 
-pub fn assert_next_entry_eq<K: Debug + PartialEq, V: Debug + PartialEq, I: Iterator<Item = Result<(K, V)>>>(
+pub fn assert_next_entry_eq<
+    K: Debug + PartialEq,
+    V: Debug + PartialEq,
+    I: Iterator<Item = Result<(K, V)>>,
+>(
     iter: &mut I,
     expected: &(K, V),
 ) {
@@ -30,7 +34,12 @@ pub fn user_key(user_key: i32) -> Vec<u8> {
     Bson::Int32(user_key).try_into_key().unwrap()
 }
 
-pub fn put_rec(collection: u32, user_key: i32, version: u32, sequence_num: u64) -> (Vec<u8>, Vec<u8>) {
+pub fn put_rec(
+    collection: u32,
+    user_key: i32,
+    version: u32,
+    sequence_num: u64,
+) -> (Vec<u8>, Vec<u8>) {
     let op = put_op(collection, user_key, version);
     (op.internal_key(sequence_num), op.value().to_vec())
 }
@@ -50,10 +59,10 @@ pub fn delete_op(collection: u32, user_key_val: i32) -> Operation {
 
 pub fn document(user_key: i32, version: u32) -> Document {
     doc! {
-            "id": user_key,
-            "version": version,
-            "payload": format!("This is document {} version {}.", user_key, version)
-        }
+        "id": user_key,
+        "version": version,
+        "payload": format!("This is document {} version {}.", user_key, version)
+    }
 }
 
 pub fn storage_engine() -> StorageResult<(Arc<StorageEngine>, TempDir)> {

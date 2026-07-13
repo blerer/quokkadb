@@ -1,9 +1,9 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::varint;
+use crate::io::varint::compute_u64_vint_size;
 use crate::util::murmur_hash64::murmur_hash64a;
 use std::f64::consts::LN_2;
 use std::io::Error;
-use crate::io::varint::compute_u64_vint_size;
 
 /// A Bloom Filter is a probabilistic data structure that efficiently tests for the existence of an element.
 /// It may yield false positives but guarantees no false negatives. This implementation uses MurmurHash3 for hashing.
@@ -61,7 +61,9 @@ impl<'a> BloomFilter<'a> {
                 size,
                 hash_count,
             } => {
-                compute_u64_vint_size(*hash_count as u64) + compute_u64_vint_size(*size as u64) + bit_array.len()
+                compute_u64_vint_size(*hash_count as u64)
+                    + compute_u64_vint_size(*size as u64)
+                    + bit_array.len()
             }
             BloomFilter::ReadOnly { .. } => {
                 panic!("Cannot estimate block size for a read-only BloomFilter")
@@ -75,7 +77,8 @@ impl<'a> BloomFilter<'a> {
     /// - `expected_items`: The estimated number of items to be stored in the filter.
     /// - `false_positive_rate`: The desired false positive probability (e.g., 0.01 for 1%).
     pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
-        let (size, hash_count, byte_size) = Self::compute_params(expected_items, false_positive_rate);
+        let (size, hash_count, byte_size) =
+            Self::compute_params(expected_items, false_positive_rate);
         BloomFilter::Writable {
             bit_array: vec![0; byte_size],
             size,
@@ -102,9 +105,8 @@ impl<'a> BloomFilter<'a> {
         {
             let normalized_hash2 = (hash2 % *size as u64) | 1; // Ensure step is at least 1
             for i in 0..*hash_count {
-                let index =
-                    (hash1.wrapping_add((i as u64).wrapping_mul(normalized_hash2)) % *size as u64)
-                        as usize;
+                let index = (hash1.wrapping_add((i as u64).wrapping_mul(normalized_hash2))
+                    % *size as u64) as usize;
                 Self::set_bit(bit_array, index);
             }
         } else {
@@ -243,7 +245,9 @@ impl BloomFilterBuilder {
         let (size_bits, hash_count, byte_size) =
             BloomFilter::compute_params(expected_items, self.false_positive_rate);
 
-        compute_u64_vint_size(hash_count as u64) + compute_u64_vint_size(size_bits as u64) + byte_size
+        compute_u64_vint_size(hash_count as u64)
+            + compute_u64_vint_size(size_bits as u64)
+            + byte_size
     }
 
     pub fn add(&mut self, item: &[u8]) {
@@ -391,7 +395,10 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let _ = BloomFilter::new(100, 0.0);
         });
-        assert!(result.is_err(), "Should panic for false_positive_rate = 0.0");
+        assert!(
+            result.is_err(),
+            "Should panic for false_positive_rate = 0.0"
+        );
     }
 
     #[test]
@@ -399,7 +406,10 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let _ = BloomFilter::new(100, 1.0);
         });
-        assert!(result.is_err(), "Should panic for false_positive_rate = 1.0");
+        assert!(
+            result.is_err(),
+            "Should panic for false_positive_rate = 1.0"
+        );
     }
 
     #[test]
@@ -407,7 +417,10 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let _ = BloomFilter::new(100, -0.01);
         });
-        assert!(result.is_err(), "Should panic for negative false_positive_rate");
+        assert!(
+            result.is_err(),
+            "Should panic for negative false_positive_rate"
+        );
     }
 
     #[test]
@@ -415,7 +428,10 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let _ = BloomFilter::new(100, 1.5);
         });
-        assert!(result.is_err(), "Should panic for false_positive_rate > 1.0");
+        assert!(
+            result.is_err(),
+            "Should panic for false_positive_rate > 1.0"
+        );
     }
 
     #[test]
@@ -426,7 +442,10 @@ mod tests {
         let readonly = BloomFilter::from_block(&block).unwrap();
 
         let result = std::panic::catch_unwind(move || readonly.to_block());
-        assert!(result.is_err(), "Should panic when serializing a read-only filter");
+        assert!(
+            result.is_err(),
+            "Should panic when serializing a read-only filter"
+        );
     }
 
     #[test]
@@ -435,7 +454,10 @@ mod tests {
             let builder = BloomFilterBuilder::new(0.01);
             builder.build()
         });
-        assert!(result.is_err(), "Should panic when finishing an empty builder");
+        assert!(
+            result.is_err(),
+            "Should panic when finishing an empty builder"
+        );
     }
 
     // --- Statistical FPR Validation ---

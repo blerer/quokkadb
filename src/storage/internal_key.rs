@@ -1,12 +1,12 @@
 use crate::io::{varint, ZeroCopy};
 use crate::storage::operation::OperationType;
-use std::convert::TryFrom;
-use std::ops::{Bound, RangeBounds, Bound::Unbounded};
-use std::rc::Rc;
 use crate::storage::Direction;
-use crate::util::interval::Interval;
 use crate::util::bson_utils::BsonKey;
+use crate::util::interval::Interval;
 use bson::Bson;
+use std::convert::TryFrom;
+use std::ops::{Bound, Bound::Unbounded, RangeBounds};
+use std::rc::Rc;
 
 /// The key used by the storage internally are called internal key and are composed of
 /// the collection ID (varint-encoded u32), the index ID (varint-encoded u32), the user key,
@@ -101,7 +101,7 @@ pub fn extract_operation_type(internal_key: &[u8]) -> OperationType {
 /// There is no excluding or including bound as this property is enforced by the value of the internal key.
 /// For example to exclude a key the sequence number is set to `u64::MIN` and the operator type to OperatorType::MinKey.
 #[derive(Clone, Debug, PartialEq)]
-pub struct InternalKeyBound (pub Vec<u8>);
+pub struct InternalKeyBound(pub Vec<u8>);
 
 impl InternalKeyBound {
     pub fn is_less_than(&self, internal_key: &[u8]) -> bool {
@@ -118,13 +118,21 @@ impl InternalKeyBound {
     pub fn max_value() -> Self {
         let max_user_key = Bson::MaxKey.try_into_key().unwrap();
         let max_record_key = encode_record_key(u32::MAX, u32::MAX, &max_user_key);
-        InternalKeyBound(encode_internal_key(&max_record_key, MAX_SEQUENCE_NUMBER, OperationType::MaxKey))
+        InternalKeyBound(encode_internal_key(
+            &max_record_key,
+            MAX_SEQUENCE_NUMBER,
+            OperationType::MaxKey,
+        ))
     }
 
     pub fn min_value() -> Self {
         let min_user_key = Bson::MinKey.try_into_key().unwrap();
         let min_record_key = encode_record_key(0, 0, &min_user_key);
-        InternalKeyBound(encode_internal_key(&min_record_key, 0, OperationType::MinKey))
+        InternalKeyBound(encode_internal_key(
+            &min_record_key,
+            0,
+            OperationType::MinKey,
+        ))
     }
 }
 
@@ -151,7 +159,7 @@ impl InternalKeyRange {
         &self.start
     }
 
-    pub fn end_bound(&self) -> &InternalKeyBound  {
+    pub fn end_bound(&self) -> &InternalKeyBound {
         &self.end
     }
 
@@ -174,24 +182,28 @@ impl InternalKeyRange {
 /// - Note: This range does not include the MVCC suffix (`!sequence (u56)` + `op (u8)`).
 ///   It is intended for record-key-only interval computations and as a helper to
 ///   compose internal-key ranges where the MVCC portion is appended separately.
-pub fn encode_record_key_range<R>(
-    collection: u32,
-    index: u32,
-    range: &R
-) -> Interval<Vec<u8>>
+pub fn encode_record_key_range<R>(collection: u32, index: u32, range: &R) -> Interval<Vec<u8>>
 where
     R: RangeBounds<Vec<u8>>,
 {
     let start_bound = match range.start_bound() {
         Bound::Included(key) => Bound::Included(encode_record_key(collection, index, key)),
         Bound::Excluded(key) => Bound::Excluded(encode_record_key(collection, index, key)),
-        Unbounded => Bound::Included(encode_record_key(collection, index, &Bson::MinKey.try_into_key().unwrap())),
+        Unbounded => Bound::Included(encode_record_key(
+            collection,
+            index,
+            &Bson::MinKey.try_into_key().unwrap(),
+        )),
     };
 
     let end_bound = match range.end_bound() {
         Bound::Included(key) => Bound::Included(encode_record_key(collection, index, key)),
         Bound::Excluded(key) => Bound::Excluded(encode_record_key(collection, index, key)),
-        Unbounded => Bound::Included(encode_record_key(collection, index, &Bson::MaxKey.try_into_key().unwrap())),
+        Unbounded => Bound::Included(encode_record_key(
+            collection,
+            index,
+            &Bson::MaxKey.try_into_key().unwrap(),
+        )),
     };
 
     Interval::new(start_bound, end_bound)
@@ -240,7 +252,7 @@ pub fn encode_internal_key_range<R>(
     index: u32,
     range: &R,
     snapshot: u64,
-    direction: Direction
+    direction: Direction,
 ) -> Rc<InternalKeyRange>
 where
     R: RangeBounds<Vec<u8>>,
@@ -263,7 +275,7 @@ where
                     OperationType::MaxKey,
                 )),
             }
-        },
+        }
         Bound::Excluded(key) => InternalKeyBound(encode_internal_key(
             &encode_record_key(collection, index, &key),
             u64::MIN,
@@ -280,13 +292,11 @@ where
     };
 
     let end = match range.end_bound() {
-        Bound::Included(key) => {
-            InternalKeyBound(encode_internal_key(
-                &encode_record_key(collection, index, &key),
-                u64::MIN,
-                OperationType::MinKey,
-            ))
-        },
+        Bound::Included(key) => InternalKeyBound(encode_internal_key(
+            &encode_record_key(collection, index, &key),
+            u64::MIN,
+            OperationType::MinKey,
+        )),
         Bound::Excluded(key) => InternalKeyBound(encode_internal_key(
             &encode_record_key(collection, index, &key),
             MAX_SEQUENCE_NUMBER,
@@ -303,7 +313,6 @@ where
     };
     Rc::new(InternalKeyRange::new(start, end))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -328,8 +337,7 @@ mod tests {
         assert_eq!(extract_operation_type(&encoded), op_type);
         assert_eq!(extract_record_key(&encoded), record_key.as_slice());
 
-        let (decoded_collection, decoded_index, decoded_user_key) =
-            decode_record_key(&record_key);
+        let (decoded_collection, decoded_index, decoded_user_key) = decode_record_key(&record_key);
         assert_eq!(decoded_collection, collection);
         assert_eq!(decoded_index, index);
         assert_eq!(decoded_user_key, user_key.as_slice());
@@ -342,8 +350,7 @@ mod tests {
         let user_key = Bson::Int64(12345).try_into_key().unwrap();
 
         let record_key = encode_record_key(collection, index, &user_key);
-        let (decoded_collection, decoded_index, decoded_user_key) =
-            decode_record_key(&record_key);
+        let (decoded_collection, decoded_index, decoded_user_key) = decode_record_key(&record_key);
 
         assert_eq!(decoded_collection, collection);
         assert_eq!(decoded_index, index);
@@ -402,13 +409,23 @@ mod tests {
         );
 
         assert!(!range.contains(&internal_key(&key_before, snapshot, OperationType::Put)));
-        assert!(!range.contains(&internal_key(&key_a, snapshot + 1, OperationType::Put)),
-            "Forward [a,b]: key 'a' with seq > snapshot should be outside the seek range");
+        assert!(
+            !range.contains(&internal_key(&key_a, snapshot + 1, OperationType::Put)),
+            "Forward [a,b]: key 'a' with seq > snapshot should be outside the seek range"
+        );
         assert!(range.contains(&internal_key(&key_a, snapshot, OperationType::Put)));
         assert!(range.contains(&internal_key(&key_a, snapshot - 1, OperationType::Put)));
-        assert!(range.contains(&internal_key(&key_inside, MAX_SEQUENCE_NUMBER, OperationType::Put)));
+        assert!(range.contains(&internal_key(
+            &key_inside,
+            MAX_SEQUENCE_NUMBER,
+            OperationType::Put
+        )));
         assert!(range.contains(&internal_key(&key_inside, 0, OperationType::Put)));
-        assert!(range.contains(&internal_key(&key_b, MAX_SEQUENCE_NUMBER, OperationType::Put)));
+        assert!(range.contains(&internal_key(
+            &key_b,
+            MAX_SEQUENCE_NUMBER,
+            OperationType::Put
+        )));
         assert!(range.contains(&internal_key(&key_b, 0, OperationType::Put)));
         assert!(!range.contains(&internal_key(&key_after, snapshot, OperationType::Put)));
 
@@ -421,9 +438,19 @@ mod tests {
             Direction::Forward,
         );
 
-        assert!(!range.contains(&internal_key(&key_a, 0, OperationType::Put)), "Forward (a,b): key 'a' should be fully excluded");
+        assert!(
+            !range.contains(&internal_key(&key_a, 0, OperationType::Put)),
+            "Forward (a,b): key 'a' should be fully excluded"
+        );
         assert!(range.contains(&internal_key(&key_inside, snapshot, OperationType::Put)));
-        assert!(!range.contains(&internal_key(&key_b, MAX_SEQUENCE_NUMBER, OperationType::Put)), "Forward (a,b): key 'b' should be fully excluded");
+        assert!(
+            !range.contains(&internal_key(
+                &key_b,
+                MAX_SEQUENCE_NUMBER,
+                OperationType::Put
+            )),
+            "Forward (a,b): key 'b' should be fully excluded"
+        );
 
         // --- REVERSE SCAN ---
 
@@ -437,10 +464,18 @@ mod tests {
         );
 
         assert!(!range.contains(&internal_key(&key_before, snapshot, OperationType::Put)));
-        assert!(range.contains(&internal_key(&key_a, MAX_SEQUENCE_NUMBER, OperationType::Put)));
+        assert!(range.contains(&internal_key(
+            &key_a,
+            MAX_SEQUENCE_NUMBER,
+            OperationType::Put
+        )));
         assert!(range.contains(&internal_key(&key_a, 0, OperationType::Put)));
         assert!(range.contains(&internal_key(&key_inside, snapshot, OperationType::Put)));
-        assert!(range.contains(&internal_key(&key_b, MAX_SEQUENCE_NUMBER, OperationType::Put)));
+        assert!(range.contains(&internal_key(
+            &key_b,
+            MAX_SEQUENCE_NUMBER,
+            OperationType::Put
+        )));
         assert!(range.contains(&internal_key(&key_b, 0, OperationType::Put)));
         assert!(!range.contains(&internal_key(&key_after, snapshot, OperationType::Put)));
 
@@ -449,12 +484,18 @@ mod tests {
         assert!(range.contains(&internal_key(&key_a, snapshot, OperationType::Put)));
         assert!(range.contains(&internal_key(&key_b, snapshot, OperationType::Put)));
 
-        let other_collection_key =
-            encode_internal_key(&encode_record_key(collection + 1, index, &key_a), snapshot, OperationType::Put);
+        let other_collection_key = encode_internal_key(
+            &encode_record_key(collection + 1, index, &key_a),
+            snapshot,
+            OperationType::Put,
+        );
         assert!(!range.contains(&other_collection_key));
 
-        let other_index_key =
-            encode_internal_key(&encode_record_key(collection, index + 1, &key_a), snapshot, OperationType::Put);
+        let other_index_key = encode_internal_key(
+            &encode_record_key(collection, index + 1, &key_a),
+            snapshot,
+            OperationType::Put,
+        );
         assert!(!range.contains(&other_index_key));
     }
 

@@ -1,10 +1,10 @@
 use crate::error::Result;
 use crate::query::execution::filters;
+use crate::query::BsonValueRef;
 use crate::query::{Parameters, PathComponent, Projection, ProjectionExpr};
+use bson::{Bson, Document};
 use std::fmt;
 use std::sync::Arc;
-use bson::{Bson, Document};
-use crate::query::{BsonValueRef};
 
 pub fn to_projector(
     projection: &Arc<Projection>,
@@ -42,7 +42,9 @@ fn build_projector(
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Projector::Fields { children: children_projectors })
+            Ok(Projector::Fields {
+                children: children_projectors,
+            })
         }
         ProjectionExpr::ArrayElements { children } => {
             let children_projectors = children
@@ -112,7 +114,6 @@ impl fmt::Display for Projector {
 }
 
 impl Projector {
-
     pub fn include(&self, doc: &Document) -> Document {
         let mut projected = Document::new();
         match self {
@@ -126,7 +127,7 @@ impl Projector {
                 }
                 projected
             }
-            _ => projected
+            _ => projected,
         }
     }
 
@@ -138,7 +139,7 @@ impl Projector {
                 } else {
                     None
                 }
-            },
+            }
             Projector::ArrayElements { children } => {
                 let mut doc = Document::new();
                 if let Bson::Array(array) = value {
@@ -154,21 +155,21 @@ impl Projector {
                 } else {
                     None
                 }
-            },
+            }
             Projector::Field => Some(value.clone()),
             Projector::Slice { skip, limit } => {
                 if let Bson::Array(array) = value {
-
                     // If limit is negative, it means we want to slice from the end
                     let (limit, skip) = if *limit < 0 {
-                        let skip = ((array.len() as i32) + *limit).max(0)  as usize;
+                        let skip = ((array.len() as i32) + *limit).max(0) as usize;
                         let limit = array.len();
                         (limit, skip)
                     } else {
                         (*limit as usize, skip.unwrap_or(0) as usize)
                     };
 
-                    let sliced = array.iter()
+                    let sliced = array
+                        .iter()
                         .skip(skip)
                         .take(limit)
                         .cloned()
@@ -177,10 +178,11 @@ impl Projector {
                 } else {
                     None
                 }
-            },
+            }
             Projector::ElemMatch { filter } => {
                 if let Bson::Array(array) = value {
-                    let filtered = array.iter()
+                    let filtered = array
+                        .iter()
                         .filter(|b| filter(BsonValueRef(*b)))
                         .cloned()
                         .collect::<Vec<Bson>>();
@@ -188,7 +190,7 @@ impl Projector {
                 } else {
                     None
                 }
-            },
+            }
         }
     }
 
@@ -199,12 +201,12 @@ impl Projector {
                     match projector {
                         Projector::Field => {
                             doc.remove(key);
-                        },
+                        }
                         Projector::Fields { .. } => {
                             if let Some(Bson::Document(sub_doc)) = doc.get_mut(key) {
                                 projector.exclude(sub_doc);
                             }
-                        },
+                        }
                         _ => {
                             unreachable!("Unexpected projector: {}", self)
                         }
@@ -212,7 +214,7 @@ impl Projector {
                 }
                 doc
             }
-            _ => doc
+            _ => doc,
         }
     }
 }

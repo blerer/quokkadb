@@ -6,13 +6,13 @@ use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
 use crate::storage::write_batch::WriteBatch;
+use crate::{debug, event, info};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::{debug, event, info};
 
 /// The current version of the write-ahead log format.
 const WAL_VERSION: u32 = 1;
@@ -107,7 +107,11 @@ impl WriteAheadLog {
 
         metrics.total_bytes.inc_by(rotated_files_size);
 
-        info!(logger, "WAL initialized at path: {:?}", append_log.file_path());
+        info!(
+            logger,
+            "WAL initialized at path: {:?}",
+            append_log.file_path()
+        );
 
         Ok(WriteAheadLog {
             logger,
@@ -136,7 +140,9 @@ impl WriteAheadLog {
     pub fn rotate(&mut self, new_log_number: u64) -> Result<()> {
         let wal_file = DbFile::new_write_ahead_log(new_log_number);
         event!(self.logger, "wal rotation start");
-        info!(self.logger, "Rotating WAL file from {} to {}",
+        info!(
+            self.logger,
+            "Rotating WAL file from {} to {}",
             self.append_log.filename().unwrap(),
             wal_file.filename()
         );
@@ -188,7 +194,9 @@ impl WriteAheadLog {
         let start = Instant::now();
         self.append_log.sync()?;
         let duration = start.elapsed();
-        event!(self.logger, "wal sync, duration={}µs, path={:?}",
+        event!(
+            self.logger,
+            "wal sync, duration={}µs, path={:?}",
             duration.as_micros(),
             self.append_log.file_path()
         );
@@ -333,10 +341,10 @@ impl Metrics {
 mod tests {
     use super::*;
     use crate::obs::logger;
+    use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
     use tempfile::tempdir;
-    use crate::obs::metrics::Gauge;
 
     #[test]
     fn test_replay_write_ahead_log() {
@@ -489,8 +497,8 @@ mod tests {
     fn test_sync_triggered_by_pending_bytes() {
         let dir = tempdir().unwrap();
         let path = dir.path();
-        let options = Options::default()
-            .with_wal_bytes_per_sync(StorageQuantity::new(1, StorageUnit::Bytes)); // force sync after any write
+        let options =
+            Options::default().with_wal_bytes_per_sync(StorageQuantity::new(1, StorageUnit::Bytes)); // force sync after any write
 
         let mut wal = WriteAheadLog::new(
             logger::test_instance(),

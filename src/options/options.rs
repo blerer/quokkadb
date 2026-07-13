@@ -246,9 +246,8 @@ impl Options {
         self.max_target_file_size
     }
 
-
     /// Returns the target SSTable size, in bytes, for the given LSM level.
-      ///
+    ///
     /// The base size is derived from the existing compaction options instead of
     /// introducing another independent knob:
     ///
@@ -291,11 +290,14 @@ impl Options {
     /// The returned value is always at least one block, so a very small
     /// configuration cannot produce SSTables smaller than the configured block
     /// size.
-    pub (crate) fn target_file_size_for_level(&self, level: u8) -> u64 {
-        assert_ne!(level, 0, "L0 file size is determined indirectly by file_write_buffer_size, not this method");
+    pub(crate) fn target_file_size_for_level(&self, level: u8) -> u64 {
+        assert_ne!(
+            level, 0,
+            "L0 file size is determined indirectly by file_write_buffer_size, not this method"
+        );
 
-        let base_target_file_size = self.max_bytes_for_level_base.to_bytes()
-            / self.level0_file_num_compaction_trigger;
+        let base_target_file_size =
+            self.max_bytes_for_level_base.to_bytes() / self.level0_file_num_compaction_trigger;
 
         let base_target_file_size = base_target_file_size.max(self.block_size.to_bytes());
 
@@ -432,9 +434,15 @@ mod tests {
     #[test]
     fn deeper_levels_are_monotonically_increasing() {
         let opts = base_options();
-        let sizes: Vec<u64> = (1u8..=5).map(|l| opts.target_file_size_for_level(l)).collect();
+        let sizes: Vec<u64> = (1u8..=5)
+            .map(|l| opts.target_file_size_for_level(l))
+            .collect();
         for window in sizes.windows(2) {
-            assert!(window[0] <= window[1], "sizes should be non-decreasing: {:?}", sizes);
+            assert!(
+                window[0] <= window[1],
+                "sizes should be non-decreasing: {:?}",
+                sizes
+            );
         }
     }
 
@@ -469,11 +477,19 @@ mod tests {
 impl fmt::Display for Options {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Database Options:")?;
-        writeln!(f, "  File Write Buffer Size: {:?}", self.file_write_buffer_size)?;
+        writeln!(
+            f,
+            "  File Write Buffer Size: {:?}",
+            self.file_write_buffer_size
+        )?;
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
-        writeln!(f, "  Max Manifest File Size: {:?}", self.max_manifest_file_size)?;
+        writeln!(
+            f,
+            "  Max Manifest File Size: {:?}",
+            self.max_manifest_file_size
+        )?;
         writeln!(f, "  Max Levels: {:?}", self.max_levels)?;
         writeln!(
             f,

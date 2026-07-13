@@ -128,7 +128,6 @@ impl<T: Debug> Interval<T> {
 }
 
 impl<T: Clone> Interval<T> {
-
     pub fn start_bound_value(&self) -> Option<T> {
         Self::bound_value(self.start_bound())
     }
@@ -202,12 +201,8 @@ impl<T: Clone + Ord + Debug> Interval<T> {
         // End bound of the union is the maximum of the two end bounds.
         let new_end = match (&lower.end, &upper.end) {
             (Bound::Unbounded, _) | (_, Bound::Unbounded) => Bound::Unbounded,
-            (Bound::Included(v1), Bound::Included(v2)) => {
-                Bound::Included(v1.max(v2).clone())
-            }
-            (Bound::Excluded(v1), Bound::Excluded(v2)) => {
-                Bound::Excluded(v1.max(v2).clone())
-            }
+            (Bound::Included(v1), Bound::Included(v2)) => Bound::Included(v1.max(v2).clone()),
+            (Bound::Excluded(v1), Bound::Excluded(v2)) => Bound::Excluded(v1.max(v2).clone()),
             (Bound::Included(v1), Bound::Excluded(v2)) => {
                 match v1.cmp(v2) {
                     Ordering::Less => Bound::Excluded(v2.clone()),
@@ -229,7 +224,6 @@ impl<T: Clone + Ord + Debug> Interval<T> {
 }
 
 impl<T: Clone + PartialOrd> Interval<T> {
-
     /// Checks if the interval represents a single point (e.g., `[a, a]`).
     ///
     /// An interval is a point if its start and end bounds are inclusive and equal.
@@ -421,7 +415,7 @@ impl<T: Clone + PartialOrd> Interval<Vec<T>> {
         self.position_of(item) == IntervalPosition::Contained
     }
 
-    pub fn end_bound_value_eq(&self,value: &[T]) -> bool {
+    pub fn end_bound_value_eq(&self, value: &[T]) -> bool {
         match &self.end {
             Bound::Included(end) | Bound::Excluded(end) => value == end,
             Bound::Unbounded => false,
@@ -450,7 +444,7 @@ impl<T> RangeBounds<T> for Interval<T> {
 impl<T: Serializable> Serializable for Interval<T> {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
         let start = Bound::<T>::read_from(reader)?;
         let end = Bound::<T>::read_from(reader)?;
@@ -837,7 +831,10 @@ mod test {
             Interval::closed(12, 14), // overlaps with [10,15]
         ];
 
-        assert!(has_overlapping_intervals(&filters, &candidates_with_overlap));
+        assert!(has_overlapping_intervals(
+            &filters,
+            &candidates_with_overlap
+        ));
     }
 
     #[test]
@@ -862,8 +859,8 @@ mod test {
     fn test_has_overlapping_intervals_unbounded() {
         let filters = vec![Interval::at_least(10)]; // [10, +inf)
         let candidates = vec![
-            Interval::closed(1, 5),   // no overlap
-            Interval::closed(8, 12),  // overlaps
+            Interval::closed(1, 5),  // no overlap
+            Interval::closed(8, 12), // overlaps
         ];
 
         assert!(has_overlapping_intervals(&filters, &candidates));
@@ -881,9 +878,9 @@ mod test {
         // Test that function returns true on first overlap without checking all
         let filters = vec![Interval::closed(1, 100)];
         let candidates = vec![
-            Interval::closed(5, 10),   // overlaps - should return immediately
-            Interval::closed(20, 30),  // also overlaps
-            Interval::closed(50, 60),  // also overlaps
+            Interval::closed(5, 10),  // overlaps - should return immediately
+            Interval::closed(20, 30), // also overlaps
+            Interval::closed(50, 60), // also overlaps
         ];
 
         assert!(has_overlapping_intervals(&filters, &candidates));
@@ -1063,7 +1060,7 @@ mod test {
     fn test_remove_included_interval_from_all() {
         let outer: Interval<i32> = Interval::all();
         let inner = Interval::closed(3, 7);
-        let result= outer.remove_included_interval(&inner);
+        let result = outer.remove_included_interval(&inner);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], Interval::less_than(3));
         assert_eq!(result[1], Interval::greater_than(7));
@@ -1190,7 +1187,7 @@ mod test {
         let r2: Interval<i32> = Interval::at_least(3);
         let span = r1.span(&r2);
         assert_eq!(span, Interval::all());
-     }
+    }
 
     #[test]
     fn test_span_with_all() {
@@ -1301,9 +1298,15 @@ mod test {
     fn test_position_of_all() {
         let interval: Interval<Vec<i32>> = Interval::all();
 
-        assert_eq!(interval.position_of(&[i32::MIN]), IntervalPosition::Contained);
+        assert_eq!(
+            interval.position_of(&[i32::MIN]),
+            IntervalPosition::Contained
+        );
         assert_eq!(interval.position_of(&[0]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&[i32::MAX]), IntervalPosition::Contained);
+        assert_eq!(
+            interval.position_of(&[i32::MAX]),
+            IntervalPosition::Contained
+        );
     }
 
     #[test]
@@ -1343,9 +1346,18 @@ mod test {
         let interval = Interval::closed(vec![1, 2, 3], vec![1, 2, 5]);
 
         assert_eq!(interval.position_of(&[1, 2]), IntervalPosition::Before);
-        assert_eq!(interval.position_of(&[1, 2, 3]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&[1, 2, 4]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&[1, 2, 5]), IntervalPosition::Contained);
+        assert_eq!(
+            interval.position_of(&[1, 2, 3]),
+            IntervalPosition::Contained
+        );
+        assert_eq!(
+            interval.position_of(&[1, 2, 4]),
+            IntervalPosition::Contained
+        );
+        assert_eq!(
+            interval.position_of(&[1, 2, 5]),
+            IntervalPosition::Contained
+        );
         assert_eq!(interval.position_of(&[1, 2, 5, 0]), IntervalPosition::After);
         assert_eq!(interval.position_of(&[1, 3]), IntervalPosition::After);
     }
@@ -1357,21 +1369,36 @@ mod test {
         assert_eq!(interval.position_of(&[]), IntervalPosition::Before);
 
         let interval_from_empty = Interval::closed(vec![], vec![5]);
-        assert_eq!(interval_from_empty.position_of(&[]), IntervalPosition::Contained);
+        assert_eq!(
+            interval_from_empty.position_of(&[]),
+            IntervalPosition::Contained
+        );
     }
 
     #[test]
     fn test_position_of_string_slices() {
-        let interval = Interval::closed(
-            vec!["apple".to_string()],
-            vec!["cherry".to_string()]
-        );
+        let interval = Interval::closed(vec!["apple".to_string()], vec!["cherry".to_string()]);
 
-        assert_eq!(interval.position_of(&["aardvark".to_string()]), IntervalPosition::Before);
-        assert_eq!(interval.position_of(&["apple".to_string()]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&["banana".to_string()]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&["cherry".to_string()]), IntervalPosition::Contained);
-        assert_eq!(interval.position_of(&["date".to_string()]), IntervalPosition::After);
+        assert_eq!(
+            interval.position_of(&["aardvark".to_string()]),
+            IntervalPosition::Before
+        );
+        assert_eq!(
+            interval.position_of(&["apple".to_string()]),
+            IntervalPosition::Contained
+        );
+        assert_eq!(
+            interval.position_of(&["banana".to_string()]),
+            IntervalPosition::Contained
+        );
+        assert_eq!(
+            interval.position_of(&["cherry".to_string()]),
+            IntervalPosition::Contained
+        );
+        assert_eq!(
+            interval.position_of(&["date".to_string()]),
+            IntervalPosition::After
+        );
     }
 
     #[test]

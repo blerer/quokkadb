@@ -3,6 +3,7 @@ use crate::io::compressor::Compressor;
 use crate::io::varint;
 use crate::options::options::Options;
 use crate::storage::files::DbFile;
+use crate::storage::internal_key::extract_record_key;
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
 use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTablePropertiesBuilder};
@@ -14,7 +15,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::storage::internal_key::extract_record_key;
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///
@@ -45,7 +45,6 @@ pub struct SSTableWriter<'a> {
 }
 
 impl<'a> SSTableWriter<'a> {
-
     /// Creates a new SSTableWriter instance with an expected number of keys for Bloom filter
     /// configuration.
     ///
@@ -79,11 +78,7 @@ impl<'a> SSTableWriter<'a> {
     ///
     /// # Returns
     /// A new instance of `SSTableWriter` configured with the provided options.
-    pub fn new(
-        directory: &Path,
-        sst_file: &DbFile,
-        options: &Options,
-    ) -> Result<Self> {
+    pub fn new(directory: &Path, sst_file: &DbFile, options: &Options) -> Result<Self> {
         let bloom_filter_writer = BloomFilterWriter::BloomFilterBuilder(BloomFilterBuilder::new(
             options.bloom_filter_false_positive(),
         ));
@@ -153,10 +148,12 @@ impl<'a> SSTableWriter<'a> {
             flushed = true;
         }
 
-        self.properties_builder.with_entry(&internal_key, value.len());
+        self.properties_builder
+            .with_entry(&internal_key, value.len());
 
         self.data_block_builder.add(&internal_key, value.to_vec())?;
-        self.bloom_filter_writer.add(&extract_record_key(internal_key));
+        self.bloom_filter_writer
+            .add(&extract_record_key(internal_key));
 
         Ok(flushed)
     }
@@ -203,7 +200,7 @@ impl<'a> SSTableWriter<'a> {
     /// The returned size is approximate and should be used with slack.
     pub fn estimated_size(&self) -> u64 {
         let written = self.current_block_offset as u64;
-        
+
         if written == 0 && self.data_block_builder.is_empty() {
             return 0;
         }
@@ -218,9 +215,9 @@ impl<'a> SSTableWriter<'a> {
             * compression_ratio)
             .ceil() as u64;
 
-        let pending_metaindex_block = (self.metaindex_block_builder.estimated_size_in_bytes() as f64
-            * compression_ratio)
-            .ceil() as u64;
+        let pending_metaindex_block =
+            (self.metaindex_block_builder.estimated_size_in_bytes() as f64 * compression_ratio)
+                .ceil() as u64;
 
         let pending_filter_block = (self.bloom_filter_writer.estimated_block_size_in_bytes() as f64
             * compression_ratio)
@@ -383,7 +380,9 @@ impl<'a> BloomFilterWriter<'a> {
     fn estimated_block_size_in_bytes(&self) -> usize {
         match self {
             BloomFilterWriter::BloomFilter(filter) => filter.estimated_block_size_in_bytes(),
-            BloomFilterWriter::BloomFilterBuilder(builder) => builder.estimated_block_size_in_bytes(),
+            BloomFilterWriter::BloomFilterBuilder(builder) => {
+                builder.estimated_block_size_in_bytes()
+            }
         }
     }
 

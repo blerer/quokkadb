@@ -7,6 +7,7 @@ use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::storage_engine::SSTableOperation;
+use crate::{error, event, info};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -15,10 +16,9 @@ use std::{
         mpsc::{sync_channel, Receiver, SyncSender},
         Arc, Condvar, Mutex,
     },
-    thread::self,
+    thread,
     time::Duration,
 };
-use crate::{error, event, info};
 
 /// Represents a task to be handled by the `FlushManager`.
 ///
@@ -42,9 +42,7 @@ pub enum FlushTask {
     /// Notify when all previously scheduled flushes are complete.
     ///
     /// - `callback`: the callback to be called when the sync is complete.
-    Sync {
-        callback: Arc<Callback<Result<()>>>,
-    },
+    Sync { callback: Arc<Callback<Result<()>>> },
 }
 
 /// Manages background flushing of memtables to SSTable files.
@@ -61,7 +59,6 @@ pub struct FlushManager {
 }
 
 impl FlushManager {
-
     /// Creates a new `FlushManager` and starts its background thread.
     ///
     /// - `logger`: Logger for events and errors.
@@ -93,53 +90,57 @@ impl FlushManager {
             thread::Builder::new()
                 .name("flush_manager".to_string())
                 .spawn(move || {
-                while let Ok(task) = receiver.recv() {
-                    if let Some(sync_control) = &sync_control_for_thread {
-                        let (lock, cvar) = &**sync_control;
-                        let mut paused = lock.lock().unwrap();
-                        while *paused {
-                            paused = cvar.wait(paused).unwrap();
+                    while let Ok(task) = receiver.recv() {
+                        if let Some(sync_control) = &sync_control_for_thread {
+                            let (lock, cvar) = &**sync_control;
+                            let mut paused = lock.lock().unwrap();
+                            while *paused {
+                                paused = cvar.wait(paused).unwrap();
+                            }
                         }
-                    }
 
-                    match task {
-                        FlushTask::Sync { callback } => {
-                            event!(log, "flush_sync start");
-                            callback.call(Ok(()));
-                            event!(log, "flush_sync done");
-                        }
-                        FlushTask::Flush { sst_file, memtable, callback } => {
-                            event!(log, "flush start, memtable={}", memtable.log_number);
+                        match task {
+                            FlushTask::Sync { callback } => {
+                                event!(log, "flush_sync start");
+                                callback.call(Ok(()));
+                                event!(log, "flush_sync done");
+                            }
+                            FlushTask::Flush {
+                                sst_file,
+                                memtable,
+                                callback,
+                            } => {
+                                event!(log, "flush start, memtable={}", memtable.log_number);
 
-                            let result = Self::flush(
-                                log.clone(),
-                                &metrics,
-                                sst_cache.clone(),
-                                &options,
-                                &memtable,
-                                &db_dir,
-                                &sst_file,
-                            );
+                                let result = Self::flush(
+                                    log.clone(),
+                                    &metrics,
+                                    sst_cache.clone(),
+                                    &options,
+                                    &memtable,
+                                    &db_dir,
+                                    &sst_file,
+                                );
 
-                            match result {
-                                Ok(sst) => {
-                                    let operation = SSTableOperation::Flush {
-                                        log_number: memtable.log_number,
-                                        flushed: Arc::new(sst),
-                                    };
-                                    callback.call(Ok(operation));
-                                }
-                                Err(e) => {
-                                    error!(log, "Flush failed: {}", e);
-                                    callback.call(Err(e));
+                                match result {
+                                    Ok(sst) => {
+                                        let operation = SSTableOperation::Flush {
+                                            log_number: memtable.log_number,
+                                            flushed: Arc::new(sst),
+                                        };
+                                        callback.call(Ok(operation));
+                                    }
+                                    Err(e) => {
+                                        error!(log, "Flush failed: {}", e);
+                                        callback.call(Err(e));
 
-                                    thread::sleep(Duration::from_secs(1));
+                                        thread::sleep(Duration::from_secs(1));
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            })
+                })
         }?;
 
         info!(logger, "FlushManager initialized");
@@ -170,8 +171,13 @@ impl FlushManager {
         let throughput = sst.size as f64 / duration.as_secs_f64();
         metrics.write_throughput.record(throughput as u64);
 
-        info!(logger, "Memtable flushed, memtable={}, sst={}", memtable.log_number, sst_file.number);
-        event!(logger, "flush done, memtable={}, sst={}, duration={}µs",
+        info!(
+            logger,
+            "Memtable flushed, memtable={}, sst={}", memtable.log_number, sst_file.number
+        );
+        event!(
+            logger,
+            "flush done, memtable={}, sst={}, duration={}µs",
             memtable.log_number,
             sst_file.number,
             duration.as_micros()
@@ -196,7 +202,6 @@ impl FlushManager {
 
 #[cfg(test)]
 impl FlushManager {
-
     /// (Test only) Pauses the flush thread, blocking task processing.
     pub fn pause(&self) {
         if let Some(sync_control) = &self.sync_control {

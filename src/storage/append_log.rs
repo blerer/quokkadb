@@ -5,10 +5,10 @@ use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::{fmt, mem, result};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::{fmt, mem, result};
 
 /// The size ot the block used in the log file. The 4KB block optimize write efficiency by
 /// aligning with disk block sizes.
@@ -93,10 +93,12 @@ impl<F: LogFileCreator> AppendLog<F> {
     }
 
     pub fn rotate(&mut self, new_log: DbFile) -> Result<(PathBuf, PathBuf)> {
-
         #[cfg(test)]
-        if self.return_error_on_rotate.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Error::new(ErrorKind::Other, "Injected error on rotate",));
+        if self
+            .return_error_on_rotate
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Error::new(ErrorKind::Other, "Injected error on rotate"));
         }
 
         if !self.buffer.is_empty() {
@@ -115,10 +117,12 @@ impl<F: LogFileCreator> AppendLog<F> {
     }
 
     pub fn append(&mut self, data: &[u8]) -> Result<usize> {
-
         #[cfg(test)]
-        if self.return_error_on_append.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(Error::new(ErrorKind::Other, "Injected error on append",));
+        if self
+            .return_error_on_append
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Error::new(ErrorKind::Other, "Injected error on append"));
         }
 
         let mut bytes_written = 0;
@@ -213,7 +217,10 @@ impl<F: LogFileCreator> AppendLog<F> {
         file.read_exact(&mut block)
             .map_err(|_e| LogReplayError::Corruption {
                 record_offset: 0,
-                reason: format!("Not enough bytes to read in {} header.", path.to_string_lossy()),
+                reason: format!(
+                    "Not enough bytes to read in {} header.",
+                    path.to_string_lossy()
+                ),
             })?;
 
         let mut header = vec![0; header_size];
@@ -225,7 +232,10 @@ impl<F: LogFileCreator> AppendLog<F> {
         if actual_crc32 != expected_crc32 {
             return Err(LogReplayError::Corruption {
                 record_offset: 0,
-                reason: format!("Invalid checksum found in {} header.", path.to_string_lossy()),
+                reason: format!(
+                    "Invalid checksum found in {} header.",
+                    path.to_string_lossy()
+                ),
             });
         }
 
@@ -236,12 +246,14 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     #[cfg(test)]
     pub fn return_error_on_append(&self, value: bool) {
-        self.return_error_on_append.store(value, std::sync::atomic::Ordering::SeqCst);
+        self.return_error_on_append
+            .store(value, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]
     pub fn return_error_on_rotate(&self, value: bool) {
-        self.return_error_on_rotate.store(value, std::sync::atomic::Ordering::SeqCst);
+        self.return_error_on_rotate
+            .store(value, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -495,8 +507,7 @@ pub enum LogReplayError {
 impl fmt::Display for LogReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LogReplayError::Io(err) =>
-                write!(f, "I/O error while replaying: {}", err),
+            LogReplayError::Io(err) => write!(f, "I/O error while replaying: {}", err),
             LogReplayError::Corruption {
                 record_offset,
                 reason,

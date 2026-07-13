@@ -145,7 +145,11 @@ pub fn top_k_heap_sort(
 
     // The heap now contains the k smallest elements, but not in sorted order.
     // `into_sorted_vec` consumes the heap and returns a sorted vec (smallest to largest).
-    let sorted_docs: Vec<Document> = heap.into_sorted_vec().into_iter().map(|hd| hd.doc).collect();
+    let sorted_docs: Vec<Document> = heap
+        .into_sorted_vec()
+        .into_iter()
+        .map(|hd| hd.doc)
+        .collect();
     Ok(Box::new(sorted_docs.into_iter().map(Ok)))
 }
 
@@ -264,51 +268,93 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
- fn test_sort_documents() {
+    fn test_sort_documents() {
         let doc1 = doc! { "a": 1, "b": "xyz", "c": { "d": 10 } };
         let doc2 = doc! { "a": 2, "b": "abc", "c": { "d": 20 } };
         let doc3 = doc! { "a": 2, "b": "xyz", "c": { "d": 5 } };
 
         // Sort by 'a' ascending
         let sort_fields = vec![make_sort_field(vec!["a".into()], SortOrder::Ascending)];
-        assert_eq!(compare_documents(&doc1, &doc2, &sort_fields), Ordering::Less);
-        assert_eq!(compare_documents(&doc2, &doc1, &sort_fields), Ordering::Greater);
-        assert_eq!(compare_documents(&doc2, &doc3, &sort_fields), Ordering::Equal);
+        assert_eq!(
+            compare_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_documents(&doc2, &doc1, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_documents(&doc2, &doc3, &sort_fields),
+            Ordering::Equal
+        );
 
         // Sort by 'a' descending
         let sort_fields = vec![make_sort_field(vec!["a".into()], SortOrder::Descending)];
-        assert_eq!(compare_documents(&doc1, &doc2, &sort_fields), Ordering::Greater);
-        assert_eq!(compare_documents(&doc2, &doc1, &sort_fields), Ordering::Less);
+        assert_eq!(
+            compare_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_documents(&doc2, &doc1, &sort_fields),
+            Ordering::Less
+        );
 
         // Sort by 'b' ascending
         let sort_fields = vec![make_sort_field(vec!["b".into()], SortOrder::Ascending)];
-        assert_eq!(compare_documents(&doc1, &doc2, &sort_fields), Ordering::Greater); // "xyz" > "abc"
-        assert_eq!(compare_documents(&doc2, &doc1, &sort_fields), Ordering::Less);
+        assert_eq!(
+            compare_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Greater
+        ); // "xyz" > "abc"
+        assert_eq!(
+            compare_documents(&doc2, &doc1, &sort_fields),
+            Ordering::Less
+        );
 
         // Multi-key sort: 'a' asc, then 'b' asc
         let sort_fields = vec![
             make_sort_field(vec!["a".into()], SortOrder::Ascending),
             make_sort_field(vec!["b".into()], SortOrder::Ascending),
         ];
-        assert_eq!(compare_documents(&doc2, &doc3, &sort_fields), Ordering::Less);
+        assert_eq!(
+            compare_documents(&doc2, &doc3, &sort_fields),
+            Ordering::Less
+        );
 
         // Multi-key sort: 'a' asc, then 'c.d' desc
         let sort_fields = vec![
             make_sort_field(vec!["a".into()], SortOrder::Ascending),
             make_sort_field(vec!["c".into(), "d".into()], SortOrder::Descending),
         ];
-        assert_eq!(compare_documents(&doc2, &doc3, &sort_fields), Ordering::Less);
+        assert_eq!(
+            compare_documents(&doc2, &doc3, &sort_fields),
+            Ordering::Less
+        );
 
         // Sort on nested key
-        let sort_fields = vec![make_sort_field(vec!["c".into(), "d".into()], SortOrder::Ascending)];
-        assert_eq!(compare_documents(&doc1, &doc2, &sort_fields), Ordering::Less); // 10 < 20
-        assert_eq!(compare_documents(&doc3, &doc1, &sort_fields), Ordering::Less); // 5 < 10
+        let sort_fields = vec![make_sort_field(
+            vec!["c".into(), "d".into()],
+            SortOrder::Ascending,
+        )];
+        assert_eq!(
+            compare_documents(&doc1, &doc2, &sort_fields),
+            Ordering::Less
+        ); // 10 < 20
+        assert_eq!(
+            compare_documents(&doc3, &doc1, &sort_fields),
+            Ordering::Less
+        ); // 5 < 10
 
         // Field missing in one doc
         let doc4 = doc! { "b": "only b" };
         let sort_fields = vec![make_sort_field(vec!["a".into()], SortOrder::Ascending)];
-        assert_eq!(compare_documents(&doc1, &doc4, &sort_fields), Ordering::Greater);
-        assert_eq!(compare_documents(&doc4, &doc1, &sort_fields), Ordering::Less);
+        assert_eq!(
+            compare_documents(&doc1, &doc4, &sort_fields),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_documents(&doc4, &doc1, &sort_fields),
+            Ordering::Less
+        );
 
         // No sort fields
         assert_eq!(compare_documents(&doc1, &doc2, &[]), Ordering::Equal);

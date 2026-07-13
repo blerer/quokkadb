@@ -39,7 +39,6 @@ pub trait LoggerAndTracer: Send + Sync {
     fn level_enabled(&self, level: LogLevel) -> bool;
 }
 
-
 #[macro_export]
 macro_rules! debug {
     ($logger:expr, $($arg:tt)*) => {
@@ -137,7 +136,11 @@ impl LoggerAndTracer for StdoutLogger {
             let timestamp = Self::now_micros();
             println!(
                 "[{:?}] [{}] [thread={:?}] [{}] {}",
-                level, timestamp, Self::thread_label(), context, msg
+                level,
+                timestamp,
+                Self::thread_label(),
+                context,
+                msg
             );
         }
     }
@@ -145,7 +148,13 @@ impl LoggerAndTracer for StdoutLogger {
     fn event(&self, context: &'static str, event: Arguments) {
         if self.tracing_enabled {
             let timestamp = Self::now_micros();
-            println!("[TRACE] [{}] [thread={:?}] [{}] {}", timestamp, Self::thread_label(), context, event);
+            println!(
+                "[TRACE] [{}] [thread={:?}] [{}] {}",
+                timestamp,
+                Self::thread_label(),
+                context,
+                event
+            );
         }
     }
 

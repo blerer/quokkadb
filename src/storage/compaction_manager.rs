@@ -1,23 +1,23 @@
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::{debug, event, info, warn};
+use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
-use crate::storage::compaction_picker::{CompactionJob, CompactionPicker};
-use crate::storage::sstable::sstable_cache::SSTableCache;
-use crate::storage::storage_engine::SSTableOperation;
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::io::Result;
-use crate::obs::metrics::MetricRegistry;
 use crate::storage::compaction_iterator::CompactionIterator;
+use crate::storage::compaction_picker::{CompactionJob, CompactionPicker};
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::extract_record_key;
 use crate::storage::lsm_version::{DropMetadata, LevelItem, Levels, SplitResults};
+use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
+use crate::storage::storage_engine::SSTableOperation;
 use crate::util::interval::IntervalPosition;
+use crate::{debug, event, info, warn};
+use std::collections::VecDeque;
+use std::io::Result;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -37,13 +37,14 @@ pub struct CompactionManager {
 }
 
 impl CompactionManager {
-    pub fn new(logger: Arc<dyn LoggerAndTracer>,
-               metric_registry: &mut MetricRegistry,
-               options: Arc<Options>,
-               db_dir: &Path,
-               sst_cache: Arc<SSTableCache>,
-               next_file_number: Arc<AtomicU64>) -> Result<Self> {
-
+    pub fn new(
+        logger: Arc<dyn LoggerAndTracer>,
+        metric_registry: &mut MetricRegistry,
+        options: Arc<Options>,
+        db_dir: &Path,
+        sst_cache: Arc<SSTableCache>,
+        next_file_number: Arc<AtomicU64>,
+    ) -> Result<Self> {
         let shared = Arc::new((
             Mutex::new(Shared {
                 queue: VecDeque::new(),
@@ -52,7 +53,11 @@ impl CompactionManager {
             Condvar::new(),
         ));
 
-        let compaction_picker = Mutex::new(CompactionPicker::new(logger.clone(), metric_registry, &options));
+        let compaction_picker = Mutex::new(CompactionPicker::new(
+            logger.clone(),
+            metric_registry,
+            &options,
+        ));
 
         let mut workers = Vec::with_capacity(options.compaction_threads());
         let worker_logger = logger.clone();
@@ -67,7 +72,16 @@ impl CompactionManager {
 
             let handle = thread::Builder::new()
                 .name(format!("compaction_manager-{i}"))
-                .spawn(move || worker_loop(shared_clone, &options, &db_dir, sst_cache, &next_file_number, logger))?;
+                .spawn(move || {
+                    worker_loop(
+                        shared_clone,
+                        &options,
+                        &db_dir,
+                        sst_cache,
+                        &next_file_number,
+                        logger,
+                    )
+                })?;
 
             workers.push(handle);
         }
@@ -82,9 +96,17 @@ impl CompactionManager {
         })
     }
 
-    pub fn schedule_compaction_if_needed(&self, levels: &Levels, callback: &Arc<Callback<Result<SSTableOperation>>>) {
-
-        while let Some(job) = self.compaction_picker.lock().unwrap().pick_compaction(levels) {
+    pub fn schedule_compaction_if_needed(
+        &self,
+        levels: &Levels,
+        callback: &Arc<Callback<Result<SSTableOperation>>>,
+    ) {
+        while let Some(job) = self
+            .compaction_picker
+            .lock()
+            .unwrap()
+            .pick_compaction(levels)
+        {
             debug!(
                 self.logger,
                 "compaction job picked, job_id={}, input_level={}, output_level={}, input_files={}",
@@ -98,12 +120,17 @@ impl CompactionManager {
     }
 
     #[cfg(test)]
-    pub fn schedule_single_compaction(&self,
-                                      levels: &Levels,
-                                      callback: &Arc<Callback<Result<SSTableOperation>>>
-    ) -> bool
-    {
-        if let Some(job) = self.compaction_picker.lock().unwrap().pick_compaction(levels) {
+    pub fn schedule_single_compaction(
+        &self,
+        levels: &Levels,
+        callback: &Arc<Callback<Result<SSTableOperation>>>,
+    ) -> bool {
+        if let Some(job) = self
+            .compaction_picker
+            .lock()
+            .unwrap()
+            .pick_compaction(levels)
+        {
             self.enqueue_compaction_job(job, callback);
             true
         } else {
@@ -111,9 +138,10 @@ impl CompactionManager {
         }
     }
 
-    fn enqueue_compaction_job(&self,
-                              job: CompactionJob,
-                              callback: &Arc<Callback<Result<SSTableOperation>>>
+    fn enqueue_compaction_job(
+        &self,
+        job: CompactionJob,
+        callback: &Arc<Callback<Result<SSTableOperation>>>,
     ) {
         let task = CompactionTask {
             compaction_job: job,
@@ -122,8 +150,7 @@ impl CompactionManager {
         self.enqueue(task);
     }
 
-    fn enqueue(&self, task: CompactionTask)
-    {
+    fn enqueue(&self, task: CompactionTask) {
         let (lock, cvar) = &*self.shared;
         let mut shared = lock.lock().unwrap();
 
@@ -153,17 +180,21 @@ impl CompactionManager {
     }
 
     pub fn unmark_compacting(&self, compaction_job: &CompactionJob) {
-        self.compaction_picker.lock().unwrap().unmark_compacting(compaction_job);
+        self.compaction_picker
+            .lock()
+            .unwrap()
+            .unmark_compacting(compaction_job);
     }
 }
 
-fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
-               options: &Options,
-               db_dir: &PathBuf,
-               sst_cache: Arc<SSTableCache>,
-               next_file_number: &AtomicU64,
-               logger: Arc<dyn LoggerAndTracer>)
-{
+fn worker_loop(
+    shared: Arc<(Mutex<Shared>, Condvar)>,
+    options: &Options,
+    db_dir: &PathBuf,
+    sst_cache: Arc<SSTableCache>,
+    next_file_number: &AtomicU64,
+    logger: Arc<dyn LoggerAndTracer>,
+) {
     let (lock, cvar) = &*shared;
 
     loop {
@@ -185,8 +216,10 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
 
         match task {
             Some(task) => {
-
-                let CompactionTask { compaction_job, callback}  =  task;
+                let CompactionTask {
+                    compaction_job,
+                    callback,
+                } = task;
                 event!(
                     logger,
                     "compaction start, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
@@ -197,7 +230,13 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
                     compaction_job.output_files.len()
                 );
 
-                let rs = perform_compaction(options, db_dir, sst_cache.clone(), compaction_job, next_file_number);
+                let rs = perform_compaction(
+                    options,
+                    db_dir,
+                    sst_cache.clone(),
+                    compaction_job,
+                    next_file_number,
+                );
                 match rs {
                     Ok(op) => {
                         if let SSTableOperation::Compaction {
@@ -205,7 +244,7 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
                             added_sstables,
                             removed_sstables,
                             drops,
-                           } = &op
+                        } = &op
                         {
                             event!(
                                 logger,
@@ -231,12 +270,13 @@ fn worker_loop(shared: Arc<(Mutex<Shared>, Condvar)>,
     }
 }
 
-fn perform_compaction(options: &Options,
-                      db_dir: &PathBuf,
-                      sst_cache: Arc<SSTableCache>,
-                      job: CompactionJob,
-                      next_file_number: &AtomicU64) -> Result<SSTableOperation>{
-
+fn perform_compaction(
+    options: &Options,
+    db_dir: &PathBuf,
+    sst_cache: Arc<SSTableCache>,
+    job: CompactionJob,
+    next_file_number: &AtomicU64,
+) -> Result<SSTableOperation> {
     let sst_max_size = options.target_file_size_for_level(job.output_level);
 
     let compaction_iter = CompactionIterator::new(
@@ -244,7 +284,8 @@ fn perform_compaction(options: &Options,
         sst_cache.clone(),
         &job.input_files,
         &job.output_files,
-        &job.drops)?;
+        &job.drops,
+    )?;
 
     let mut added = Vec::new();
 
@@ -256,7 +297,9 @@ fn perform_compaction(options: &Options,
 
         if let Some(boundaries) = &job.partitions_grid {
             let record_key = extract_record_key(&internal_key);
-            while boundary_idx < boundaries.len() && record_key > boundaries[boundary_idx].as_slice() {
+            while boundary_idx < boundaries.len()
+                && record_key > boundaries[boundary_idx].as_slice()
+            {
                 if sstable_writer.estimated_size() > 0 {
                     added.push(Arc::new(sstable_writer.finish()?));
                     sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
@@ -276,10 +319,12 @@ fn perform_compaction(options: &Options,
     if sstable_writer.estimated_size() > 0 {
         added.push(Arc::new(sstable_writer.finish()?));
     }
-    let removed = job.input_files.iter()
-            .cloned()
-            .chain(job.output_files.iter().cloned())
-            .collect();
+    let removed = job
+        .input_files
+        .iter()
+        .cloned()
+        .chain(job.output_files.iter().cloned())
+        .collect();
 
     let drops = split_drops_if_needed(&job);
 
@@ -293,14 +338,12 @@ fn perform_compaction(options: &Options,
 
 /// Splits the drops, so that they match the output partitions
 fn split_drops_if_needed(job: &CompactionJob) -> Vec<Arc<DropMetadata>> {
-
     if job.drops.is_empty() {
         return Vec::new();
     }
 
     // Drop are sorted by min key, so we can iterate on them and partition at the same time.
     if let Some(boundaries) = &job.partitions_grid {
-
         if boundaries.is_empty() {
             return job.drops.clone();
         }
@@ -312,12 +355,15 @@ fn split_drops_if_needed(job: &CompactionJob) -> Vec<Arc<DropMetadata>> {
 
         while current_drop.is_some() && partition_idx < boundaries.len() {
             let drop = current_drop.unwrap();
-            match drop.record_key_range().position_of(&boundaries[partition_idx]) {
+            match drop
+                .record_key_range()
+                .position_of(&boundaries[partition_idx])
+            {
                 IntervalPosition::Before => {
                     // drop is after the partition, we should move to the next partition
                     partition_idx += 1;
                     current_drop = Some(drop);
-                },
+                }
                 IntervalPosition::Contained => {
                     // drop contains the partition end, we need to split it and include only
                     // the part within the partition
@@ -333,7 +379,7 @@ fn split_drops_if_needed(job: &CompactionJob) -> Vec<Arc<DropMetadata>> {
                             current_drop = Some(right);
                         }
                     }
-                },
+                }
                 IntervalPosition::After => {
                     // drop is before the partition end, so it belongs to the current partition.
                     output_drops.push(drop);
@@ -356,7 +402,7 @@ fn split_drops_if_needed(job: &CompactionJob) -> Vec<Arc<DropMetadata>> {
 fn new_sstable_writer<'a>(
     options: &'a Options,
     db_dir: &'a PathBuf,
-    next_file_number: &'a AtomicU64
+    next_file_number: &'a AtomicU64,
 ) -> Result<SSTableWriter<'a>> {
     let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
     Ok(SSTableWriter::new(db_dir, &sst_file, options)?)
@@ -364,7 +410,6 @@ fn new_sstable_writer<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::ops::{Bound, RangeBounds};
     use super::*;
     use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
@@ -373,11 +418,12 @@ mod tests {
     use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
     use crate::storage::sstable::sstable_cache::SSTableCache;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
+    use crate::storage::test_utils::{put_rec, record_key};
+    use crate::util::interval::Interval;
+    use std::ops::{Bound, RangeBounds};
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use crate::storage::test_utils::{put_rec, record_key};
-    use crate::util::interval::Interval;
 
     fn setup_cache(options: &Options) -> Arc<SSTableCache> {
         let mut metric_registry = MetricRegistry::new();
@@ -413,7 +459,12 @@ mod tests {
     // -----------------------------------------------------------------------
     fn unwrap_compaction(
         op: SSTableOperation,
-    ) -> (CompactionJob, Vec<Arc<SSTableMetadata>>, Vec<Arc<SSTableMetadata>>, Vec<Arc<DropMetadata>>) {
+    ) -> (
+        CompactionJob,
+        Vec<Arc<SSTableMetadata>>,
+        Vec<Arc<SSTableMetadata>>,
+        Vec<Arc<DropMetadata>>,
+    ) {
         match op {
             SSTableOperation::Compaction {
                 compaction_job,
@@ -442,9 +493,9 @@ mod tests {
 
         // Write an input SST with a few entries.
         let entries = vec![
-            put_rec(col, 10, 1,1),
-            put_rec(col, 20, 1,2),
-            put_rec(col, 30, 1,3),
+            put_rec(col, 10, 1, 1),
+            put_rec(col, 20, 1, 2),
+            put_rec(col, 30, 1, 3),
         ];
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
@@ -460,8 +511,14 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
@@ -488,27 +545,16 @@ mod tests {
         let input1 = write_sst(
             dir.path(),
             1,
-            &[
-                put_rec(col, 10, 1, 5),
-                put_rec(col, 20, 1, 6)
-            ],
+            &[put_rec(col, 10, 1, 5), put_rec(col, 20, 1, 6)],
             &options,
         );
         // another input SST: key 30
-        let input2 = write_sst(
-            dir.path(),
-            2,
-            &[put_rec(col, 30, 1, 7)],
-            &options,
-        );
+        let input2 = write_sst(dir.path(), 2, &[put_rec(col, 30, 1, 7)], &options);
         // output SST that overlaps: keys 15, 25
         let output1 = write_sst(
             dir.path(),
             3,
-            &[
-                put_rec(col,15, 1, 1),
-                put_rec(col,25, 1, 2)
-            ],
+            &[put_rec(col, 15, 1, 1), put_rec(col, 25, 1, 2)],
             &options,
         );
 
@@ -524,8 +570,14 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
@@ -548,12 +600,7 @@ mod tests {
 
         let col = 10;
 
-        let input_sst = write_sst(
-            dir.path(),
-            1,
-            &[put_rec(col, 10, 1, 1)],
-            &options,
-        );
+        let input_sst = write_sst(dir.path(), 1, &[put_rec(col, 10, 1, 1)], &options);
 
         let drop = DropMetadata::new_collection_drop(col, 50);
 
@@ -569,8 +616,8 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
-            .unwrap();
+        let op =
+            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
         let (_compaction_job, added, removed, drops) = unwrap_compaction(op);
 
         // No partitions_grid → drops returned as-is
@@ -597,9 +644,7 @@ mod tests {
 
         let col = 10;
 
-        let entries: Vec<_> = (1..=5)
-            .map(|k| put_rec(col, k * 10, 1, k as u64))
-            .collect();
+        let entries: Vec<_> = (1..=5).map(|k| put_rec(col, k * 10, 1, k as u64)).collect();
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
@@ -615,8 +660,14 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
@@ -636,12 +687,7 @@ mod tests {
 
         let col = 10;
 
-        let input_sst = write_sst(
-            dir.path(),
-            1,
-            &[put_rec(col,10, 1,1)],
-            &options,
-        );
+        let input_sst = write_sst(dir.path(), 1, &[put_rec(col, 10, 1, 1)], &options);
         let drop = DropMetadata::new_collection_drop(col, 99);
 
         let job = CompactionJob {
@@ -656,8 +702,8 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
-            .unwrap();
+        let op =
+            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
         let (_compaction_job, _added, _removed, drops) = unwrap_compaction(op);
 
         assert_eq!(drops.len(), 1);
@@ -702,18 +748,34 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
-        assert_eq!(added.len(), 2, "One boundary should produce two output SSTables");
+        assert_eq!(
+            added.len(),
+            2,
+            "One boundary should produce two output SSTables"
+        );
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].number, input_sst.number);
 
         // First SST should cover keys up to the boundary; second SST should cover keys after it.
-        assert!(added[0].max_key <= boundary, "First SST max_key should be <= boundary");
-        assert!(added[1].min_key > boundary, "Second SST min_key should be > boundary");
+        assert!(
+            added[0].max_key <= boundary,
+            "First SST max_key should be <= boundary"
+        );
+        assert!(
+            added[1].min_key > boundary,
+            "Second SST min_key should be > boundary"
+        );
     }
 
     /// Two boundaries → three output SSTables.
@@ -751,12 +813,22 @@ mod tests {
             partitions_grid: Some(vec![b1.clone(), b2.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, _removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
-        assert_eq!(added.len(), 3, "Two boundaries should produce three output SSTables");
+        assert_eq!(
+            added.len(),
+            3,
+            "Two boundaries should produce three output SSTables"
+        );
         assert!(added[0].max_key <= b1);
         assert!(added[1].min_key > b1);
         assert!(added[1].max_key <= b2);
@@ -775,10 +847,7 @@ mod tests {
 
         let boundary = record_key(col, 100); // all entries are below this
 
-        let entries = vec![
-            put_rec(col, 10, 1, 1),
-            put_rec(col, 20, 1, 2),
-        ];
+        let entries = vec![put_rec(col, 10, 1, 1), put_rec(col, 20, 1, 2)];
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
@@ -793,8 +862,8 @@ mod tests {
             partitions_grid: Some(vec![boundary]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
-            .unwrap();
+        let op =
+            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
         let (_compaction_job, added, _removed, _drops) = unwrap_compaction(op);
 
         // Entries only before boundary: the boundary-crossing loop never fires, so
@@ -817,10 +886,7 @@ mod tests {
         let input_sst = write_sst(
             dir.path(),
             1,
-            &vec![
-                put_rec(col, 10, 1, 1),
-                put_rec(col, 70, 1, 2),
-            ],
+            &vec![put_rec(col, 10, 1, 1), put_rec(col, 70, 1, 2)],
             &options,
         );
 
@@ -839,8 +905,8 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
-            .unwrap();
+        let op =
+            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
         let (_level, _added, _removed, drops) = unwrap_compaction(op);
 
         // The drop should have been split at the boundary.
@@ -870,10 +936,7 @@ mod tests {
 
         let col = 10;
 
-        let entries = vec![
-            put_rec(col, 10, 1,1),
-            put_rec(col, 20, 1, 2),
-        ];
+        let entries = vec![put_rec(col, 10, 1, 1), put_rec(col, 20, 1, 2)];
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         // Single partition (no boundaries) — everything goes into one SST.
@@ -889,8 +952,14 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
@@ -919,7 +988,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &input_entries, &options);
 
         // Output SST from L3 that will be merged.
-        let output_entries = vec![put_rec(col, 20, 1, 1),];
+        let output_entries = vec![put_rec(col, 20, 1, 1)];
         let output_sst = write_sst(dir.path(), 2, &output_entries, &options);
 
         let job = CompactionJob {
@@ -934,13 +1003,27 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job.clone(), &counter)
-            .unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job.clone(),
+            &counter,
+        )
+        .unwrap();
         let (compaction_job, added, removed, _drops) = unwrap_compaction(op);
 
         assert_eq!(compaction_job, job);
-        assert_eq!(added.len(), 2, "Boundary should split into two output SSTables");
-        assert_eq!(removed.len(), 2, "Both input and output SSTables should be removed");
+        assert_eq!(
+            added.len(),
+            2,
+            "Boundary should split into two output SSTables"
+        );
+        assert_eq!(
+            removed.len(),
+            2,
+            "Both input and output SSTables should be removed"
+        );
 
         let removed_numbers: Vec<u64> = removed.iter().map(|s| s.number).collect();
         assert!(removed_numbers.contains(&input_sst.number));
@@ -960,12 +1043,7 @@ mod tests {
 
         let col = 10;
 
-        let input_sst = write_sst(
-            dir.path(),
-            1,
-            &[put_rec(col, 10, 1, 1)],
-            &options,
-        );
+        let input_sst = write_sst(dir.path(), 1, &[put_rec(col, 10, 1, 1)], &options);
 
         // A drop already scoped to partition 0 (no need to split).
         let (drop_p0, _drop_p1) = DropMetadata::new_collection_drop(col, 10)
@@ -979,20 +1057,14 @@ mod tests {
             input_files: vec![input_sst],
             output_files: vec![],
             drops: vec![drop_p0.clone()],
-            input_key_range: Interval::new(
-                Bound::Unbounded,
-                Bound::Included(record_key(col, 50)),
-            ),
-            output_key_range: Interval::new(
-                Bound::Unbounded,
-                Bound::Included(record_key(col, 50)),
-            ),
+            input_key_range: Interval::new(Bound::Unbounded, Bound::Included(record_key(col, 50))),
+            output_key_range: Interval::new(Bound::Unbounded, Bound::Included(record_key(col, 50))),
             // boundary at 50 — drop is entirely within the left partition
             partitions_grid: Some(vec![record_key(col, 50)]),
         };
 
-        let op = perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter)
-            .unwrap();
+        let op =
+            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
         let (_compaction_job, _added, _removed, drops) = unwrap_compaction(op);
 
         // The drop fragment ends at the boundary (Included(50)); it is the left fragment
@@ -1002,9 +1074,9 @@ mod tests {
     }
 
     mod split_drops_tests {
-        use std::ops::{Bound, RangeBounds};
-        use crate::storage::test_utils::record_key;
         use super::*;
+        use crate::storage::test_utils::record_key;
+        use std::ops::{Bound, RangeBounds};
 
         fn job_with_drops(
             drops: Vec<Arc<DropMetadata>>,
@@ -1131,8 +1203,14 @@ mod tests {
             let result = split_drops_if_needed(&&job);
 
             assert_eq!(result.len(), 2);
-            assert_eq!(result[0].key_range.end_bound(), Bound::Included(&record_key(col, 50)));
-            assert_eq!(result[1].key_range.start_bound(), Bound::Excluded(&record_key(col, 50)));
+            assert_eq!(
+                result[0].key_range.end_bound(),
+                Bound::Included(&record_key(col, 50))
+            );
+            assert_eq!(
+                result[1].key_range.start_bound(),
+                Bound::Excluded(&record_key(col, 50))
+            );
         }
 
         #[test]
@@ -1146,9 +1224,18 @@ mod tests {
             let result = split_drops_if_needed(&&job);
 
             assert_eq!(result.len(), 3);
-            assert_eq!(result[0].key_range.end_bound(), Bound::Included(&record_key(col, 30)));
-            assert_eq!(result[1].key_range.end_bound(), Bound::Included(&record_key(col, 70)));
-            assert_eq!(result[2].key_range.start_bound(), Bound::Excluded(&record_key(col, 70)));
+            assert_eq!(
+                result[0].key_range.end_bound(),
+                Bound::Included(&record_key(col, 30))
+            );
+            assert_eq!(
+                result[1].key_range.end_bound(),
+                Bound::Included(&record_key(col, 70))
+            );
+            assert_eq!(
+                result[2].key_range.start_bound(),
+                Bound::Excluded(&record_key(col, 70))
+            );
         }
 
         #[test]
@@ -1158,14 +1245,23 @@ mod tests {
             let drop = DropMetadata::new_collection_drop(col1, 10);
             let spanning = DropMetadata::new_collection_drop(col2, 20);
 
-            let job = job_with_drops(vec![drop.clone(), spanning.clone()], Some(vec![record_key(col2, 50)]));
+            let job = job_with_drops(
+                vec![drop.clone(), spanning.clone()],
+                Some(vec![record_key(col2, 50)]),
+            );
 
             let result = split_drops_if_needed(&&job);
 
             assert_eq!(result.len(), 3);
             assert_eq!(result[0], drop);
-            assert_eq!(result[1].key_range.end_bound(), Bound::Included(&record_key(col2, 50)));
-            assert_eq!(result[2].key_range.start_bound(), Bound::Excluded(&record_key(col2, 50)));
+            assert_eq!(
+                result[1].key_range.end_bound(),
+                Bound::Included(&record_key(col2, 50))
+            );
+            assert_eq!(
+                result[2].key_range.start_bound(),
+                Bound::Excluded(&record_key(col2, 50))
+            );
         }
     }
 }

@@ -1,8 +1,8 @@
+use crate::query::Expr;
+use crate::Error;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
-use crate::query::Expr;
-use crate::Error;
 
 /// Represents a component in an update path, which can include positional operators.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -54,23 +54,43 @@ pub enum UpdateOp {
 
     // Temporal
     /// `$currentDate`: Sets the field to the current date, either as a BSON Date or a Timestamp.
-    CurrentDate { path: UpdatePath, type_hint: CurrentDateType },
+    CurrentDate {
+        path: UpdatePath,
+        type_hint: CurrentDateType,
+    },
 
     // Array ops
     /// `$addToSet`: Adds elements to an array only if they do not already exist in the set.
-    AddToSet { path: UpdatePath, values: EachOrSingle<Arc<Expr>> },
+    AddToSet {
+        path: UpdatePath,
+        values: EachOrSingle<Arc<Expr>>,
+    },
     /// `$push`: Appends a value to an array.
-    Push { path: UpdatePath, spec: PushSpec<Arc<Expr>> },
+    Push {
+        path: UpdatePath,
+        spec: PushSpec<Arc<Expr>>,
+    },
     /// `$pop`: Removes the first or last element of an array.
-    Pop { path: UpdatePath, from: PopFrom },          // First/Last
+    Pop { path: UpdatePath, from: PopFrom }, // First/Last
     /// `$pull`: Removes all array elements that match a specified query.
-    Pull { path: UpdatePath, criterion: PullCriterion },
+    Pull {
+        path: UpdatePath,
+        criterion: PullCriterion,
+    },
     /// `$pullAll`: Removes all instances of the specified values from an existing array.
-    PullAll { path: UpdatePath, values: Vec<Arc<Expr>> },
+    PullAll {
+        path: UpdatePath,
+        values: Vec<Arc<Expr>>,
+    },
 
     // Bitwise
     /// `$bit`: Performs bitwise AND, OR, and XOR updates.
-    Bit { path: UpdatePath, and: Option<i64>, or: Option<i64>, xor: Option<i64> },
+    Bit {
+        path: UpdatePath,
+        and: Option<i64>,
+        or: Option<i64>,
+        xor: Option<i64>,
+    },
 }
 
 /// Type specifier for the `$currentDate` operator.
@@ -180,7 +200,9 @@ impl UpdateExpr {
     /// Validates the semantic correctness of the update expression.
     pub fn validate(&self) -> Result<(), Error> {
         if self.ops.is_empty() {
-            return Err(Error::InvalidRequest("Update document cannot be empty".to_string()));
+            return Err(Error::InvalidRequest(
+                "Update document cannot be empty".to_string(),
+            ));
         }
 
         let mut used_identifiers = HashSet::new();
@@ -206,7 +228,11 @@ impl UpdateExpr {
             };
 
             for path in paths {
-                let path_str = path.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
+                let path_str = path
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".");
                 for &existing_path in modified_paths.iter() {
                     if path.starts_with(existing_path) || existing_path.starts_with(path) {
                         return Err(Error::InvalidRequest(format!(
@@ -223,7 +249,8 @@ impl UpdateExpr {
                         UpdatePathComponent::Filtered(id) => {
                             if id.is_empty() {
                                 return Err(Error::InvalidRequest(
-                                    "Filtered positional operator identifier cannot be empty.".to_string(),
+                                    "Filtered positional operator identifier cannot be empty."
+                                        .to_string(),
                                 ));
                             }
                             let mut chars = id.chars();
@@ -253,8 +280,18 @@ impl UpdateExpr {
                             "$rename source and destination must be different".to_string(),
                         ));
                     }
-                    if to.iter().any(|p| !matches!(p, UpdatePathComponent::FieldName(_) | UpdatePathComponent::ArrayElement(_))) {
-                        let to_path_str = to.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
+                    if to.iter().any(|p| {
+                        !matches!(
+                            p,
+                            UpdatePathComponent::FieldName(_)
+                                | UpdatePathComponent::ArrayElement(_)
+                        )
+                    }) {
+                        let to_path_str = to
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(".");
                         return Err(Error::InvalidRequest(format!(
                             "$rename destination path cannot contain positional operators: {}",
                             to_path_str
@@ -308,7 +345,8 @@ impl UpdateExpr {
 
         if !used_identifiers.is_empty() && self.array_filters.is_empty() {
             return Err(Error::InvalidRequest(
-                "Filtered positional operator is used but arrayFilters is not specified".to_string(),
+                "Filtered positional operator is used but arrayFilters is not specified"
+                    .to_string(),
             ));
         }
 
@@ -345,28 +383,30 @@ impl UpdateExpr {
                         )));
                     }
                 }
-                UpdateOp::AddToSet { values, .. } | UpdateOp::Push { spec: PushSpec { values, .. }, .. } => {
-                    match values {
-                        EachOrSingle::Single(expr) => {
+                UpdateOp::AddToSet { values, .. }
+                | UpdateOp::Push {
+                    spec: PushSpec { values, .. },
+                    ..
+                } => match values {
+                    EachOrSingle::Single(expr) => {
+                        if !matches!(expr.as_ref(), Expr::Literal(_)) {
+                            return Err(Error::InvalidRequest(format!(
+                                "Update operator value must be a literal, but got: {:?}",
+                                expr
+                            )));
+                        }
+                    }
+                    EachOrSingle::Each(exprs) => {
+                        for expr in exprs {
                             if !matches!(expr.as_ref(), Expr::Literal(_)) {
                                 return Err(Error::InvalidRequest(format!(
-                                    "Update operator value must be a literal, but got: {:?}",
-                                    expr
-                                )));
-                            }
-                        }
-                        EachOrSingle::Each(exprs) => {
-                            for expr in exprs {
-                                if !matches!(expr.as_ref(), Expr::Literal(_)) {
-                                    return Err(Error::InvalidRequest(format!(
                                         "Update operator value in $each must be a literal, but got: {:?}",
                                         expr
                                     )));
-                                }
                             }
                         }
                     }
-                }
+                },
                 UpdateOp::PullAll { values, .. } => {
                     for expr in values {
                         if !matches!(expr.as_ref(), Expr::Literal(_)) {
@@ -377,21 +417,19 @@ impl UpdateExpr {
                         }
                     }
                 }
-                UpdateOp::Pull { criterion, .. } => {
-                    match criterion {
-                        PullCriterion::Equals(expr) => {
-                            if !matches!(expr.as_ref(), Expr::Literal(_)) {
-                                return Err(Error::InvalidRequest(format!(
-                                    "Update operator value in $pull must be a literal, but got: {:?}",
-                                    expr
-                                )));
-                            }
-                        }
-                        PullCriterion::Matches(expr) => {
-                            validate_pull_criterion_expr(expr.as_ref())?;
+                UpdateOp::Pull { criterion, .. } => match criterion {
+                    PullCriterion::Equals(expr) => {
+                        if !matches!(expr.as_ref(), Expr::Literal(_)) {
+                            return Err(Error::InvalidRequest(format!(
+                                "Update operator value in $pull must be a literal, but got: {:?}",
+                                expr
+                            )));
                         }
                     }
-                }
+                    PullCriterion::Matches(expr) => {
+                        validate_pull_criterion_expr(expr.as_ref())?;
+                    }
+                },
                 // Ops without values or already handled: Unset, Rename, CurrentDate, Pop, Bit
                 _ => {}
             }
@@ -400,8 +438,6 @@ impl UpdateExpr {
         Ok(())
     }
 }
-
-
 
 /// Validates a MongoDB field name.
 pub(crate) fn validate_field_name(field_name: &str) -> Result<(), Error> {

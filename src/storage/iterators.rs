@@ -1,12 +1,12 @@
-use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
-use crate::obs::logger::{LoggerAndTracer};
-use std::iter::Iterator;
-use std::io::Result;
-use std::sync::Arc;
 use crate::event;
+use crate::obs::logger::LoggerAndTracer;
+use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use crate::storage::Direction;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::io::Result;
+use std::iter::Iterator;
+use std::sync::Arc;
 
 pub struct ForwardIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
@@ -14,8 +14,11 @@ pub struct ForwardIterator<'a> {
     previous: Option<Vec<u8>>,
 }
 
-impl <'a> ForwardIterator<'a> {
-    pub fn new(iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>, snapshot: u64) -> Self {
+impl<'a> ForwardIterator<'a> {
+    pub fn new(
+        iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+        snapshot: u64,
+    ) -> Self {
         ForwardIterator {
             iter,
             snapshot,
@@ -28,7 +31,6 @@ impl<'a> Iterator for ForwardIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-
         while let Some(entry) = self.iter.next() {
             return match entry {
                 Ok((key, value)) => {
@@ -46,12 +48,12 @@ impl<'a> Iterator for ForwardIterator<'a> {
                     self.previous = Some(record_key.to_vec());
 
                     Some(Ok((key, value)))
-                },
+                }
                 Err(e) => {
                     // If there's an error, we return it
                     Some(Err(e))
                 }
-            }
+            };
         }
         None
     }
@@ -63,8 +65,11 @@ pub struct ReverseIterator<'a> {
     previous: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-impl <'a> ReverseIterator<'a> {
-    pub fn new(iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>, snapshot: u64) -> Self {
+impl<'a> ReverseIterator<'a> {
+    pub fn new(
+        iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+        snapshot: u64,
+    ) -> Self {
         ReverseIterator {
             iter,
             snapshot,
@@ -77,7 +82,6 @@ impl<'a> Iterator for ReverseIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-
         while let Some(entry) = self.iter.next() {
             return match entry {
                 Ok((key, value)) => {
@@ -94,12 +98,12 @@ impl<'a> Iterator for ReverseIterator<'a> {
                     }
                     self.previous = Some((key, value));
                     continue;
-                },
+                }
                 Err(e) => {
                     // If there's an error, we return it
                     Some(Err(e))
                 }
-            }
+            };
         }
         // At the end, yield the last buffered entry if any
         match self.previous.take() {
@@ -118,7 +122,11 @@ pub struct TracingIterator<'a> {
 }
 
 impl<'a> TracingIterator<'a> {
-    pub fn new(iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>, logger: Arc<dyn LoggerAndTracer>, context: String) -> Self {
+    pub fn new(
+        iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+        logger: Arc<dyn LoggerAndTracer>,
+        context: String,
+    ) -> Self {
         TracingIterator {
             iter,
             logger,
@@ -129,14 +137,14 @@ impl<'a> TracingIterator<'a> {
     }
 }
 
-impl<'a> Iterator for TracingIterator<'a>{
+impl<'a> Iterator for TracingIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.iter.next();
         match &item {
             Some(Ok(_)) => self.count += 1,
-            Some(Err(_)) => {},
+            Some(Err(_)) => {}
             None if !self.exhausted => {
                 event!(self.logger, "{} count={}", self.context, self.count);
                 self.exhausted = true;
@@ -177,7 +185,9 @@ impl PartialOrd for MergeHeapItem {
 
 impl PartialEq for MergeHeapItem {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.source_index == other.source_index && self.direction == other.direction
+        self.key == other.key
+            && self.source_index == other.source_index
+            && self.direction == other.direction
     }
 }
 
@@ -277,10 +287,7 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ForwardIterator::new(
-            Box::new(entries.into_iter()),
-            MAX_SEQUENCE_NUMBER,
-        );
+        let mut iter = ForwardIterator::new(Box::new(entries.into_iter()), MAX_SEQUENCE_NUMBER);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
         assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 2));
@@ -292,10 +299,7 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ForwardIterator::new(
-            Box::new(entries.into_iter()),
-            10,
-        );
+        let mut iter = ForwardIterator::new(Box::new(entries.into_iter()), 10);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
         assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 2));
@@ -307,10 +311,7 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ForwardIterator::new(
-            Box::new(entries.into_iter()),
-            6,
-        );
+        let mut iter = ForwardIterator::new(Box::new(entries.into_iter()), 6);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
         assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 2));
@@ -326,10 +327,8 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ReverseIterator::new(
-            Box::new(entries.into_iter().rev()),
-            MAX_SEQUENCE_NUMBER,
-        );
+        let mut iter =
+            ReverseIterator::new(Box::new(entries.into_iter().rev()), MAX_SEQUENCE_NUMBER);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 7, 2, 11));
         assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 9));
@@ -341,10 +340,7 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ReverseIterator::new(
-            Box::new(entries.into_iter().rev()),
-            10,
-        );
+        let mut iter = ReverseIterator::new(Box::new(entries.into_iter().rev()), 10);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 7, 1, 10));
         assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 9));
@@ -356,10 +352,7 @@ mod tests {
 
         let entries = build_dataset(col);
 
-        let mut iter = ReverseIterator::new(
-            Box::new(entries.into_iter().rev()),
-            6,
-        );
+        let mut iter = ReverseIterator::new(Box::new(entries.into_iter().rev()), 6);
 
         assert_next_entry_eq(&mut iter, &put_rec(col, 5, 2, 6));
         assert_next_entry_eq(&mut iter, &put_rec(col, 4, 1, 4));
@@ -441,28 +434,28 @@ mod tests {
     fn merge_iterator_error_on_init() {
         let col = 10;
         let err1_msg = "init error iter1";
-        let iter1_items: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![Err(Error::new(ErrorKind::Other, err1_msg))];
-        let iter2_items: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![
-            Ok(put_rec(col, 1, 1, 1)),
-        ];
+        let iter1_items: Vec<Result<(Vec<u8>, Vec<u8>)>> =
+            vec![Err(Error::new(ErrorKind::Other, err1_msg))];
+        let iter2_items: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![Ok(put_rec(col, 1, 1, 1))];
 
         // Error from the first iterator (iter1_items)
         let sources_err_first: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> = vec![
             Box::new(iter1_items.into_iter()),
             Box::new(iter2_items.into_iter()), // This one won't be reached if the first errors
         ];
-        
+
         match MergeIterator::new(sources_err_first, Direction::Forward) {
             Err(e) => assert_eq!(e.to_string(), err1_msg),
-            Ok(_) => panic!("Expected MergeIterator::new to return Err for init error from first iterator"),
+            Ok(_) => panic!(
+                "Expected MergeIterator::new to return Err for init error from first iterator"
+            ),
         }
 
         // Test with error from a later iterator during initialization
-        let iter3_items_ok: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![
-            Ok(put_rec(col, 2, 1, 1)), 
-        ];
+        let iter3_items_ok: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![Ok(put_rec(col, 2, 1, 1))];
         let err2_msg = "init error iter4";
-        let iter4_items_err: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![Err(Error::new(ErrorKind::Other, err2_msg))];
+        let iter4_items_err: Vec<Result<(Vec<u8>, Vec<u8>)>> =
+            vec![Err(Error::new(ErrorKind::Other, err2_msg))];
 
         let sources_err_later: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> = vec![
             Box::new(iter3_items_ok.into_iter()), // This one will be successfully processed by new()
@@ -471,19 +464,20 @@ mod tests {
 
         match MergeIterator::new(sources_err_later, Direction::Forward) {
             Err(e) => assert_eq!(e.to_string(), err2_msg),
-            Ok(_) => panic!("Expected MergeIterator::new to return Err for init error from later iterator"),
+            Ok(_) => panic!(
+                "Expected MergeIterator::new to return Err for init error from later iterator"
+            ),
         }
     }
-
 
     #[test]
     fn merge_iterator_error_during_iteration() {
         let col = 10;
         let err1 = Error::new(ErrorKind::Other, "iter error");
-        
+
         let iter1_items: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![
             Ok(put_rec(col, 1, 2, 2)), // item 1: user_key=1, version=2, seq=2
-            Err(err1),                                         // item 2 (error)
+            Err(err1),                 // item 2 (error)
             Ok(put_rec(col, 1, 1, 1)), // item 3: user_key=1, version=1, seq=1 (should not be reached if error stops stream)
         ];
         let iter2_items: Vec<Result<(Vec<u8>, Vec<u8>)>> = vec![

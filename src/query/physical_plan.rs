@@ -1,10 +1,10 @@
+use crate::query::update::UpdateExpr;
 use crate::query::Expr;
-use std::sync::Arc;
 use crate::query::Projection;
 use crate::query::SortField;
-use crate::query::update::UpdateExpr;
 use crate::storage::Direction;
 use crate::util::interval::Interval;
+use std::sync::Arc;
 
 /// Represents a physical plan that can be executed by the query engine.
 ///

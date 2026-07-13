@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{extract_record_key, InternalKeyRange};
 use crate::storage::iterators::{ForwardIterator, MergeIterator};
+use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::Direction;
-use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
 use crate::util::interval::{Interval, IntervalPosition};
 
 /// An iterator that merges records from multiple SSTables while applying drops to skip deleted
@@ -19,7 +19,6 @@ pub struct CompactionIterator<'a> {
 }
 
 impl<'a> CompactionIterator<'a> {
-
     /// Creates a new `CompactionIterator` for the given compaction job. It initializes iterators
     /// for the input and output SSTables, applies drops to skip deleted records, and merges
     /// records from multiple SSTables if necessary.
@@ -31,16 +30,15 @@ impl<'a> CompactionIterator<'a> {
         drops: &[Arc<DropMetadata>],
     ) -> Result<Box<Self>> {
         // drops should be sorted and should be non overlapping after compaction picker's merge/split logic
-        let drops :Vec<Arc<DropMetadata>> = drops.iter().cloned().collect();
+        let drops: Vec<Arc<DropMetadata>> = drops.iter().cloned().collect();
 
-        let sources: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> =
-            input_files
-            .into_iter().chain(output_files.into_iter())
+        let sources: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> = input_files
+            .into_iter()
+            .chain(output_files.into_iter())
             .filter(|sst| !sst_skippable_due_to_drops(sst.as_ref(), &drops))
             .map(|sst| {
                 let file_path = db_dir.join(DbFile::new_sst(sst.number).filename());
-                let reader = sst_cache
-                    .get(&file_path)?;
+                let reader = sst_cache.get(&file_path)?;
                 reader.range_scan(InternalKeyRange::all(), u64::MAX, Direction::Forward)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -50,19 +48,23 @@ impl<'a> CompactionIterator<'a> {
                 record_iter: Box::new(std::iter::empty()),
                 drop_iter: Box::new(std::iter::empty()),
                 current_drop_interval: None,
-            }))
+            }));
         }
 
-        let record_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> = if sources.len() == 1 {
-            Box::new(sources.into_iter().next().unwrap())
-        } else {
-            Box::new(MergeIterator::new(sources, Direction::Forward)?)
-        };
+        let record_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> =
+            if sources.len() == 1 {
+                Box::new(sources.into_iter().next().unwrap())
+            } else {
+                Box::new(MergeIterator::new(sources, Direction::Forward)?)
+            };
 
         let record_iter = Box::new(Box::new(ForwardIterator::new(record_iter, u64::MAX)));
 
-        let mut drop_iter : Box<dyn Iterator<Item = Arc<DropMetadata>>> = Box::new(drops.into_iter());
-        let current_drop_interval = drop_iter.next().map_or(None, |drop| Some(drop.record_key_range().clone()));
+        let mut drop_iter: Box<dyn Iterator<Item = Arc<DropMetadata>>> =
+            Box::new(drops.into_iter());
+        let current_drop_interval = drop_iter
+            .next()
+            .map_or(None, |drop| Some(drop.record_key_range().clone()));
 
         Ok(Box::new(Self {
             record_iter,
@@ -78,32 +80,22 @@ impl<'a> Iterator for CompactionIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(entry) = self.record_iter.next() {
             match entry {
-                Ok((key, value)) => {
-                    loop
-                    {
-                        match &self.current_drop_interval {
-                            Some(interval) => {
-                                match interval.position_of(extract_record_key(&key)) {
-                                    IntervalPosition::Before => {
-                                        return Some(Ok((key, value)))
-                                    },
-                                    IntervalPosition::Contained => {
-                                        break
-                                    },
-                                    IntervalPosition::After => {
-                                        self.current_drop_interval = self.drop_iter.next().map_or(None, |drop| Some(drop.record_key_range()));
-                                    },
-                                }
-                            },
-                            None => {
-                                return Some(Ok((key, value)))
-                            },
-                        }
+                Ok((key, value)) => loop {
+                    match &self.current_drop_interval {
+                        Some(interval) => match interval.position_of(extract_record_key(&key)) {
+                            IntervalPosition::Before => return Some(Ok((key, value))),
+                            IntervalPosition::Contained => break,
+                            IntervalPosition::After => {
+                                self.current_drop_interval = self
+                                    .drop_iter
+                                    .next()
+                                    .map_or(None, |drop| Some(drop.record_key_range()));
+                            }
+                        },
+                        None => return Some(Ok((key, value))),
                     }
                 },
-                Err(e) => {
-                    return Some(Err(e))
-                }
+                Err(e) => return Some(Err(e)),
             }
         }
         None
@@ -112,12 +104,13 @@ impl<'a> Iterator for CompactionIterator<'a> {
 
 /// Determines if an SSTable can be skipped during compaction because it is fully covered by one of the drops.
 fn sst_skippable_due_to_drops(sst: &SSTableMetadata, drops: &[Arc<DropMetadata>]) -> bool {
-
     if drops.is_empty() {
         return false;
     }
     let sst_range = sst.record_key_range();
-    drops.iter().any(|drop| drop.key_range.contains_interval(&sst_range))
+    drops
+        .iter()
+        .any(|drop| drop.key_range.contains_interval(&sst_range))
 }
 
 #[cfg(test)]
@@ -286,14 +279,20 @@ mod tests {
         let drop_1 = DropMetadata::new_collection_drop(col_1, 100);
         // Create a drop that covers part of collection 3
         let drop_3 = DropMetadata::new_collection_drop(col_3, 101)
-            .split_at(&record_key(col_3, 50)).expect_two().0;
+            .split_at(&record_key(col_3, 50))
+            .expect_two()
+            .0;
 
-        let mut iter = CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop_1, drop_3]).unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[drop_1, drop_3],
+        )
+        .unwrap();
 
-        let expected_entries = vec![
-            put_rec(col_2, 1, 1, 11),
-            put_rec(col_2, 2, 1, 12),
-        ];
+        let expected_entries = vec![put_rec(col_2, 1, 1, 11), put_rec(col_2, 2, 1, 12)];
 
         for expected in &expected_entries {
             let actual = iter.next().unwrap().unwrap();
@@ -333,7 +332,7 @@ mod tests {
         let options = Options::lightweight();
         let sst_cache = setup_cache();
 
-        let col_1= COL;
+        let col_1 = COL;
         let col_2 = COL + 1;
 
         // SST 1: keys 1-3
@@ -356,7 +355,8 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col_1, 100);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1, sst2], &[], &[drop]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1, sst2], &[], &[drop])
+                .unwrap();
 
         // SST 1 should be skipped entirely, only entries from SST 2 should be returned
         for expected in &entries2 {

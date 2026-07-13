@@ -79,7 +79,7 @@ impl SSTableProperties {
     /// # Returns
     /// - `f64`: The compression ratio.
     pub fn compression_ratio(&self) -> f64 {
-        compute_compression_ratio(self.raw_key_size , self.raw_value_size, self.data_size)
+        compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size)
     }
 
     pub fn to_vec(&self) -> std::io::Result<Vec<u8>> {
@@ -130,7 +130,7 @@ impl SSTablePropertiesBuilder {
     /// Updates the entry properties with the provided key, key size, and value size.
     pub fn with_entry(&mut self, key: &[u8], value_size: usize) -> &mut Self {
         self.num_entries += 1;
-        self.raw_key_size += key.len() + 4 + 4 + 8 ; // user_key + collection + index + sequence (with op)
+        self.raw_key_size += key.len() + 4 + 4 + 8; // user_key + collection + index + sequence (with op)
         self.raw_value_size += value_size;
 
         let record_key = extract_record_key(key);
@@ -171,7 +171,8 @@ impl SSTablePropertiesBuilder {
         if self.data_size == 0 {
             return 1.0; // Avoid division by zero, assume no compression
         }
-        let ratio = compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size);
+        let ratio =
+            compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size);
         if ratio.is_finite() && ratio > 0.0 {
             // Avoid extreme under-estimates that could lead to huge overshoots.
             ratio.clamp(0.05, 1.0)
@@ -221,9 +222,9 @@ mod tests {
     #[test]
     fn test_update_entry_properties_with_builder() {
         let collection = 1;
-        let record_key_1= encode_record_key(collection, 0, &vec![10, 20, 30]);
-        let record_key_2= encode_record_key(collection, 0, &vec![5, 15, 25, 35]);
-        let record_key_3= encode_record_key(collection, 0, &vec![50, 60, 70, 80, 90]);
+        let record_key_1 = encode_record_key(collection, 0, &vec![10, 20, 30]);
+        let record_key_2 = encode_record_key(collection, 0, &vec![5, 15, 25, 35]);
+        let record_key_3 = encode_record_key(collection, 0, &vec![50, 60, 70, 80, 90]);
         let key1 = encode_internal_key(&record_key_1, 1, OperationType::Put);
         let key2 = encode_internal_key(&record_key_2, 5, OperationType::Put);
         let key3 = encode_internal_key(&record_key_3, 3, OperationType::Put);
@@ -243,8 +244,14 @@ mod tests {
         assert_eq!(sstable_properties.min_sequence, 1);
         assert_eq!(sstable_properties.max_sequence, 5);
         assert_eq!(sstable_properties.num_entries, 3);
-        assert_eq!(sstable_properties.raw_key_size, 90, "Raw key size should be 90 (29 + 30 + 31)");
-        assert_eq!(sstable_properties.raw_value_size, 115, "Raw value size should be 115 (50 + 40 + 25)");
+        assert_eq!(
+            sstable_properties.raw_key_size, 90,
+            "Raw key size should be 90 (29 + 30 + 31)"
+        );
+        assert_eq!(
+            sstable_properties.raw_value_size, 115,
+            "Raw value size should be 115 (50 + 40 + 25)"
+        );
     }
 
     #[test]

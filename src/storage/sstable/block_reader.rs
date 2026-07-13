@@ -25,7 +25,6 @@ pub struct BlockReader<W: EntryReader + 'static> {
 impl<W: EntryReader + 'static> BlockReader<W> {
     /// Constructs a new `BlockReader` from a block of bytes and a reader.
     pub fn new(block: Arc<[u8]>, reader: W) -> Result<Self> {
-
         let len = block.len();
         let nbr_of_restarts_offset = len - 4;
         let nbr_of_restarts = (&block[..]).read_u32_le(nbr_of_restarts_offset) as usize;
@@ -53,25 +52,34 @@ impl<W: EntryReader + 'static> BlockReader<W> {
         Ok(self.block.read_u32_le(self.restarts_offset + (index << 2)) as usize)
     }
 
-    pub fn scan_forward_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    pub fn scan_forward_from(
+        &self,
+        bound: &InternalKeyBound,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         BlockEntryIterator::new_from_key(self, bound.as_bytes())
     }
 
-    pub fn scan_reverse_from(&self, bound: &InternalKeyBound) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    pub fn scan_reverse_from(
+        &self,
+        bound: &InternalKeyBound,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         ReverseBlockEntryIterator::new_from_key(self, bound.as_bytes())
     }
 
-    pub fn scan_all_forward(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    pub fn scan_all_forward(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         BlockEntryIterator::new(self)
     }
 
-    pub fn scan_all_reverse(&self) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    pub fn scan_all_reverse(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         ReverseBlockEntryIterator::new(self)
     }
 
     /// Performs a binary search on restart points to find a candidate start offset.
     fn binary_search_restarts(&self, internal_key: &[u8]) -> Result<Option<usize>> {
-
         let mut mid = 0;
         let mut left = 0usize;
         let mut right = self.nbr_of_restarts - 1;
@@ -103,7 +111,6 @@ impl<W: EntryReader + 'static> BlockReader<W> {
         prev_key: &Vec<u8>,
         prev_value: &Option<W::Output>,
     ) -> Result<(Vec<u8>, W::Output)> {
-
         let shared = data.read_varint_u64()? as usize;
         let mut key = Vec::with_capacity(shared);
         key.extend_from_slice(&prev_key[..shared]);
@@ -133,7 +140,9 @@ pub struct BlockEntryIterator<W: EntryReader + 'static> {
 }
 
 impl<W: EntryReader + 'static> BlockEntryIterator<W> {
-    fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
+    fn new(
+        reader: &BlockReader<W>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         let next_restart_offset = reader.next_restart_offset(0)?;
 
         Ok(Box::new(Self {
@@ -151,13 +160,12 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
     fn new_from_key(
         reader: &BlockReader<W>,
         internal_key: &[u8],
-    ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         let mut first = None;
         let restart_idx = reader.binary_search_restarts(internal_key)?;
 
         if restart_idx.is_none() {
-            return Self::new(reader)
+            return Self::new(reader);
         }
 
         let mut restart_idx = restart_idx.unwrap();
@@ -174,7 +182,6 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
         {
             let data = &data;
             while data.position() < reader.restarts_offset {
-
                 let position = data.position();
                 let restart = if Some(position) == next_restart_offset {
                     restart_idx += 1;
@@ -183,30 +190,33 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
                 } else {
                     false
                 };
-                let (new_key, output) = reader.read_entry(data, &prev_key, if restart { &None } else { &prev_value })?;
+                let (new_key, output) = reader.read_entry(
+                    data,
+                    &prev_key,
+                    if restart { &None } else { &prev_value },
+                )?;
 
                 match internal_key.cmp(&new_key) {
                     Ordering::Equal => {
                         data.seek(position)?; // Reset position to the start of the entry
                         break;
-                    },
+                    }
                     Ordering::Less => {
                         if reader.reader.is_index_reader() {
                             first = Some((prev_key.clone(), prev_value.clone().unwrap()));
                         }
                         data.seek(position)?; // Reset position to the start of the entry
-                        // If we rewind the position we might need to rewind the restart_idx as well.
+                                              // If we rewind the position we might need to rewind the restart_idx as well.
                         if restart {
                             restart_idx -= 1;
                             next_restart_offset = reader.next_restart_offset(restart_idx)?;
                         }
-                        break
-
-                    },
-                    Ordering::Greater => {},
+                        break;
+                    }
+                    Ordering::Greater => {}
                 };
 
-                if reader.reader.is_index_reader() && data.position() == reader.restarts_offset  {
+                if reader.reader.is_index_reader() && data.position() == reader.restarts_offset {
                     first = Some((new_key, output));
                 } else {
                     prev_key = new_key;
@@ -226,9 +236,7 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
         }))
     }
 
-
     fn read_next(&mut self) -> Result<(Vec<u8>, W::Output)> {
-
         let restart = if Some(self.data.position()) == self.next_restart_offset {
             self.restart_idx += 1;
             self.next_restart_offset = self.reader.next_restart_offset(self.restart_idx)?;
@@ -237,7 +245,11 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
             false
         };
 
-        let (key, value) = self.reader.read_entry(&self.data, &self.prev_key, if restart { &None } else { &self.prev_value})?;
+        let (key, value) = self.reader.read_entry(
+            &self.data,
+            &self.prev_key,
+            if restart { &None } else { &self.prev_value },
+        )?;
 
         self.prev_key = key.clone();
         self.prev_value = Some(value.clone());
@@ -250,7 +262,6 @@ impl<W: EntryReader + 'static> Iterator for BlockEntryIterator<W> {
     type Item = Result<(Vec<u8>, W::Output)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-
         if self.first.is_some() {
             let first = self.first.take().unwrap();
             return Some(Ok(first));
@@ -272,8 +283,9 @@ pub struct ReverseBlockEntryIterator<W: EntryReader + 'static> {
 }
 
 impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
-    fn new(reader: &BlockReader<W>) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-
+    fn new(
+        reader: &BlockReader<W>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         let restart_idx = reader.nbr_of_restarts;
 
         Ok(Box::new(Self {
@@ -288,8 +300,7 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
     fn new_from_key(
         reader: &BlockReader<W>,
         internal_key: &[u8],
-    ) -> Result<Box<dyn Iterator<Item=Result<(Vec<u8>, W::Output)>>>> {
-
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, W::Output)>>>> {
         let restart_idx = reader.binary_search_restarts(internal_key)?;
 
         if restart_idx.is_none() {
@@ -299,7 +310,8 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
         let restart_idx = restart_idx.unwrap();
 
         let restart_offset = reader.read_key_offset(restart_idx)?;
-        let next_restart_offset = reader.next_restart_offset(restart_idx)?
+        let next_restart_offset = reader
+            .next_restart_offset(restart_idx)?
             .unwrap_or(reader.restarts_offset);
 
         let data = ByteReader::new(reader.block.clone());
@@ -314,28 +326,33 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
             let mut next_restart_offset = next_restart_offset;
 
             while data.position() < reader.restarts_offset {
-
                 let restart = if data.position() == next_restart_offset {
                     restart_idx += 1;
-                    next_restart_offset = reader.next_restart_offset(restart_idx)?.unwrap_or(reader.restarts_offset);
+                    next_restart_offset = reader
+                        .next_restart_offset(restart_idx)?
+                        .unwrap_or(reader.restarts_offset);
                     true
                 } else {
                     false
                 };
 
-                let (new_key, output) = reader.read_entry(&data, &prev_key, if restart { &None } else { &prev_value })?;
+                let (new_key, output) = reader.read_entry(
+                    &data,
+                    &prev_key,
+                    if restart { &None } else { &prev_value },
+                )?;
 
                 match internal_key.cmp(&new_key) {
                     Ordering::Equal => {
                         stack.push(Ok((new_key, output)));
                         break;
-                    },
+                    }
                     Ordering::Less => {
                         break;
-                    },
+                    }
                     Ordering::Greater => {
                         // Continue searching
-                    },
+                    }
                 };
 
                 prev_key = new_key.clone();
@@ -354,10 +371,11 @@ impl<W: EntryReader + 'static> ReverseBlockEntryIterator<W> {
     }
 
     fn fill_stack(&mut self) -> Result<()> {
-
         let restart_offset = self.reader.read_key_offset(self.restart_idx)?;
-        let next_restart_offset = self.reader.next_restart_offset(self.restart_idx)?
-                                                   .unwrap_or(self.reader.restarts_offset);
+        let next_restart_offset = self
+            .reader
+            .next_restart_offset(self.restart_idx)?
+            .unwrap_or(self.reader.restarts_offset);
 
         self.data.seek(restart_offset)?;
 
@@ -381,7 +399,6 @@ impl<W: EntryReader + 'static> Iterator for ReverseBlockEntryIterator<W> {
     type Item = Result<(Vec<u8>, W::Output)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-
         if self.stack.is_empty() {
             if self.restart_idx == 0 {
                 return None;
@@ -404,7 +421,7 @@ impl<W: EntryReader + 'static> Iterator for ReverseBlockEntryIterator<W> {
 pub trait EntryReader: Clone {
     type Output: Clone + Debug;
 
-    fn is_index_reader(&self) -> bool ;
+    fn is_index_reader(&self) -> bool;
 
     /// Reads the next value, possibly using the previous value (for deltas).
     fn read<B: AsRef<[u8]>>(
@@ -478,15 +495,17 @@ impl EntryReader for DataEntryReader {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use super::*;
-    use crate::storage::internal_key::{encode_internal_key, encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER};
+    use crate::storage::internal_key::{
+        encode_internal_key, encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER,
+    };
     use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
-    use crate::util::bson_utils::BsonKey;
-    use bson::{doc, to_vec, Bson};
-    use crate::storage::Direction;
     use crate::storage::test_utils::assert_next_entry_eq;
+    use crate::storage::Direction;
+    use crate::util::bson_utils::BsonKey;
     use crate::util::interval::Interval;
+    use bson::{doc, to_vec, Bson};
+    use std::fmt::Debug;
 
     #[test]
     fn test_index_binary_search_restarts() {
@@ -534,37 +553,129 @@ mod tests {
         assert_eq!(Some(3), block.binary_search_restarts(&max(8, 12)).unwrap());
         assert_eq!(Some(3), block.binary_search_restarts(&min(8)).unwrap());
 
-        assert_eq!(None, block.binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(2), block.binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(3), block.binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(
+            None,
+            block
+                .binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(1),
+            block
+                .binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(2),
+            block
+                .binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(2),
+            block
+                .binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(3),
+            block
+                .binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
 
         assert_eq!(Some(2), block.binary_search_restarts(&max(5, 2)).unwrap());
     }
 
     #[test]
     fn test_data_binary_search_restarts() {
-
         let mut builder = BlockBuilder::new(8, DataEntryWriter);
 
         // 1st restart
-        builder.add(&put(1, 1), to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap()).unwrap();
-        builder.add(&put(2, 2), to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap()).unwrap();
-        builder.add(&put(3, 3), to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap()).unwrap();
-        builder.add(&put(4, 4), to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap()).unwrap();
-        builder.add(&delete(5, 9), vec!()).unwrap();
-        builder.add(&put(5, 8), to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}).unwrap()).unwrap();
-        builder.add(&put(5, 7), to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}).unwrap()).unwrap();
-        builder.add(&put(5, 6), to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}).unwrap()).unwrap();
+        builder
+            .add(
+                &put(1, 1),
+                to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(2, 2),
+                to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(3, 3),
+                to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(4, 4),
+                to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap(),
+            )
+            .unwrap();
+        builder.add(&delete(5, 9), vec![]).unwrap();
+        builder
+            .add(
+                &put(5, 8),
+                to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011})
+                    .unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(5, 7),
+                to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011})
+                    .unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(5, 6),
+                to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011})
+                    .unwrap(),
+            )
+            .unwrap();
         // 2nd restart
-        builder.add(&put(5, 5), to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}).unwrap()).unwrap();
-        builder.add(&put(7, 11), to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2013}).unwrap()).unwrap();
-        builder.add(&put(7, 10), to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2012}).unwrap()).unwrap();
-
+        builder
+            .add(
+                &put(5, 5),
+                to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011})
+                    .unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(7, 11),
+                to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2013}).unwrap(),
+            )
+            .unwrap();
+        builder
+            .add(
+                &put(7, 10),
+                to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2012}).unwrap(),
+            )
+            .unwrap();
 
         let block_data = Arc::from(builder.finish().unwrap().1);
         let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
@@ -592,14 +703,54 @@ mod tests {
         assert_eq!(Some(1), block.binary_search_restarts(&max(8, 12)).unwrap());
         assert_eq!(Some(1), block.binary_search_restarts(&min(8)).unwrap());
 
-        assert_eq!(None, block.binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(0), block.binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER)).unwrap());
-        assert_eq!(Some(1), block.binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER)).unwrap());
+        assert_eq!(
+            None,
+            block
+                .binary_search_restarts(&max(1, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(2, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(3, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(4, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(0),
+            block
+                .binary_search_restarts(&max(5, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(1),
+            block
+                .binary_search_restarts(&max(6, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(1),
+            block
+                .binary_search_restarts(&max(7, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(1),
+            block
+                .binary_search_restarts(&max(8, MAX_SEQUENCE_NUMBER))
+                .unwrap()
+        );
 
         assert_eq!(Some(1), block.binary_search_restarts(&max(5, 2)).unwrap());
     }
@@ -642,7 +793,9 @@ mod tests {
                 let mut iter = block.scan_forward_from(&inc_start(5, 3)).unwrap();
                 assert_iter_eq(&mut iter, &entries[1..]); // The entry could be in the previous block.
 
-                let mut iter = block.scan_forward_from(&inc_start(7, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(7, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries[2..]);
 
                 let mut iter = block.scan_forward_from(&inc_start(7, 3)).unwrap();
@@ -657,13 +810,19 @@ mod tests {
 
             // Test for keys between existing entries (non-existent keys)
             {
-                let mut iter = block.scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries[1..]);
 
-                let mut iter = block.scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
             }
         }
@@ -675,7 +834,7 @@ mod tests {
             // Test for all existing keys
             {
                 let mut iter = block.scan_reverse_from(&exc_end(1)).unwrap();
-                assert_iter_eq(&mut iter, &vec!());
+                assert_iter_eq(&mut iter, &vec![]);
 
                 let mut iter = block.scan_reverse_from(&inc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
@@ -702,7 +861,7 @@ mod tests {
             // Test for keys between existing entries (non-existent keys)
             {
                 let mut iter = block.scan_reverse_from(&exc_end(0)).unwrap();
-                assert_iter_eq(&mut iter, &vec!());
+                assert_iter_eq(&mut iter, &vec![]);
 
                 let mut iter = block.scan_reverse_from(&exc_end(4)).unwrap();
                 assert_iter_eq(&mut iter, &entries[9..]);
@@ -721,7 +880,6 @@ mod tests {
 
     #[test]
     fn test_scan_index_with_a_single_block() {
-
         let mut builder = BlockBuilder::new(3, IndexEntryWriter);
 
         // Use the same keys/values as in test_search_index
@@ -733,11 +891,15 @@ mod tests {
         let block_data = Arc::from(builder.finish().unwrap().1);
         let block = BlockReader::new(block_data, IndexEntryReader).unwrap();
 
-        let mut iter = block.scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER)).unwrap();
-        assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
+        let mut iter = block
+            .scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER))
+            .unwrap();
+        assert_iter_eq(&mut iter, &vec![(key.clone(), value.clone())]);
 
-        let mut iter = block.scan_forward_from(&inc_start(2, MAX_SEQUENCE_NUMBER)).unwrap();
-        assert_iter_eq(&mut iter, &vec!((key.clone(), value.clone())));
+        let mut iter = block
+            .scan_forward_from(&inc_start(2, MAX_SEQUENCE_NUMBER))
+            .unwrap();
+        assert_iter_eq(&mut iter, &vec![(key.clone(), value.clone())]);
     }
 
     #[test]
@@ -749,17 +911,41 @@ mod tests {
 
         // Prepare entries: (key, value)
         let mut entries = vec![
-            (put(1, 1), to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap()),
-            (put(3, 2), to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap()),
-            (put(5, 3), to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap()),
+            (
+                put(1, 1),
+                to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap(),
+            ),
+            (
+                put(3, 2),
+                to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap(),
+            ),
+            (
+                put(5, 3),
+                to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap(),
+            ),
             (put(7, 4), to_vec(&doc! {"id": 7, "name": "Thor"}).unwrap()),
             (delete(9, 9), Vec::new()),
             (put(9, 8), to_vec(&doc! {"id": 9, "name": "Hulk"}).unwrap()),
-            (put(9, 7), to_vec(&doc! {"id": 9, "name": "Hawkeye"}).unwrap()),
-            (put(9, 6), to_vec(&doc! {"id": 9, "name": "Black Widow"}).unwrap()),
-            (put(9, 5), to_vec(&doc! {"id": 9, "name": "Vision"}).unwrap()),
-            (put(11, 11), to_vec(&doc! {"id": 11, "name": "Loki"}).unwrap()),
-            (put(11, 10), to_vec(&doc! {"id": 11, "name": "Ultron"}).unwrap()),
+            (
+                put(9, 7),
+                to_vec(&doc! {"id": 9, "name": "Hawkeye"}).unwrap(),
+            ),
+            (
+                put(9, 6),
+                to_vec(&doc! {"id": 9, "name": "Black Widow"}).unwrap(),
+            ),
+            (
+                put(9, 5),
+                to_vec(&doc! {"id": 9, "name": "Vision"}).unwrap(),
+            ),
+            (
+                put(11, 11),
+                to_vec(&doc! {"id": 11, "name": "Loki"}).unwrap(),
+            ),
+            (
+                put(11, 10),
+                to_vec(&doc! {"id": 11, "name": "Ultron"}).unwrap(),
+            ),
         ];
 
         for (k, v) in &entries {
@@ -773,7 +959,9 @@ mod tests {
         {
             // Test for all existing keys
             {
-                let mut iter = block.scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(1, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
                 let mut iter = block.scan_forward_from(&exc_start(1)).unwrap();
@@ -797,19 +985,25 @@ mod tests {
 
             // Test for keys between existing entries (non-existent keys)
             {
-                let mut iter = block.scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(0, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
                 let mut iter = block.scan_forward_from(&exc_start(0)).unwrap();
                 assert_iter_eq(&mut iter, &entries);
 
-                let mut iter = block.scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(4, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert_iter_eq(&mut iter, &entries[2..]);
 
                 let mut iter = block.scan_forward_from(&exc_start(4)).unwrap();
                 assert_iter_eq(&mut iter, &entries[2..]);
 
-                let mut iter = block.scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER)).unwrap();
+                let mut iter = block
+                    .scan_forward_from(&inc_start(12, MAX_SEQUENCE_NUMBER))
+                    .unwrap();
                 assert!(iter.next().is_none());
 
                 let mut iter = block.scan_forward_from(&exc_start(12)).unwrap();
@@ -824,7 +1018,7 @@ mod tests {
             // Test for all existing keys
             {
                 let mut iter = block.scan_reverse_from(&exc_end(1)).unwrap();
-                assert_iter_eq(&mut iter, &vec!());
+                assert_iter_eq(&mut iter, &vec![]);
 
                 let mut iter = block.scan_reverse_from(&inc_end(1)).unwrap();
                 assert_iter_eq(&mut iter, &entries[10..]);
@@ -852,7 +1046,7 @@ mod tests {
             {
                 // <= 0 - seq: MAX_SEQUENCE_NUMBER
                 let mut iter = block.scan_reverse_from(&inc_end(0)).unwrap();
-                assert_iter_eq(&mut iter, &vec!());
+                assert_iter_eq(&mut iter, &vec![]);
 
                 // <= 4 - seq: MAX_SEQUENCE_NUMBER
                 let mut iter = block.scan_reverse_from(&exc_end(4)).unwrap();
@@ -899,21 +1093,24 @@ mod tests {
     fn exc_start(id: i32) -> InternalKeyBound {
         let user_key = Bson::Int32(id).try_into_key().unwrap();
         let range = Interval::greater_than(user_key);
-        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Forward);
+        let range =
+            encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Forward);
         range.start_bound().clone()
     }
 
     fn inc_end(id: i32) -> InternalKeyBound {
         let user_key = Bson::Int32(id).try_into_key().unwrap();
         let range = Interval::at_most(user_key);
-        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
+        let range =
+            encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
         range.end_bound().clone()
     }
 
     fn exc_end(id: i32) -> InternalKeyBound {
         let user_key = Bson::Int32(id).try_into_key().unwrap();
         let range = Interval::less_than(user_key);
-        let range = encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
+        let range =
+            encode_internal_key_range(32, 0, &range, MAX_SEQUENCE_NUMBER, Direction::Reverse);
         range.end_bound().clone()
     }
 

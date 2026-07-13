@@ -29,10 +29,14 @@ impl LsmTree {
         current_log_number: u64,
         next_file_number: u64,
         next_seq: u64,
-        max_levels: usize
+        max_levels: usize,
     ) -> Self {
         LsmTree {
-            manifest: Arc::new(ManifestState::new(current_log_number, next_file_number, max_levels)),
+            manifest: Arc::new(ManifestState::new(
+                current_log_number,
+                next_file_number,
+                max_levels,
+            )),
             memtable: Arc::new(Memtable::new(current_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
@@ -50,7 +54,10 @@ impl LsmTree {
 
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         match edit {
-            ManifestEdit::WalRotation { log_number, next_seq } => {
+            ManifestEdit::WalRotation {
+                log_number,
+                next_seq,
+            } => {
                 // The log was rotated because the memtable was considered as full. The memtable
                 // should be considered as immutable and placed in the queue waiting for being
                 // flushed to disk. A new memtable should be created and associated to the new log.
@@ -118,17 +125,20 @@ impl LsmTree {
         index: u32,
         user_key: &[u8],
         snapshot: u64,
-        min_snapshot: Option<u64>
+        min_snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-
-        if self.catalog().collection_or_index_exist_at(collection, index, snapshot) == false {
+        if self
+            .catalog()
+            .collection_or_index_exist_at(collection, index, snapshot)
+            == false
+        {
             return Ok(None);
         }
 
         let record_key = encode_record_key(collection, index, user_key);
         let rs = self.memtable.read(&record_key, snapshot, min_snapshot);
         if let Some((internal_key, value)) = rs {
-            return Ok(Some((internal_key, value)))
+            return Ok(Some((internal_key, value)));
         }
 
         if let Some(min_snapshot) = min_snapshot {
@@ -139,12 +149,10 @@ impl LsmTree {
 
         // Iterate from newest to oldest
         for imm_memtable in self.imm_memtables.iter().rev() {
-            if let Some((internal_key, value)) = imm_memtable.read(
-                &record_key,
-                snapshot,
-                min_snapshot
-            ) {
-                return Ok(Some((internal_key, value)))
+            if let Some((internal_key, value)) =
+                imm_memtable.read(&record_key, snapshot, min_snapshot)
+            {
+                return Ok(Some((internal_key, value)));
             }
 
             if let Some(min_snapshot) = min_snapshot {
@@ -154,11 +162,16 @@ impl LsmTree {
             }
         }
 
-        for sst in self.manifest.find_sstables(&record_key, snapshot, min_snapshot) {
+        for sst in self
+            .manifest
+            .find_sstables(&record_key, snapshot, min_snapshot)
+        {
             let file = db_dir.join(DbFile::new_sst(sst.number).filename());
             let sst_reader = sstable_cache.get(&file)?;
-            if let Some((internal_key, value)) = sst_reader.read(&record_key, snapshot, min_snapshot)? {
-                return Ok(Some((internal_key, value)))
+            if let Some((internal_key, value)) =
+                sst_reader.read(&record_key, snapshot, min_snapshot)?
+            {
+                return Ok(Some((internal_key, value)));
             }
         }
 
@@ -178,7 +191,11 @@ impl LsmTree {
     where
         R: RangeBounds<Vec<u8>>,
     {
-        if self.catalog().collection_or_index_exist_at(collection, index, snapshot) == false {
+        if self
+            .catalog()
+            .collection_or_index_exist_at(collection, index, snapshot)
+            == false
+        {
             // Return an empty iterator if the collection or index does not exist
             let empty_iter = std::iter::empty();
             return Ok(Box::new(empty_iter));
@@ -211,11 +228,13 @@ impl LsmTree {
             )?);
         }
 
-        let record_key_interval =
-            encode_record_key_range(collection, index, user_key_range);
+        let record_key_interval = encode_record_key_range(collection, index, user_key_range);
 
         // SSTable iterators
-        for sst_meta in self.manifest.find_sstables_in_range(&record_key_interval, snapshot) {
+        for sst_meta in self
+            .manifest
+            .find_sstables_in_range(&record_key_interval, snapshot)
+        {
             let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
             let sst_reader = sstable_cache.get(&file_path)?;
             iterators.push(sst_reader.range_scan(
@@ -227,11 +246,11 @@ impl LsmTree {
 
         let merge_iter = MergeIterator::new(iterators, direction.clone())?;
 
-        let result_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> =
-            match direction {
-                Direction::Forward => Box::new(ForwardIterator::new(Box::new(merge_iter), snapshot)),
-                Direction::Reverse => Box::new(ReverseIterator::new(Box::new(merge_iter), snapshot)),
-            };
+        let result_iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> = match direction
+        {
+            Direction::Forward => Box::new(ForwardIterator::new(Box::new(merge_iter), snapshot)),
+            Direction::Reverse => Box::new(ReverseIterator::new(Box::new(merge_iter), snapshot)),
+        };
 
         Ok(result_iter)
     }

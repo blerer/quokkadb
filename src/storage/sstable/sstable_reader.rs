@@ -2,32 +2,34 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::{Compressor, CompressorType};
 use crate::io::ZeroCopy;
+use crate::obs::logger::{LogLevel, LoggerAndTracer};
+use crate::storage::files::DbFile;
+use crate::storage::internal_key::{
+    encode_internal_key, extract_record_key, extract_sequence_number,
+};
+use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
+use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterator};
+use crate::storage::operation::OperationType;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::block_reader::{BlockReader, DataEntryReader, IndexEntryReader};
 use crate::storage::sstable::sstable_properties::SSTableProperties;
 use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::{MAGIC_NUMBER, SSTABLE_FOOTER_LENGTH};
+use crate::storage::Direction;
 use crate::util::bloom_filter::BloomFilter;
+use crate::{event, info};
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
-use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterator};
+use std::fmt;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
 #[cfg(windows)]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
-use ErrorKind::InvalidData;
-use std::cmp::Ordering;
-use std::fmt;
 use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use crate::{event, info};
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::storage::Direction;
-use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, extract_record_key, extract_sequence_number};
-use crate::storage::operation::OperationType;
+use ErrorKind::InvalidData;
 
 pub struct SSTableReader {
     logger: Arc<dyn LoggerAndTracer>,
@@ -39,8 +41,11 @@ pub struct SSTableReader {
 }
 
 impl SSTableReader {
-    pub fn open(logger: Arc<dyn LoggerAndTracer>, block_cache: Arc<BlockCache>, file_path: &Path) -> Result<SSTableReader> {
-
+    pub fn open(
+        logger: Arc<dyn LoggerAndTracer>,
+        block_cache: Arc<BlockCache>,
+        file_path: &Path,
+    ) -> Result<SSTableReader> {
         let filename = DbFile::new(file_path).unwrap().filename();
 
         let start = Instant::now();
@@ -95,7 +100,13 @@ impl SSTableReader {
             Self::read_properties(&file, &compressor, &checksum_strategy, &properties_handle)?;
 
         let duration = start.elapsed();
-        info!(logger, "SSTableReader opened file={}, properties={:?}, duration={}us", &filename, properties, duration.as_micros());
+        info!(
+            logger,
+            "SSTableReader opened file={}, properties={:?}, duration={}us",
+            &filename,
+            properties,
+            duration.as_micros()
+        );
 
         let block_loader = Arc::new(BlockLoader::new(
             block_cache,
@@ -133,8 +144,7 @@ impl SSTableReader {
         let mut handles = HashMap::new();
 
         let reader = BlockReader::new(data, IndexEntryReader)?;
-        for res in reader.scan_all_forward()?
-        {
+        for res in reader.scan_all_forward()? {
             match res {
                 Ok((key, handle)) => {
                     // Ensure the key is valid UTF-8
@@ -190,15 +200,20 @@ impl SSTableReader {
     }
 
     /// Read a value by user key and snapshot
-    pub fn read(&self,
-                record_key: &[u8],
-                snapshot: u64,
-                min_snapshot: Option<u64>
+    pub fn read(
+        &self,
+        record_key: &[u8],
+        snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-
-        event!(self.logger,
+        event!(
+            self.logger,
             "read start file={}, key={:?}, snapshot={}, min_snapshot={}",
-            &self.filename, &record_key, snapshot, min_snapshot.map_or("None".to_string(), |s| s.to_string()));
+            &self.filename,
+            &record_key,
+            snapshot,
+            min_snapshot.map_or("None".to_string(), |s| s.to_string())
+        );
 
         let filter_block = self.get_block(&self.filter_handle)?;
 
@@ -252,58 +267,66 @@ impl SSTableReader {
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
         // Fetch and parse the index block
-        event!(self.logger, "range_scan start file={}, range={:?}, snapshot={}, direction={:?}", &self.filename, &range, snapshot, direction);
+        event!(
+            self.logger,
+            "range_scan start file={}, range={:?}, snapshot={}, direction={:?}",
+            &self.filename,
+            &range,
+            snapshot,
+            direction
+        );
         let index_block = self.get_block(&self.index_handle)?;
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
-        let mut sstable_iter_base: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>> = match direction {
-            Direction::Forward => {
-                let mut index_iter = index_reader.scan_forward_from(range.start_bound())?;
+        let mut sstable_iter_base: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>> =
+            match direction {
+                Direction::Forward => {
+                    let mut index_iter = index_reader.scan_forward_from(range.start_bound())?;
 
-                let data_iter = match index_iter.next() {
-                    Some(Ok((_index_key, handle))) => {
-                        let data_block = self.block_loader.load_block(&handle)?;
-                        let data_reader = BlockReader::new(data_block, DataEntryReader)?;
-                        Some(data_reader.scan_forward_from(&range.start_bound())?)
-                     },
-                    Some(Err(e)) => return Err(e),
-                    None => None, 
-                };
-                
-                let iter = SSTableRangeScanIterator {
-                    block_loader: self.block_loader.clone(),
-                    range: range.clone(), // Pass along for boundary checks
-                    direction,
-                    index_iter,
-                    current_data_block_iter: data_iter,
-                    count: 0,
-                };
-                Box::new(ForwardIterator::new(Box::new(iter), snapshot))
-            }
-            Direction::Reverse => {
-                let mut index_iter = index_reader.scan_reverse_from(range.end_bound())?;
+                    let data_iter = match index_iter.next() {
+                        Some(Ok((_index_key, handle))) => {
+                            let data_block = self.block_loader.load_block(&handle)?;
+                            let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                            Some(data_reader.scan_forward_from(&range.start_bound())?)
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => None,
+                    };
 
-                let data_iter = match index_iter.next() {
-                    Some(Ok((_index_key, handle))) => {
-                        let data_block = self.block_loader.load_block(&handle)?;
-                        let data_reader = BlockReader::new(data_block, DataEntryReader)?;
-                        Some(data_reader.scan_reverse_from(range.end_bound())?)
-                    },
-                    Some(Err(e)) => return Err(e),
-                    None => None,
-                };
+                    let iter = SSTableRangeScanIterator {
+                        block_loader: self.block_loader.clone(),
+                        range: range.clone(), // Pass along for boundary checks
+                        direction,
+                        index_iter,
+                        current_data_block_iter: data_iter,
+                        count: 0,
+                    };
+                    Box::new(ForwardIterator::new(Box::new(iter), snapshot))
+                }
+                Direction::Reverse => {
+                    let mut index_iter = index_reader.scan_reverse_from(range.end_bound())?;
 
-                let iter = SSTableRangeScanIterator {
-                    block_loader: self.block_loader.clone(),
-                    range: range.clone(), // Pass along for boundary checks
-                    direction,
-                    index_iter,
-                    current_data_block_iter: data_iter,
-                    count: 0,
-                };
-                Box::new(ReverseIterator::new(Box::new(iter), snapshot))
-            }
-        };
+                    let data_iter = match index_iter.next() {
+                        Some(Ok((_index_key, handle))) => {
+                            let data_block = self.block_loader.load_block(&handle)?;
+                            let data_reader = BlockReader::new(data_block, DataEntryReader)?;
+                            Some(data_reader.scan_reverse_from(range.end_bound())?)
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => None,
+                    };
+
+                    let iter = SSTableRangeScanIterator {
+                        block_loader: self.block_loader.clone(),
+                        range: range.clone(), // Pass along for boundary checks
+                        direction,
+                        index_iter,
+                        current_data_block_iter: data_iter,
+                        count: 0,
+                    };
+                    Box::new(ReverseIterator::new(Box::new(iter), snapshot))
+                }
+            };
 
         if self.logger.is_tracing_enabled() {
             sstable_iter_base = Box::new(TracingIterator::new(
@@ -395,13 +418,14 @@ impl Iterator for SSTableRangeScanIterator {
                         self.current_data_block_iter = None; // Invalidate on error
                         return Some(Err(e));
                     }
-                    None => { // Current data block exhausted
+                    None => {
+                        // Current data block exhausted
                         self.current_data_block_iter = None;
                         // Loop again to fetch the next data block via index_iter
                     }
                 }
             } else {
-                 // current_data_block_iter is None, and index_iter was exhausted or failed.
+                // current_data_block_iter is None, and index_iter was exhausted or failed.
                 return None;
             }
         }
@@ -557,21 +581,23 @@ impl BlockLoader {
 
 #[cfg(test)]
 mod tests {
-    use bson::Bson;
-    use tempfile::tempdir;
+    use super::*;
     use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
-    use super::*;
-    use crate::storage::internal_key::{encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER};
+    use crate::storage::internal_key::{
+        encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER,
+    };
     use crate::storage::lsm_version::SSTableMetadata;
     use crate::storage::operation::Operation;
-    use std::ops::{Bound, RangeBounds};
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::{delete_op, delete_rec, put_op, put_rec};
     use crate::util::bson_utils::BsonKey;
     use crate::util::interval::Interval;
+    use bson::Bson;
+    use std::ops::{Bound, RangeBounds};
+    use tempfile::tempdir;
 
     #[test]
     fn test_open() {
@@ -592,7 +618,9 @@ mod tests {
 
         let sst_file = DbFile::new_sst(12);
 
-        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, inserts.len()).unwrap();
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, inserts.len())
+                .unwrap();
 
         let mut seq = 15;
         for op in inserts.iter() {
@@ -602,7 +630,11 @@ mod tests {
 
         let sst = writer.finish().unwrap();
 
-        let expected_size = path.join(DbFile::new_sst(12).filename()).metadata().unwrap().len();
+        let expected_size = path
+            .join(DbFile::new_sst(12).filename())
+            .metadata()
+            .unwrap()
+            .len();
 
         let expected = SSTableMetadata::new(
             12,
@@ -615,7 +647,12 @@ mod tests {
         );
         assert_eq!(sst, expected);
 
-        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+        let reader = SSTableReader::open(
+            test_instance(),
+            block_cache,
+            &path.join(sst_file.filename()),
+        )
+        .unwrap();
         let properties = reader.properties();
 
         assert_eq!(properties.num_entries, 4);
@@ -625,16 +662,16 @@ mod tests {
 
         let mut seq = 15;
         for op in inserts.iter() {
-            let result = reader.read(&encode_record_key(col, 0, op.user_key()), 19, None).unwrap();
+            let result = reader
+                .read(&encode_record_key(col, 0, op.user_key()), 19, None)
+                .unwrap();
             assert_eq!(result, Some((op.internal_key(seq), op.value().to_vec())));
             seq += 1;
         }
     }
 
-
     #[test]
     fn test_search_data() {
-
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
@@ -646,21 +683,22 @@ mod tests {
         let col = 32;
 
         let entries = vec![
-            put_rec(col, 1, 1, 1), // 0
-            put_rec(col, 2, 1, 2), // 1
-            put_rec(col, 3, 1, 3), // 2
-            put_rec(col, 4, 1, 4), // 3
-            delete_rec(col, 5, 9), // 4
-            put_rec(col, 5, 4, 8), // 5
-            put_rec(col, 5, 3, 7), // 6
-            put_rec(col, 5, 2, 6), // 7
-            put_rec(col, 5, 1, 5), // 8
+            put_rec(col, 1, 1, 1),  // 0
+            put_rec(col, 2, 1, 2),  // 1
+            put_rec(col, 3, 1, 3),  // 2
+            put_rec(col, 4, 1, 4),  // 3
+            delete_rec(col, 5, 9),  // 4
+            put_rec(col, 5, 4, 8),  // 5
+            put_rec(col, 5, 3, 7),  // 6
+            put_rec(col, 5, 2, 6),  // 7
+            put_rec(col, 5, 1, 5),  // 8
             put_rec(col, 7, 2, 11), // 9
             put_rec(col, 7, 1, 10), //10
         ];
 
         let len = entries.len();
-        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len).unwrap();
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len).unwrap();
 
         for entry in entries.iter() {
             writer.add(&entry.0, &entry.1).unwrap();
@@ -668,27 +706,74 @@ mod tests {
 
         let _sst = writer.finish().unwrap();
 
-        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+        let reader = SSTableReader::open(
+            test_instance(),
+            block_cache,
+            &path.join(sst_file.filename()),
+        )
+        .unwrap();
 
-        assert_search_eq(&reader, &record_key(col,0), MAX_SEQUENCE_NUMBER, None, None);
-        assert_search_eq(&reader, &record_key(col,1), MAX_SEQUENCE_NUMBER, entries.get(0), None);
-        assert_search_eq(&reader, &record_key(col,2), 2, entries.get(1), None);
-        assert_search_eq(&reader, &record_key(col,2), MAX_SEQUENCE_NUMBER, entries.get(1), None);
-        assert_search_eq(&reader, &record_key(col,2), 1, None, None);
-        assert_search_eq(&reader, &record_key(col,3), 3, entries.get(2), None);
-        assert_search_eq(&reader, &record_key(col,4), 4, entries.get(3), None);
-        assert_search_eq(&reader, &record_key(col,4), MAX_SEQUENCE_NUMBER, entries.get(3), None);
-        assert_search_eq(&reader, &record_key(col,5), MAX_SEQUENCE_NUMBER, entries.get(4), None);
-        assert_search_eq(&reader, &record_key(col,5), 9, entries.get(4), None);
-        assert_search_eq(&reader, &record_key(col,5), 8, entries.get(5), None);
-        assert_search_eq(&reader, &record_key(col,5), 7, entries.get(6), None);
-        assert_search_eq(&reader, &record_key(col,5), 6, entries.get(7), None);
-        assert_search_eq(&reader, &record_key(col,5), 5, entries.get(8), None);
-        assert_search_eq(&reader, &record_key(col,6), MAX_SEQUENCE_NUMBER, None, None);
-        assert_search_eq(&reader, &record_key(col,7), MAX_SEQUENCE_NUMBER, entries.get(9), None);
-        assert_search_eq(&reader, &record_key(col,7), 11, entries.get(9), None);
-        assert_search_eq(&reader, &record_key(col,7), 10, entries.get(10), None);
-        assert_search_eq(&reader, &record_key(col,8), 12, None, None);
+        assert_search_eq(
+            &reader,
+            &record_key(col, 0),
+            MAX_SEQUENCE_NUMBER,
+            None,
+            None,
+        );
+        assert_search_eq(
+            &reader,
+            &record_key(col, 1),
+            MAX_SEQUENCE_NUMBER,
+            entries.get(0),
+            None,
+        );
+        assert_search_eq(&reader, &record_key(col, 2), 2, entries.get(1), None);
+        assert_search_eq(
+            &reader,
+            &record_key(col, 2),
+            MAX_SEQUENCE_NUMBER,
+            entries.get(1),
+            None,
+        );
+        assert_search_eq(&reader, &record_key(col, 2), 1, None, None);
+        assert_search_eq(&reader, &record_key(col, 3), 3, entries.get(2), None);
+        assert_search_eq(&reader, &record_key(col, 4), 4, entries.get(3), None);
+        assert_search_eq(
+            &reader,
+            &record_key(col, 4),
+            MAX_SEQUENCE_NUMBER,
+            entries.get(3),
+            None,
+        );
+        assert_search_eq(
+            &reader,
+            &record_key(col, 5),
+            MAX_SEQUENCE_NUMBER,
+            entries.get(4),
+            None,
+        );
+        assert_search_eq(&reader, &record_key(col, 5), 9, entries.get(4), None);
+        assert_search_eq(&reader, &record_key(col, 5), 8, entries.get(5), None);
+        assert_search_eq(&reader, &record_key(col, 5), 7, entries.get(6), None);
+        assert_search_eq(&reader, &record_key(col, 5), 6, entries.get(7), None);
+        assert_search_eq(&reader, &record_key(col, 5), 5, entries.get(8), None);
+        assert_search_eq(
+            &reader,
+            &record_key(col, 6),
+            MAX_SEQUENCE_NUMBER,
+            None,
+            None,
+        );
+        assert_search_eq(
+            &reader,
+            &record_key(col, 7),
+            MAX_SEQUENCE_NUMBER,
+            entries.get(9),
+            None,
+        );
+        assert_search_eq(&reader, &record_key(col, 7), 11, entries.get(9), None);
+        assert_search_eq(&reader, &record_key(col, 7), 10, entries.get(10), None);
+        assert_search_eq(&reader, &record_key(col, 8), 12, None, None);
     }
 
     #[test]
@@ -710,14 +795,21 @@ mod tests {
             delete_rec(col, 5, 8), // seq 8
         ];
 
-        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, entries.len()).unwrap();
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, entries.len())
+                .unwrap();
         // Add in decreasing sequence number order, which is increasing internal key order.
         for entry in entries.iter().rev() {
             writer.add(&entry.0, &entry.1).unwrap();
         }
         writer.finish().unwrap();
 
-        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+        let reader = SSTableReader::open(
+            test_instance(),
+            block_cache,
+            &path.join(sst_file.filename()),
+        )
+        .unwrap();
         let key = record_key(col, 5);
 
         // snapshot=10, min_snapshot=Some(8): should find nothing (newest is seq=8, which is not > 8)
@@ -750,7 +842,6 @@ mod tests {
 
     #[test]
     fn test_search_through_multiple_blocks() {
-
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
@@ -762,7 +853,9 @@ mod tests {
         let col = 32;
 
         let len = 1000i32;
-        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len as usize).unwrap();
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, len as usize)
+                .unwrap();
 
         for i in 0..len {
             let entry = put_rec(col, i, i as u32, i as u64);
@@ -771,17 +864,27 @@ mod tests {
 
         let _sst = writer.finish().unwrap();
 
-        let reader = SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap();
+        let reader = SSTableReader::open(
+            test_instance(),
+            block_cache,
+            &path.join(sst_file.filename()),
+        )
+        .unwrap();
 
         for i in 0..1000 {
             let entry = put_rec(col, i, i as u32, i as u64);
-            assert_search_eq(&reader, &record_key(col, i), MAX_SEQUENCE_NUMBER, Some(&entry), None);
+            assert_search_eq(
+                &reader,
+                &record_key(col, i),
+                MAX_SEQUENCE_NUMBER,
+                Some(&entry),
+                None,
+            );
         }
     }
 
     #[test]
     fn test_sstable_reader_range_scan() {
-
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
@@ -791,9 +894,11 @@ mod tests {
         let sst_file = DbFile::new_sst(1);
         let col = 32;
 
-        let mut writer = SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, 1000).unwrap();
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(&path, &sst_file, &options, 1000).unwrap();
 
-        for i in 1..=1001 { // We need to start at 1 as 0 would be skipped
+        for i in 1..=1001 {
+            // We need to start at 1 as 0 would be skipped
 
             let vec = operations_and_sequences_for(col, i);
 
@@ -805,101 +910,218 @@ mod tests {
 
         writer.finish().unwrap();
 
-        let reader = Arc::new(SSTableReader::open(test_instance(), block_cache, &path.join(sst_file.filename())).unwrap());
+        let reader = Arc::new(
+            SSTableReader::open(
+                test_instance(),
+                block_cache,
+                &path.join(sst_file.filename()),
+            )
+            .unwrap(),
+        );
 
         for snapshot in vec![MAX_SEQUENCE_NUMBER, 5000, 2000] {
-            for direction in vec!(Direction::Forward, Direction::Reverse) {
-
+            for direction in vec![Direction::Forward, Direction::Reverse] {
                 // Full Unbounded
-                test_range_scan(reader.clone(), col, &Interval::all(), &mut (1..=1001), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::all(),
+                    &mut (1..=1001),
+                    snapshot,
+                    &direction,
+                );
 
                 // Full Included
-                test_range_scan(reader.clone(), col, &Interval::closed(1, 1001), &mut (1..=1001), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(1, 1001),
+                    &mut (1..=1001),
+                    snapshot,
+                    &direction,
+                );
 
                 // Full Excluded Start
-                test_range_scan(reader.clone(), col, &Interval::open_closed(1, 1001), &mut (2..=1001), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::open_closed(1, 1001),
+                    &mut (2..=1001),
+                    snapshot,
+                    &direction,
+                );
 
                 // Full Excluded End
-                test_range_scan(reader.clone(), col, &Interval::closed_open(1, 1001), &mut (1..=1001), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed_open(1, 1001),
+                    &mut (1..=1001),
+                    snapshot,
+                    &direction,
+                );
 
                 // First Half
-                test_range_scan(reader.clone(), col, &Interval::closed_open(1, 500), &mut (1..500), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed_open(1, 500),
+                    &mut (1..500),
+                    snapshot,
+                    &direction,
+                );
 
                 // Second Half
-                test_range_scan(reader.clone(), col, &Interval::closed(500, 1001), &mut (500..=1001), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(500, 1001),
+                    &mut (500..=1001),
+                    snapshot,
+                    &direction,
+                );
 
                 // Around Skipped
-                test_range_scan(reader.clone(), col, &Interval::closed(6, 8), &mut (6..=8), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(6, 8),
+                    &mut (6..=8),
+                    snapshot,
+                    &direction,
+                );
 
                 // Around Deleted
-                test_range_scan(reader.clone(), col, &Interval::closed(7, 9), &mut (7..=9), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(7, 9),
+                    &mut (7..=9),
+                    snapshot,
+                    &direction,
+                );
 
                 // Around Overridden
-                test_range_scan(reader.clone(), col, &Interval::closed_open(11, 14), &mut (11..=13), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed_open(11, 14),
+                    &mut (11..=13),
+                    snapshot,
+                    &direction,
+                );
 
                 // Single Existing Item (e.g. ID 1)
-                test_range_scan(reader.clone(), col, &Interval::closed(1, 1), &mut (1..=1), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(1, 1),
+                    &mut (1..=1),
+                    snapshot,
+                    &direction,
+                );
 
                 // Single Skipped Item (e.g. ID 5)
-                test_range_scan(reader.clone(), col, &Interval::closed(7, 7), &mut (7..=7), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(7, 7),
+                    &mut (7..=7),
+                    snapshot,
+                    &direction,
+                );
 
                 // Single Deleted Item (e.g. ID 7)
-                test_range_scan(reader.clone(), col, &Interval::closed(5, 5), &mut (5..=5), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(5, 5),
+                    &mut (5..=5),
+                    snapshot,
+                    &direction,
+                );
 
                 // Single Overridden Item (e.g. ID 11)
-                test_range_scan(reader.clone(), col, &Interval::closed(12, 12), &mut (12..=12), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(12, 12),
+                    &mut (12..=12),
+                    snapshot,
+                    &direction,
+                );
 
                 // Empty Range (low)
-                test_range_scan(reader.clone(), col, &Interval::closed(-100, -50), &mut (0..0), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(-100, -50),
+                    &mut (0..0),
+                    snapshot,
+                    &direction,
+                );
 
                 // Empty Range (high)
-                test_range_scan(reader.clone(), col, &Interval::closed(1002, 2000), &mut (0..0), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(1002, 2000),
+                    &mut (0..0),
+                    snapshot,
+                    &direction,
+                );
 
                 // Empty Range (start > end)
-                test_range_scan(reader.clone(), col, &Interval::closed(100, 50), &mut (0..0), snapshot, &direction);
+                test_range_scan(
+                    reader.clone(),
+                    col,
+                    &Interval::closed(100, 50),
+                    &mut (0..0),
+                    snapshot,
+                    &direction,
+                );
             }
         }
     }
 
-    fn test_range_scan<R: RangeBounds<i32> + IntoIterator<Item=i32> + Clone>(
+    fn test_range_scan<R: RangeBounds<i32> + IntoIterator<Item = i32> + Clone>(
         reader: Arc<SSTableReader>,
         col: u32,
         selected_range: &Interval<i32>,
         expected_range: &mut R,
         snapshot: u64,
-        direction: &Direction
-    )
-    where
+        direction: &Direction,
+    ) where
         <R as IntoIterator>::IntoIter: DoubleEndedIterator,
     {
-        let mut iter = reader.range_scan(
-            key_range(col, selected_range, snapshot, direction.clone()),
-            snapshot,
-            direction.clone(),
-        ).unwrap();
+        let mut iter = reader
+            .range_scan(
+                key_range(col, selected_range, snapshot, direction.clone()),
+                snapshot,
+                direction.clone(),
+            )
+            .unwrap();
 
         check_iter(&mut iter, col, expected_range, snapshot, direction);
     }
 
-    fn check_iter<I, R: RangeBounds<i32> + IntoIterator<Item=i32> + Clone>(
+    fn check_iter<I, R: RangeBounds<i32> + IntoIterator<Item = i32> + Clone>(
         iter: &mut I,
         col: u32,
         range: &mut R,
         snapshot: u64,
-        direction: &Direction
-    )
-    where
-        I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>, <R as IntoIterator>::IntoIter: DoubleEndedIterator,
+        direction: &Direction,
+    ) where
+        I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+        <R as IntoIterator>::IntoIter: DoubleEndedIterator,
     {
-
-        let range: Box<dyn Iterator<Item=i32>> = if direction == &Direction::Reverse {
+        let range: Box<dyn Iterator<Item = i32>> = if direction == &Direction::Reverse {
             Box::new(range.clone().into_iter().rev())
         } else {
             Box::new(range.clone().into_iter())
         };
 
         for i in range {
-
             if i < 1 || i > 1001 {
                 // Skip out of range indices
                 continue;
@@ -928,9 +1150,12 @@ mod tests {
                             validated = true;
                             break; // Break after the first valid operation
                         }
-                    };
+                    }
                     if !validated {
-                        panic!("No valid operation found for index {} with snapshot {}", i, snapshot);
+                        panic!(
+                            "No valid operation found for index {} with snapshot {}",
+                            i, snapshot
+                        );
                     }
                 }
                 Some(Err(e)) => panic!("Unexpected error at index {}: {:?}", i, e),
@@ -942,7 +1167,6 @@ mod tests {
     }
 
     fn operations_and_sequences_for(col: u32, i: i32) -> Vec<(Operation, u64)> {
-
         if i % 7 == 0 {
             return vec![]; // Skip every 7th item
         }
@@ -958,7 +1182,7 @@ mod tests {
             vec.push((put_op(col, i, 2), i as u64 + 3000));
         }
         // Initial put operation
-        vec.push((put_op(col,i, 1), i as u64));
+        vec.push((put_op(col, i, 1), i as u64));
         vec
     }
 
@@ -971,20 +1195,24 @@ mod tests {
     ) {
         let result = reader.read(key, snapshot, min_snapshot);
         match (result, expected) {
-            (Ok(actual), _exp) => { assert_eq!(actual.as_ref(), expected) }
+            (Ok(actual), _exp) => {
+                assert_eq!(actual.as_ref(), expected)
+            }
             (Err(e), _) => panic!("Search returned error: {:?}", e),
         }
     }
 
-    fn key_range<R>(col: u32,
-                    range: &R,
-                    snapshot: u64,
-                    direction: Direction
+    fn key_range<R>(
+        col: u32,
+        range: &R,
+        snapshot: u64,
+        direction: Direction,
     ) -> Rc<InternalKeyRange>
-    where R: RangeBounds<i32>,
+    where
+        R: RangeBounds<i32>,
     {
         let start_bound = to_user_key_bound(&range.start_bound());
-        let end_bound =  to_user_key_bound(&range.end_bound());
+        let end_bound = to_user_key_bound(&range.end_bound());
         let interval = Interval::new(start_bound, end_bound);
         encode_internal_key_range(col, 0, &interval, snapshot, direction)
     }

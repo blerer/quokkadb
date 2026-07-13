@@ -5,12 +5,12 @@ use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
+use crate::{error, event, info};
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::{error, event, info};
 
 /// Block Cache (LRU, retrieves blocks using the shared file provided as a get parameter)
 pub struct BlockCache {
@@ -29,14 +29,12 @@ impl BlockCache {
         let evictions_counter = Counter::new();
         let cache = Cache::builder()
             .max_capacity(cache_size)
-            .weigher(
-                |_: &(String, u64), block: &Result<Arc<[u8]>, Arc<Error>>| {
-                    match block {
-                        Ok(block) => block.len() as u32,
-                        Err(_) => 1, // Errors take minimal space
-                    }
-                },
-            )
+            .weigher(|_: &(String, u64), block: &Result<Arc<[u8]>, Arc<Error>>| {
+                match block {
+                    Ok(block) => block.len() as u32,
+                    Err(_) => 1, // Errors take minimal space
+                }
+            })
             .eviction_listener(Self::eviction_listener(
                 logger.clone(),
                 evictions_counter.clone(),
@@ -51,10 +49,7 @@ impl BlockCache {
 
         info!(logger, "BlockCache initialized with {} bytes", cache_size);
 
-        Arc::new(Self {
-            logger,
-            cache,
-        })
+        Arc::new(Self { logger, cache })
     }
 
     /// Retrieve the specified block, loading it from disk if necessary
@@ -74,20 +69,30 @@ impl BlockCache {
         let block = self.cache.get_with(key.clone(), || {
             let path = file.path.to_string_lossy();
             let start = Instant::now();
-            event!(self.logger, "block_load start file={}, offset={}, size={}", path, block_handle.offset, block_handle.size);
+            event!(
+                self.logger,
+                "block_load start file={}, offset={}, size={}",
+                path,
+                block_handle.offset,
+                block_handle.size
+            );
 
             // Read, decompress, and validate the block
             let uncompressed_block =
                 self.read_and_decompress(compressor, checksum_strategy, file, block_handle);
 
             if let Err(e) = uncompressed_block {
-                error!(self.logger, "Error loading block from {} at offset {}: {}", path, block_handle.offset, e);
+                error!(
+                    self.logger,
+                    "Error loading block from {} at offset {}: {}", path, block_handle.offset, e
+                );
                 return Err(Arc::new(e));
             }
 
             let uncompressed_block = uncompressed_block?;
             let duration = start.elapsed();
-            event!(self.logger,
+            event!(
+                self.logger,
                 "block_load end, size={}, duration={}us",
                 uncompressed_block.len(),
                 duration.as_micros()
@@ -123,7 +128,13 @@ impl BlockCache {
         evictions_counter: Arc<Counter>,
     ) -> impl Fn(Arc<(String, u64)>, Result<Arc<[u8]>, Arc<Error>>, RemovalCause) {
         move |key, _value, cause| {
-            event!(logger, "evict_block file={} offset={} cause={:?}", key.0, key.1, cause);
+            event!(
+                logger,
+                "evict_block file={} offset={} cause={:?}",
+                key.0,
+                key.1,
+                cause
+            );
             evictions_counter.inc();
         }
     }

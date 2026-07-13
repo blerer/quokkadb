@@ -95,7 +95,6 @@ impl DerivedGauge {
 }
 
 impl Gauge for DerivedGauge {
-
     /// Returns the current computed value of the gauge.
     fn get(&self) -> u64 {
         (self.compute)()
@@ -415,8 +414,8 @@ pub fn assert_gauge_eq(registry: &MetricRegistry, name: &str, expected: u64) {
 mod tests {
 
     mod hit_ratio {
-        use crate::obs::metrics::{Computed, Counter};
         use crate::obs::metrics::HitRatio;
+        use crate::obs::metrics::{Computed, Counter};
 
         #[test]
         fn test_mem_table_hit_ratio() {

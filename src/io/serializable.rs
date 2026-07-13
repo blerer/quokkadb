@@ -1,10 +1,10 @@
+use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::io::Result;
 use std::ops::Bound;
 use std::sync::Arc;
-use crate::io::byte_reader::ByteReader;
-use crate::io::byte_writer::ByteWriter;
 
 /// A component that can be serialized using the write_to method and deserialized using
 /// the read_from method.
@@ -120,7 +120,8 @@ where
 
 impl<K, V> Serializable for BTreeMap<K, V>
 where
-    K: Eq + Hash + Ord + Serializable, V: Serializable,
+    K: Eq + Hash + Ord + Serializable,
+    V: Serializable,
 {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let length = reader.read_varint_u64()? as usize;

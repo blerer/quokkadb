@@ -6,12 +6,12 @@ use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
+use crate::{event, info};
 use std::fs;
 use std::fs::{remove_file, File};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::{event, info};
 
 const MANIFEST_MAGIC_NUMBER: u32 = 0x516D616E; // "Qman" in ASCII
 
@@ -62,7 +62,11 @@ impl Manifest {
         };
         manifest.append_edit(&snapshot)?;
         Self::update_current_file(db_dir, &log_filename)?;
-        info!(manifest.logger, "Manifest initialized at path: {:?}", manifest.append_log.file_path());
+        info!(
+            manifest.logger,
+            "Manifest initialized at path: {:?}",
+            manifest.append_log.file_path()
+        );
         Ok(manifest)
     }
 
@@ -113,7 +117,6 @@ impl Manifest {
 
     // Rotation logic: flush current file, create new manifest, and update CURRENT pointer.
     pub fn rotate(&mut self, new_manifest_number: u64, snapshot: &ManifestEdit) -> Result<()> {
-
         event!(self.logger, "rotate start");
 
         let (new_file, old_file) = self
@@ -306,7 +309,10 @@ impl Metrics {
             .register_counter("manifest_rewrite", self.manifest_rewrite.clone())
             .register_counter("manifest_writes", self.manifest_writes.clone())
             .register_gauge("manifest_size", self.manifest_size.clone())
-            .register_counter("manifest_bytes_written", self.manifest_bytes_written.clone());
+            .register_counter(
+                "manifest_bytes_written",
+                self.manifest_bytes_written.clone(),
+            );
     }
 }
 
@@ -314,16 +320,16 @@ impl Metrics {
 mod tests {
     use super::*;
     use crate::obs::logger;
+    use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::append_log::BUFFER_SIZE_IN_BYTES;
+    use crate::storage::catalog::{CollectionOptions, IdCreationStrategy};
     use crate::storage::internal_key::encode_record_key;
     use crate::storage::lsm_version::SSTableMetadata;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use crate::obs::metrics::Gauge;
-    use crate::storage::catalog::{CollectionOptions, IdCreationStrategy};
 
     #[test]
     fn test_rebuild_lsm_tree_from_valid_manifest() {
@@ -378,7 +384,7 @@ mod tests {
                 created_at: 1001,
                 options: CollectionOptions {
                     id_creation_strategy: IdCreationStrategy::Generated,
-                }
+                },
             },
             ManifestEdit::Flush {
                 oldest_log_number: 2,

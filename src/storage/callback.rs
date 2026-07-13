@@ -1,8 +1,8 @@
+use crate::error;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use std::io::{Error, ErrorKind, Result};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use crate::error;
 
 pub enum Callback<T> {
     Async(AsyncCallback<T>),
@@ -69,7 +69,10 @@ impl<T: Send + 'static> AsyncCallback<T> {
 
     pub fn call(&self, value: T) {
         if let Err(err) = execute_function(&self.fun, value) {
-            error!(self.logger, "AsyncCallback function returned an error: {}", err);
+            error!(
+                self.logger,
+                "AsyncCallback function returned an error: {}", err
+            );
         }
     }
 }
@@ -84,8 +87,7 @@ pub struct BlockingCallback<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T> BlockingCallback<T>
-{
+impl<T> BlockingCallback<T> {
     pub fn new(f: Box<dyn Fn(T) -> Result<()> + Send + Sync>) -> Self {
         let (sender, receiver): (SyncSender<Result<()>>, Receiver<Result<()>>) = sync_channel(1);
 
@@ -117,13 +119,14 @@ impl<T> BlockingCallback<T>
     }
 }
 
-
-fn execute_function<T>(fun: &Box<dyn Fn(T) -> Result<()> + Send + Sync>, value: T) -> Result<()>
-{
+fn execute_function<T>(fun: &Box<dyn Fn(T) -> Result<()> + Send + Sync>, value: T) -> Result<()> {
     // If the function panics, catch it and send an IO error instead.
     // It should not happen normally, but we want to avoid deadlocks and if a panic! happens
     // the error should be treated like an IO error.
-    catch_unwind(AssertUnwindSafe(|| { fun(value) }))
-        .unwrap_or_else(|_| Err(Error::new(ErrorKind::Other, "BlockingCallback function panicked")))
+    catch_unwind(AssertUnwindSafe(|| fun(value))).unwrap_or_else(|_| {
+        Err(Error::new(
+            ErrorKind::Other,
+            "BlockingCallback function panicked",
+        ))
+    })
 }
-

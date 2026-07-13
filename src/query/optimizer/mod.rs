@@ -1,2 +1,2 @@
-pub(crate) mod optimizer;
 mod normalization_rules;
+pub(crate) mod optimizer;

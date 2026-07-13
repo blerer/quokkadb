@@ -101,7 +101,6 @@ impl<T, W: EntryWriter<T>> BlockBuilder<T, W> {
 
     /// Estimate the current uncompressed block size in bytes.
     pub fn estimated_size_in_bytes(&self) -> usize {
-
         if self.is_empty() {
             return 0;
         }

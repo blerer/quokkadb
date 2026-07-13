@@ -32,15 +32,15 @@
 //!
 //! A level needs compaction when its score exceeds 1.0.
 
-use std::ops::{Bound, RangeBounds};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{AtomicGauge, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
+use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::storage::lsm_version::{span, DropMetadata, Level, LevelItem, Levels, SSTableMetadata};
 use crate::util::interval::{has_overlapping_intervals, Interval};
-use std::sync::Arc;
-use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::{event, info};
+use std::ops::{Bound, RangeBounds};
+use std::sync::Arc;
 
 /// Describes a compaction job to be executed.
 ///
@@ -139,12 +139,18 @@ impl CompactionPicker {
         let nbr_of_threads = options.compaction_threads() as u8;
         let max_levels = options.max_levels();
         let level_l = max_levels - 1;
-        assert!(max_levels >= 2, "max_levels must be at least 2 for 2L-Spooky compaction");
+        assert!(
+            max_levels >= 2,
+            "max_levels must be at least 2 for 2L-Spooky compaction"
+        );
         let level_x = max_levels - 2; // Start partitioning from the second to last level
         let metrics = Metrics::new(max_levels);
         metrics.register_to(metric_registry);
 
-        info!(logger, "CompactionPicker initialized, max_levels={}, level_x={}", max_levels, level_x);
+        info!(
+            logger,
+            "CompactionPicker initialized, max_levels={}, level_x={}", max_levels, level_x
+        );
 
         CompactionPicker {
             logger,
@@ -212,7 +218,6 @@ impl CompactionPicker {
     /// (successfully or not). This design prevents race conditions between picking
     /// and marking, following the pattern used by RocksDB and Pebble.
     pub fn pick_compaction(&mut self, levels: &Levels) -> Option<CompactionJob> {
-
         if self.nbr_of_running_compactions >= self.nbr_of_threads {
             self.metrics.jobs_skipped_level_compacting.inc();
             event!(self.logger, "compaction_skipped reason=max_parallelism_reached, running_compactions={}, max_threads={}",
@@ -233,7 +238,7 @@ impl CompactionPicker {
 
             // Sanity check - output level should always exist for levels needing compaction
             // (except last level which has score 0)
-            let input= levels.level(input_level).unwrap();
+            let input = levels.level(input_level).unwrap();
             let output = levels.level(output_level).unwrap();
 
             // 2L-Spooky: partial compaction only when compacting into the bottom two levels
@@ -260,7 +265,9 @@ impl CompactionPicker {
                     self.metrics.jobs_picked.inc();
                     self.metrics.jobs_picked_partial.inc();
                     self.metrics.record_picked_from_level(input_level);
-                    self.metrics.input_files_count.record(job.input_files.len() as u64);
+                    self.metrics
+                        .input_files_count
+                        .record(job.input_files.len() as u64);
 
                     info!(self.logger, "Picked partial compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
                         job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
@@ -270,7 +277,12 @@ impl CompactionPicker {
                     return Some(job);
                 } else {
                     self.metrics.jobs_skipped_range_overlap.inc();
-                    event!(self.logger, "compaction_skipped reason=range_overlap, input_level={}, output_level={}", input_level, output_level);
+                    event!(
+                        self.logger,
+                        "compaction_skipped reason=range_overlap, input_level={}, output_level={}",
+                        input_level,
+                        output_level
+                    );
                 }
             } else {
                 // Full compaction: block if any compaction is active on either level
@@ -280,12 +292,20 @@ impl CompactionPicker {
                     continue;
                 }
 
-                if let Some(job) = self.pick_full_compaction(input, output, input_level, output_level, partitions_grid) {
+                if let Some(job) = self.pick_full_compaction(
+                    input,
+                    output,
+                    input_level,
+                    output_level,
+                    partitions_grid,
+                ) {
                     self.mark_compacting(&job);
                     self.metrics.jobs_picked.inc();
                     self.metrics.jobs_picked_full.inc();
                     self.metrics.record_picked_from_level(input_level);
-                    self.metrics.input_files_count.record(job.input_files.len() as u64);
+                    self.metrics
+                        .input_files_count
+                        .record(job.input_files.len() as u64);
 
                     info!(self.logger, "Picked full compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
                         job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
@@ -299,7 +319,10 @@ impl CompactionPicker {
             }
         }
 
-        event!(self.logger, "compaction_skipped reason=no_level_need_compaction");
+        event!(
+            self.logger,
+            "compaction_skipped reason=no_level_need_compaction"
+        );
 
         None
     }
@@ -319,7 +342,10 @@ impl CompactionPicker {
     ///
     /// Used for partial compaction: only blocks if ranges actually overlap.
     fn is_range_compacting(&self, level: usize, key_range: &Interval<Vec<u8>>) -> bool {
-        has_overlapping_intervals(&[key_range.clone()], self.compacting_ranges.get(level).unwrap_or(&Vec::new()))
+        has_overlapping_intervals(
+            &[key_range.clone()],
+            self.compacting_ranges.get(level).unwrap_or(&Vec::new()),
+        )
     }
 
     /// Picks a full compaction for levels above the bottom two.
@@ -335,7 +361,6 @@ impl CompactionPicker {
         output_level: usize,
         partitions_grid: Option<Vec<Vec<u8>>>,
     ) -> Option<CompactionJob> {
-
         let id = self.next_job_id;
         self.next_job_id += 1;
 
@@ -385,8 +410,10 @@ impl CompactionPicker {
         output_level: usize,
         partitions_grid: Option<Vec<Vec<u8>>>,
     ) -> Option<CompactionJob> {
-        assert!(matches!(input, NonOverlapping {..}),
-                "Expected NonOverlapping level for partial compaction, found Overlapping");
+        assert!(
+            matches!(input, NonOverlapping { .. }),
+            "Expected NonOverlapping level for partial compaction, found Overlapping"
+        );
 
         let id = self.next_job_id;
         self.next_job_id += 1;
@@ -397,7 +424,6 @@ impl CompactionPicker {
         items.sort_by(|a, b| a.min_sequence_number().cmp(&b.min_sequence_number()));
 
         for item in items {
-
             // Partitions change over time as the last level sstables could have been split or
             // merged. To adapt to that, we need to retrieve the current set of partitions to which
             // the item belongs and use them to pick all the sstables and drops that need to be
@@ -406,10 +432,14 @@ impl CompactionPicker {
             // have only changed through a single split or merge in the last level, which means
             // that we should not have sstables or drops that will cross the boundaries of the
             // partition_key_range.
-            let partition_key_range = self.find_partition_key_range_for_item(item.as_ref(), partitions_grid.as_ref().unwrap());
+            let partition_key_range = self.find_partition_key_range_for_item(
+                item.as_ref(),
+                partitions_grid.as_ref().unwrap(),
+            );
 
             if self.is_range_compacting(input_level, &partition_key_range)
-                || self.is_range_compacting(output_level, &partition_key_range) {
+                || self.is_range_compacting(output_level, &partition_key_range)
+            {
                 continue;
             }
 
@@ -480,7 +510,9 @@ impl CompactionPicker {
     /// Boundaries are the upper bounds of partitions (except the last partition).
     /// Uses binary search for efficient lookup.
     fn find_partition_for_key(&self, key: &[u8], boundaries: &[Vec<u8>]) -> usize {
-        boundaries.binary_search_by(|probe| probe.as_slice().cmp(key)).unwrap_or_else(|idx| idx)
+        boundaries
+            .binary_search_by(|probe| probe.as_slice().cmp(key))
+            .unwrap_or_else(|idx| idx)
     }
 
     /// Finds the key range interval for the partition(s) that an item overlaps with.
@@ -643,10 +675,22 @@ impl Metrics {
         registry
             .register_counter("compaction.jobs.picked", self.jobs_picked.clone())
             .register_counter("compaction.jobs.picked.full", self.jobs_picked_full.clone())
-            .register_counter("compaction.jobs.picked.partial", self.jobs_picked_partial.clone())
-            .register_counter("compaction.jobs.skipped.level_compacting", self.jobs_skipped_level_compacting.clone())
-            .register_counter("compaction.jobs.skipped.range_overlap", self.jobs_skipped_range_overlap.clone())
-            .register_histogram("compaction.input_files.count", self.input_files_count.clone());
+            .register_counter(
+                "compaction.jobs.picked.partial",
+                self.jobs_picked_partial.clone(),
+            )
+            .register_counter(
+                "compaction.jobs.skipped.level_compacting",
+                self.jobs_skipped_level_compacting.clone(),
+            )
+            .register_counter(
+                "compaction.jobs.skipped.range_overlap",
+                self.jobs_skipped_range_overlap.clone(),
+            )
+            .register_histogram(
+                "compaction.input_files.count",
+                self.input_files_count.clone(),
+            );
 
         for (level, counter) in self.picked_from_level.iter().enumerate() {
             registry.register_counter(&format!("compaction.picked.l{}", level), counter.clone());
@@ -687,16 +731,16 @@ impl Metrics {
 
 #[cfg(test)]
 mod tests {
-    use std::iter::{empty, once};
     use super::*;
     use crate::obs::logger;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::internal_key::encode_record_key;
+    use crate::storage::lsm_version::DropKind;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
+    use std::iter::{empty, once};
     use std::ops::RangeBounds;
-    use crate::storage::lsm_version::DropKind;
 
     /// Default collection ID used for test SSTables and drops.
     const DEFAULT_COLLECTION: u32 = 1;
@@ -739,7 +783,7 @@ mod tests {
             level,
             min,
             max,
-            number * 100,      // min_sequence_number: distinct per SST for deterministic ordering
+            number * 100, // min_sequence_number: distinct per SST for deterministic ordering
             number * 100 + 50, // max_sequence_number
             size,
         ))
@@ -786,11 +830,13 @@ mod tests {
         let l0_ssts: Vec<_> = (1..=3)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
-        let levels = Levels::new(options.max_levels())
-            .add(0, l0_ssts, empty());
+        let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
         let scores = picker.compute_scores(&levels);
-        assert!(scores.scores[0] < 1.0, "Score below trigger should be < 1.0");
+        assert!(
+            scores.scores[0] < 1.0,
+            "Score below trigger should be < 1.0"
+        );
         assert_eq!(scores.levels_needing_compaction().count(), 0);
         assert!(picker.pick_compaction(&levels).is_none());
     }
@@ -804,8 +850,7 @@ mod tests {
         let l0_ssts: Vec<_> = (1..=4)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
-        let levels = Levels::new(options.max_levels())
-            .add(0, l0_ssts, empty());
+        let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
         let scores = picker.compute_scores(&levels);
         assert!(scores.scores[0] >= 1.0);
@@ -836,18 +881,23 @@ mod tests {
             create_sst(4, 0, 100, 110, 1000),
             create_sst(5, 0, 25, 45, 1000),
         ];
-        let levels = Levels::new(options.max_levels())
-            .add(0, l0_ssts, empty());
+        let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
         let job = picker.pick_compaction(&levels).unwrap();
 
         // Full compaction takes ALL L0 files
         assert_eq!(job.input_level, 0);
         // input_key_range spans all L0 files
-        assert_eq!(job.input_key_range, Interval::closed(record_key(10), record_key(110)));
+        assert_eq!(
+            job.input_key_range,
+            Interval::closed(record_key(10), record_key(110))
+        );
         assert_eq!(job.output_level, 1);
         // When output level is empty, output_key_range uses input_key_range to block the range
-        assert_eq!(job.output_key_range, Interval::closed(record_key(10), record_key(110)));
+        assert_eq!(
+            job.output_key_range,
+            Interval::closed(record_key(10), record_key(110))
+        );
         let input_numbers: Vec<u64> = job.input_files.iter().map(|f| f.number).collect();
         assert!(input_numbers.contains(&1));
         assert!(input_numbers.contains(&2));
@@ -863,14 +913,12 @@ mod tests {
         let mut picker = test_picker(&options);
 
         // Create L0 files
-        let l0_ssts: Vec<_> = (1..=5)
-            .map(|i| create_sst(i, 0, 10, 50, 1000))
-            .collect();
+        let l0_ssts: Vec<_> = (1..=5).map(|i| create_sst(i, 0, 10, 50, 1000)).collect();
 
         // Create L1 files
         let l1_ssts = vec![
-            create_sst(10, 1, 5, 25, 1000),   // overlaps
-            create_sst(11, 1, 30, 60, 1000),  // overlaps
+            create_sst(10, 1, 5, 25, 1000),    // overlaps
+            create_sst(11, 1, 30, 60, 1000),   // overlaps
             create_sst(12, 1, 100, 150, 1000), // does not overlap
         ];
 
@@ -886,7 +934,10 @@ mod tests {
         assert!(!output_numbers.contains(&12));
         assert_eq!(job.input_key_range, interval(10, 50));
         // output_key_range spans all overlapping L1 files
-        assert_eq!(job.output_key_range, Interval::closed(record_key(5), record_key(60)));
+        assert_eq!(
+            job.output_key_range,
+            Interval::closed(record_key(5), record_key(60))
+        );
     }
 
     #[test]
@@ -894,9 +945,7 @@ mod tests {
         let options = test_options();
         let mut picker = test_picker(&options);
 
-        let l0_ssts: Vec<_> = (1..=5)
-            .map(|i| create_sst(i, 0, 100, 110, 1000))
-            .collect();
+        let l0_ssts: Vec<_> = (1..=5).map(|i| create_sst(i, 0, 100, 110, 1000)).collect();
         let l1_ssts = Vec::new();
 
         let levels = Levels::new(options.max_levels())
@@ -905,17 +954,14 @@ mod tests {
 
         let _job = picker.pick_compaction(&levels).unwrap();
 
-        let l0_ssts: Vec<_> = (1..=6)
-            .map(|i| create_sst(i, 0, 100, 110, 1000))
-            .collect();
+        let l0_ssts: Vec<_> = (1..=6).map(|i| create_sst(i, 0, 100, 110, 1000)).collect();
 
         let levels = Levels::new(options.max_levels())
             .add(0, l0_ssts, empty())
             .add(1, l1_ssts, empty());
 
-        assert!(picker.pick_compaction(&levels).is_none());// Mark the job as compacting to block the level
+        assert!(picker.pick_compaction(&levels).is_none()); // Mark the job as compacting to block the level
     }
-
 
     #[test]
     fn test_l0_compaction_finds_overlapping_l1_files() {
@@ -926,9 +972,7 @@ mod tests {
         // L1 File A: [90, 105] (Overlaps L0)
         // L1 File B: [106, 115] (Overlaps L0)
         // L1 File C: [200, 210] (No overlap)
-        let l0_ssts: Vec<_> = (1..=5)
-            .map(|i| create_sst(i, 0, 100, 110, 1000))
-            .collect();
+        let l0_ssts: Vec<_> = (1..=5).map(|i| create_sst(i, 0, 100, 110, 1000)).collect();
         let l1_ssts = vec![
             create_sst(10, 1, 90, 105, 1000),
             create_sst(11, 1, 106, 115, 1000),
@@ -949,7 +993,10 @@ mod tests {
 
         assert_eq!(job.input_key_range, interval(100, 110));
         // output_key_range spans all overlapping L1 files
-        assert_eq!(job.output_key_range, Interval::closed(record_key(90), record_key(115)));
+        assert_eq!(
+            job.output_key_range,
+            Interval::closed(record_key(90), record_key(115))
+        );
     }
 
     #[test]
@@ -981,8 +1028,7 @@ mod tests {
         let l0_ssts: Vec<_> = (1..=4)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
-        let levels = Levels::new(options.max_levels())
-            .add(0, l0_ssts, empty());
+        let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
         // pick_compaction automatically marks the job
         let job = picker.pick_compaction(&levels).unwrap();
@@ -1030,10 +1076,15 @@ mod tests {
         // Both input and output key ranges use the partition range
         // Since the L2 file [10, 30] is within partition 0 [Min, 20] and partition 1 (20, 40],
         // it spans from the start of the first partition to the end of the second.
-        let expected_partition_range = Interval::new(Bound::Unbounded, Bound::Included(record_key(40)));
+        let expected_partition_range =
+            Interval::new(Bound::Unbounded, Bound::Included(record_key(40)));
         assert_eq!(job.input_key_range, expected_partition_range.clone());
         assert_eq!(job.output_key_range, expected_partition_range);
-        assert_eq!(job.partitions_grid, Some(vec![record_key(20), record_key(40)]), "L2→L3 should use partial compaction (2L-Spooky)");
+        assert_eq!(
+            job.partitions_grid,
+            Some(vec![record_key(20), record_key(40)]),
+            "L2→L3 should use partial compaction (2L-Spooky)"
+        );
     }
 
     #[test]
@@ -1048,8 +1099,10 @@ mod tests {
             .with_max_bytes_for_level_multiplier(10.0);
 
         let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
-        let l3_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(2)) as u64;
-        let l4_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(3)) as u64;
+        let l3_target =
+            (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(2)) as u64;
+        let l4_target =
+            (base_bytes as f64 * options.max_bytes_for_level_multiplier().powi(3)) as u64;
 
         let mut picker = test_picker(&options);
 
@@ -1065,7 +1118,11 @@ mod tests {
         assert_eq!(job.input_key_range, interval(10, 30));
         assert_eq!(job.output_level, 4);
         assert_eq!(job.output_key_range, interval(5, 25));
-        assert_eq!(job.partitions_grid, Some(vec![]), "L3→L4 should partition the output");
+        assert_eq!(
+            job.partitions_grid,
+            Some(vec![]),
+            "L3→L4 should partition the output"
+        );
 
         // Unmark compaction to allow compaction on the next level
         picker.unmark_compacting(&job);
@@ -1087,9 +1144,11 @@ mod tests {
         assert_eq!(job.input_key_range, expected_partition_range.clone());
         assert_eq!(job.output_level, 5);
         assert_eq!(job.output_key_range, expected_partition_range);
-        assert_eq!(job.partitions_grid,
-                   Some(vec![record_key(20)]),
-                   "L4→L5 should use partial compaction with max_levels=6");
+        assert_eq!(
+            job.partitions_grid,
+            Some(vec![record_key(20)]),
+            "L4→L5 should use partial compaction with max_levels=6"
+        );
     }
 
     /// Creates an interval using the default collection and index encoding.
@@ -1214,37 +1273,63 @@ mod tests {
         assert_eq!(boundaries[1], record_key(100));
 
         // Case 5: Max level has only 1 SSTable -> single partition (no boundaries)
-        let levels_single = Levels::new(options.max_levels())
-            .add(3, vec![create_sst(1, 3, 0, 100, l3_min)], empty());
-        assert!(picker.compute_partition_boundaries(&levels_single).is_empty());
+        let levels_single = Levels::new(options.max_levels()).add(
+            3,
+            vec![create_sst(1, 3, 0, 100, l3_min)],
+            empty(),
+        );
+        assert!(picker
+            .compute_partition_boundaries(&levels_single)
+            .is_empty());
 
         // Case 6: L3 has 2 SSTables but both are too small -> no boundaries emitted
-        let levels_small = Levels::new(options.max_levels())
-            .add(3, vec![
+        let levels_small = Levels::new(options.max_levels()).add(
+            3,
+            vec![
                 create_sst(1, 3, 0, 45, 1000),
                 create_sst(2, 3, 46, 100, 1000),
-            ], empty());
-        assert!(picker.compute_partition_boundaries(&levels_small).is_empty(),
-            "Small SSTables below threshold should not emit boundaries");
+            ],
+            empty(),
+        );
+        assert!(
+            picker
+                .compute_partition_boundaries(&levels_small)
+                .is_empty(),
+            "Small SSTables below threshold should not emit boundaries"
+        );
 
         // Case 7: Mixed: first SSTable large, second small -> no boundary (second is small)
-        let levels_mixed = Levels::new(options.max_levels())
-            .add(3, vec![
+        let levels_mixed = Levels::new(options.max_levels()).add(
+            3,
+            vec![
                 create_sst(1, 3, 0, 45, l3_min),
                 create_sst(2, 3, 46, 100, 1000),
-            ], empty());
-        assert!(picker.compute_partition_boundaries(&levels_mixed).is_empty(),
-            "Boundary should not be emitted before a small SSTable");
+            ],
+            empty(),
+        );
+        assert!(
+            picker
+                .compute_partition_boundaries(&levels_mixed)
+                .is_empty(),
+            "Boundary should not be emitted before a small SSTable"
+        );
 
         // Case 8: Mixed: first SSTable small, second large -> 1 boundary
         // (the second SSTable is large enough to deserve its own partition)
-        let levels_mixed2 = Levels::new(options.max_levels())
-            .add(3, vec![
+        let levels_mixed2 = Levels::new(options.max_levels()).add(
+            3,
+            vec![
                 create_sst(1, 3, 0, 45, 1000),
                 create_sst(2, 3, 46, 100, l3_min),
-            ], empty());
+            ],
+            empty(),
+        );
         let boundaries = picker.compute_partition_boundaries(&levels_mixed2);
-        assert_eq!(boundaries.len(), 1, "Boundary should be emitted before the large SSTable");
+        assert_eq!(
+            boundaries.len(),
+            1,
+            "Boundary should be emitted before the large SSTable"
+        );
         assert_eq!(boundaries[0], record_key(45));
     }
 
@@ -1300,7 +1385,8 @@ mod tests {
         // Empty boundaries: single partition with unbounded range
         let empty_boundaries: Vec<Vec<u8>> = Vec::new();
         let sst_unbounded = create_sst(7, 3, 0, 100, 1000);
-        let range = picker.find_partition_key_range_for_item(sst_unbounded.as_ref(), &empty_boundaries);
+        let range =
+            picker.find_partition_key_range_for_item(sst_unbounded.as_ref(), &empty_boundaries);
         assert_eq!(range.start_bound(), Bound::Unbounded);
         assert_eq!(range.end_bound(), Bound::Unbounded);
 
@@ -1312,7 +1398,8 @@ mod tests {
             key_range: Interval::open_closed(record_key(10), record_key(15)),
             drop_sequence_number: 100,
         });
-        let range = picker.find_partition_key_range_for_item(drop_excluded_start.as_ref(), &boundaries);
+        let range =
+            picker.find_partition_key_range_for_item(drop_excluded_start.as_ref(), &boundaries);
         assert_eq!(range.start_bound(), Bound::Excluded(&record_key(10)));
         assert_eq!(range.end_bound(), Bound::Included(&record_key(20)));
 
@@ -1323,7 +1410,8 @@ mod tests {
             key_range: Interval::closed_open(record_key(15), record_key(20)),
             drop_sequence_number: 100,
         });
-        let range = picker.find_partition_key_range_for_item(drop_excluded_end.as_ref(), &boundaries);
+        let range =
+            picker.find_partition_key_range_for_item(drop_excluded_end.as_ref(), &boundaries);
         assert_eq!(range.start_bound(), Bound::Excluded(&record_key(10)));
         assert_eq!(range.end_bound(), Bound::Included(&record_key(20)));
 
@@ -1335,7 +1423,8 @@ mod tests {
             key_range: Interval::open(record_key(10), record_key(20)),
             drop_sequence_number: 100,
         });
-        let range = picker.find_partition_key_range_for_item(drop_both_excluded.as_ref(), &boundaries);
+        let range =
+            picker.find_partition_key_range_for_item(drop_both_excluded.as_ref(), &boundaries);
         assert_eq!(range.start_bound(), Bound::Excluded(&record_key(10)));
         assert_eq!(range.end_bound(), Bound::Included(&record_key(20)));
 
@@ -1347,7 +1436,8 @@ mod tests {
             key_range: Interval::closed_open(record_key(5), record_key(10)),
             drop_sequence_number: 100,
         });
-        let range = picker.find_partition_key_range_for_item(drop_p0_excluded_end.as_ref(), &boundaries);
+        let range =
+            picker.find_partition_key_range_for_item(drop_p0_excluded_end.as_ref(), &boundaries);
         assert_eq!(range.start_bound(), Bound::Unbounded);
         assert_eq!(range.end_bound(), Bound::Included(&record_key(10)));
     }
@@ -1368,8 +1458,14 @@ mod tests {
         // File count score: 2/4 = 0.5
         // Size score: 2*base_bytes / base_bytes = 2.0
         // L0 score should be max(0.5, 2.0) = 2.0
-        assert!(scores.scores[0] > 1.0, "L0 score should exceed 1.0 due to size");
-        assert!((scores.scores[0] - 2.0).abs() < 0.01, "L0 score should be ~2.0");
+        assert!(
+            scores.scores[0] > 1.0,
+            "L0 score should exceed 1.0 due to size"
+        );
+        assert!(
+            (scores.scores[0] - 2.0).abs() < 0.01,
+            "L0 score should be ~2.0"
+        );
 
         let job = picker.pick_compaction(&levels);
         assert!(job.is_some(), "Should trigger compaction based on size");
@@ -1383,21 +1479,29 @@ mod tests {
         let l0_ssts: Vec<_> = (1..=4)
             .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
             .collect();
-        let levels = Levels::new(options.max_levels())
-            .add(0, l0_ssts, empty());
+        let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
         // Pick and auto-mark
         let job1 = picker.pick_compaction(&levels).unwrap();
 
         // Verify ranges are marked
-        assert!(!picker.compacting_ranges[0].is_empty(), "Input level should have marked ranges");
+        assert!(
+            !picker.compacting_ranges[0].is_empty(),
+            "Input level should have marked ranges"
+        );
 
         // Unmark
         picker.unmark_compacting(&job1);
 
         // Verify ranges are cleared
-        assert!(picker.compacting_ranges[0].is_empty(), "Input level ranges should be cleared");
-        assert!(picker.compacting_ranges[1].is_empty(), "Output level ranges should be cleared");
+        assert!(
+            picker.compacting_ranges[0].is_empty(),
+            "Input level ranges should be cleared"
+        );
+        assert!(
+            picker.compacting_ranges[1].is_empty(),
+            "Output level ranges should be cleared"
+        );
 
         // Pick again - should get same compaction
         let job2 = picker.pick_compaction(&levels).unwrap();
@@ -1414,9 +1518,7 @@ mod tests {
             let options = test_options();
             let mut picker = test_picker(&options);
 
-            let l0_ssts: Vec<_> = (1..=5)
-                .map(|i| create_sst(i, 0, 10, 50, 1000))
-                .collect();
+            let l0_ssts: Vec<_> = (1..=5).map(|i| create_sst(i, 0, 10, 50, 1000)).collect();
             let l1_ssts = vec![
                 create_sst(10, 1, 5, 25, 1000),
                 create_sst(11, 1, 30, 60, 1000),
@@ -1432,8 +1534,14 @@ mod tests {
             assert_eq!(job.output_level, 1);
             assert_eq!(job.input_key_range, interval(10, 50));
             // output_key_range spans all overlapping L1 files
-            assert_eq!(job.output_key_range, Interval::closed(record_key(5), record_key(60)));
-            assert!(job.partitions_grid.is_none(), "L0→L1 should use full compaction");
+            assert_eq!(
+                job.output_key_range,
+                Interval::closed(record_key(5), record_key(60))
+            );
+            assert!(
+                job.partitions_grid.is_none(),
+                "L0→L1 should use full compaction"
+            );
             assert!(!job.input_files.is_empty());
         }
 
@@ -1464,11 +1572,21 @@ mod tests {
 
             assert_eq!(job.input_level, 1);
             // input_key_range spans all L1 files
-            assert_eq!(job.input_key_range, Interval::closed(record_key(10), record_key(50)));
+            assert_eq!(
+                job.input_key_range,
+                Interval::closed(record_key(10), record_key(50))
+            );
             assert_eq!(job.output_level, 2);
             // output_key_range spans all overlapping L2 files
-            assert_eq!(job.output_key_range, Interval::closed(record_key(5), record_key(60)));
-            assert_eq!(job.partitions_grid, Some(vec![]), "L1→L2 should partition on output");
+            assert_eq!(
+                job.output_key_range,
+                Interval::closed(record_key(5), record_key(60))
+            );
+            assert_eq!(
+                job.partitions_grid,
+                Some(vec![]),
+                "L1→L2 should partition on output"
+            );
         }
 
         #[test]
@@ -1480,8 +1598,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             // Pick first compaction (auto-marked)
             let job1 = picker.pick_compaction(&levels).unwrap();
@@ -1510,7 +1627,6 @@ mod tests {
             let col_2 = 11;
             let col_3 = 12;
 
-
             // L0 files with narrow key range
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| {
@@ -1529,21 +1645,23 @@ mod tests {
             let drop_2 = DropMetadata::new_collection_drop(col_2, 100);
             let drop_3 = DropMetadata::new_collection_drop(col_3, 100);
             let l0_drops = vec![
-                drop_2.clone(),  // Outside SSTable range
-                drop_3.clone(),  // Outside SSTable range
+                drop_2.clone(), // Outside SSTable range
+                drop_3.clone(), // Outside SSTable range
             ];
 
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts.clone(), l0_drops.clone());
+            let levels =
+                Levels::new(options.max_levels()).add(0, l0_ssts.clone(), l0_drops.clone());
 
             let job = picker.pick_compaction(&levels).unwrap();
 
             // Full compaction should include ALL drops from input level.
             // The input_key_range will be the span of SSTables (col 10) and Drops (col 11, col 12).
             let expected_range = span_vec(
-                l0_ssts.iter().map(|s| s.clone() as Arc<dyn LevelItem>)
+                l0_ssts
+                    .iter()
+                    .map(|s| s.clone() as Arc<dyn LevelItem>)
                     .chain(l0_drops.iter().map(|d| d.clone() as Arc<dyn LevelItem>))
-                    .collect()
+                    .collect(),
             );
 
             assert_eq!(job.input_level, 0);
@@ -1605,8 +1723,10 @@ mod tests {
             let job = picker.pick_compaction(&levels);
             // Either no job, or not L1→L2
             if let Some(j) = job {
-                assert!(j.input_level != 1 || j.output_level != 2,
-                        "L1→L2 full compaction should be blocked by L2→L3 partial");
+                assert!(
+                    j.input_level != 1 || j.output_level != 2,
+                    "L1→L2 full compaction should be blocked by L2→L3 partial"
+                );
             }
         }
         #[test]
@@ -1637,18 +1757,19 @@ mod tests {
             // Historically index=0 meant "drop entire collection".
             let drop_1 = DropMetadata::new_collection_drop(col, 100);
             let drop_2 = DropMetadata::new_collection_drop(col_2, 200);
-            let l0_drops = vec![
-                drop_1.clone(),
-                drop_2.clone(),
-            ];
+            let l0_drops = vec![drop_1.clone(), drop_2.clone()];
 
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts.clone(), l0_drops.clone());
+            let levels =
+                Levels::new(options.max_levels()).add(0, l0_ssts.clone(), l0_drops.clone());
 
             let job = picker.pick_compaction(&levels).unwrap();
 
             // The items_range for L0 will span from MinKey(col=10) to MaxKey(col=11).
-            let expected_range = levels.level(0).unwrap().items_range().expect("L0 should have items");
+            let expected_range = levels
+                .level(0)
+                .unwrap()
+                .items_range()
+                .expect("L0 should have items");
 
             assert_eq!(job.input_level, 0);
             assert_eq!(job.output_level, 1);
@@ -1682,8 +1803,15 @@ mod tests {
 
             let job = picker.pick_compaction(&levels).unwrap();
 
-            assert_eq!(job.drops.len(), 1, "Should only include drops from input level");
-            assert_eq!(job.drops[0].drop_sequence_number, 100, "Should only include L0 drop");
+            assert_eq!(
+                job.drops.len(),
+                1,
+                "Should only include drops from input level"
+            );
+            assert_eq!(
+                job.drops[0].drop_sequence_number, 100,
+                "Should only include L0 drop"
+            );
         }
 
         #[test]
@@ -1714,7 +1842,9 @@ mod tests {
                 .add(1, l1_ssts, l1_drops)
                 .add(2, l2_ssts, empty());
 
-            let job = picker.pick_compaction(&levels).expect("Should pick a compaction");
+            let job = picker
+                .pick_compaction(&levels)
+                .expect("Should pick a compaction");
 
             assert_eq!(job.input_level, 1);
             assert_eq!(job.output_level, 2);
@@ -1765,9 +1895,16 @@ mod tests {
             let partition1 = Interval::new(Bound::Unbounded, Bound::Included(record_key(50)));
             assert_eq!(job1.input_key_range, partition1.clone());
             assert_eq!(job1.output_key_range, partition1);
-            assert_eq!(job1.partitions_grid, Some(vec![record_key(50), record_key(100)]), "L2→L3 should be partial");
+            assert_eq!(
+                job1.partitions_grid,
+                Some(vec![record_key(50), record_key(100)]),
+                "L2→L3 should be partial"
+            );
             assert_eq!(job1.input_files.len(), 1);
-            assert_eq!(job1.input_files[0].number, 1, "Should pick oldest file first");
+            assert_eq!(
+                job1.input_files[0].number, 1,
+                "Should pick oldest file first"
+            );
 
             // Pick another compaction - should be able to pick the other L2 file
             // because it's in a different partition
@@ -1812,7 +1949,10 @@ mod tests {
             // Pick first compaction (auto-marked)
             let job1 = picker.pick_compaction(&levels).unwrap();
             assert_eq!(job1.input_level, 2);
-            assert_eq!(job1.input_files[0].number, 1, "Should pick oldest file first");
+            assert_eq!(
+                job1.input_files[0].number, 1,
+                "Should pick oldest file first"
+            );
             // Both input and output use the partition range
             let partition_range = Interval::new(Bound::Unbounded, Bound::Included(record_key(45)));
             assert_eq!(job1.input_key_range, partition_range.clone());
@@ -1824,7 +1964,10 @@ mod tests {
             // Try to pick another - should be blocked because both L2 files map to
             // the same partition (partition ranges overlap)
             let job2 = picker.pick_compaction(&levels);
-            assert!(job2.is_none(), "Compactions in the same partition should block each other");
+            assert!(
+                job2.is_none(),
+                "Compactions in the same partition should block each other"
+            );
         }
 
         #[test]
@@ -1839,13 +1982,31 @@ mod tests {
             // SST 3 has lowest sequence number (oldest), SST 1 has highest (newest)
             // Add in non-sequential order to ensure sorting works
             let sst_newest = Arc::new(SSTableMetadata::new(
-                1, 2, &record_key(10), &record_key(30), 300, 350, l2_target,
+                1,
+                2,
+                &record_key(10),
+                &record_key(30),
+                300,
+                350,
+                l2_target,
             ));
             let sst_middle = Arc::new(SSTableMetadata::new(
-                2, 2, &record_key(60), &record_key(80), 200, 250, l2_target,
+                2,
+                2,
+                &record_key(60),
+                &record_key(80),
+                200,
+                250,
+                l2_target,
             ));
             let sst_oldest = Arc::new(SSTableMetadata::new(
-                3, 2, &record_key(110), &record_key(130), 100, 150, l2_target,
+                3,
+                2,
+                &record_key(110),
+                &record_key(130),
+                100,
+                150,
+                l2_target,
             ));
 
             let l2_ssts = vec![sst_newest, sst_middle, sst_oldest];
@@ -1863,25 +2024,45 @@ mod tests {
 
             // First pick should get the oldest file (SST 3, seq 100)
             let job1 = picker.pick_compaction(&levels).unwrap();
-            assert_eq!(job1.input_files[0].number, 3, "Should pick oldest file (lowest seq num) first");
+            assert_eq!(
+                job1.input_files[0].number, 3,
+                "Should pick oldest file (lowest seq num) first"
+            );
             // Partition range: (Excluded(100), Unbounded)
             let partition3 = Interval::new(Bound::Excluded(record_key(100)), Bound::Unbounded);
             assert_eq!(job1.input_key_range, partition3.clone());
             assert_eq!(job1.output_key_range, partition3);
-            assert_eq!(job1.partitions_grid, Some(vec![record_key(50), record_key(100)]), "Should use partial compaction");
+            assert_eq!(
+                job1.partitions_grid,
+                Some(vec![record_key(50), record_key(100)]),
+                "Should use partial compaction"
+            );
 
             // Second pick should get middle file (SST 2, seq 200)
             let job2 = picker.pick_compaction(&levels).unwrap();
-            assert_eq!(job2.input_files[0].number, 2, "Should pick second oldest file");
+            assert_eq!(
+                job2.input_files[0].number, 2,
+                "Should pick second oldest file"
+            );
             // Partition range: (Excluded(50), Included(100)]
-            let partition2 = Interval::new(Bound::Excluded(record_key(50)), Bound::Included(record_key(100)));
+            let partition2 = Interval::new(
+                Bound::Excluded(record_key(50)),
+                Bound::Included(record_key(100)),
+            );
             assert_eq!(job2.input_key_range, partition2.clone());
             assert_eq!(job2.output_key_range, partition2);
-            assert_eq!(job2.partitions_grid, Some(vec![record_key(50), record_key(100)]), "Should use partial compaction");
+            assert_eq!(
+                job2.partitions_grid,
+                Some(vec![record_key(50), record_key(100)]),
+                "Should use partial compaction"
+            );
 
             // Third pick should get newest file (SST 1, seq 300)
             let job3 = picker.pick_compaction(&levels).unwrap();
-            assert_eq!(job3.input_files[0].number, 1, "Should pick newest file last");
+            assert_eq!(
+                job3.input_files[0].number, 1,
+                "Should pick newest file last"
+            );
             // Partition range: (Unbounded, Included(50)]
             let partition1 = Interval::new(Bound::Unbounded, Bound::Included(record_key(50)));
             assert_eq!(job3.input_key_range, partition1.clone());
@@ -1907,10 +2088,21 @@ mod tests {
             assert_eq!(job.input_level, 2);
             assert_eq!(job.output_level, 3);
             assert_eq!(job.input_files.len(), 1);
-            assert!(job.output_files.is_empty(), "Output files should be empty when output level is empty");
+            assert!(
+                job.output_files.is_empty(),
+                "Output files should be empty when output level is empty"
+            );
             // Even with empty output level, output_key_range uses the partition range to block the range
-            assert_eq!(job.output_key_range, Interval::all(), "Output key range should use partition range");
-            assert_eq!(job.partitions_grid, Some(vec![]), "Should have empty partition grid");
+            assert_eq!(
+                job.output_key_range,
+                Interval::all(),
+                "Output key range should use partition range"
+            );
+            assert_eq!(
+                job.partitions_grid,
+                Some(vec![]),
+                "Should have empty partition grid"
+            );
         }
 
         #[test]
@@ -1939,13 +2131,22 @@ mod tests {
                 .add(2, l2_ssts, l2_drops)
                 .add(3, l3_ssts, empty());
 
-            let job = picker.pick_compaction(&levels).expect("Should pick a compaction");
+            let job = picker
+                .pick_compaction(&levels)
+                .expect("Should pick a compaction");
 
             assert_eq!(job.input_level, 2);
             assert_eq!(job.output_level, 3);
             // Should only include the fragment intersecting partition 0
-            assert_eq!(job.drops.len(), 1, "Should only include drops in the partition range");
-            assert_eq!(job.drops[0], drop_p0, "Should include drop fragment in partition 0");
+            assert_eq!(
+                job.drops.len(),
+                1,
+                "Should only include drops in the partition range"
+            );
+            assert_eq!(
+                job.drops[0], drop_p0,
+                "Should include drop fragment in partition 0"
+            );
         }
 
         #[test]
@@ -1976,12 +2177,17 @@ mod tests {
                 .add(2, l2_ssts, l2_drops)
                 .add(3, l3_ssts, empty());
 
-            let job = picker.pick_compaction(&levels).expect("Should pick a compaction");
+            let job = picker
+                .pick_compaction(&levels)
+                .expect("Should pick a compaction");
 
             // Should pick partition 1 (keys > 50)
             assert_eq!(job.input_files.len(), 1);
             assert_eq!(job.input_files[0].number, 1);
-            assert!(job.drops.is_empty(), "Drop fragment from partition 0 should not be included");
+            assert!(
+                job.drops.is_empty(),
+                "Drop fragment from partition 0 should not be included"
+            );
             assert_eq!(job.output_files.len(), 1);
             assert_eq!(job.output_files[0].number, 11);
         }
@@ -2013,7 +2219,11 @@ mod tests {
             let job = picker.pick_compaction(&levels).unwrap();
 
             // The drop [40, 70] overlaps with partition 0 (keys <= 50)
-            assert_eq!(job.drops.len(), 1, "Drop overlapping partition should be included");
+            assert_eq!(
+                job.drops.len(),
+                1,
+                "Drop overlapping partition should be included"
+            );
         }
 
         #[test]
@@ -2045,10 +2255,7 @@ mod tests {
             let job = picker.pick_compaction(&levels).unwrap();
 
             // Partition range for partition 1: (Excluded(50), Included(100)]
-            let expected_range = Interval::new(
-                Bound::Excluded(record_key(50)),
-                Bound::Unbounded,
-            );
+            let expected_range = Interval::new(Bound::Excluded(record_key(50)), Bound::Unbounded);
             assert_eq!(job.input_key_range, expected_range);
             assert_eq!(job.output_key_range, expected_range);
             assert_eq!(job.drops.len(), 1);
@@ -2195,7 +2402,9 @@ mod tests {
                 .add(2, l2_ssts, l2_drops)
                 .add(3, l3_ssts, empty());
 
-            let job = picker.pick_compaction(&levels).expect("Should pick a compaction");
+            let job = picker
+                .pick_compaction(&levels)
+                .expect("Should pick a compaction");
 
             // All 3 fragments within partition 0 should be included
             assert_eq!(job.drops.len(), 3);
@@ -2220,23 +2429,31 @@ mod tests {
             let drop2 = DropMetadata::new_collection_drop(101, 150);
 
             // L3 is empty - single partition
-            let levels = Levels::new(options.max_levels())
-                .add(2, vec![l2_sst.clone()], vec![drop1.clone(), drop2.clone()]);
+            let levels = Levels::new(options.max_levels()).add(
+                2,
+                vec![l2_sst.clone()],
+                vec![drop1.clone(), drop2.clone()],
+            );
 
-            let job = picker.pick_compaction(&levels).expect("Should pick a compaction");
+            let job = picker
+                .pick_compaction(&levels)
+                .expect("Should pick a compaction");
 
             // Single partition means all drops should be included.
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                input_files: vec![l2_sst],
-                output_files: vec![],
-                drops: vec![drop1, drop2],
-                input_key_range: Interval::all(),
-                output_key_range: Interval::all(),
-                partitions_grid: Some(vec![]),
-            });
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    input_files: vec![l2_sst],
+                    output_files: vec![],
+                    drops: vec![drop1, drop2],
+                    input_key_range: Interval::all(),
+                    output_key_range: Interval::all(),
+                    partitions_grid: Some(vec![]),
+                }
+            );
         }
 
         #[test]
@@ -2255,8 +2472,9 @@ mod tests {
             // But we need an SSTable somewhere to trigger compaction score > 1
             // Put an SSTable in partition 2 and a drop in partition 0
             // Both use same collection/index
-            let (drop, _) =
-                DropMetadata::new_collection_drop(col, 100).split_at(&record_key_for(col, idx, 50)).expect_two(); // drop [0, 50]
+            let (drop, _) = DropMetadata::new_collection_drop(col, 100)
+                .split_at(&record_key_for(col, idx, 50))
+                .expect_two(); // drop [0, 50]
             let size = l2_target * 2;
             let l2_ssts = vec![create_sst_for(
                 2,
@@ -2268,28 +2486,28 @@ mod tests {
             let l2_drops = vec![drop.clone()]; // partition 0
 
             // L3 files defining partitions: 0=[0,50], 1=[51,100], 2=[101,150]
-                let l3_min = min_boundary_size(&options, 3);
-                let l3_sst_0 = create_sst_for(
-                    10,
-                    3,
-                    &record_key_for(col, idx, 0),
-                    &record_key_for(col, idx, 50),
-                    l3_min,
-                );
-                let l3_sst_1 = create_sst_for(
-                    11,
-                    3,
-                    &record_key_for(col, idx, 51),
-                    &record_key_for(col, idx, 100),
-                    l3_min,
-                );
-                let l3_sst_2 = create_sst_for(
-                    12,
-                    3,
-                    &record_key_for(col, idx, 101),
-                    &record_key_for(col, idx, 150),
-                    l3_min,
-                );
+            let l3_min = min_boundary_size(&options, 3);
+            let l3_sst_0 = create_sst_for(
+                10,
+                3,
+                &record_key_for(col, idx, 0),
+                &record_key_for(col, idx, 50),
+                l3_min,
+            );
+            let l3_sst_1 = create_sst_for(
+                11,
+                3,
+                &record_key_for(col, idx, 51),
+                &record_key_for(col, idx, 100),
+                l3_min,
+            );
+            let l3_sst_2 = create_sst_for(
+                12,
+                3,
+                &record_key_for(col, idx, 101),
+                &record_key_for(col, idx, 150),
+                l3_min,
+            );
             let l3_ssts = vec![l3_sst_0.clone(), l3_sst_1, l3_sst_2];
 
             let levels = Levels::new(options.max_levels())
@@ -2299,17 +2517,29 @@ mod tests {
             // The picker iterates items by sequence number, so the drop (seq 100) comes before SST (seq 200)
             let job = picker.pick_compaction(&levels).unwrap();
 
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                input_files: vec![],
-                output_files: vec![l3_sst_0],
-                drops: vec![drop.clone()],
-                input_key_range: Interval::new(Bound::Unbounded, Bound::Included(record_key_for(col, idx, 50))),
-                output_key_range: Interval::new(Bound::Unbounded, Bound::Included(record_key_for(col, idx, 50))),
-                partitions_grid: Some(vec![record_key_for(col, idx, 50), record_key_for(col, idx, 100)]),
-            });
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    input_files: vec![],
+                    output_files: vec![l3_sst_0],
+                    drops: vec![drop.clone()],
+                    input_key_range: Interval::new(
+                        Bound::Unbounded,
+                        Bound::Included(record_key_for(col, idx, 50))
+                    ),
+                    output_key_range: Interval::new(
+                        Bound::Unbounded,
+                        Bound::Included(record_key_for(col, idx, 50))
+                    ),
+                    partitions_grid: Some(vec![
+                        record_key_for(col, idx, 50),
+                        record_key_for(col, idx, 100)
+                    ]),
+                }
+            );
         }
 
         #[test]
@@ -2346,7 +2576,7 @@ mod tests {
                 &record_key_for(col, idx, 0),
                 &record_key_for(col, idx, 50),
                 l3_min,
-            );   // Partition 0
+            ); // Partition 0
             let l3_sst_1 = create_sst_for(
                 11,
                 3,
@@ -2362,20 +2592,23 @@ mod tests {
 
             let job = picker.pick_compaction(&levels).unwrap();
 
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                // The SST [30, 70] spans both partitions
-                // The partition range should cover both partitions (all)
-                input_files: vec![l2_sst],
-                output_files: vec![l3_sst_0, l3_sst_1],
-                // The drop spans both partitions and should be included
-                drops: vec![drop],
-                input_key_range: Interval::all(),
-                output_key_range: Interval::all(),
-                partitions_grid: Some(vec![record_key_for(col, idx, 50)]),
-            });
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    // The SST [30, 70] spans both partitions
+                    // The partition range should cover both partitions (all)
+                    input_files: vec![l2_sst],
+                    output_files: vec![l3_sst_0, l3_sst_1],
+                    // The drop spans both partitions and should be included
+                    drops: vec![drop],
+                    input_key_range: Interval::all(),
+                    output_key_range: Interval::all(),
+                    partitions_grid: Some(vec![record_key_for(col, idx, 50)]),
+                }
+            );
         }
 
         #[test]
@@ -2402,8 +2635,9 @@ mod tests {
                 size,
             );
             let l2_ssts = vec![l2_sst.clone()];
-            let (_, drop) =
-                DropMetadata::new_collection_drop(col, 100).split_at(&record_key_for(col, idx, 50)).expect_two(); // drop (50, max]
+            let (_, drop) = DropMetadata::new_collection_drop(col, 100)
+                .split_at(&record_key_for(col, idx, 50))
+                .expect_two(); // drop (50, max]
             let l2_drops = vec![drop.clone()];
 
             // L3 with only partition 0 (the original partition 1 was deleted)
@@ -2414,7 +2648,7 @@ mod tests {
                 &record_key_for(col, idx, 50),
                 min_boundary_size(&options, 3),
             ); // Only partition 0
-            let l3_ssts = vec![l3_sst.clone(),];
+            let l3_ssts = vec![l3_sst.clone()];
 
             let levels = Levels::new(options.max_levels())
                 .add(2, l2_ssts, l2_drops.clone())
@@ -2422,17 +2656,20 @@ mod tests {
 
             let job = picker.pick_compaction(&levels).unwrap();
 
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                input_files: vec![l2_sst],
-                output_files: vec![l3_sst],
-                drops: vec![drop],
-                input_key_range: Interval::all(),
-                output_key_range: Interval::all(),
-                partitions_grid: Some(vec![]),
-            });
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    input_files: vec![l2_sst],
+                    output_files: vec![l3_sst],
+                    drops: vec![drop],
+                    input_key_range: Interval::all(),
+                    output_key_range: Interval::all(),
+                    partitions_grid: Some(vec![]),
+                }
+            );
         }
 
         #[test]
@@ -2462,34 +2699,27 @@ mod tests {
             let drop_col_1 = DropMetadata::new_collection_drop(1, 100);
             let drop_col_2 = DropMetadata::new_collection_drop(2, 150);
             let drop_col_3 = DropMetadata::new_collection_drop(3, 200);
-            let l2_drops = vec![
-                drop_col_1.clone(),
-                drop_col_2.clone(),
-                drop_col_3.clone(),
-            ];
+            let l2_drops = vec![drop_col_1.clone(), drop_col_2.clone(), drop_col_3.clone()];
 
             // L3 files defining partitions - use collection 1 to match SSTable
-                let l3_min = min_boundary_size(&options, 3);
-                let collection = 2;
-                let l3_sst_10 = create_sst_for(
-                    10,
-                    3,
-                    &record_key_for(collection, 0, 0),
-                    &record_key_for(collection, 0, 50),
-                    l3_min,
-                ); // Partition 0
-                let collection = 3;
-                let l3_sst_11 = create_sst_for(
-                    11,
-                    3,
-                    &record_key_for(collection, 0, 51),
-                    &record_key_for(collection, 0, 100),
-                    l3_min,
-                ); // Partition 1
-            let l3_ssts = vec![
-                l3_sst_10.clone(),
-                l3_sst_11.clone(),
-            ];
+            let l3_min = min_boundary_size(&options, 3);
+            let collection = 2;
+            let l3_sst_10 = create_sst_for(
+                10,
+                3,
+                &record_key_for(collection, 0, 0),
+                &record_key_for(collection, 0, 50),
+                l3_min,
+            ); // Partition 0
+            let collection = 3;
+            let l3_sst_11 = create_sst_for(
+                11,
+                3,
+                &record_key_for(collection, 0, 51),
+                &record_key_for(collection, 0, 100),
+                l3_min,
+            ); // Partition 1
+            let l3_ssts = vec![l3_sst_10.clone(), l3_sst_11.clone()];
 
             let levels = Levels::new(options.max_levels())
                 .add(2, l2_ssts, l2_drops)
@@ -2502,7 +2732,7 @@ mod tests {
             assert_eq!(job.output_level, 3);
             assert_eq!(job.input_files, vec![l2_sst]);
             assert_eq!(job.output_files, vec![l3_sst_10]);
-            // The drops are picked if they overlap with the partition. 
+            // The drops are picked if they overlap with the partition.
             // Drop for col 1 covers partition 0 [Unbounded, 50].
             // Drop for col 2 covers partition 0 [Unbounded, 50].
             assert_eq!(job.drops.len(), 2);
@@ -2520,16 +2750,15 @@ mod tests {
             let mut picker = test_picker(&options);
 
             // L2 file in partition 0 - cover collection 10 and 11 including any 10 indexes
-            let l2_sst_10 =
-                Arc::new(SSTableMetadata::new(
-                    10,
-                    2,
-                    &record_key_for(10, 0, 10),
-                    &record_key_for(11, 0, 30),
-                    1000,
-                    1050,
-                    l2_target * 2,
-                ));
+            let l2_sst_10 = Arc::new(SSTableMetadata::new(
+                10,
+                2,
+                &record_key_for(10, 0, 10),
+                &record_key_for(11, 0, 30),
+                1000,
+                1050,
+                l2_target * 2,
+            ));
 
             // Drop for a specific index (index = 1, not 0) but same collection
             // Key range overlaps with partition 0
@@ -2537,27 +2766,25 @@ mod tests {
 
             // L3 files defining partitions
             let l3_min = min_boundary_size(&options, 3);
-            let l3_sst_1 =
-                Arc::new(SSTableMetadata::new(
-                    1,
-                    3,
-                    &record_key_for(10, 0, 0),
-                    &record_key_for(11, 0, 50),
-                    100,
-                    150,
-                    l3_min,
-                ));
+            let l3_sst_1 = Arc::new(SSTableMetadata::new(
+                1,
+                3,
+                &record_key_for(10, 0, 0),
+                &record_key_for(11, 0, 50),
+                100,
+                150,
+                l3_min,
+            ));
 
-            let l3_sst_2 =
-                Arc::new(SSTableMetadata::new(
-                    2,
-                    3,
-                    &record_key_for(11, 0, 60),
-                    &record_key_for(11, 1, 50),
-                    100,
-                    150,
-                    l3_min,
-                ));
+            let l3_sst_2 = Arc::new(SSTableMetadata::new(
+                2,
+                3,
+                &record_key_for(11, 0, 60),
+                &record_key_for(11, 1, 50),
+                100,
+                150,
+                l3_min,
+            ));
 
             let levels = Levels::new(options.max_levels())
                 .add(2, vec![l2_sst_10.clone()], vec![idx_drop.clone()])
@@ -2567,18 +2794,22 @@ mod tests {
 
             // The index-specific drop should be included
             // Partition 0 boundary is (col 11, idx 0, 50)
-            let expected_partition_range = Interval::new(Bound::Unbounded, Bound::Included(record_key_for(11, 0, 50)));
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                input_files: vec![l2_sst_10],
-                output_files: vec![l3_sst_1],
-                drops: vec![idx_drop],
-                input_key_range: expected_partition_range.clone(),
-                output_key_range: expected_partition_range,
-                partitions_grid: Some(vec![record_key_for(11, 0, 50)]),
-            });
+            let expected_partition_range =
+                Interval::new(Bound::Unbounded, Bound::Included(record_key_for(11, 0, 50)));
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    input_files: vec![l2_sst_10],
+                    output_files: vec![l3_sst_1],
+                    drops: vec![idx_drop],
+                    input_key_range: expected_partition_range.clone(),
+                    output_key_range: expected_partition_range,
+                    partitions_grid: Some(vec![record_key_for(11, 0, 50)]),
+                }
+            );
         }
 
         #[test]
@@ -2602,7 +2833,7 @@ mod tests {
                 2,
                 &record_key_for(col, idx, 5),
                 &record_key_for(col, idx, 15),
-                l2_target * 2
+                l2_target * 2,
             );
 
             // Drop in same partition but different key range - still should be included since it's in the same partition
@@ -2613,19 +2844,14 @@ mod tests {
             // Partition 0: keys up to (col_2, idx, 50)
             let l3_min = min_boundary_size(&options, 3);
             let boundary_key = record_key_for(col_2, idx, 50);
-            let l3_10_sst = create_sst_for(
-                10,
-                3,
-                &record_key_for(col, idx, 1),
-                &boundary_key,
-                l3_min
-            );
+            let l3_10_sst =
+                create_sst_for(10, 3, &record_key_for(col, idx, 1), &boundary_key, l3_min);
             let l3_11_sst = create_sst_for(
                 11,
                 3,
                 &record_key_for(col_2, idx, 51),
                 &record_key_for(col_2, idx, 3000),
-                l3_min
+                l3_min,
             );
 
             let levels = Levels::new(options.max_levels())
@@ -2636,18 +2862,22 @@ mod tests {
 
             // The drop's key range (col 10, idx 1) falls into Partition 0 because
             // (col 10, idx 1) < (col 11, idx 50).
-            let expected_partition_range = Interval::new(Bound::Unbounded, Bound::Included(boundary_key.clone()));
-            assert_eq!(job, CompactionJob {
-                id: job.id,
-                input_level: 2,
-                output_level: 3,
-                input_files: vec![l2_sst],
-                output_files: vec![l3_10_sst],
-                drops: vec![l2_drop],
-                input_key_range: expected_partition_range.clone(),
-                output_key_range: expected_partition_range,
-                partitions_grid: Some(vec![boundary_key]),
-            });
+            let expected_partition_range =
+                Interval::new(Bound::Unbounded, Bound::Included(boundary_key.clone()));
+            assert_eq!(
+                job,
+                CompactionJob {
+                    id: job.id,
+                    input_level: 2,
+                    output_level: 3,
+                    input_files: vec![l2_sst],
+                    output_files: vec![l3_10_sst],
+                    drops: vec![l2_drop],
+                    input_key_range: expected_partition_range.clone(),
+                    output_key_range: expected_partition_range,
+                    partitions_grid: Some(vec![boundary_key]),
+                }
+            );
         }
 
         #[test]
@@ -2707,7 +2937,10 @@ mod tests {
             assert_eq!(job.input_level, 2);
             // The drop should NOT be included since its key range (with collection=2 prefix)
             // doesn't overlap with the partition range (based on collection=1 boundaries)
-            assert!(job.drops.is_empty(), "Drop with different collection prefix should not be included");
+            assert!(
+                job.drops.is_empty(),
+                "Drop with different collection prefix should not be included"
+            );
         }
     }
 
@@ -2730,8 +2963,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             assert_counter_eq(&registry, "compaction.jobs.picked", 0);
 
@@ -2755,8 +2987,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             let job1 = picker.pick_compaction(&levels).unwrap();
             assert_counter_eq(&registry, "compaction.jobs.picked.full", 1);
@@ -2786,8 +3017,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             assert_counter_eq(&registry, "compaction.jobs.skipped.level_compacting", 0);
 
@@ -2840,8 +3070,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             assert_counter_eq(&registry, "compaction.picked.l0", 0);
             assert_counter_eq(&registry, "compaction.picked.l1", 0);
@@ -2853,8 +3082,7 @@ mod tests {
 
             // L1 compaction
             let l1_ssts = vec![create_sst(100, 1, 10, 50, base_bytes * 2)];
-            let levels = Levels::new(options.max_levels())
-                .add(1, l1_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(1, l1_ssts, empty());
 
             let _job2 = picker.pick_compaction(&levels).unwrap();
             assert_counter_eq(&registry, "compaction.picked.l0", 1);
@@ -2903,8 +3131,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             let job = picker.pick_compaction(&levels).unwrap();
 
@@ -2968,8 +3195,7 @@ mod tests {
             let l0_ssts: Vec<_> = (1..=5)
                 .map(|i| create_sst(i, 0, (i * 10) as u32, (i * 10 + 9) as u32, 1000))
                 .collect();
-            let levels = Levels::new(options.max_levels())
-                .add(0, l0_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(0, l0_ssts, empty());
 
             let job1 = picker.pick_compaction(&levels).unwrap();
             assert_eq!(job1.input_files.len(), 5);
@@ -2977,13 +3203,14 @@ mod tests {
 
             // L1 compaction with 1 input file
             let l1_ssts = vec![create_sst(100, 1, 10, 50, base_bytes * 2)];
-            let levels = Levels::new(options.max_levels())
-                .add(1, l1_ssts, empty());
+            let levels = Levels::new(options.max_levels()).add(1, l1_ssts, empty());
 
             let job2 = picker.pick_compaction(&levels).unwrap();
             assert_eq!(job2.input_files.len(), 1);
 
-            let histogram = registry.get_histogram("compaction.input_files.count").unwrap();
+            let histogram = registry
+                .get_histogram("compaction.input_files.count")
+                .unwrap();
             let snapshot = histogram.snapshot();
             assert_eq!(snapshot.count, 2);
             assert_eq!(snapshot.min, 1);
@@ -3017,16 +3244,25 @@ mod tests {
             // Verify all per-level metrics are registered
             for level in 0..4 {
                 assert!(
-                    registry.get_counter(&format!("compaction.picked.l{}", level)).is_some(),
-                    "Missing counter for compaction.picked.l{}", level
+                    registry
+                        .get_counter(&format!("compaction.picked.l{}", level))
+                        .is_some(),
+                    "Missing counter for compaction.picked.l{}",
+                    level
                 );
                 assert!(
-                    registry.get_gauge(&format!("compaction.score.l{}", level)).is_some(),
-                    "Missing gauge for compaction.score.l{}", level
+                    registry
+                        .get_gauge(&format!("compaction.score.l{}", level))
+                        .is_some(),
+                    "Missing gauge for compaction.score.l{}",
+                    level
                 );
                 assert!(
-                    registry.get_gauge(&format!("compaction.active.l{}", level)).is_some(),
-                    "Missing gauge for compaction.active.l{}", level
+                    registry
+                        .get_gauge(&format!("compaction.active.l{}", level))
+                        .is_some(),
+                    "Missing gauge for compaction.active.l{}",
+                    level
                 );
             }
         }

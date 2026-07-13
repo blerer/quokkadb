@@ -3,12 +3,12 @@ use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
+use crate::{error, event, info};
 use moka::sync::Cache;
 use std::io::Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::{error, event, info};
 
 /// SSTable reader cache (an LRU cache).
 pub struct SSTableCache {
@@ -29,7 +29,10 @@ impl SSTableCache {
         let cache = Cache::new(cache_size);
         let metrics = Metrics::new(cache.clone());
         metrics.register_to(metric_registry);
-        info!(logger, "SSTableCache initialized with capacity={}", cache_size);
+        info!(
+            logger,
+            "SSTableCache initialized with capacity={}", cache_size
+        );
 
         let block_cache = BlockCache::new(logger.clone(), metric_registry, options);
 
@@ -43,7 +46,6 @@ impl SSTableCache {
 
     /// Retrieve the specified SSTableReader, creating it by reading the file on disk if necessary
     pub fn get(&self, file: &Path) -> Result<Arc<SSTableReader>, Error> {
-
         let key = file.to_string_lossy().into_owned();
 
         event!(self.logger, "get start file={}", &key);
@@ -59,14 +61,22 @@ impl SSTableCache {
             let reader = SSTableReader::open(self.logger.clone(), self.block_cache.clone(), &file);
 
             let duration = start.elapsed().as_millis();
-             miss = true;
+            miss = true;
 
             if let Err(e) = reader {
-                error!(self.logger, "Failed to load SSTable from file={}: {}", &key, e);
+                error!(
+                    self.logger,
+                    "Failed to load SSTable from file={}: {}", &key, e
+                );
                 event!(self.logger, "load error file={} error={}", &key, e);
                 return Err(Arc::new(e));
             }
-            event!(self.logger, "load finish file={} duration={}ms", &key, duration);
+            event!(
+                self.logger,
+                "load finish file={} duration={}ms",
+                &key,
+                duration
+            );
             Ok(Arc::new(reader?))
         });
 

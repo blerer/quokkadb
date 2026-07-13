@@ -27,7 +27,7 @@ impl BitSet {
 impl Serializable for BitSet {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
         reader.read_varint_u64().map(BitSet)
     }
@@ -39,8 +39,8 @@ impl Serializable for BitSet {
 
 #[cfg(test)]
 mod tests {
-    use crate::io::serializable::check_serialization_round_trip;
     use super::*;
+    use crate::io::serializable::check_serialization_round_trip;
 
     #[test]
     fn new_bitset_is_empty() {

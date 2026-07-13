@@ -1,10 +1,10 @@
 use crate::query::{get_path_value, BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters};
+use crate::util::interval::Interval;
+use bson::spec::ElementType;
 use bson::{Bson, Document};
 use std::collections::HashSet;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
-use bson::spec::ElementType;
-use crate::util::interval::Interval;
 
 /// Converts a numeric BSON type code to an `ElementType`.
 fn get_element_type_from_code(code: u8) -> Option<ElementType> {
@@ -34,17 +34,18 @@ fn get_element_type_from_code(code: u8) -> Option<ElementType> {
 }
 
 pub fn to_type_filter(type_spec: &Bson) -> Box<dyn Fn(ElementType) -> bool + Send + Sync> {
-
     // Handle "number" alias, which matches multiple numeric types
     if let Bson::String(s) = type_spec {
         if s == "number" {
-            return Box::new(move |value_type|
-                matches!(value_type,
+            return Box::new(move |value_type| {
+                matches!(
+                    value_type,
                     ElementType::Double
                         | ElementType::Int32
                         | ElementType::Int64
                         | ElementType::Decimal128
-            ));
+                )
+            });
         }
     }
 
@@ -126,14 +127,18 @@ fn compare_value(
         ComparisonOperator::Ne => document_value != comparison_value,
         ComparisonOperator::In => {
             if let BsonValueRef(Bson::Array(array)) = comparison_value {
-                array.iter().any(|item| BsonValueRef(item) == document_value)
+                array
+                    .iter()
+                    .any(|item| BsonValueRef(item) == document_value)
             } else {
                 false
             }
         }
         ComparisonOperator::Nin => {
             if let BsonValueRef(Bson::Array(array)) = comparison_value {
-                !array.iter().any(|item| BsonValueRef(item) == document_value)
+                !array
+                    .iter()
+                    .any(|item| BsonValueRef(item) == document_value)
             } else {
                 true
             }
@@ -146,7 +151,6 @@ pub fn to_value_filter(
     filter: Arc<Expr>,
     parameters: &Parameters,
 ) -> Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync> {
-
     match filter.as_ref() {
         Expr::FieldFilters { field, filters } => {
             let path = match field.as_ref() {
@@ -172,12 +176,16 @@ pub fn to_value_filter(
             let comparison_value = match value.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
                 Expr::Literal(val) => val.clone(),
-                _ => unreachable!("Comparison value must be a placeholder or a literal but was {:?}", value),
+                _ => unreachable!(
+                    "Comparison value must be a placeholder or a literal but was {:?}",
+                    value
+                ),
             };
-            Box::new(move |field_value| compare_value(operator, comparison_value.as_ref(), field_value))
+            Box::new(move |field_value| {
+                compare_value(operator, comparison_value.as_ref(), field_value)
+            })
         }
         Expr::Interval(interval) => {
-
             let start = resolve_bound(interval.start_bound(), parameters);
             let end = resolve_bound(interval.end_bound(), parameters);
             let interval = Interval::new(start, end);
@@ -185,10 +193,18 @@ pub fn to_value_filter(
             Box::new(move |field_value| {
                 match field_value {
                     // Arrays are compared element-wise. $eq: null matches if any element is null or if the whole field is missing
-                    Some(BsonValueRef(Bson::Array(array))) => array.iter().any(|val| contains(&interval, BsonValueRef(&val))),
+                    Some(BsonValueRef(Bson::Array(array))) => array
+                        .iter()
+                        .any(|val| contains(&interval, BsonValueRef(&val))),
                     Some(val) => contains(&interval, val),
                     // $eq: null matches also missing fields so we need to check for point intervals with null bounds
-                    None => interval.is_point() && interval.start_bound_value().and_then(|v| v.0.as_null()).is_some(), //
+                    None => {
+                        interval.is_point()
+                            && interval
+                                .start_bound_value()
+                                .and_then(|v| v.0.as_null())
+                                .is_some()
+                    } //
                 }
             })
         }
@@ -197,16 +213,20 @@ pub fn to_value_filter(
         // - `$exists: false` matches documents where the field is missing.
         Expr::Exists(exists) => {
             let exists = *exists;
-            Box::new(move |field_value| {
-                field_value.is_some() == exists
-            })
+            Box::new(move |field_value| field_value.is_some() == exists)
         }
         // Implements the `$elemMatch` filter as:
         // - Matches documents where at least one element in an array matches all the specified filter conditions.
         // - If the array element is a document, all document-level filters must match.
         // - If the array element is a scalar, all value-level filters must match.
         Expr::ElemMatch(filters) => {
-            let is_doc_filter = matches!(filters.first().map(|f| f.as_ref()), Some(Expr::FieldFilters { .. }) | Some(Expr::And(_)) | Some(Expr::Or(_)) | Some(Expr::Not(_)));
+            let is_doc_filter = matches!(
+                filters.first().map(|f| f.as_ref()),
+                Some(Expr::FieldFilters { .. })
+                    | Some(Expr::And(_))
+                    | Some(Expr::Or(_))
+                    | Some(Expr::Not(_))
+            );
 
             if is_doc_filter {
                 let elem_filters: Vec<_> = to_filters(filters, parameters);
@@ -296,11 +316,11 @@ pub fn to_value_filter(
                     false
                 }
             })
-        },
+        }
         Expr::Not(child) => {
             let inner = to_value_filter(child.clone(), parameters);
             Box::new(move |field_value| !inner(field_value))
-        },
+        }
         Expr::And(children) => {
             let filters = to_value_filters(children, parameters);
             Box::new(move |field_value| filters.iter().all(|f| f(field_value)))
@@ -317,8 +337,7 @@ pub fn to_value_filter(
     }
 }
 
-fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool
-{
+fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool {
     (match interval.start_bound() {
         Bound::Included(start) => start.as_ref() <= item,
         Bound::Excluded(start) => start.as_ref() < item,
@@ -330,7 +349,7 @@ fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool
     })
 }
 
-fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) ->Bound<BsonValue> {
+fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) -> Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
         Expr::Placeholder(idx) => parameters.get(*idx).clone(),
         _ => unreachable!("Interval bound must be a placeholder"),
@@ -342,7 +361,7 @@ fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) ->Bound<Bson
     }
 }
 
-fn elem_match_array<F>(field_value: Option<BsonValueRef>, matcher: F,) -> bool
+fn elem_match_array<F>(field_value: Option<BsonValueRef>, matcher: F) -> bool
 where
     F: Fn(&Bson) -> bool,
 {
@@ -354,8 +373,10 @@ where
 }
 
 /// Compiles an expression into a filter function that can be applied to documents.
-pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Document) -> bool + Send + Sync> {
-
+pub fn to_filter(
+    expr: Arc<Expr>,
+    parameters: &Parameters,
+) -> Box<dyn Fn(&Document) -> bool + Send + Sync> {
     match expr.as_ref() {
         Expr::And(children) => {
             let children_filters = to_filters(children, parameters);
@@ -383,48 +404,46 @@ pub fn to_filter(expr: Arc<Expr>, parameters: &Parameters) -> Box<dyn Fn(&Docume
                 let field_value = get_path_value(doc, &path);
                 value_filters.iter().all(|f| f(field_value))
             })
-        },
+        }
         _ => unreachable!("Unsupported top-level filter: {:?}", expr),
     }
 }
 
-fn to_value_filters(filters: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
-    filters.iter()
-           .map(|f| to_value_filter(f.clone(), parameters))
-           .collect()
+fn to_value_filters(
+    filters: &Vec<Arc<Expr>>,
+    parameters: &Parameters,
+) -> Vec<Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
+    filters
+        .iter()
+        .map(|f| to_value_filter(f.clone(), parameters))
+        .collect()
 }
 
-fn to_filters(children: &Vec<Arc<Expr>>, parameters: &Parameters) -> Vec<Box<dyn Fn(&Document) -> bool + Send + Sync>> {
-    children.iter()
-            .map(|c| to_filter(c.clone(), parameters))
-            .collect()
+fn to_filters(
+    children: &Vec<Arc<Expr>>,
+    parameters: &Parameters,
+) -> Vec<Box<dyn Fn(&Document) -> bool + Send + Sync>> {
+    children
+        .iter()
+        .map(|c| to_filter(c.clone(), parameters))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use bson::{doc, Bson, Decimal128};
+    use std::str::FromStr;
 
     #[test]
     fn test_to_type_filter_with_string_alias() {
-
         assert!(matches_type_spec(
             &Bson::String("hello".to_string()),
             &Bson::from("string")
         ));
-        assert!(matches_type_spec(
-            &Bson::Int32(1),
-            &Bson::from("int")
-        ));
-        assert!(matches_type_spec(
-            &Bson::Int64(1),
-            &Bson::from("long")
-        ));
-        assert!(matches_type_spec(
-            &Bson::Double(1.0),
-            &Bson::from("double")
-        ));
+        assert!(matches_type_spec(&Bson::Int32(1), &Bson::from("int")));
+        assert!(matches_type_spec(&Bson::Int64(1), &Bson::from("long")));
+        assert!(matches_type_spec(&Bson::Double(1.0), &Bson::from("double")));
         assert!(matches_type_spec(
             &Bson::Array(vec![]),
             &Bson::from("array")
@@ -433,14 +452,8 @@ mod tests {
             &Bson::Document(doc! {}),
             &Bson::from("object")
         ));
-        assert!(matches_type_spec(
-            &Bson::Boolean(true),
-            &Bson::from("bool")
-        ));
-        assert!(matches_type_spec(
-            &Bson::Null,
-            &Bson::from("null")
-        ));
+        assert!(matches_type_spec(&Bson::Boolean(true), &Bson::from("bool")));
+        assert!(matches_type_spec(&Bson::Null, &Bson::from("null")));
         assert!(matches_type_spec(
             &Bson::Decimal128(Decimal128::from_str("1").unwrap()),
             &Bson::from("decimal")
@@ -484,8 +497,14 @@ mod tests {
         assert!(matches_type_spec(&Bson::Int32(1), &number_spec));
         assert!(matches_type_spec(&Bson::Int64(1), &number_spec));
         assert!(matches_type_spec(&Bson::Double(1.0), &number_spec));
-        assert!(matches_type_spec(&Bson::Decimal128(Decimal128::from_str("1").unwrap()), &number_spec));
-        assert!(!matches_type_spec(&Bson::String("hello".to_string()), &number_spec));
+        assert!(matches_type_spec(
+            &Bson::Decimal128(Decimal128::from_str("1").unwrap()),
+            &number_spec
+        ));
+        assert!(!matches_type_spec(
+            &Bson::String("hello".to_string()),
+            &number_spec
+        ));
     }
 
     #[test]
@@ -498,14 +517,8 @@ mod tests {
             &Bson::from("not-a-type")
         ));
         // Invalid number code
-        assert!(!matches_type_spec(
-            &Bson::from(&i32),
-            &Bson::from(12345)
-        ));
+        assert!(!matches_type_spec(&Bson::from(&i32), &Bson::from(12345)));
         // Invalid spec type
-        assert!(!matches_type_spec(
-            &Bson::from(&i32),
-            &Bson::from(true)
-        ));
+        assert!(!matches_type_spec(&Bson::from(&i32), &Bson::from(true)));
     }
 }

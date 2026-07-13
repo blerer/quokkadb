@@ -1,27 +1,27 @@
 use crate::options::options::Options;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, InternalKeyRange};
+use crate::storage::iterators::{ForwardIterator, ReverseIterator};
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::write_batch::WriteBatch;
+use crate::storage::Direction;
 use crate::util::interval::Interval;
 use crossbeam_skiplist::SkipMap;
 use std::io::Result;
+use std::ops::Bound;
 use std::path::Path;
+use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::ops::Bound;
-use std::rc::Rc;
-use crate::storage::Direction;
-use crate::storage::iterators::{ForwardIterator, ReverseIterator};
 
 pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
     size: AtomicUsize,                   // Current size of the memtable
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
-    pub min_seq: u64, // The minimum sequence number of the operations in this memtable
+    pub min_seq: u64,    // The minimum sequence number of the operations in this memtable
     #[cfg(test)]
     return_error_on_flush: AtomicBool,
 }
@@ -45,10 +45,12 @@ impl Memtable {
 
     /// Applies all the WriteBatch operations to the Memtable
     pub fn write(&self, seq: u64, batch: &WriteBatch) {
-
-        assert!(seq >= self.min_seq,
-                "The documents must have a sequence >= min_seq: [seq = {}, min_seq = {}]",
-                seq, self.min_seq);
+        assert!(
+            seq >= self.min_seq,
+            "The documents must have a sequence >= min_seq: [seq = {}, min_seq = {}]",
+            seq,
+            self.min_seq
+        );
 
         for operation in batch.operations() {
             let key = operation.internal_key(seq);
@@ -60,7 +62,8 @@ impl Memtable {
             self.skiplist.insert(key, value);
 
             // Update the size
-            self.size.fetch_add(key_size + value_size, Ordering::Relaxed);
+            self.size
+                .fetch_add(key_size + value_size, Ordering::Relaxed);
         }
     }
 
@@ -73,10 +76,11 @@ impl Memtable {
     /// The `min_snapshot` parameter can be used to specify an exclusive lower bound
     /// for the sequence number. If provided, only versions with a sequence number
     /// strictly greater than `min_snapshot` will be considered.
-    pub fn read(&self,
-                record_key: &[u8],
-                snapshot: u64,
-                min_snapshot: Option<u64>
+    pub fn read(
+        &self,
+        record_key: &[u8],
+        snapshot: u64,
+        min_snapshot: Option<u64>,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         // Create the range bounds for the search:
         // We want to retrieve all the entries for the specified key
@@ -103,7 +107,6 @@ impl Memtable {
         snapshot: u64,
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> {
-
         let start = Bound::Included(range.start_bound().as_bytes().to_vec());
         let end = Bound::Included(range.end_bound().as_bytes().to_vec());
 
@@ -135,7 +138,6 @@ impl Memtable {
         sst_file: &DbFile,
         options: &Options,
     ) -> Result<SSTableMetadata> {
-
         #[cfg(test)]
         if self.return_error_on_flush.load(Ordering::Relaxed) {
             return Err(std::io::Error::new(
@@ -144,7 +146,12 @@ impl Memtable {
             ));
         }
 
-        let mut writer = SSTableWriter::new_with_expected_keys(directory, sst_file, options, self.skiplist.len())?;
+        let mut writer = SSTableWriter::new_with_expected_keys(
+            directory,
+            sst_file,
+            options,
+            self.skiplist.len(),
+        )?;
         for entry in self.skiplist.iter() {
             writer.add(entry.key(), entry.value())?;
         }
@@ -156,22 +163,26 @@ pub struct RangeScanIterator<'a> {
     iter: Box<dyn Iterator<Item = crossbeam_skiplist::map::Entry<'a, Vec<u8>, Vec<u8>>> + 'a>,
 }
 
-impl <'a> Iterator for RangeScanIterator<'a> {
+impl<'a> Iterator for RangeScanIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|entry| Ok((entry.key().clone(), entry.value().clone())))
+        self.iter
+            .next()
+            .map(|entry| Ok((entry.key().clone(), entry.value().clone())))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
-    use crate::storage::internal_key::{encode_internal_key_range, MAX_SEQUENCE_NUMBER};
     use super::*;
+    use crate::storage::internal_key::{encode_internal_key_range, MAX_SEQUENCE_NUMBER};
     use crate::storage::operation::Operation;
-    use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, record_key, user_key};
+    use crate::storage::test_utils::{
+        assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, record_key, user_key,
+    };
     use crate::storage::write_batch::WriteBatch;
+    use tempfile::tempdir;
 
     #[test]
     fn write_put_operations() {
@@ -179,10 +190,7 @@ mod tests {
 
         // Create a WriteBatch with PUT operations
         let collection: u32 = 32;
-        let batch = write_batch(vec![
-            put_op(collection, 1, 1),
-            put_op(collection, 2, 1),
-        ]);
+        let batch = write_batch(vec![put_op(collection, 1, 1), put_op(collection, 2, 1)]);
 
         memtable.write(1, &batch);
 
@@ -193,7 +201,7 @@ mod tests {
         );
         assert_eq!(
             memtable.read(&record_key(collection, 2), MAX_SEQUENCE_NUMBER, None),
-            Some(put_rec(collection,2, 1, 1))
+            Some(put_rec(collection, 2, 1, 1))
         );
     }
 
@@ -203,18 +211,19 @@ mod tests {
 
         // Create a WriteBatch with PUT and DELETE operations
         let collection: u32 = 32;
-        let batch = write_batch(vec![
-            put_op(collection, 1, 1),
-            delete_op(collection, 1),
-        ]);
+        let batch = write_batch(vec![put_op(collection, 1, 1), delete_op(collection, 1)]);
 
         memtable.write(1, &batch);
 
         // Verify key1 was deleted
-        assert_eq!(memtable.read(&record_key(collection, 1), 2, None),
-                   Some(delete_rec(collection, 1, 1)));
-        assert_eq!(memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER, None),
-                   Some(delete_rec(collection, 1, 1)));
+        assert_eq!(
+            memtable.read(&record_key(collection, 1), 2, None),
+            Some(delete_rec(collection, 1, 1))
+        );
+        assert_eq!(
+            memtable.read(&record_key(collection, 1), MAX_SEQUENCE_NUMBER, None),
+            Some(delete_rec(collection, 1, 1))
+        );
     }
 
     #[test]
@@ -291,8 +300,7 @@ mod tests {
             Some(put_rec(collection, 1, 3, 5))
         );
         // min_snapshot = seq (5), should find it
-        assert_eq!(
-            memtable.read(&record_key, 6, Some(5)), None);
+        assert_eq!(memtable.read(&record_key, 6, Some(5)), None);
 
         // Reading at latest snapshot
         assert_eq!(
@@ -321,21 +329,22 @@ mod tests {
         let memtable = Memtable::new(2, 1);
 
         let col: u32 = 32;
-        let batch = write_batch(vec![
-            put_op(col, 1, 1),
-            put_op(col, 4, 1),
-        ]);
+        let batch = write_batch(vec![put_op(col, 1, 1), put_op(col, 4, 1)]);
 
         memtable.write(1, &batch);
 
         // Range scan: key2 to key3 (no matching keys)
         let range = Interval::closed(user_key(2), user_key(3));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
         assert!(range_iter.next().is_none());
     }
 
@@ -366,98 +375,117 @@ mod tests {
 
         let range = Interval::closed(user_key(2), user_key(6));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert!(range_iter.next().is_none());
 
         let range = Interval::closed_open(user_key(2), user_key(6));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert!(range_iter.next().is_none());
 
         let range = Interval::open(user_key(2), user_key(6));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert!(range_iter.next().is_none());
 
         let range = Interval::open_closed(user_key(2), user_key(6));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert!(range_iter.next().is_none());
-
 
         let range = Interval::at_least(user_key(2));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 6, 1, 3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1,3));
-        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1,3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 5, 1, 3));
+        assert_next_entry_eq(&mut range_iter, &put_rec(col, 4, 1, 3));
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
         assert!(range_iter.next().is_none());
@@ -484,7 +512,9 @@ mod tests {
 
         let range = Interval::closed(user_key(1), user_key(3));
         let internal_key_range = forward_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 1, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
@@ -492,7 +522,9 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, MAX_SEQUENCE_NUMBER);
-        let mut range_iter = memtable.range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, MAX_SEQUENCE_NUMBER, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
@@ -500,7 +532,9 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = forward_range(col, &range, 2);
-        let mut range_iter = memtable.range_scan(internal_key_range, 2, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 2, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 1, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
@@ -508,7 +542,9 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, 2);
-        let mut range_iter = memtable.range_scan(internal_key_range, 2, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 2, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &delete_rec(col, 3, 2));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 2, 2));
@@ -516,7 +552,9 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = forward_range(col, &range, 1);
-        let mut range_iter = memtable.range_scan(internal_key_range, 1, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 1, Direction::Forward)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 1, 1, 1));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 1, 1));
@@ -524,7 +562,9 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, 1);
-        let mut range_iter = memtable.range_scan(internal_key_range, 1, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 1, Direction::Reverse)
+            .unwrap();
 
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 3, 1, 1));
         assert_next_entry_eq(&mut range_iter, &put_rec(col, 2, 1, 1));
@@ -532,12 +572,16 @@ mod tests {
         assert!(range_iter.next().is_none());
 
         let internal_key_range = forward_range(col, &range, 0);
-        let mut range_iter = memtable.range_scan(internal_key_range, 0, Direction::Forward).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 0, Direction::Forward)
+            .unwrap();
 
         assert!(range_iter.next().is_none());
 
         let internal_key_range = reverse_range(col, &range, 0);
-        let mut range_iter = memtable.range_scan(internal_key_range, 0, Direction::Reverse).unwrap();
+        let mut range_iter = memtable
+            .range_scan(internal_key_range, 0, Direction::Reverse)
+            .unwrap();
 
         assert!(range_iter.next().is_none());
     }
@@ -559,12 +603,14 @@ mod tests {
 
         let mut seq = 15;
         for insert in inserts {
-            let _ = memtable.write(seq, &write_batch(vec!(insert)));
+            let _ = memtable.write(seq, &write_batch(vec![insert]));
             seq += 1;
         }
 
         let sst_file = DbFile::new_sst(3);
-        let sst = memtable.flush(&path, &sst_file, &Options::lightweight()).unwrap();
+        let sst = memtable
+            .flush(&path, &sst_file, &Options::lightweight())
+            .unwrap();
 
         let expected_size = path.join(sst_file.filename()).metadata().unwrap().len();
 

@@ -1,12 +1,12 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::query::{Expr, Limit, Projection, ProjectionExpr, SortField};
 use crate::query::tree_node::TreeNode;
+use crate::query::update::UpdateExpr;
+use crate::query::{Expr, Limit, Projection, ProjectionExpr, SortField};
+use crate::util::murmur_hash64::murmur_hash64a;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
-use crate::query::update::UpdateExpr;
-use crate::util::murmur_hash64::murmur_hash64a;
 
 /// Represents the LogicalPlan for MongoDB-like operations
 #[derive(Debug, Clone, PartialEq)]
@@ -15,34 +15,34 @@ pub enum LogicalPlan {
     NoOp,
     /// Represents an insert operation for a single document. This is a terminal operator.
     InsertOne {
-        collection: u32, // Collection identifier
+        collection: u32,   // Collection identifier
         document: Vec<u8>, // The document to be inserted.
     },
     /// Represents an insert operation for set of documents into a collection. This is a terminal operator.
     InsertMany {
-        collection: u32, // Collection identifier
+        collection: u32,         // Collection identifier
         documents: Vec<Vec<u8>>, // The documents to be inserted.
     },
     /// Represents an update operation for a single document. This is a terminal operator.
     UpdateOne {
-        collection: u32, // Collection identifier
+        collection: u32,         // Collection identifier
         query: Arc<LogicalPlan>, // Filter to match the document to update
-        update: UpdateExpr, // Update operations
-        upsert: bool, // Whether to perform an upsert if no documents match the query
+        update: UpdateExpr,      // Update operations
+        upsert: bool,            // Whether to perform an upsert if no documents match the query
     },
     /// Represents an update operation for multiple documents. This is a terminal operator.
     UpdateMany {
-        collection: u32, // Collection identifier
+        collection: u32,         // Collection identifier
         query: Arc<LogicalPlan>, // Filter to match documents to update
-        update: UpdateExpr, // Update operations
-        upsert: bool, // Whether to perform an upsert if no documents match the query
+        update: UpdateExpr,      // Update operations
+        upsert: bool,            // Whether to perform an upsert if no documents match the query
     },
     /// Represents a collection scan with optional projection, filtering, and sorting. This is a terminal operator.
     CollectionScan {
-        collection: u32, // Collection identifier
+        collection: u32,                     // Collection identifier
         projection: Option<Arc<Projection>>, // Fields to include
-        filter: Option<Arc<Expr>>,            // Optional filtering condition
-        sort: Option<Arc<Vec<SortField>>>,    // Optional sorting fields
+        filter: Option<Arc<Expr>>,           // Optional filtering condition
+        sort: Option<Arc<Vec<SortField>>>,   // Optional sorting fields
     },
 
     /// Represents a filter operation.
@@ -89,13 +89,23 @@ impl TreeNode for LogicalPlan {
     /// Create a new node with updated children
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self::Child>>) -> Arc<Self> {
         match self.as_ref() {
-            LogicalPlan::UpdateOne { collection, update, upsert, .. } => Arc::new(LogicalPlan::UpdateOne {
+            LogicalPlan::UpdateOne {
+                collection,
+                update,
+                upsert,
+                ..
+            } => Arc::new(LogicalPlan::UpdateOne {
                 collection: *collection,
                 query: Self::get_first(children),
                 update: update.clone(),
                 upsert: *upsert,
             }),
-            LogicalPlan::UpdateMany { collection, update, upsert, .. } => Arc::new(LogicalPlan::UpdateMany {
+            LogicalPlan::UpdateMany {
+                collection,
+                update,
+                upsert,
+                ..
+            } => Arc::new(LogicalPlan::UpdateMany {
                 collection: *collection,
                 query: Self::get_first(children),
                 update: update.clone(),
@@ -171,19 +181,13 @@ impl Serializable for LogicalPlan {
                 // Projection
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let projection = Arc::<Projection>::read_from(reader)?;
-                Ok(LogicalPlan::Projection {
-                    input,
-                    projection,
-                })
+                Ok(LogicalPlan::Projection { input, projection })
             }
             4 => {
                 // Sort
                 let input = Arc::<LogicalPlan>::read_from(reader)?;
                 let sort_fields = Arc::<Vec<SortField>>::read_from(reader)?;
-                Ok(LogicalPlan::Sort {
-                    input,
-                    sort_fields,
-                })
+                Ok(LogicalPlan::Sort { input, sort_fields })
             }
             5 => {
                 // Limit
@@ -192,10 +196,7 @@ impl Serializable for LogicalPlan {
                     skip: Option::<usize>::read_from(reader)?,
                     limit: Option::<usize>::read_from(reader)?,
                 };
-                Ok(LogicalPlan::Limit {
-                    input,
-                    limit,
-                })
+                Ok(LogicalPlan::Limit { input, limit })
             }
             _ => Err(Error::new(
                 ErrorKind::InvalidData,
@@ -231,18 +232,12 @@ impl Serializable for LogicalPlan {
                 input.write_to(writer);
                 projection.write_to(writer);
             }
-            LogicalPlan::Sort {
-                input,
-                sort_fields,
-            } => {
+            LogicalPlan::Sort { input, sort_fields } => {
                 writer.write_u8(4);
                 input.write_to(writer);
                 sort_fields.write_to(writer);
             }
-            LogicalPlan::Limit {
-                input,
-                limit,
-            } => {
+            LogicalPlan::Limit { input, limit } => {
                 writer.write_u8(5);
                 input.write_to(writer);
                 limit.write_to(writer);
@@ -279,7 +274,8 @@ impl LogicalPlanBuilder {
         collection: u32,
         filter: Option<Arc<Expr>>,
         projection: Option<Arc<Projection>>,
-        sort: Option<Arc<Vec<SortField>>>) -> Self {
+        sort: Option<Arc<Vec<SortField>>>,
+    ) -> Self {
         Self {
             plan: Arc::new(LogicalPlan::CollectionScan {
                 collection,
@@ -321,7 +317,7 @@ impl LogicalPlanBuilder {
     pub fn limit(mut self, skip: Option<usize>, limit: Option<usize>) -> Self {
         self.plan = Arc::new(LogicalPlan::Limit {
             input: self.plan,
-            limit: Limit { skip, limit }
+            limit: Limit { skip, limit },
         });
         self
     }
@@ -353,7 +349,12 @@ where
                 projection,
             })
         }
-        LogicalPlan::CollectionScan { collection, projection, filter, sort } => {
+        LogicalPlan::CollectionScan {
+            collection,
+            projection,
+            filter,
+            sort,
+        } => {
             if filter.is_none() && projection.is_none() {
                 return node;
             }
@@ -376,14 +377,14 @@ where
                 filter,
                 sort: sort.clone(),
             })
-        },
+        }
         _ => node,
     })
 }
 
 fn transform_up_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc<Projection>
 where
-    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
 {
     let projection = Arc::new(match projection.as_ref() {
         Projection::Include(proj_exprs) => {
@@ -398,11 +399,16 @@ where
     projection
 }
 
-fn transform_up_proj_expr_filters<F>(function: F, proj_exprs: &Arc<ProjectionExpr>) -> Arc<ProjectionExpr>
+fn transform_up_proj_expr_filters<F>(
+    function: F,
+    proj_exprs: &Arc<ProjectionExpr>,
+) -> Arc<ProjectionExpr>
 where
     F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
 {
-    proj_exprs.clone().transform_up(&|c| transform_up_proj_elem_match_filter(c, function.clone()))
+    proj_exprs
+        .clone()
+        .transform_up(&|c| transform_up_proj_elem_match_filter(c, function.clone()))
 }
 
 fn transform_up_proj_elem_match_filter<F>(
@@ -415,7 +421,7 @@ where
     match proj_expr.as_ref() {
         ProjectionExpr::ElemMatch { filter } => {
             let new_expr = filter.clone().transform_up(&|c| function(c));
-            Arc::new(ProjectionExpr::ElemMatch{ filter: new_expr })
+            Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
         }
         _ => proj_expr.clone(),
     }
@@ -427,54 +433,57 @@ pub fn transform_down_filter<F>(plan: Arc<LogicalPlan>, function: F) -> Arc<Logi
 where
     F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
 {
-    plan.transform_down(&|node: Arc<LogicalPlan>| {
-        match node.as_ref() {
-            LogicalPlan::Filter { input, condition } => {
-                let expr = condition.clone().transform_down(&function);
-                Arc::new(LogicalPlan::Filter {
-                    input: input.clone(),
-                    condition: expr,
-                })
-            }
-            LogicalPlan::Projection { input, projection } => {
-                let projection = transform_down_projection(&projection, &function);
-                Arc::new(LogicalPlan::Projection {
-                    input: input.clone(),
-                    projection,
-                })
-            }
-            LogicalPlan::CollectionScan { collection, projection, filter, sort } => {
-                if filter.is_none() && projection.is_none() {
-                    return node;
-                }
-
-                let filter = if let Some(filter) = filter {
-                    Some(filter.clone().transform_down(&|c| function(c)))
-                } else {
-                    None
-                };
-
-                let projection = if let Some(projection) = projection {
-                    Some(transform_down_projection(&projection, &function))
-                } else {
-                    None
-                };
-
-                Arc::new(LogicalPlan::CollectionScan {
-                    collection: *collection,
-                    projection,
-                    filter,
-                    sort: sort.clone(),
-                })
-            },
-            _ => node.clone(),
+    plan.transform_down(&|node: Arc<LogicalPlan>| match node.as_ref() {
+        LogicalPlan::Filter { input, condition } => {
+            let expr = condition.clone().transform_down(&function);
+            Arc::new(LogicalPlan::Filter {
+                input: input.clone(),
+                condition: expr,
+            })
         }
+        LogicalPlan::Projection { input, projection } => {
+            let projection = transform_down_projection(&projection, &function);
+            Arc::new(LogicalPlan::Projection {
+                input: input.clone(),
+                projection,
+            })
+        }
+        LogicalPlan::CollectionScan {
+            collection,
+            projection,
+            filter,
+            sort,
+        } => {
+            if filter.is_none() && projection.is_none() {
+                return node;
+            }
+
+            let filter = if let Some(filter) = filter {
+                Some(filter.clone().transform_down(&|c| function(c)))
+            } else {
+                None
+            };
+
+            let projection = if let Some(projection) = projection {
+                Some(transform_down_projection(&projection, &function))
+            } else {
+                None
+            };
+
+            Arc::new(LogicalPlan::CollectionScan {
+                collection: *collection,
+                projection,
+                filter,
+                sort: sort.clone(),
+            })
+        }
+        _ => node.clone(),
     })
 }
 
 fn transform_down_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc<Projection>
 where
-    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone
+    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
 {
     let projection = Arc::new(match projection.as_ref() {
         Projection::Include(proj_exprs) => {
@@ -521,7 +530,10 @@ where
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
-    use crate::query::expr_fn::{elem_match, eq, field, field_filters, include, lit, placeholder, proj_elem_match, proj_field, proj_fields, sort_asc};
+    use crate::query::expr_fn::{
+        elem_match, eq, field, field_filters, include, lit, placeholder, proj_elem_match,
+        proj_field, proj_fields, sort_asc,
+    };
     use crate::query::{ComparisonOperator, SortOrder};
 
     #[test]
@@ -547,10 +559,8 @@ mod tests {
                 operator: ComparisonOperator::Eq,
                 value: Arc::new(Expr::Placeholder(0)),
             }))
-            .project(include(proj_fields([
-                ("a", proj_field()),
-            ])))
-            .sort(Arc::new(vec!(sort_asc(field(["b"])))))
+            .project(include(proj_fields([("a", proj_field())])))
+            .sort(Arc::new(vec![sort_asc(field(["b"]))]))
             .limit(Some(10), Some(20))
             .build();
 
@@ -574,24 +584,28 @@ mod tests {
         };
 
         // Test with LogicalPlan::Filter
-        let plan = LogicalPlanBuilder::scan_with_filters_and_projections(123,
-                                                                         Some(eq(original.clone())),
-                                                                         None,
-                                                                         None)
-            .filter(elem_match([eq(original.clone())]))
-            .project(include(proj_elem_match(eq(original.clone()))))
-            .build();
+        let plan = LogicalPlanBuilder::scan_with_filters_and_projections(
+            123,
+            Some(eq(original.clone())),
+            None,
+            None,
+        )
+        .filter(elem_match([eq(original.clone())]))
+        .project(include(proj_elem_match(eq(original.clone()))))
+        .build();
 
         let transformed_up = transform_up_filter(plan.clone(), transformation.clone());
         let transformed_down = transform_down_filter(plan.clone(), transformation.clone());
 
-        let expected = LogicalPlanBuilder::scan_with_filters_and_projections(123,
-                                                                                  Some(eq(transformed.clone())),
-                                                                                  None,
-                                                                                  None)
-            .filter(elem_match([eq(transformed.clone())]))
-            .project(include(proj_elem_match(eq(transformed.clone()))))
-            .build();
+        let expected = LogicalPlanBuilder::scan_with_filters_and_projections(
+            123,
+            Some(eq(transformed.clone())),
+            None,
+            None,
+        )
+        .filter(elem_match([eq(transformed.clone())]))
+        .project(include(proj_elem_match(eq(transformed.clone()))))
+        .build();
 
         assert_eq!(transformed_up, expected);
         assert_eq!(transformed_down, expected);
