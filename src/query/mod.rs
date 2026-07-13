@@ -694,6 +694,15 @@ pub enum SortOrder {
     Descending,
 }
 
+impl SortOrder {
+    pub fn reverse(&self) -> SortOrder {
+        match self {
+            SortOrder::Ascending => SortOrder::Descending,
+            SortOrder::Descending => SortOrder::Ascending,
+        }
+    }
+}
+
 impl Serializable for SortOrder {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
@@ -735,6 +744,13 @@ impl SortField {
         SortField {
             field,
             order: SortOrder::Descending,
+        }
+    }
+
+    pub fn reverse(&self) -> SortField {
+        SortField {
+            field: self.field.clone(),
+            order: self.order.reverse(),
         }
     }
 }
@@ -846,9 +862,6 @@ pub struct IndexKeyField {
 }
 
 impl IndexKeyField {
-    pub fn new(path: Vec<PathComponent>, kind: IndexKeyKind) -> Self {
-        Self { path, kind }
-    }
 
     pub fn asc(path: Vec<PathComponent>) -> Self {
         Self {
@@ -1042,7 +1055,7 @@ pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<B
     Some(BsonValueRef(current))
 }
 
-fn raw_array_get(array: &RawArray, index: usize) -> Option<RawBsonRef> {
+fn raw_array_get(array: &RawArray, index: usize) -> Option<RawBsonRef<'_>> {
     array.get(index).ok().flatten()
 }
 

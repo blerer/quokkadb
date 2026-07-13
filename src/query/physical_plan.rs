@@ -6,6 +6,22 @@ use crate::storage::Direction;
 use crate::util::interval::Interval;
 use std::sync::Arc;
 
+/// A storage-facing description of the bounds for a secondary index scan.
+///
+/// Compound index access follows the usual shape:
+/// - zero or more leading equality predicates
+/// - optionally one interval predicate on the next index field
+///
+/// Remaining index fields are left open and are expanded by the executor when
+/// it binds this structure into concrete byte ranges.
+#[derive(Debug, PartialEq, Clone)]
+pub struct IndexScanRangeExpr {
+    /// Equality-constrained leading index fields, in index order.
+    pub equal_prefix: Vec<Arc<Expr>>,
+    /// Optional interval predicate on the first non-equality index field.
+    pub tail: Option<Interval<Arc<Expr>>>,
+}
+
 /// Represents a physical plan that can be executed by the query engine.
 ///
 /// A physical plan is a tree of operators that defines the concrete steps
@@ -48,8 +64,10 @@ pub enum PhysicalPlan {
         collection: u32,
         /// The identifier for the index.
         index: u32,
-        /// The  range for the scan on the index.
-        range: Interval<Arc<Expr>>,
+        /// The logical bound description for the scan on the index.
+        range: IndexScanRangeExpr,
+        /// The direction in which the index scan must be performed.
+        direction: Direction,
         /// An optional filter to apply at the binary level after scanning.
         filter: Option<Arc<Expr>>,
         /// An optional list of fields to project. If `None`, all fields are returned.

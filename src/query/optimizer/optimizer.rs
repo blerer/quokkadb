@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::convert::Into;
-use std::sync::Arc;
-use std::time::Instant;
 use crate::event;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
@@ -9,11 +5,17 @@ use crate::obs::logger::LoggerAndTracer;
 use crate::query::logical_plan::{transform_down_filter, LogicalPlan};
 use crate::query::optimizer::normalization_rules;
 use crate::query::optimizer::normalization_rules::NormalisationRule;
-use crate::query::physical_plan::PhysicalPlan;
+use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::tree_node::TreeNode;
-use crate::query::{ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder};
-use crate::storage::catalog::Catalog;
+use crate::query::{
+    ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder,
+};
+use crate::storage::catalog::{Catalog, IndexDefinition, IndexDirection, OrderedIndexField};
 use crate::storage::Direction;
+use std::collections::HashMap;
+use std::convert::Into;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub type Cost = f64;
 
@@ -128,7 +130,10 @@ impl LogicalPlanKey {
                     limit: limit.clone(),
                 }
             }
-            _ => panic!("Unsupported logical plan node in key generation: {:?}", plan)
+            _ => panic!(
+                "Unsupported logical plan node in key generation: {:?}",
+                plan
+            ),
         }
     }
 }
@@ -208,7 +213,7 @@ struct Provides {
 }
 
 impl Optimizer {
-    pub fn new(logger: Arc<dyn LoggerAndTracer>,) -> Self {
+    pub fn new(logger: Arc<dyn LoggerAndTracer>) -> Self {
         Self {
             logger: logger.clone(),
             normalization_rules: Arc::new(normalization_rules::all_normalization_rules()),
@@ -217,7 +222,6 @@ impl Optimizer {
     }
 
     pub fn optimize(&self, plan: Arc<LogicalPlan>, catalog: Arc<Catalog>) -> Arc<PhysicalPlan> {
-
         event!(self.logger, "optimization start, logical_plan={:?}", plan);
         let start = Instant::now();
 
@@ -230,19 +234,18 @@ impl Optimizer {
 
         let required_props = ReqProps::default(); // No required properties for the root
 
-        let physical_plan = self.best_expr(
-            catalog.as_ref(),
-            &mut memo,
-            root_group_id,
-            &required_props,
-        )
-        .plan
-        .clone();
+        let physical_plan = self
+            .best_expr(catalog.as_ref(), &mut memo, root_group_id, &required_props)
+            .plan
+            .clone();
 
         let duration = start.elapsed();
-        event!(self.logger, "optimization done, duration={}µs, physical_plan={:?}",
+        event!(
+            self.logger,
+            "optimization done, duration={}µs, physical_plan={:?}",
             duration.as_micros(),
-            physical_plan);
+            physical_plan
+        );
 
         physical_plan
     }
@@ -254,9 +257,12 @@ impl Optimizer {
         let logical_plan = self.normalization_rules.apply(plan);
 
         let duration = start.elapsed();
-        event!(self.logger, "normalization done,duration={}µs, normalized_plan={:?}",
+        event!(
+            self.logger,
+            "normalization done,duration={}µs, normalized_plan={:?}",
             duration.as_micros(),
-            logical_plan);
+            logical_plan
+        );
         logical_plan
     }
 
@@ -280,11 +286,13 @@ impl Optimizer {
                     } else {
                         unreachable!("Interval bound should be literals")
                     };
-                    Arc::new(Expr::Interval(Interval::closed(bound.clone(), bound.clone())))
+                    Arc::new(Expr::Interval(Interval::closed(
+                        bound.clone(),
+                        bound.clone(),
+                    )))
                 } else {
-                   expr.clone()
+                    expr.clone()
                 }
-
             }
             Expr::Literal(value) => {
                 // If the expression is a literal, we can parameterize it
@@ -332,7 +340,11 @@ impl Optimizer {
         }
 
         let best = best.expect("Failed to produce a physical plan");
-        let best = Arc::new(Best { plan: best.plan, cost: best.cost, provides: best.provides });
+        let best = Arc::new(Best {
+            plan: best.plan,
+            cost: best.cost,
+            provides: best.provides,
+        });
 
         // 6. Cache and return
         memo.groups[group_id]
@@ -348,9 +360,10 @@ impl Optimizer {
         child_bests: &[Arc<Best>],
         req: &ReqProps,
     ) -> Vec<Candidate> {
-
         match node {
-            LogicalPlan::CollectionScan { collection, filter, .. } => {
+            LogicalPlan::CollectionScan {
+                collection, filter, ..
+            } => {
                 assert!(child_bests.is_empty());
                 self.implement_collection_scan_node(catalog, *collection, filter, req)
             }
@@ -370,13 +383,23 @@ impl Optimizer {
                 assert_eq!(child_bests.len(), 1);
                 self.implement_limit_node(&child_bests, limit)
             }
-            _ => panic!("Unsupported logical plan node in implementation: {:?}", node),
+            _ => panic!(
+                "Unsupported logical plan node in implementation: {:?}",
+                node
+            ),
         }
     }
 
-    fn implement_filter_node(&self, child_bests: &[Arc<Best>], condition: &Arc<Expr>) -> Vec<Candidate> {
+    fn implement_filter_node(
+        &self,
+        child_bests: &[Arc<Best>],
+        condition: &Arc<Expr>,
+    ) -> Vec<Candidate> {
         let child = &child_bests[0];
-        let plan = Arc::new(PhysicalPlan::Filter { input: child.plan.clone(), predicate: condition.clone() });
+        let plan = Arc::new(PhysicalPlan::Filter {
+            input: child.plan.clone(),
+            predicate: condition.clone(),
+        });
         vec![Candidate {
             provides: child.provides.clone(),
             cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
@@ -384,9 +407,16 @@ impl Optimizer {
         }]
     }
 
-    fn implement_projection_node(&self, child_bests: &[Arc<Best>], projection: &Arc<Projection>) -> Vec<Candidate> {
+    fn implement_projection_node(
+        &self,
+        child_bests: &[Arc<Best>],
+        projection: &Arc<Projection>,
+    ) -> Vec<Candidate> {
         let child = &child_bests[0];
-        let plan = Arc::new(PhysicalPlan::Projection { input: child.plan.clone(), projection: projection.clone() });
+        let plan = Arc::new(PhysicalPlan::Projection {
+            input: child.plan.clone(),
+            projection: projection.clone(),
+        });
         vec![Candidate {
             provides: child.provides.clone(),
             cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
@@ -439,20 +469,18 @@ impl Optimizer {
         filter: &Option<Arc<Expr>>,
         req: &ReqProps,
     ) -> Vec<Candidate> {
-
         let primary_key = Expr::Field(vec!["_id".into()]);
+        let mut candidates = vec![self.create_pk_range_scan_candidate(
+            collection,
+            primary_key.clone(),
+            Interval::all(),
+            filter.clone(),
+            req,
+        )];
 
-        let expr = if let Some(expr) = filter {
-            expr
-        } else {
-            // If there are no filters, it means that all documents need to be read
-            return vec![self.create_pk_range_scan_candidate(
-                collection,
-                primary_key,
-                Interval::all(),
-                None,
-                req
-            )]
+        let Some(expr) = filter else {
+            self.add_index_scan_candidates(catalog, collection, filter, None, req, &mut candidates);
+            return candidates;
         };
 
         // Flatten the expression into a list of conjuncts
@@ -477,21 +505,20 @@ impl Optimizer {
             })
             .collect();
 
-        let mut candidates = Vec::new();
-
         // Handle primary key separately
-        if let Some(Expr::FieldFilters { field: _field, filters }) =
-            field_filters_map.get(&primary_key).map(|e| *e)
+        if let Some(Expr::FieldFilters {
+            field: _field,
+            filters,
+        }) = field_filters_map.get(&primary_key).map(|e| *e)
         {
             // After normalization, we know that:
             // * if the field filters exists it must contain at least one filter
             // * if there is a sargable filter it will be the first filter
             assert!(!filters.is_empty(), "There should be at least one filter");
-            
-            let first_filter = filters.first().unwrap();
-            
-            if is_sargable(first_filter) {
 
+            let first_filter = filters.first().unwrap();
+
+            if is_sargable(first_filter) {
                 let sargable = first_filter;
                 let residual = compute_residual_filter(expr.clone(), &primary_key);
 
@@ -514,88 +541,114 @@ impl Optimizer {
                         if interval.is_point() {
                             // Point search
                             let key = interval.start_bound_value().unwrap().clone();
-                            let candidate = self.create_point_search_candidate(
-                                collection,
-                                key,
-                                residual
-                            );
+                            let candidate =
+                                self.create_point_search_candidate(collection, key, residual);
                             // If we can answer to the query with a point search, we know that it is
                             // the fastest that we can use. So, instead of exploring other alternative
                             // we can directly return it
                             return vec![candidate];
                         } else {
                             // Range scan
-                            let candidate = self.create_pk_range_scan_candidate(
+                            candidates[0] = self.create_pk_range_scan_candidate(
                                 collection,
                                 primary_key,
                                 interval.clone(),
                                 residual,
-                                req
+                                req,
                             );
-                            candidates.push(candidate);
                         }
-                    },
+                    }
                     Expr::Exists(true) => {
-                        let candidate = self.create_pk_range_scan_candidate(
+                        candidates[0] = self.create_pk_range_scan_candidate(
                             collection,
-                            primary_key,
+                            primary_key.clone(),
                             Interval::all(),
                             residual,
-                            req
+                            req,
                         );
-                        candidates.push(candidate);
-                    },
+                    }
                     _ => unreachable!(), // Should be filtered by is_sargable_leaf
                 }
             }
-        } else {
-            // If there are no restriction on the primary key then a full scan + raw filtering is a candidate.
-            candidates.push(self.create_pk_range_scan_candidate(
-                collection,
-                primary_key,
-                Interval::all(),
-                filter.clone(),
-                req
-            ))
         }
 
-        let metadata = catalog.get_collection_by_id(&collection)
-            .expect("The collection should exists");
-
-        // Handle indexes
-        for _index in metadata.indexes.values() {
-
-            todo!("Implement the logic for index candidates")
-
-            // let mut matched_prefix_len = 0;
-            // for (field_name, _) in &index.fields {
-            //     if field_filters_map.contains_key(field_name) {
-            //         matched_prefix_len += 1;
-            //     } else {
-            //         break;
-            //     }
-            // }
-            //
-            // if matched_prefix_len > 0 {
-            //     for i in 0..matched_prefix_len {
-            //         let (field_name, _) = &index.fields[i];
-            //         if let Some(Expr::FieldFilters { field, filters }) =
-            //             field_filters_map.get(field_name).map(|e| *e)
-            //         {
-            //
-            //         }
-            //     }
-            // }
-        }
+        self.add_index_scan_candidates(
+            catalog,
+            collection,
+            filter,
+            Some(&field_filters_map),
+            req,
+            &mut candidates,
+        );
         candidates
     }
 
-    fn create_point_search_candidate(&self,
-                                     collection: u32,
-                                     key: Arc<Expr>,
-                                     residual: Option<Arc<Expr>>
-    ) -> Candidate {
+    fn add_index_scan_candidates(
+        &self,
+        catalog: &Catalog,
+        collection: u32,
+        filter: &Option<Arc<Expr>>,
+        field_filters_map: Option<&HashMap<&Expr, &Expr>>,
+        req: &ReqProps,
+        candidates: &mut Vec<Candidate>,
+    ) {
+        let metadata = catalog
+            .get_collection_by_id(&collection)
+            .expect("The collection should exists");
 
+        for index in metadata.queryable_indexes() {
+            let index_fields = match &index.definition {
+                IndexDefinition::Regular(fields) => fields,
+            };
+
+            let maybe_range = field_filters_map
+                .and_then(|filters| build_index_scan_range_expr(index_fields, filters));
+
+            if let Some((range, used_fields)) = maybe_range {
+                let residual = filter.clone().and_then(|original_filter| {
+                    let mut residual = Some(original_filter);
+                    for field in used_fields {
+                        if let Some(current) = residual {
+                            residual = compute_residual_filter(current, field.as_ref());
+                        }
+                    }
+                    residual
+                });
+
+                candidates.push(self.create_index_scan_candidate(
+                    collection,
+                    index.id,
+                    range,
+                    residual,
+                    req,
+                    index_fields,
+                ));
+            } else if req
+                .order
+                .as_ref()
+                .is_some_and(|order| index_scan_direction(index_fields, order.as_slice()).is_some())
+            {
+                candidates.push(self.create_index_scan_candidate(
+                    collection,
+                    index.id,
+                    IndexScanRangeExpr {
+                        equal_prefix: vec![],
+                        tail: None,
+                    },
+                    None,
+                    req,
+                    index_fields,
+                ));
+            }
+        }
+    }
+
+    fn create_point_search_candidate(
+        &self,
+        collection: u32,
+        key: Arc<Expr>,
+        residual: Option<Arc<Expr>>,
+    ) -> Candidate {
         let plan = Arc::new(PhysicalPlan::PointSearch {
             collection,
             key,
@@ -605,7 +658,10 @@ impl Optimizer {
 
         let provides = Provides {
             order: None,
-            limit: Some(Limit { skip: None, limit: Some(1) })
+            limit: Some(Limit {
+                skip: None,
+                limit: Some(1),
+            }),
         };
 
         Candidate {
@@ -615,17 +671,17 @@ impl Optimizer {
         }
     }
 
-    fn create_pk_range_scan_candidate(&self,
-                                      collection: u32,
-                                      primary_key: Expr,
-                                      interval: Interval<Arc<Expr>>,
-                                      residual: Option<Arc<Expr>>,
-                                      req: &ReqProps
+    fn create_pk_range_scan_candidate(
+        &self,
+        collection: u32,
+        primary_key: Expr,
+        interval: Interval<Arc<Expr>>,
+        residual: Option<Arc<Expr>>,
+        req: &ReqProps,
     ) -> Candidate {
-
         let (direction, sort_field) = if matches!(req.order.as_deref().and_then(|fields| fields.first()),
-            Some(sort_field) if sort_field.field.as_ref() == &primary_key && sort_field.order == SortOrder::Descending
-                            ) {
+        Some(sort_field) if sort_field.field.as_ref() == &primary_key && sort_field.order == SortOrder::Descending
+                        ) {
             (Direction::Reverse, SortField::desc(Arc::new(primary_key)))
         } else {
             (Direction::Forward, SortField::asc(Arc::new(primary_key)))
@@ -652,6 +708,44 @@ impl Optimizer {
         candidate
     }
 
+    fn create_index_scan_candidate(
+        &self,
+        collection: u32,
+        index: u32,
+        range: IndexScanRangeExpr,
+        residual: Option<Arc<Expr>>,
+        req: &ReqProps,
+        index_fields: &[OrderedIndexField],
+    ) -> Candidate {
+        let (direction, provides_order) = if let Some(req_order) = req.order.as_ref() {
+            if let Some(direction) = index_scan_direction(index_fields, req_order.as_slice()) {
+                (direction, Some(req_order.clone()))
+            } else {
+                (Direction::Forward, None)
+            }
+        } else {
+            (Direction::Forward, None)
+        };
+
+        let plan = Arc::new(PhysicalPlan::IndexScan {
+            collection,
+            index,
+            range,
+            direction,
+            filter: residual,
+            projection: None,
+        });
+
+        Candidate {
+            provides: Provides {
+                order: provides_order,
+                limit: None,
+            },
+            cost: self.cost_estimator.estimate_node_cost(&plan),
+            plan,
+        }
+    }
+
     fn create_multipoint_search_candidate(
         &self,
         collection: u32,
@@ -662,11 +756,17 @@ impl Optimizer {
         let primary_key = Expr::Field(vec!["_id".into()]);
 
         let (direction, sort_field) = if matches!(req.order.as_deref().and_then(|fields| fields.first()),
-            Some(sort_field) if sort_field.field.as_ref() == &primary_key && sort_field.order == SortOrder::Descending
-                            ) {
-            (Direction::Reverse, Some(SortField::desc(Arc::new(primary_key))))
+        Some(sort_field) if sort_field.field.as_ref() == &primary_key && sort_field.order == SortOrder::Descending
+                        ) {
+            (
+                Direction::Reverse,
+                Some(SortField::desc(Arc::new(primary_key))),
+            )
         } else {
-            (Direction::Forward, Some(SortField::asc(Arc::new(primary_key))))
+            (
+                Direction::Forward,
+                Some(SortField::asc(Arc::new(primary_key))),
+            )
         };
 
         let plan = Arc::new(PhysicalPlan::MultiPointSearch {
@@ -689,10 +789,11 @@ impl Optimizer {
         }
     }
 
-    fn implement_sort_node(&self,
-                           child_bests: &[Arc<Best>],
-                           sort_fields: &Arc<Vec<SortField>>,
-                           req: &ReqProps,
+    fn implement_sort_node(
+        &self,
+        child_bests: &[Arc<Best>],
+        sort_fields: &Arc<Vec<SortField>>,
+        req: &ReqProps,
     ) -> Vec<Candidate> {
         // TODO: the parameter should be exposed at the Options levels as a number of bytes and
         // we should use cardinality information to deduct the number of rows.
@@ -702,13 +803,16 @@ impl Optimizer {
         // If the child is returning data already sorted in the correct order or a single result
         // we can simply return the child.
         if Some(sort_fields.as_ref()) == child.provides.order.as_ref()
-            || Some(Limit { skip: None, limit: Some(1)}) == child.provides.limit {
-
+            || Some(Limit {
+                skip: None,
+                limit: Some(1),
+            }) == child.provides.limit
+        {
             return vec![Candidate {
                 provides: child.provides.clone(),
                 cost: child.cost,
                 plan: child.plan.clone(),
-            }]
+            }];
         }
 
         let mut candidates = Vec::new();
@@ -727,12 +831,19 @@ impl Optimizer {
 
                     let provides = Provides {
                         order: Some(sort_fields.as_ref().clone()),
-                        limit: Some(Limit { skip: None, limit: Some(k) }),
+                        limit: Some(Limit {
+                            skip: None,
+                            limit: Some(k),
+                        }),
                     };
 
                     let cost = child.cost + self.cost_estimator.estimate_node_cost(&plan);
 
-                    candidates.push(Candidate { plan, provides, cost, })
+                    candidates.push(Candidate {
+                        plan,
+                        provides,
+                        cost,
+                    })
                 }
             }
         }
@@ -758,12 +869,99 @@ impl Optimizer {
     }
 }
 
+fn build_index_scan_range_expr(
+    index_fields: &[OrderedIndexField],
+    field_filters_map: &HashMap<&Expr, &Expr>,
+) -> Option<(IndexScanRangeExpr, Vec<Arc<Expr>>)> {
+    let mut equal_prefix = Vec::new();
+    let mut used_fields = Vec::new();
+    let mut tail = None;
+
+    for index_field in index_fields {
+        let field_expr = Arc::new(Expr::Field((&index_field.path).into()));
+        let Some(Expr::FieldFilters { filters, .. }) =
+            field_filters_map.get(field_expr.as_ref()).copied()
+        else {
+            break;
+        };
+
+        let Some(first_filter) = filters.first() else {
+            break;
+        };
+
+        if !is_sargable(first_filter) {
+            break;
+        }
+
+        match first_filter.as_ref() {
+            Expr::Interval(interval) if interval.is_point() => {
+                equal_prefix.push(interval.start_bound_value().unwrap().clone());
+                used_fields.push(field_expr);
+            }
+            Expr::Interval(interval) => {
+                tail = Some(interval.clone());
+                used_fields.push(field_expr);
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    if equal_prefix.is_empty() && tail.is_none() {
+        None
+    } else {
+        Some((IndexScanRangeExpr { equal_prefix, tail }, used_fields))
+    }
+}
+
+fn index_fields_as_sort_fields(index_fields: &[OrderedIndexField]) -> Vec<SortField> {
+    index_fields
+        .iter()
+        .map(|index_field| {
+            let field = Arc::new(Expr::Field((&index_field.path).into()));
+            match index_field.direction {
+                IndexDirection::Ascending => SortField::asc(field),
+                IndexDirection::Descending => SortField::desc(field),
+            }
+        })
+        .collect()
+}
+
+fn index_provides_order(
+    provided_order: &[SortField],
+    requested_order: &[SortField],
+) -> bool {
+    requested_order.len() <= provided_order.len()
+        && requested_order == &provided_order[..requested_order.len()]
+}
+
+fn index_scan_direction(
+    index_fields: &[OrderedIndexField],
+    requested_order: &[SortField],
+) -> Option<Direction> {
+    let provided_order = index_fields_as_sort_fields(index_fields);
+
+    if index_provides_order(&provided_order, requested_order) {
+        return Some(Direction::Forward);
+    }
+
+    let reversed_order: Vec<SortField> = provided_order
+        .into_iter()
+        .map(|sort_field| sort_field.reverse())
+        .collect();
+
+    if index_provides_order(&reversed_order, requested_order) {
+        Some(Direction::Reverse)
+    } else {
+        None
+    }
+}
 
 fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc<Expr>> {
     let filters = match original.as_ref() {
         Expr::And(filters) => filters,
         Expr::FieldFilters { .. } => &vec![original],
-        _ => unreachable!("Unexpected expression: {:?}", original)
+        _ => unreachable!("Unexpected expression: {:?}", original),
     };
 
     let new_filters: Vec<Arc<Expr>> = filters
@@ -780,7 +978,7 @@ fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc
                     } else {
                         // The only filter was used, so this part is gone.
                         None
-                    }
+                    };
                 }
             }
             Some(filter.clone())
@@ -790,7 +988,7 @@ fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc
     match new_filters.len() {
         0 => None,
         1 => new_filters.into_iter().next(),
-        _ => Some(Arc::new(Expr::And(new_filters)))
+        _ => Some(Arc::new(Expr::And(new_filters))),
     }
 }
 
@@ -800,7 +998,8 @@ fn is_sargable(expr: &Arc<Expr>) -> bool {
         // $eq, $gte, $gte, $lt, and $lte have been converted into interval expressions during normalization.
         // So we only need to check for intervals, $in and $exists here.
         Expr::Comparison { operator, value } => {
-            matches!(value.as_ref(), Expr::Placeholder(_)) && matches!(operator, ComparisonOperator::In)
+            matches!(value.as_ref(), Expr::Placeholder(_))
+                && matches!(operator, ComparisonOperator::In)
         }
         Expr::Interval(_) => true,
         Expr::Exists(true) => true,
@@ -824,9 +1023,11 @@ fn required_props_for_children(node: &LogicalPlan, req: &ReqProps) -> ReqProps {
 
 #[cfg(test)]
 mod parametrize_test {
-    use crate::obs::logger::test_instance;
     use super::*;
-    use crate::query::expr_fn::{and, eq, exists, field, field_filters, interval, lit, placeholder};
+    use crate::obs::logger::test_instance;
+    use crate::query::expr_fn::{
+        and, eq, exists, field, field_filters, interval, lit, placeholder,
+    };
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::query::BsonValue;
 
@@ -866,14 +1067,15 @@ mod parametrize_test {
         // Check plan
         let expected_filter = field_filters(
             field(["a"]),
-            vec![interval(Interval::closed(placeholder(0), placeholder(0)))]
+            vec![interval(Interval::closed(placeholder(0), placeholder(0)))],
         );
         let expected_plan = LogicalPlanBuilder::scan_with_filters_and_projections(
             collection,
             Some(expected_filter),
             None,
             None,
-        ).build();
+        )
+        .build();
         assert_eq!(parametrized_plan, expected_plan);
     }
 
@@ -929,10 +1131,14 @@ mod parametrize_test {
 
 #[cfg(test)]
 mod optimizer_tests {
-    use crate::obs::logger::test_instance;
     use super::*;
-    use crate::query::expr_fn::{and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field, proj_fields, within};
+    use crate::obs::logger::test_instance;
+    use crate::query::expr_fn::{
+        and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field,
+        proj_fields, within,
+    };
     use crate::query::logical_plan::LogicalPlanBuilder;
+    use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use bson::Bson;
 
     const COLLECTION: u32 = 10;
@@ -961,7 +1167,10 @@ mod optimizer_tests {
             collection: COLLECTION,
             range: Interval::all(),
             direction: Direction::Forward,
-            filter: Some(field_filters(field(["a"]), [interval(Interval::greater_than(placeholder(0)))])),
+            filter: Some(field_filters(
+                field(["a"]),
+                [interval(Interval::greater_than(placeholder(0)))],
+            )),
             projection: None,
         };
 
@@ -975,7 +1184,7 @@ mod optimizer_tests {
             .project(projection.clone())
             .build();
 
-        let output =  PhysicalPlan::Projection {
+        let output = PhysicalPlan::Projection {
             input: Arc::new(full_scan_plan()),
             projection,
         };
@@ -985,7 +1194,9 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_limit() {
-        let input = LogicalPlanBuilder::scan(COLLECTION).limit(Some(10), Some(20)).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .limit(Some(10), Some(20))
+            .build();
         let output = PhysicalPlan::Limit {
             input: Arc::new(full_scan_plan()),
             skip: Some(10),
@@ -1032,9 +1243,7 @@ mod optimizer_tests {
             field_filters(field(["_id"]), vec![gt(lit(123))]),
             field_filters(field(["a"]), vec![gt(lit(10))]),
         ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(filters)
-            .build();
+        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
 
         // The residual filter will also be normalized and parametrized.
         let residual_filter = field_filters(
@@ -1279,14 +1488,20 @@ mod optimizer_tests {
         check_optimization(input, output);
     }
 
-    fn check_optimization(input: Arc<LogicalPlan>, output:PhysicalPlan) {
+    fn check_optimization(input: Arc<LogicalPlan>, output: PhysicalPlan) {
+        check_optimization_with_catalog(input, test_catalog(), output);
+    }
 
+    fn check_optimization_with_catalog(
+        input: Arc<LogicalPlan>,
+        catalog: Arc<Catalog>,
+        output: PhysicalPlan,
+    ) {
         let optimizer = Optimizer::new(test_instance());
         // First, normalize the logical plan
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, _parameters) = optimizer.parametrize(normalized_plan);
-        let catalog = test_catalog();
         let physical_plan = optimizer.optimize(logical_plan, catalog);
         assert_eq!(physical_plan.as_ref(), &output)
     }
@@ -1301,9 +1516,176 @@ mod optimizer_tests {
         }
     }
 
+    #[test]
+    fn test_optimize_sort_elimination_single_field_index() {
+        let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .sort(sort_fields)
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_sort_elimination_compound_index_prefix() {
+        let sort_fields = Arc::new(vec![
+            SortField::asc(field(["a"])),
+            SortField::desc(field(["b"])),
+        ]);
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .sort(sort_fields)
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_sort_elimination_compound_index_prefix_reverse() {
+        let sort_fields = Arc::new(vec![
+            SortField::desc(field(["a"])),
+            SortField::asc(field(["b"])),
+        ]);
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .sort(sort_fields)
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Reverse,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_single_field_index_equality_uses_index_scan_range() {
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_compound_index_prefix_plus_tail_range_uses_index_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(and(vec![
+                field_filters(field(["a"]), vec![eq(lit(10))]),
+                field_filters(field(["b"]), vec![gt(lit(20))]),
+            ]))
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: Some(Interval::greater_than(placeholder(1))),
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_non_indexed_field_still_uses_collection_scan() {
+        let filters = field_filters(field(["z"]), vec![eq(lit(99))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["z"]),
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization(input, output);
+    }
+
     fn test_catalog() -> Arc<Catalog> {
-        let mut catalog = Catalog::new();
-        catalog = catalog.add_collection("test", COLLECTION, 2);
+        let catalog = Catalog::new()
+            .add_collection("test", COLLECTION, 2)
+            .add_collection_with_options(
+                "tmp",
+                11,
+                2,
+                crate::storage::catalog::CollectionOptions::default(),
+            );
+        Arc::new(catalog)
+    }
+
+    fn indexed_test_catalog() -> Arc<Catalog> {
+        let catalog = Catalog::new()
+            .add_collection("test", COLLECTION, 2)
+            .add_index_to_collection(
+                COLLECTION,
+                1,
+                &IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+                &IndexOptions::default(),
+                3,
+            )
+            .add_index_to_collection(
+                COLLECTION,
+                2,
+                &IndexDefinition::Regular(vec![
+                    OrderedIndexField::asc("a"),
+                    OrderedIndexField::desc("b"),
+                ]),
+                &IndexOptions::default(),
+                4,
+            )
+            .mark_index_queryable(COLLECTION, 1, 5)
+            .mark_index_queryable(COLLECTION, 2, 6);
         Arc::new(catalog)
     }
 }

@@ -221,6 +221,26 @@ impl Catalog {
             id_by_name: self.id_by_name.clone(),
         }
     }
+
+    pub fn mark_index_queryable(
+        &self,
+        collection_id: u32,
+        index_id: u32,
+        queryable_at: u64,
+    ) -> Self {
+        let col = self.collections.get(&collection_id).cloned().unwrap();
+        let mut collections = self.collections.clone();
+        collections.insert(
+            collection_id,
+            Arc::new(col.mark_index_queryable(index_id, queryable_at)),
+        );
+
+        Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+            id_by_name: self.id_by_name.clone(),
+        }
+    }
 }
 
 mod id_creation_strategy_tags {
@@ -438,6 +458,14 @@ impl CollectionMetadata {
             .collect()
     }
 
+    pub fn queryable_indexes(&self) -> Vec<Arc<IndexMetadata>> {
+        self.indexes
+            .values()
+            .filter(|idx| idx.dropped_at.is_none() && idx.queryable_at.is_some())
+            .cloned()
+            .collect()
+    }
+
     pub fn find_index_equivalent_to(
         &self,
         definition: &IndexDefinition,
@@ -496,6 +524,32 @@ impl CollectionMetadata {
             dropped_at: self.dropped_at,
             indexes,
             index_id_by_name: id_by_name,
+            options: self.options.clone(),
+        }
+    }
+
+    fn mark_index_queryable(&self, id: u32, queryable_at: u64) -> Self {
+        let index = self.indexes.get(&id).cloned().unwrap();
+        let updated_index = Arc::new(IndexMetadata {
+            id,
+            definition: index.definition.clone(),
+            created_at: index.created_at,
+            queryable_at: Some(queryable_at),
+            dropped_at: index.dropped_at,
+            options: index.options.clone(),
+        });
+
+        let mut indexes = self.indexes.clone();
+        indexes.insert(id, updated_index);
+
+        CollectionMetadata {
+            next_index_id: self.next_index_id,
+            id: self.id,
+            name: self.name.clone(),
+            created_at: self.created_at,
+            dropped_at: self.dropped_at,
+            indexes,
+            index_id_by_name: self.index_id_by_name.clone(),
             options: self.options.clone(),
         }
     }
@@ -1100,6 +1154,17 @@ mod tests {
     }
 
     #[test]
+    fn test_readable_indexes_only_include_queryable_non_dropped_indexes() {
+        let metadata = create_collections_with_indexes();
+        assert_eq!(metadata.active_indexes().len(), 2);
+        assert_eq!(metadata.queryable_indexes().len(), 1);
+        assert_eq!(metadata.queryable_indexes()[0].name(), "by_price");
+
+        let dropped = metadata.drop_index(2, 1627846300);
+        assert!(dropped.queryable_indexes().is_empty());
+    }
+
+    #[test]
     fn test_get_index_at_respects_mvcc_boundaries() {
         let metadata = create_collections_with_indexes();
 
@@ -1268,7 +1333,7 @@ mod tests {
                 id: 2,
                 definition: IndexDefinition::Regular(vec![OrderedIndexField::asc("price")]),
                 created_at: 1627846263,
-                queryable_at: None,
+                queryable_at: Some(1627846264),
                 dropped_at: None,
                 options: IndexOptions {
                     name: Some("by_price".to_string()),

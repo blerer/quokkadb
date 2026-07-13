@@ -1,23 +1,24 @@
 use crate::error::{Error, Result};
-use crate::query::physical_plan::PhysicalPlan;
-use crate::query::{BsonValue, Expr, PathComponent, Parameters};
-use crate::query::execution::{filters, projections, sorts, updates};
+use crate::query::execution::indexes::{Index, Indexes};
+use crate::query::execution::{filters, projections, set_path_value, sorts, updates};
+use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
+use crate::query::update::UpdateExpr;
+use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::catalog::IdCreationStrategy;
-use crate::storage::Direction;
-use crate::storage::internal_key::extract_operation_type;
+use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::{Operation, OperationType};
 use crate::storage::storage_engine::{StorageEngine, StorageError};
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
+use crate::storage::Direction;
 use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
 use bson::{doc, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex};
-use crate::query::update::UpdateExpr;
+use std::time::{Duration, Instant};
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
@@ -32,24 +33,45 @@ impl QueryExecutor {
     pub fn new(storage_engine: Arc<StorageEngine>) -> Self {
         Self {
             storage_engine,
-            id_generator: Mutex::new(Sonyflake::new().unwrap()),
+            id_generator: Mutex::new(
+                Sonyflake::builder()
+                    .machine_id(&|| Ok(0))
+                    .finalize()
+                    .unwrap(),
+            ),
         }
     }
 
-    pub fn execute_direct(&self, plan: PhysicalPlan, parameters: Option<Parameters>) -> Result<QueryOutput> {
+    pub fn execute_direct(
+        &self,
+        plan: PhysicalPlan,
+        parameters: Option<Parameters>,
+    ) -> Result<QueryOutput> {
         match plan {
-            PhysicalPlan::InsertMany { collection, documents, } => {
-                self.perform_insert_many(collection, documents)
-            }
-            PhysicalPlan::InsertOne { collection, document, } => {
-                self.perform_insert_one(collection, document)
-            }
-            PhysicalPlan::UpdateOne { collection, query, update, upsert } => {
+            PhysicalPlan::InsertMany {
+                collection,
+                documents,
+            } => self.perform_insert_many(collection, documents),
+            PhysicalPlan::InsertOne {
+                collection,
+                document,
+            } => self.perform_insert_one(collection, document),
+            PhysicalPlan::UpdateOne {
+                collection,
+                query,
+                update,
+                upsert,
+            } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateOne");
 
                 self.perform_update_one(collection, query, &update, upsert, &parameters)
             }
-            PhysicalPlan::UpdateMany { collection, query, update, upsert } => {
+            PhysicalPlan::UpdateMany {
+                collection,
+                query,
+                update,
+                upsert,
+            } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateMany");
 
                 self.perform_update_many(collection, query, &update, upsert, &parameters)
@@ -62,7 +84,11 @@ impl QueryExecutor {
     }
 
     /// Executes the given physical plan using the latest visible data.
-    pub fn execute_cached(&self, plan: Arc<PhysicalPlan>, parameters: &Parameters) -> Result<QueryOutput> {
+    pub fn execute_cached(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+    ) -> Result<QueryOutput> {
         self.execute_cached_at_snapshot(plan, parameters, None)
     }
 
@@ -81,54 +107,73 @@ impl QueryExecutor {
                 direction,
                 filter,
                 projection: _, // Projection pushdown is not yet supported at this level
-            } => {
-                self.perform_collection_scan(&parameters, snapshot, collection, range, direction, filter)
-            }
+            } => self.perform_collection_scan(
+                &parameters,
+                snapshot,
+                collection,
+                range,
+                direction,
+                filter,
+            ),
             PhysicalPlan::PointSearch {
                 collection,
                 key,
                 filter,
                 projection: _,
-            } => {
-                self.perform_point_search(&parameters, snapshot, collection, key, filter)
-            }
+            } => self.perform_point_search(&parameters, snapshot, collection, key, filter),
             PhysicalPlan::IndexScan {
-                collection: _,
-                index: _,
-                range: _,
-                filter: _,
+                collection,
+                index,
+                range,
+                direction,
+                filter,
                 projection: _,
-            } => {
-                todo!()
-            }
+            } => self.perform_index_scan(
+                &parameters,
+                snapshot,
+                collection,
+                index,
+                range,
+                direction,
+                filter,
+            ),
             PhysicalPlan::MultiPointSearch {
                 collection,
                 keys,
                 direction,
                 filter,
                 projection: _,
-            } => {
-                self.perform_multi_point_search(&parameters, snapshot, collection, keys, direction, filter)
-            }
+            } => self.perform_multi_point_search(
+                &parameters,
+                snapshot,
+                collection,
+                keys,
+                direction,
+                filter,
+            ),
             PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), &parameters);
-                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                let input_iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 Ok(Box::new(input_iter.filter(move |res| {
-                    if res.is_err() { true } else { filter(res.as_ref().unwrap()) }
+                    if res.is_err() {
+                        true
+                    } else {
+                        filter(res.as_ref().unwrap())
+                    }
                 })))
             }
             PhysicalPlan::Projection { input, projection } => {
                 let projector = projections::to_projector(projection, &parameters)?;
-                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
-                Ok(Box::new(input_iter.map(move |res| {
-                    res.and_then(|doc| projector(doc))
-                })))
+                let input_iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                Ok(Box::new(
+                    input_iter.map(move |res| res.and_then(|doc| projector(doc))),
+                ))
             }
-            PhysicalPlan::InMemorySort {
-                input,
-                sort_fields,
-            } => {
-                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+            PhysicalPlan::InMemorySort { input, sort_fields } => {
+                let input_iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 sorts::in_memory_sort(input_iter, &sort_fields)
             }
             PhysicalPlan::ExternalMergeSort {
@@ -136,7 +181,8 @@ impl QueryExecutor {
                 sort_fields,
                 max_in_memory_rows,
             } => {
-                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                let input_iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 sorts::external_merge_sort(input_iter, sort_fields.clone(), *max_in_memory_rows)
             }
             PhysicalPlan::TopKHeapSort {
@@ -144,15 +190,13 @@ impl QueryExecutor {
                 sort_fields,
                 k,
             } => {
-                let input_iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                let input_iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
-            PhysicalPlan::Limit {
-                input,
-                skip,
-                limit,
-            } => {
-                let mut iter = self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+            PhysicalPlan::Limit { input, skip, limit } => {
+                let mut iter =
+                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 if let Some(s) = skip {
                     iter = Box::new(iter.skip(*s));
                 }
@@ -175,7 +219,6 @@ impl QueryExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<QueryOutput> {
-
         let snapshot = self.storage_engine.last_visible_sequence();
         let mut iter =
             self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
@@ -192,18 +235,23 @@ impl QueryExecutor {
             let updater = updates::to_updater(&update, false)?;
 
             while let Some(doc_result) = next {
-                let doc = doc_result?;
+                let old_doc = doc_result?;
                 matched_count += 1;
-                let new_doc = updater(doc)?;
+                let new_doc = updater(old_doc.clone())?;
+
+                let indices = self.indices(collection);
+
+                indices.append_delete_ops(&mut operations, &old_doc)?;
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
-
                 operations.push(Operation::new_put(
                     collection,
                     0,
                     user_key.clone(),
                     bson::to_vec(&new_doc)?,
                 ));
+                indices.append_put_ops(&mut operations, &new_doc)?;
+
                 preconditions.push(Precondition::VersionMatch {
                     collection,
                     index: 0,
@@ -217,8 +265,19 @@ impl QueryExecutor {
             upserted_id = Some(generated_id.clone());
 
             let user_key = generated_id.try_into_key()?;
-            operations.push(Operation::new_put(collection, 0, user_key.clone(), bson::to_vec(&new_doc)?));
-            preconditions.push(Precondition::VersionMatch { collection, index: 0, user_key });
+            let indices = self.indices(collection);
+            indices.append_put_ops(&mut operations, &new_doc)?;
+            operations.push(Operation::new_put(
+                collection,
+                0,
+                user_key.clone(),
+                bson::to_vec(&new_doc)?,
+            ));
+            preconditions.push(Precondition::VersionMatch {
+                collection,
+                index: 0,
+                user_key,
+            });
         } else {
             let result = doc! { "matched_count": matched_count, "modified_count": 0 };
             return Ok(Box::new(std::iter::once(Ok(result))));
@@ -246,7 +305,6 @@ impl QueryExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<QueryOutput> {
-        const MAX_RETRY_DURATION: Duration = Duration::from_secs(5);
         let start_time = Instant::now();
         let mut attempt = 0;
 
@@ -256,13 +314,21 @@ impl QueryExecutor {
                 self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
 
             let result_doc = if let Some(doc_result) = iter.next() {
-                let doc = doc_result?;
+                let old_doc = doc_result?;
                 let updater = updates::to_updater(&update, false)?;
-                let new_doc = updater(doc)?;
+                let new_doc = updater(old_doc.clone())?;
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
 
-                match self.write_document(collection, snapshot, user_key, bson::to_vec(&new_doc)?) {
+                let new_doc_bytes = bson::to_vec(&new_doc)?;
+                match self.write_document(
+                    collection,
+                    snapshot,
+                    user_key,
+                    Some(old_doc.clone()),
+                    new_doc.clone(),
+                    new_doc_bytes,
+                ) {
                     Ok(_) => doc! { "matched_count": 1, "modified_count": 1 },
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
@@ -273,8 +339,18 @@ impl QueryExecutor {
                 let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
                 let user_key = upserted_id.clone().try_into_key()?;
 
-                match self.write_document(collection, snapshot, user_key, bson::to_vec(&new_doc)?) {
-                    Ok(_) => doc! { "matched_count": 0, "modified_count": 0, "upserted_id": upserted_id },
+                let new_doc_bytes = bson::to_vec(&new_doc)?;
+                match self.write_document(
+                    collection,
+                    snapshot,
+                    user_key,
+                    None,
+                    new_doc.clone(),
+                    new_doc_bytes,
+                ) {
+                    Ok(_) => {
+                        doc! { "matched_count": 0, "modified_count": 0, "upserted_id": upserted_id }
+                    }
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
@@ -294,16 +370,30 @@ impl QueryExecutor {
         let id = self.ensure_id(&mut doc, &id_strategy)?;
         let user_key = id.try_into_key()?;
 
-        let operation = Operation::new_put(collection, 0, user_key.clone(), doc);
+        let mut operations = Vec::new();
+        operations.push(Operation::new_put(
+            collection,
+            0,
+            user_key.clone(),
+            doc.clone(),
+        ));
+
+        let indices = self.indices(collection);
+        let raw_doc = RawDocument::from_bytes(&doc)?;
+        indices.append_put_ops_raw(&mut operations, raw_doc)?;
 
         // For Generated strategy, IDs are guaranteed unique, so skip precondition checks.
         let batch = if id_strategy == IdCreationStrategy::Generated {
-            WriteBatch::new(vec![operation])
+            WriteBatch::new(operations)
         } else {
             let snapshot = self.storage_engine.last_visible_sequence();
 
             // check for duplicate key.
-            if self.storage_engine.read(collection, 0, &user_key, None)?.is_some() {
+            if self
+                .storage_engine
+                .read(collection, 0, &user_key, None)?
+                .is_some()
+            {
                 return Err(Self::duplicate_key_error(&id));
             }
 
@@ -313,7 +403,7 @@ impl QueryExecutor {
                 user_key,
             };
             WriteBatch::new_with_preconditions(
-                vec![operation],
+                operations,
                 Preconditions::new(snapshot, vec![precondition]),
             )
         };
@@ -345,13 +435,22 @@ impl QueryExecutor {
             documents_with_ids.push((doc, id, user_key));
         }
 
+        let indices = self.indices(collection);
+
         // For Generated strategy, IDs are guaranteed unique, so skip duplicate checks.
         let (batch, ids, seen_keys) = if id_strategy == IdCreationStrategy::Generated {
-            let mut operations = Vec::with_capacity(documents_with_ids.len());
+            let mut operations = Vec::new();
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
                 ids.push(id);
-                operations.push(Operation::new_put(collection, 0, user_key, doc));
+                operations.push(Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    doc.clone(),
+                ));
+                let raw_doc = RawDocument::from_bytes(&doc)?;
+                indices.append_put_ops_raw(&mut operations, raw_doc)?;
             }
             (WriteBatch::new(operations), ids, None)
         } else {
@@ -362,14 +461,17 @@ impl QueryExecutor {
             let mut seen_keys = HashMap::new();
             for (_, id, user_key) in &documents_with_ids {
                 if seen_keys.insert(user_key.clone(), id.clone()).is_some()
-                    || self.storage_engine.read(collection, 0, user_key, Some(snapshot))?.is_some()
+                    || self
+                        .storage_engine
+                        .read(collection, 0, user_key, Some(snapshot))?
+                        .is_some()
                 {
                     return Err(Self::duplicate_key_error(id));
                 }
             }
 
             // build operations if all checks passed.
-            let mut operations = Vec::with_capacity(documents_with_ids.len());
+            let mut operations = Vec::new();
             let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
@@ -378,7 +480,14 @@ impl QueryExecutor {
                     index: 0,
                     user_key: user_key.clone(),
                 });
-                operations.push(Operation::new_put(collection, 0, user_key, doc));
+                operations.push(Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    doc.clone(),
+                ));
+                let raw_doc = RawDocument::from_bytes(&doc)?;
+                indices.append_put_ops_raw(&mut operations, raw_doc)?;
                 ids.push(id);
             }
 
@@ -412,10 +521,7 @@ impl QueryExecutor {
     }
 
     fn duplicate_key_error(id: &Bson) -> Error {
-        Error::InvalidRequest(format!(
-            "Duplicate key error. dup key: {{ _id: {} }}",
-            id
-        ))
+        Error::InvalidRequest(format!("Duplicate key error. dup key: {{ _id: {} }}", id))
     }
 
     /// Returns the `IdCreationStrategy` for the given collection.
@@ -446,24 +552,20 @@ impl QueryExecutor {
                 bson_utils::prepend_field(doc, "_id", &bson)?;
                 Ok(bson)
             }
-            IdCreationStrategy::Manual => {
-                match existing_id {
-                    Some(id) => Ok(id.to_raw_bson().try_into()?),
-                    None => Err(Error::InvalidRequest(
-                        "Document must contain an _id field for this collection".to_string(),
-                    )),
+            IdCreationStrategy::Manual => match existing_id {
+                Some(id) => Ok(id.to_raw_bson().try_into()?),
+                None => Err(Error::InvalidRequest(
+                    "Document must contain an _id field for this collection".to_string(),
+                )),
+            },
+            IdCreationStrategy::Mixed => match existing_id {
+                Some(id) => Ok(id.to_raw_bson().try_into()?),
+                None => {
+                    let bson = self.generate_id();
+                    bson_utils::prepend_field(doc, "_id", &bson)?;
+                    Ok(bson)
                 }
-            }
-            IdCreationStrategy::Mixed => {
-                match existing_id {
-                    Some(id) => Ok(id.to_raw_bson().try_into()?),
-                    None => {
-                        let bson = self.generate_id();
-                        bson_utils::prepend_field(doc, "_id", &bson)?;
-                        Ok(bson)
-                    }
-                }
-            }
+            },
         }
     }
 
@@ -473,15 +575,15 @@ impl QueryExecutor {
         bson
     }
 
-    fn perform_multi_point_search(&self,
-                                  parameters: &Parameters,
-                                  snapshot: Option<u64>,
-                                  collection: &u32,
-                                  keys: &Arc<Expr>,
-                                  direction: &Direction,
-                                  filter: &Option<Arc<Expr>>
+    fn perform_multi_point_search(
+        &self,
+        parameters: &Parameters,
+        snapshot: Option<u64>,
+        collection: &u32,
+        keys: &Arc<Expr>,
+        direction: &Direction,
+        filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
-
         let filter = filter
             .clone()
             .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
@@ -490,7 +592,10 @@ impl QueryExecutor {
         let keys_array = if let BsonValue(Bson::Array(arr)) = keys_values {
             arr
         } else {
-            unreachable!("Expected array for MultiPointSearch keys, got {:?}", keys_values);
+            unreachable!(
+                "Expected array for MultiPointSearch keys, got {:?}",
+                keys_values
+            );
         };
 
         let mut keys_as_bson_values: Vec<BsonValue> =
@@ -499,12 +604,12 @@ impl QueryExecutor {
         // Sort keys to ensure consistent order for storage engine lookups
         keys_as_bson_values.sort();
 
-        let key_iterator: Box<dyn Iterator<Item=BsonValue>> =
-            if *direction == Direction::Reverse {
-                Box::new(keys_as_bson_values.into_iter().rev())
-            } else {
-                Box::new(keys_as_bson_values.into_iter())
-            };
+        let key_iterator: Box<dyn Iterator<Item = BsonValue>> = if *direction == Direction::Reverse
+        {
+            Box::new(keys_as_bson_values.into_iter().rev())
+        } else {
+            Box::new(keys_as_bson_values.into_iter())
+        };
 
         let storage_engine = self.storage_engine.clone();
         let collection = *collection;
@@ -539,16 +644,18 @@ impl QueryExecutor {
         Ok(Box::new(iter))
     }
 
-    fn perform_point_search(&self,
-                            parameters: &Parameters,
-                            snapshot: Option<u64>,
-                            collection: &u32,
-                            key: &Arc<Expr>,
-                            filter: &Option<Arc<Expr>>
+    fn perform_point_search(
+        &self,
+        parameters: &Parameters,
+        snapshot: Option<u64>,
+        collection: &u32,
+        key: &Arc<Expr>,
+        filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
-
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
-        let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+        let filter = filter
+            .clone()
+            .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
 
         let key = Self::bind_key_parameter(key, &parameters)?;
         let result = self.storage_engine.read(*collection, 0, &key, snapshot)?;
@@ -573,8 +680,8 @@ impl QueryExecutor {
                                 } else {
                                     Box::new(std::iter::empty())
                                 }
-                            },
-                            None => Box::new(std::iter::once(Ok(doc)))
+                            }
+                            None => Box::new(std::iter::once(Ok(doc))),
                         }
                     }
                     _ => unreachable!("Unexpected operation type: {:?}", op),
@@ -585,57 +692,146 @@ impl QueryExecutor {
         Ok(iter)
     }
 
-    fn perform_collection_scan(&self,
-                               parameters: &Parameters,
-                               snapshot: Option<u64>,
-                               collection: &u32,
-                               range: &Interval<Arc<Expr>>,
-                               direction: &Direction,
-                               filter: &Option<Arc<Expr>>
+    fn perform_collection_scan(
+        &self,
+        parameters: &Parameters,
+        snapshot: Option<u64>,
+        collection: &u32,
+        range: &Interval<Arc<Expr>>,
+        direction: &Direction,
+        filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
-
         let range = Self::bind_key_range_parameters(range, &parameters)?;
 
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
-        let filter = filter.clone().and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
+        let filter = filter
+            .clone()
+            .and_then(|predicate| Some(filters::to_filter(predicate, &parameters)));
 
-        Ok(Box::new(self.storage_engine.range_scan(
-            *collection,
-            0, // This is table scan so index is 0
-            &range,
-            snapshot,
-            direction.clone(),
-        )?.filter_map(move |res| {
-            let doc = match res {
-                Ok((k, v)) => {
-                    let op = extract_operation_type(&k);
-                    match op {
-                        OperationType::Delete => return None,
-                        OperationType::Put => {
-                            // Deserialize the value into a Document
-                            let doc = Document::from_reader(Cursor::new(v));
-                            match doc {
-                                Err(e) => return Some(Err(e.into())),
-                                Ok(doc) => doc
+        Ok(Box::new(
+            self.storage_engine
+                .range_scan(
+                    *collection,
+                    0, // This is table scan so index is 0
+                    &range,
+                    snapshot,
+                    direction.clone(),
+                )?
+                .filter_map(move |res| {
+                    let doc = match res {
+                        Ok((k, v)) => {
+                            let op = extract_operation_type(&k);
+                            match op {
+                                OperationType::Delete => return None,
+                                OperationType::Put => {
+                                    // Deserialize the value into a Document
+                                    let doc = Document::from_reader(Cursor::new(v));
+                                    match doc {
+                                        Err(e) => return Some(Err(e.into())),
+                                        Ok(doc) => doc,
+                                    }
+                                }
+                                _ => unreachable!("Unexpected operation type: {:?}", op),
                             }
-                        },
-                        _ => unreachable!("Unexpected operation type: {:?}", op),
-                    }
-                }
-                Err(e) => return Some(Err(e.into())),
-            };
+                        }
+                        Err(e) => return Some(Err(e.into())),
+                    };
 
-            match &filter {
-                Some(filter) => {
-                    if filter(&doc) {
-                        Some(Ok(doc))
-                    } else {
-                        None
+                    match &filter {
+                        Some(filter) => {
+                            if filter(&doc) {
+                                Some(Ok(doc))
+                            } else {
+                                None
+                            }
+                        }
+                        None => Some(Ok(doc)),
                     }
-                },
-                None => Some(Ok(doc))
-            }
-        })))
+                }),
+        ))
+    }
+
+    fn perform_index_scan(
+        &self,
+        parameters: &Parameters,
+        snapshot: Option<u64>,
+        collection: &u32,
+        index: &u32,
+        range: &IndexScanRangeExpr,
+        direction: &Direction,
+        filter: &Option<Arc<Expr>>,
+    ) -> Result<QueryOutput> {
+        let index_metadata = self
+            .storage_engine
+            .catalog()
+            .get_collection_by_id(collection)
+            .unwrap()
+            .get_index_by_id(*index)
+            .unwrap();
+        let index_codec = Index::from(*collection, &index_metadata);
+        let bound_range = index_codec.bind_range_expr(range, parameters)?;
+
+        let filter = filter
+            .clone()
+            .map(|predicate| filters::to_filter(predicate, parameters));
+
+        let storage_engine = self.storage_engine.clone();
+        let collection = *collection;
+        let secondary_index = *index;
+
+        Ok(Box::new(
+            storage_engine
+                .range_scan(
+                    collection,
+                    secondary_index,
+                    &bound_range,
+                    snapshot,
+                    direction.clone(),
+                )?
+                .filter_map(move |res| {
+                    let primary_key = match res {
+                        Ok((k, v)) => {
+                            let op = extract_operation_type(&k);
+                            match op {
+                                OperationType::Delete => return None,
+                                OperationType::Put => {
+                                    let user_key = extract_record_key(&k);
+                                    match Index::extract_id_from_entry_bytes(user_key, &v) {
+                                        Ok(id) => id.to_vec(),
+                                        Err(e) => return Some(Err(e.into())),
+                                    }
+                                }
+                                _ => unreachable!("Unexpected operation type: {:?}", op),
+                            }
+                        }
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                    let doc_bytes = match storage_engine.read(collection, 0, &primary_key, snapshot)
+                    {
+                        Ok(Some((k, v))) => {
+                            let op = extract_operation_type(&k);
+                            match op {
+                                OperationType::Delete => return None,
+                                OperationType::Put => v,
+                                _ => unreachable!("Unexpected operation type: {:?}", op),
+                            }
+                        }
+                        Ok(None) => return None,
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                    let doc = match Document::from_reader(Cursor::new(doc_bytes)) {
+                        Ok(doc) => doc,
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                    match &filter {
+                        Some(filter) if !filter(&doc) => None,
+                        _ => Some(Ok(doc)),
+                    }
+                }),
+        ))
     }
 
     /// Builds the upsert updater, creates the new document from the query's equality
@@ -660,7 +856,6 @@ impl QueryExecutor {
         parameters: &Parameters,
         updater: &Box<dyn Fn(Document) -> Result<Document> + Send + Sync>,
     ) -> Result<(Document, Bson)> {
-
         let mut new_doc = self.create_base_document_from_query(query, parameters)?;
         new_doc = updater(new_doc)?;
 
@@ -741,10 +936,9 @@ impl QueryExecutor {
     /// Extracts a point (equality) value from an interval expression.
     fn extract_point_value(&self, expr: &Expr, parameters: &Parameters) -> Option<BsonValue> {
         match expr {
-            Expr::Interval(interval) if interval.is_point() => {
-                interval.start_bound_value()
-                    .and_then(|e| self.resolve_expr_value(&e, parameters))
-            }
+            Expr::Interval(interval) if interval.is_point() => interval
+                .start_bound_value()
+                .and_then(|e| self.resolve_expr_value(&e, parameters)),
             _ => None,
         }
     }
@@ -757,35 +951,75 @@ impl QueryExecutor {
         }
     }
 
-    
-    /// Writes a single document to storage as a put operation with a `MustNotExist` precondition.
+    /// Writes a single document to storage as a put operation with a `VersionMatch` precondition.
     fn write_document(
         &self,
         collection: u32,
         snapshot: u64,
         user_key: Vec<u8>,
-        data: Vec<u8>,
+        old_doc: Option<Document>,
+        new_doc: Document,
+        new_doc_bytes: Vec<u8>,
     ) -> std::result::Result<(), StorageError> {
-        let operation = Operation::new_put(collection, 0, user_key.clone(), data);
-        let precondition = Precondition::VersionMatch { collection, index: 0, user_key };
+        let mut operations = Vec::new();
+
+        let indices = self.indices(collection);
+
+        if let Some(doc) = old_doc.as_ref() {
+            indices.append_delete_ops(&mut operations, doc)?;
+        }
+
+        operations.push(Operation::new_put(
+            collection,
+            0,
+            user_key.clone(),
+            new_doc_bytes,
+        ));
+
+        indices.append_put_ops(&mut operations, &new_doc)?;
+
+        let precondition = Precondition::VersionMatch {
+            collection,
+            index: 0,
+            user_key,
+        };
         let batch = WriteBatch::new_with_preconditions(
-            vec![operation],
+            operations,
             Preconditions::new(snapshot, vec![precondition]),
         );
         self.storage_engine.write(batch)
     }
 
-    fn bind_key_range_parameters(range: &Interval<Arc<Expr>>, parameters: &Parameters) -> Result<Interval<Vec<u8>>> {
+    fn indices(&self, collection: u32) -> Indexes {
+        let metadata = self
+            .storage_engine
+            .catalog()
+            .get_collection_by_id(&collection)
+            .unwrap();
+        Indexes::from_collection(&metadata)
+    }
+
+    fn bind_key_range_parameters(
+        range: &Interval<Arc<Expr>>,
+        parameters: &Parameters,
+    ) -> Result<Interval<Vec<u8>>> {
         let start = Self::bind_key_bound_parameter(range.start_bound(), &parameters)?;
         let end = Self::bind_key_bound_parameter(range.end_bound(), &parameters)?;
         let range = Interval::new(start, end);
         Ok(range)
     }
 
-    fn bind_key_bound_parameter(start: Bound<&Arc<Expr>>, parameters: &Parameters) -> Result<Bound<Vec<u8>>> {
+    fn bind_key_bound_parameter(
+        start: Bound<&Arc<Expr>>,
+        parameters: &Parameters,
+    ) -> Result<Bound<Vec<u8>>> {
         let start = match start {
-            Bound::Included(b) => Bound::Included(Self::bind_parameter(b, &parameters).try_into_key()?),
-            Bound::Excluded(b) => Bound::Excluded(Self::bind_parameter(b, &parameters).try_into_key()?),
+            Bound::Included(b) => {
+                Bound::Included(Self::bind_parameter(b, &parameters).try_into_key()?)
+            }
+            Bound::Excluded(b) => {
+                Bound::Excluded(Self::bind_parameter(b, &parameters).try_into_key()?)
+            }
             Bound::Unbounded => Bound::Unbounded,
         };
         Ok(start)
@@ -808,26 +1042,6 @@ impl QueryExecutor {
     }
 }
 
-/// Inserts `value` at `path` inside `doc`, creating intermediate documents as needed.
-/// Array-element path components are skipped since upsert base documents are plain documents.
-fn set_path_value(doc: &mut Document, path: &[PathComponent], value: Bson) {
-    match path {
-        [] => {}
-        [PathComponent::FieldName(name)] => {
-            doc.insert(name.clone(), value);
-        }
-        [PathComponent::FieldName(name), rest @ ..] => {
-            let nested = doc
-                .entry(name.clone())
-                .or_insert_with(|| Bson::Document(Document::new()));
-            if let Bson::Document(nested_doc) = nested {
-                set_path_value(nested_doc, rest, value);
-            }
-        }
-        _ => {} // skip array-element components
-    }
-}
-
 /// Handles a storage write error inside a retry loop.
 ///
 /// If the error is a `VersionConflict` and the deadline has not been reached,
@@ -835,11 +1049,7 @@ fn set_path_value(doc: &mut Document, path: &[PathComponent], value: Bson) {
 /// `Ok(())` so the caller can `continue` to the next iteration.
 ///
 /// Otherwise returns the error converted to [`crate::error::Error`].
-fn on_version_conflict(
-    e: StorageError,
-    start_time: &Instant,
-    attempt: &mut u32,
-) -> Result<()> {
+fn on_version_conflict(e: StorageError, start_time: &Instant, attempt: &mut u32) -> Result<()> {
     match e {
         StorageError::VersionConflict { .. } => {
             if start_time.elapsed() >= Duration::from_secs(5) {
@@ -871,16 +1081,22 @@ fn calculate_backoff(attempt: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::error::{Error, Result};
+    use crate::query::expr_fn::{
+        all, and, at_least, at_most, elem_match, exists, field, field_filters, greater_than,
+        has_type, interval, less_than, ne, nor, not, or, point, proj_array_elements,
+        proj_elem_match, proj_field, proj_fields, proj_slice, size, within,
+    };
+    use crate::query::physical_plan::IndexScanRangeExpr;
+    use crate::query::update_fn::{field_name, set, update};
     use crate::query::{make_sort_field, SortOrder};
     use crate::query::{BsonValue, Expr, Parameters, Projection};
+    use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use crate::storage::operation::Operation;
     use crate::storage::test_utils::storage_engine;
     use crate::storage::write_batch::WriteBatch;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::sync::Arc;
-    use crate::query::expr_fn::{all, and, elem_match, exists, field, field_filters, has_type, ne, nor, not, or, size, within, proj_array_elements, proj_elem_match, proj_field, proj_fields, proj_slice, interval, point, greater_than, less_than, at_most, at_least};
-    use crate::query::update_fn::{field_name, set, update};
 
     #[test]
     fn test_insert_duplicate_key_preflight_check() -> Result<()> {
@@ -1221,6 +1437,169 @@ mod tests {
     }
 
     #[test]
+    fn test_index_scan_single_field_equality_execution() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_index_eq")?;
+        let index_name = storage_engine.create_index(
+            collection_id,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+            IndexOptions::default(),
+        )?;
+        let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+
+        for doc in [
+            doc! { "_id": 1_i32, "a": 10_i32, "tag": "x" },
+            doc! { "_id": 2_i32, "a": 20_i32, "tag": "y" },
+            doc! { "_id": 3_i32, "a": 10_i32, "tag": "z" },
+        ] {
+            let mut result = executor.execute_direct(
+                PhysicalPlan::InsertOne {
+                    collection: collection_id,
+                    document: bson::to_vec(&doc)?,
+                },
+                None,
+            )?;
+            result.next().unwrap()?;
+        }
+
+        let mut params = Parameters::new();
+        let a_eq = params.collect_parameter(10_i32.into());
+        let plan = Arc::new(PhysicalPlan::IndexScan {
+            collection: collection_id,
+            index: index_id,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![a_eq],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        });
+
+        let results = executor.execute_cached(plan, &params)?;
+        let docs: Vec<Document> = results.collect::<Result<_>>()?;
+        let ids: Vec<i32> = docs.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(ids, vec![1, 3]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_index_compound")?;
+        let index_name = storage_engine.create_index(
+            collection_id,
+            IndexDefinition::Regular(vec![
+                OrderedIndexField::asc("a"),
+                OrderedIndexField::desc("b"),
+            ]),
+            IndexOptions::default(),
+        )?;
+        let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+
+        for doc in [
+            doc! { "_id": 1_i32, "a": 10_i32, "b": 30_i32 },
+            doc! { "_id": 2_i32, "a": 10_i32, "b": 20_i32 },
+            doc! { "_id": 3_i32, "a": 10_i32, "b": 10_i32 },
+            doc! { "_id": 4_i32, "a": 9_i32, "b": 50_i32 },
+        ] {
+            let mut result = executor.execute_direct(
+                PhysicalPlan::InsertOne {
+                    collection: collection_id,
+                    document: bson::to_vec(&doc)?,
+                },
+                None,
+            )?;
+            result.next().unwrap()?;
+        }
+
+        let mut params = Parameters::new();
+        let a_eq = params.collect_parameter(10_i32.into());
+        let b_gt = params.collect_parameter(20_i32.into());
+        let plan = Arc::new(PhysicalPlan::IndexScan {
+            collection: collection_id,
+            index: index_id,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![a_eq],
+                tail: Some(Interval::greater_than(b_gt)),
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        });
+
+        let results = executor.execute_cached(plan, &params)?;
+        let docs: Vec<Document> = results.collect::<Result<_>>()?;
+        let ids: Vec<i32> = docs.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(ids, vec![1]);
+
+        Ok(())
+    }
+
+    fn get_index_id(storage_engine: Arc<StorageEngine>, collection_id: &u32, index_name: &String) -> u32 {
+        let index_id = storage_engine
+            .catalog()
+            .get_collection_by_id(&collection_id)
+            .unwrap()
+            .get_index_by_name(&index_name)
+            .unwrap()
+            .id;
+        index_id
+    }
+
+    #[test]
+    fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_index_reverse")?;
+        let index_name = storage_engine.create_index(
+            collection_id,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+            IndexOptions::default(),
+        )?;
+        let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+
+        for doc in [
+            doc! { "_id": 1_i32, "a": 10_i32, "kind": "keep" },
+            doc! { "_id": 2_i32, "a": 20_i32, "kind": "drop" },
+            doc! { "_id": 3_i32, "a": 30_i32, "kind": "keep" },
+        ] {
+            let mut result = executor.execute_direct(
+                PhysicalPlan::InsertOne {
+                    collection: collection_id,
+                    document: bson::to_vec(&doc)?,
+                },
+                None,
+            )?;
+            result.next().unwrap()?;
+        }
+
+        let mut params = Parameters::new();
+        let kind_keep = params.collect_parameter(BsonValue(Bson::String("keep".to_string())));
+        let plan = Arc::new(PhysicalPlan::IndexScan {
+            collection: collection_id,
+            index: index_id,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Reverse,
+            filter: Some(field_filters(field(["kind"]), [interval(point(&kind_keep))])),
+            projection: None,
+        });
+
+        let results = executor.execute_cached(plan, &params)?;
+        let docs: Vec<Document> = results.collect::<Result<_>>()?;
+        let ids: Vec<i32> = docs.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(ids, vec![3, 1]);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_plan_execution() -> Result<()> {
         // 1. Setup
         let (storage_engine, _dir) = storage_engine()?;
@@ -1501,17 +1880,13 @@ mod tests {
         // $eq
         let mut params = Parameters::new();
         let p = params.collect_parameter("a".into());
-        let filter = field_filters(
-            field(["name"]), [interval(point(&p))]
-        );
+        let filter = field_filters(field(["name"]), [interval(point(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[2, 4])?;
 
         // $gt
         let mut params = Parameters::new();
         let p = params.collect_parameter(15.0.into());
-        let filter = field_filters(
-            field(["value"]), [interval(greater_than(&p))]
-        );
+        let filter = field_filters(field(["value"]), [interval(greater_than(&p))]);
         run_filter_test(&executor, collection_id, filter, params, &[2, 3])?;
 
         // $in
@@ -1538,25 +1913,13 @@ mod tests {
         let mut params = Parameters::new();
         let p = params.collect_parameter("double".into());
         let filter = field_filters(field(["value"]), [has_type(p, false)]);
-        run_filter_test(
-            &executor,
-            collection_id,
-            filter,
-            params,
-            &[1, 2, 3, 4, 5],
-        )?;
+        run_filter_test(&executor, collection_id, filter, params, &[1, 2, 3, 4, 5])?;
 
         // $size: 2
         let mut params = Parameters::new();
         let p = params.collect_parameter(2.into());
         let filter = field_filters(field(["tags"]), [size(p, false)]);
-        run_filter_test(
-            &executor,
-            collection_id,
-            filter,
-            params,
-            &[1, 2, 3, 4],
-        )?;
+        run_filter_test(&executor, collection_id, filter, params, &[1, 2, 3, 4])?;
 
         // $all
         let mut params = Parameters::new();
@@ -1568,13 +1931,13 @@ mod tests {
         let mut params = Parameters::new();
         let p_k = params.collect_parameter("y".into());
         let p_v = params.collect_parameter(2.into());
-        let filter = field_filters(field(["items"]),
-                                   [elem_match(
-                                       vec![
-                                           field_filters(field(["k"]), [interval(point(&p_k))]),
-                                           field_filters(field(["v"]), [interval(point(&p_v))])
-                                       ]
-                                   )]);
+        let filter = field_filters(
+            field(["items"]),
+            [elem_match(vec![
+                field_filters(field(["k"]), [interval(point(&p_k))]),
+                field_filters(field(["v"]), [interval(point(&p_v))]),
+            ])],
+        );
         run_filter_test(&executor, collection_id, filter, params, &[1])?;
 
         // $and
@@ -1915,7 +2278,10 @@ mod tests {
 
         let results1 = executor.execute_cached(plan1, &params1)?;
         let found_docs1: Vec<Document> = results1.collect::<Result<_>>()?;
-        let found_ids1: Vec<i32> = found_docs1.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        let found_ids1: Vec<i32> = found_docs1
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
         assert_eq!(found_ids1, vec![1, 3, 5]);
 
         // Case 2: Reverse direction
@@ -1935,7 +2301,10 @@ mod tests {
 
         let results2 = executor.execute_cached(plan2, &params2)?;
         let found_docs2: Vec<Document> = results2.collect::<Result<_>>()?;
-        let found_ids2: Vec<i32> = found_docs2.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        let found_ids2: Vec<i32> = found_docs2
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
         assert_eq!(found_ids2, vec![5, 3, 1]);
 
         // Case 3: With residual filter
@@ -1959,7 +2328,10 @@ mod tests {
 
         let results3 = executor.execute_cached(plan3, &params3)?;
         let found_docs3: Vec<Document> = results3.collect::<Result<_>>()?;
-        let found_ids3: Vec<i32> = found_docs3.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        let found_ids3: Vec<i32> = found_docs3
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
         assert_eq!(found_ids3, vec![1, 3]);
 
         Ok(())
@@ -2003,8 +2375,11 @@ mod tests {
             projection: None,
         });
 
-        let mut result_at_snapshot =
-            executor.execute_cached_at_snapshot(point_search_plan.clone(), &params, Some(snapshot1))?;
+        let mut result_at_snapshot = executor.execute_cached_at_snapshot(
+            point_search_plan.clone(),
+            &params,
+            Some(snapshot1),
+        )?;
         let doc_at_snapshot = result_at_snapshot.next().unwrap()?;
         assert!(result_at_snapshot.next().is_none());
         assert_eq!(doc_at_snapshot, initial_doc);
@@ -2038,8 +2413,11 @@ mod tests {
         });
 
         // Scan at snapshot2 should see both documents (doc1 is updated, doc2 exists)
-        let results_at_snapshot2 =
-            executor.execute_cached_at_snapshot(scan_plan.clone(), &Parameters::new(), Some(snapshot2))?;
+        let results_at_snapshot2 = executor.execute_cached_at_snapshot(
+            scan_plan.clone(),
+            &Parameters::new(),
+            Some(snapshot2),
+        )?;
         let mut docs_at_snapshot2: Vec<Document> = results_at_snapshot2.collect::<Result<_>>()?;
         assert_eq!(docs_at_snapshot2.len(), 2);
         docs_at_snapshot2.sort_by_key(|d| d.get_i32("_id").unwrap());
@@ -2103,7 +2481,10 @@ mod tests {
 
         // 4. Assert final state
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value").unwrap(), "updated");
         assert_eq!(final_doc.get_i32("_id").unwrap(), 1);
@@ -2160,7 +2541,10 @@ mod tests {
         }
 
         // 5. Assert that the document was not changed
-        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value").unwrap(), "initial");
 
@@ -2195,14 +2579,17 @@ mod tests {
 
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
-        
+
         assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
         assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
         assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 1);
 
         // 3. Verify the document was inserted
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
         assert_eq!(doc.get_i32("_id").unwrap(), 1);
         assert_eq!(doc.get_str("value").unwrap(), "created");
@@ -2246,14 +2633,17 @@ mod tests {
 
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
-        
+
         assert_eq!(result_doc.get_i32("matched_count").unwrap(), 1);
         assert_eq!(result_doc.get_i32("modified_count").unwrap(), 1);
         assert!(result_doc.get("upserted_id").is_none());
 
         // 3. Verify the document was updated
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
         assert_eq!(doc.get_str("value").unwrap(), "updated");
 
@@ -2270,7 +2660,7 @@ mod tests {
         // 2. Execute UpdateMany with upsert=true on empty collection
         let mut params = Parameters::new();
         let p_val = params.collect_parameter(BsonValue(Bson::String("target".to_string())));
-        
+
         let query_plan = Arc::new(PhysicalPlan::Filter {
             input: Arc::new(PhysicalPlan::CollectionScan {
                 collection: collection_id,
@@ -2293,11 +2683,11 @@ mod tests {
 
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
-        
+
         assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
         assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
         assert!(result_doc.get("upserted_id").is_some());
-        
+
         // 3. Verify document was created with equality condition from query
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
@@ -2326,9 +2716,9 @@ mod tests {
         let mut params = Parameters::new();
         let key_expr = params.collect_parameter(BsonValue(Bson::Int32(42)));
         let p_nested = params.collect_parameter(BsonValue(Bson::String("nested_val".to_string())));
-        
+
         let filter = field_filters(field(["data", "inner"]), [interval(point(&p_nested))]);
-        
+
         let query_plan = Arc::new(PhysicalPlan::PointSearch {
             collection: collection_id,
             key: key_expr,
@@ -2347,12 +2737,15 @@ mod tests {
 
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
-        
+
         assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 42);
 
         // 3. Verify the nested structure was created
         let user_key = BsonValue(Bson::Int32(42)).try_into_key()?;
-        let doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
         assert_eq!(doc.get_i32("_id").unwrap(), 42);
         assert_eq!(doc.get_str("extra").unwrap(), "added");
@@ -2411,7 +2804,10 @@ mod tests {
 
         // 5. Assert that the document was not changed
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let final_doc_bytes = storage_engine.read(collection_id, 0, &user_key, None)?.unwrap().1;
+        let final_doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value").unwrap(), "initial");
 
