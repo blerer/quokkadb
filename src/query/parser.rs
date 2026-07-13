@@ -1,23 +1,31 @@
-use std::collections::{BTreeMap, HashSet};
-use crate::query::{Projection, ProjectionExpr, SortField, SortOrder};
-use crate::query::{
-    BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent,
-};
 use crate::query::update::{
-    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec,
-    UpdateExpr, UpdateOp, UpdatePathComponent,
+    CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
+    UpdateOp, UpdatePathComponent,
 };
+use crate::query::{BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent};
+use crate::query::{IndexKeyField, IndexKeySpec, Projection, ProjectionExpr, SortField, SortOrder};
 use crate::Error;
 use bson::{Bson, Document};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 static SCALAR_OPERATIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-        HashSet::from([
-            "$eq", "$ne", "$gt", "$gte", "$lt", "$lte",
-            "$in", "$nin", "$exists", "$type", "$size", "$all",
-            "$elemMatch"])
-    });
-
+    HashSet::from([
+        "$eq",
+        "$ne",
+        "$gt",
+        "$gte",
+        "$lt",
+        "$lte",
+        "$in",
+        "$nin",
+        "$exists",
+        "$type",
+        "$size",
+        "$all",
+        "$elemMatch",
+    ])
+});
 
 /// Parses a BSON `Document` representing a query filter into an `Expr`.
 pub fn parse_conditions(doc: &Document) -> Result<Arc<Expr>, Error> {
@@ -152,16 +160,18 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                 }
                 "$all" => {
                     if let Bson::Array(values) = value {
-                        predicates.push(Arc::new(Expr::All(
-                            Arc::new(Expr::Literal(BsonValue(Bson::Array(values.clone())))),
-                        )))
+                        predicates.push(Arc::new(Expr::All(Arc::new(Expr::Literal(BsonValue(
+                            Bson::Array(values.clone()),
+                        ))))))
                     } else {
                         return Err(Error::InvalidRequest("$all must be an array".to_string()));
                     }
                 }
                 "$elemMatch" => {
                     if let Bson::Document(doc) = value {
-                        let is_operator_only = doc.iter().all(|(k, _)| SCALAR_OPERATIONS.contains(k.as_str()));
+                        let is_operator_only = doc
+                            .iter()
+                            .all(|(k, _)| SCALAR_OPERATIONS.contains(k.as_str()));
 
                         if is_operator_only {
                             // Scalar array case: operators only
@@ -172,12 +182,14 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                             let nested = parse_conditions(doc)?; // Arc<Expr>
                             let sub_preds = match nested.as_ref() {
                                 Expr::And(children) => children.clone(), // flatten top-level AND
-                                _ => vec![nested],                       // preserve OR/NOT/etc. as a single subexpr
+                                _ => vec![nested], // preserve OR/NOT/etc. as a single subexpr
                             };
                             predicates.push(Arc::new(Expr::ElemMatch(sub_preds)));
                         }
                     } else {
-                        return Err(Error::InvalidRequest("$elemMatch must be a document".to_string()));
+                        return Err(Error::InvalidRequest(
+                            "$elemMatch must be a document".to_string(),
+                        ));
                     }
                 }
                 _ => return Err(Error::InvalidRequest(format!("Unknown operator: {}", key))),
@@ -240,8 +252,12 @@ fn parse_bson_type(value: &Bson) -> Option<Bson> {
 /// - Returns an error for invalid projection values, unknown operators,
 ///   or if the projection document is empty.
 pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
-    let mut include_fields = ProjectionExpr::Fields { children: BTreeMap::new() };
-    let mut exclude_fields = ProjectionExpr::Fields { children: BTreeMap::new() };
+    let mut include_fields = ProjectionExpr::Fields {
+        children: BTreeMap::new(),
+    };
+    let mut exclude_fields = ProjectionExpr::Fields {
+        children: BTreeMap::new(),
+    };
     let mut has_id = false;
     let mut exclude_id = false;
 
@@ -264,7 +280,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 Expr::Field(path) => {
                     include_fields.add_expr(&path, 0, Arc::new(ProjectionExpr::Field))?;
                 }
-                _ => unreachable!("Invalid projection value for field '{}': expected field or positional field", key),
+                _ => unreachable!(
+                    "Invalid projection value for field '{}': expected field or positional field",
+                    key
+                ),
             },
             Bson::Int32(0) | Bson::Int64(0) => match field {
                 Expr::Field(path) => {
@@ -276,7 +295,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                         key
                     )));
                 }
-                _ => unreachable!("Invalid projection value for field '{}': expected field", key),
+                _ => unreachable!(
+                    "Invalid projection value for field '{}': expected field",
+                    key
+                ),
             },
             Bson::Document(projection_doc) => {
                 let path = match field {
@@ -287,7 +309,10 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                             key
                         )));
                     }
-                    _ => unreachable!("Invalid projection value for field '{}': expected field", key),
+                    _ => unreachable!(
+                        "Invalid projection value for field '{}': expected field",
+                        key
+                    ),
                 };
 
                 if projection_doc.len() != 1 {
@@ -341,7 +366,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 ));
             }
             Ok(Projection::Include(Arc::new(include_fields)))
-        },
+        }
         (false, false) => Err(Error::InvalidRequest(
             "Projection document cannot be empty".to_string(),
         )),
@@ -350,34 +375,63 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
 
 fn parse_slice_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
     match value {
-        Bson::Int32(n) if *n > 0 || *n < 0 => {
-            Ok(ProjectionExpr::Slice { skip: None, limit: *n })
-        }
+        Bson::Int32(n) if *n > 0 || *n < 0 => Ok(ProjectionExpr::Slice {
+            skip: None,
+            limit: *n,
+        }),
         Bson::Int64(n) if *n > 0 || *n < 0 => {
-            let limit = (*n).try_into().map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
+            let limit = (*n)
+                .try_into()
+                .map_err(|_| Error::InvalidRequest("$slice value out of i32 range".to_string()))?;
             Ok(ProjectionExpr::Slice { skip: None, limit })
         }
         Bson::Array(arr) => {
             if arr.len() != 2 {
-                return Err(Error::InvalidRequest("$slice array must have exactly two elements".to_string()));
+                return Err(Error::InvalidRequest(
+                    "$slice array must have exactly two elements".to_string(),
+                ));
             }
             let skip = match &arr[0] {
                 Bson::Int32(n) if *n >= 0 => Some(*n),
-                Bson::Int64(n) if *n >= 0 => Some((*n).try_into().map_err(|_| Error::InvalidRequest("$slice skip out of i32 range".to_string()))?),
-                _ => return Err(Error::InvalidRequest("$slice skip must be a non-negative integer".to_string())),
+                Bson::Int64(n) if *n >= 0 => Some((*n).try_into().map_err(|_| {
+                    Error::InvalidRequest("$slice skip out of i32 range".to_string())
+                })?),
+                _ => {
+                    return Err(Error::InvalidRequest(
+                        "$slice skip must be a non-negative integer".to_string(),
+                    ))
+                }
             };
             let limit = match &arr[1] {
                 Bson::Int32(n) if *n > 0 => *n,
-                Bson::Int64(n) if *n > 0 => (*n).try_into().map_err(|_| Error::InvalidRequest("$slice limit out of i32 range".to_string()))?,
+                Bson::Int64(n) if *n > 0 => (*n).try_into().map_err(|_| {
+                    Error::InvalidRequest("$slice limit out of i32 range".to_string())
+                })?,
                 Bson::Int32(n) if *n < 0 && skip == Some(0) => *n,
-                Bson::Int64(n) if *n < 0 && skip == Some(0) => (*n).try_into().map_err(|_| Error::InvalidRequest("$slice limit out of i32 range".to_string()))?,
-                Bson::Int32(n) if *n < 0 && skip != Some(0) => return Err(Error::InvalidRequest("$slice with negative limit and non-zero skip is invalid".to_string())),
-                Bson::Int64(n) if *n < 0 && skip != Some(0) => return Err(Error::InvalidRequest("$slice with negative limit and non-zero skip is invalid".to_string())),
-                _ => return Err(Error::InvalidRequest("$slice limit must be a non-zero integer".to_string())),
+                Bson::Int64(n) if *n < 0 && skip == Some(0) => (*n).try_into().map_err(|_| {
+                    Error::InvalidRequest("$slice limit out of i32 range".to_string())
+                })?,
+                Bson::Int32(n) if *n < 0 && skip != Some(0) => {
+                    return Err(Error::InvalidRequest(
+                        "$slice with negative limit and non-zero skip is invalid".to_string(),
+                    ))
+                }
+                Bson::Int64(n) if *n < 0 && skip != Some(0) => {
+                    return Err(Error::InvalidRequest(
+                        "$slice with negative limit and non-zero skip is invalid".to_string(),
+                    ))
+                }
+                _ => {
+                    return Err(Error::InvalidRequest(
+                        "$slice limit must be a non-zero integer".to_string(),
+                    ))
+                }
             };
             Ok(ProjectionExpr::Slice { skip, limit })
         }
-        _ => Err(Error::InvalidRequest("$slice must be an integer or an array of two integers".to_string())),
+        _ => Err(Error::InvalidRequest(
+            "$slice must be an integer or an array of two integers".to_string(),
+        )),
     }
 }
 
@@ -452,7 +506,6 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
 fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr>>, Error> {
     let mut parsed_filters = BTreeMap::new();
     for filter_doc in filters {
-
         let mut previous_identifier = None;
         let mut predicates = Vec::with_capacity(filter_doc.len());
 
@@ -465,8 +518,7 @@ fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr
                     if previous != &identifier {
                         return Err(Error::InvalidRequest(format!(
                             "Array filters must have a single identifier. Found '{}' and '{}'",
-                            previous,
-                            &identifier,
+                            previous, &identifier,
                         )));
                     }
                 }
@@ -482,7 +534,10 @@ fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr
             predicates.into_iter().next().unwrap()
         };
 
-        if parsed_filters.insert(identifier.clone(), predicate).is_some() {
+        if parsed_filters
+            .insert(identifier.clone(), predicate)
+            .is_some()
+        {
             return Err(Error::InvalidRequest(format!(
                 "Found multiple array filters with the same identifier '{}'",
                 identifier
@@ -495,9 +550,8 @@ fn parse_array_filters(filters: &[Document]) -> Result<BTreeMap<String, Arc<Expr
 
 fn parse_identifier_and_predicate(
     field_name: &String,
-    predicate: &Bson
+    predicate: &Bson,
 ) -> Result<(String, Arc<Expr>), Error> {
-
     let components = parse_field_path(field_name)?;
 
     let identifier = if let PathComponent::FieldName(s) = &components[0] {
@@ -526,7 +580,10 @@ fn parse_identifier_and_predicate(
 }
 
 /// Parses a BSON document representing an update operation into an `UpdateExpr`.
-pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> Result<UpdateExpr, Error> {
+pub fn parse_update(
+    update: &Document,
+    array_filters: Option<Vec<Document>>,
+) -> Result<UpdateExpr, Error> {
     let mut ops = Vec::new();
 
     for (key, value) in update.iter() {
@@ -565,7 +622,9 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                     Error::InvalidRequest("$unset value must be a document".to_string())
                 })?;
                 for (path, _) in sub_doc {
-                    ops.push(UpdateOp::Unset { path: parse_update_path(path)? });
+                    ops.push(UpdateOp::Unset {
+                        path: parse_update_path(path)?,
+                    });
                 }
             }
             "$inc" => {
@@ -676,7 +735,10 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                 })?;
                 for (path_str, value_spec) in sub_doc {
                     let path = parse_update_path(path_str)?;
-                    ops.push(UpdateOp::Push { path, spec: parse_push_spec(value_spec)? });
+                    ops.push(UpdateOp::Push {
+                        path,
+                        spec: parse_push_spec(value_spec)?,
+                    });
                 }
             }
             "$pop" => {
@@ -689,7 +751,9 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                         Some(-1) => PopFrom::First,
                         Some(1) => PopFrom::Last,
                         _ => {
-                            return Err(Error::InvalidRequest("$pop value must be 1 or -1".to_string()))
+                            return Err(Error::InvalidRequest(
+                                "$pop value must be 1 or -1".to_string(),
+                            ))
                         }
                     };
                     ops.push(UpdateOp::Pop { path, from });
@@ -702,8 +766,9 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                 for (path_str, criterion_bson) in sub_doc {
                     let path = parse_update_path(path_str)?;
                     let criterion = if let Bson::Document(doc) = criterion_bson {
-                        let is_operator_only =
-                            doc.iter().all(|(k, _)| SCALAR_OPERATIONS.contains(k.as_str()));
+                        let is_operator_only = doc
+                            .iter()
+                            .all(|(k, _)| SCALAR_OPERATIONS.contains(k.as_str()));
                         if is_operator_only {
                             let predicates = parse_predicates(criterion_bson)?;
                             let expr = if predicates.len() == 1 {
@@ -777,7 +842,12 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
                     ops.push(UpdateOp::Bit { path, and, or, xor });
                 }
             }
-            _ => return Err(Error::InvalidRequest(format!("Unknown update operator: {}", key))),
+            _ => {
+                return Err(Error::InvalidRequest(format!(
+                    "Unknown update operator: {}",
+                    key
+                )))
+            }
         }
     }
 
@@ -787,7 +857,10 @@ pub fn parse_update(update: &Document, array_filters: Option<Vec<Document>>) -> 
         BTreeMap::new()
     };
 
-    let update_expr = UpdateExpr { ops, array_filters: parsed_array_filters };
+    let update_expr = UpdateExpr {
+        ops,
+        array_filters: parsed_array_filters,
+    };
     update_expr.validate()?;
     Ok(update_expr)
 }
@@ -830,17 +903,25 @@ fn parse_each_or_single(value: &Bson, op_name: &str) -> Result<EachOrSingle<Arc<
             }
         }
     }
-    Ok(EachOrSingle::Single(Arc::new(Expr::Literal(BsonValue(value.clone())))))
+    Ok(EachOrSingle::Single(Arc::new(Expr::Literal(BsonValue(
+        value.clone(),
+    )))))
 }
 
 fn parse_push_spec(value: &Bson) -> Result<PushSpec<Arc<Expr>>, Error> {
     if let Some(doc) = value.as_document() {
         // If the document contains any non-modifier keys, treat it as a literal push.
-        let has_non_modifier_keys =
-            doc.keys().any(|k| !matches!(k.as_str(), "$each" | "$position" | "$slice" | "$sort"));
+        let has_non_modifier_keys = doc
+            .keys()
+            .any(|k| !matches!(k.as_str(), "$each" | "$position" | "$slice" | "$sort"));
         if has_non_modifier_keys {
             let values = EachOrSingle::Single(Arc::new(Expr::Literal(BsonValue(value.clone()))));
-            return Ok(PushSpec { values, position: None, slice: None, sort: None });
+            return Ok(PushSpec {
+                values,
+                position: None,
+                slice: None,
+                sort: None,
+            });
         }
 
         let mut values = None;
@@ -852,7 +933,9 @@ fn parse_push_spec(value: &Bson) -> Result<PushSpec<Arc<Expr>>, Error> {
             match key.as_str() {
                 "$each" => {
                     let arr = val.as_array().ok_or_else(|| {
-                        Error::InvalidRequest("$push with $each must have an array value".to_string())
+                        Error::InvalidRequest(
+                            "$push with $each must have an array value".to_string(),
+                        )
                     })?;
                     let exprs = arr
                         .iter()
@@ -861,16 +944,14 @@ fn parse_push_spec(value: &Bson) -> Result<PushSpec<Arc<Expr>>, Error> {
                     values = Some(EachOrSingle::Each(exprs));
                 }
                 "$position" => {
-                    position = Some(
-                        val.as_i32()
-                            .ok_or_else(|| Error::InvalidRequest("$position must be an integer".to_string()))?,
-                    );
+                    position = Some(val.as_i32().ok_or_else(|| {
+                        Error::InvalidRequest("$position must be an integer".to_string())
+                    })?);
                 }
                 "$slice" => {
-                    slice = Some(
-                        val.as_i32()
-                            .ok_or_else(|| Error::InvalidRequest("$slice must be an integer".to_string()))?,
-                    );
+                    slice = Some(val.as_i32().ok_or_else(|| {
+                        Error::InvalidRequest("$slice must be an integer".to_string())
+                    })?);
                 }
                 "$sort" => match val {
                     Bson::Int32(1) | Bson::Int64(1) => sort = Some(PushSort::Ascending),
@@ -896,7 +977,12 @@ fn parse_push_spec(value: &Bson) -> Result<PushSpec<Arc<Expr>>, Error> {
                     // This case is handled by the check at the beginning, but as a safeguard:
                     let values =
                         EachOrSingle::Single(Arc::new(Expr::Literal(BsonValue(value.clone()))));
-                    return Ok(PushSpec { values, position: None, slice: None, sort: None });
+                    return Ok(PushSpec {
+                        values,
+                        position: None,
+                        slice: None,
+                        sort: None,
+                    });
                 }
             }
         }
@@ -904,22 +990,70 @@ fn parse_push_spec(value: &Bson) -> Result<PushSpec<Arc<Expr>>, Error> {
         let values = values.ok_or_else(|| {
             Error::InvalidRequest("$push with modifiers must include $each".to_string())
         })?;
-        Ok(PushSpec { values, position, slice, sort })
+        Ok(PushSpec {
+            values,
+            position,
+            slice,
+            sort,
+        })
     } else {
         // Simple push
         let values = EachOrSingle::Single(Arc::new(Expr::Literal(BsonValue(value.clone()))));
-        Ok(PushSpec { values, position: None, slice: None, sort: None })
+        Ok(PushSpec {
+            values,
+            position: None,
+            slice: None,
+            sort: None,
+        })
     }
 }
 
+pub fn parse_index_keys(document: &Document) -> Result<IndexKeySpec, Error> {
+    if document.is_empty() {
+        return Err(Error::InvalidRequest(
+            "Index key specification cannot be empty".to_string(),
+        ));
+    }
+
+    let mut keys = Vec::new();
+    for (field, value) in document.iter() {
+        let path = parse_field_path(field)?;
+        let key = match parse_index_direction(value, field)? {
+            SortOrder::Ascending => IndexKeyField::asc(path),
+            SortOrder::Descending => IndexKeyField::desc(path),
+        };
+        keys.push(key);
+    }
+    let spec = IndexKeySpec::new(keys);
+    spec.validate()?;
+    Ok(spec)
+}
+
+fn parse_index_direction(value: &Bson, field: &str) -> Result<SortOrder, Error> {
+    match value {
+        Bson::Int32(1) | Bson::Int64(1) => Ok(SortOrder::Ascending),
+        Bson::Int32(-1) | Bson::Int64(-1) => Ok(SortOrder::Descending),
+        Bson::Int32(_) | Bson::Int64(_) => Err(Error::InvalidRequest(format!(
+            "Invalid index key order for field '{}': expected 1 or -1",
+            field
+        ))),
+        _ => Err(Error::InvalidRequest(format!(
+            "Invalid index key order for field '{}': expected an integer value of 1 or -1",
+            field
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::query::expr_fn::*;
-    use bson::{doc, Bson};
     use crate::query::update_fn;
-    use crate::query::update_fn::{by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec, push_single, push_spec, set, set_on_insert, unset, update};
+    use crate::query::update_fn::{
+        by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec,
+        push_single, push_spec, set, set_on_insert, unset, update,
+    };
+    use bson::{doc, Bson};
 
     #[cfg(test)]
     mod bson_type_parsing {
@@ -984,7 +1118,7 @@ mod tests {
         fn test_parse_conditions_with_all() {
             let doc = doc! { "tags": { "$all": ["tag1", "tag2"] } };
             let parsed = parse_conditions(&doc).unwrap();
-            let expected = field_filters(field(["tags"]), [all(lit(vec!("tag1", "tag2")))]);
+            let expected = field_filters(field(["tags"]), [all(lit(vec!["tag1", "tag2"]))]);
             assert_eq!(expected, parsed);
         }
 
@@ -992,7 +1126,10 @@ mod tests {
         fn test_parse_conditions_with_elem_match() {
             let doc = doc! { "nestedArray": { "$elemMatch": { "$gt": 22, "$lt": 30 } } };
             let parsed = parse_conditions(&doc).unwrap();
-            let expected = field_filters(field(["nestedArray"]), [elem_match([gt(lit(22)), lt(lit(30))])]);
+            let expected = field_filters(
+                field(["nestedArray"]),
+                [elem_match([gt(lit(22)), lt(lit(30))])],
+            );
             assert_eq!(expected, parsed);
         }
 
@@ -1011,7 +1148,7 @@ mod tests {
             let expected = and([
                 field_filters(field(["age"]), [gte(lit(18))]),
                 field_filters(field(["status"]), [eq(lit("active"))]),
-                field_filters(field(["tags"]), [all(lit(vec!("tag1", "tag2")))]),
+                field_filters(field(["tags"]), [all(lit(vec!["tag1", "tag2"]))]),
             ]);
 
             assert_eq!(expected, parsed.unwrap());
@@ -1202,8 +1339,8 @@ mod tests {
             use bson::doc;
 
             let filter = doc! {
-        "items": { "$elemMatch": { "product": "xyz", "score": { "$gte": 8 } } }
-    };
+                "items": { "$elemMatch": { "product": "xyz", "score": { "$gte": 8 } } }
+            };
 
             let parsed = parse_conditions(&filter).unwrap();
             let expected = field_filters(
@@ -1227,17 +1364,15 @@ mod tests {
         #[test]
         fn test_parse_conditions_elem_match_with_or() {
             let filter = doc! {
-        "a": { "$elemMatch": { "$or": [ { "x": 1 }, { "y": 2 } ] } }
-    };
+                "a": { "$elemMatch": { "$or": [ { "x": 1 }, { "y": 2 } ] } }
+            };
             let parsed = parse_conditions(&filter).unwrap();
             let expected = field_filters(
                 field(["a"]),
-                [elem_match([
-                    or([
-                        field_filters(field(["x"]), [eq(lit(1))]),
-                        field_filters(field(["y"]), [eq(lit(2))]),
-                    ])
-                ])]
+                [elem_match([or([
+                    field_filters(field(["x"]), [eq(lit(1))]),
+                    field_filters(field(["y"]), [eq(lit(2))]),
+                ])])],
             );
             assert_eq!(parsed, expected);
         }
@@ -1259,14 +1394,14 @@ mod tests {
 
         #[test]
         fn test_parse_conditions_nested_elem_match() {
-            let filter =
-                doc! { "a": { "$elemMatch": { "b": { "$elemMatch": { "$gt": 5 } } } } };
+            let filter = doc! { "a": { "$elemMatch": { "b": { "$elemMatch": { "$gt": 5 } } } } };
             let parsed = parse_conditions(&filter).unwrap();
             let expected = field_filters(
                 field(["a"]),
-                [elem_match([
-                    field_filters(field(["b"]), [elem_match([gt(lit(5))])])
-                ])]
+                [elem_match([field_filters(
+                    field(["b"]),
+                    [elem_match([gt(lit(5))])],
+                )])],
             );
             assert_eq!(parsed, expected);
         }
@@ -1275,10 +1410,7 @@ mod tests {
         fn test_parse_conditions_elem_match_empty_document() {
             let filter = doc! { "a": { "$elemMatch": {} } };
             let parsed = parse_conditions(&filter).unwrap();
-            let expected = field_filters(
-                field(["a"]),
-                [elem_match(Vec::<Arc<Expr>>::new())],
-            );
+            let expected = field_filters(field(["a"]), [elem_match(Vec::<Arc<Expr>>::new())]);
             assert_eq!(parsed, expected);
         }
     }
@@ -1293,7 +1425,7 @@ mod tests {
             let parsed = parse_projection(&projection).unwrap();
             let expected = Projection::Include(proj_fields([
                 ("_id", proj_field()),
-                ("comments", proj_slice(None, 5))
+                ("comments", proj_slice(None, 5)),
             ]));
             assert_eq!(parsed, expected);
         }
@@ -1304,7 +1436,7 @@ mod tests {
             let parsed = parse_projection(&projection).unwrap();
             let expected = Projection::Include(proj_fields([
                 ("_id", proj_field()),
-                ("comments", proj_slice(Some(10), 5))
+                ("comments", proj_slice(Some(10), 5)),
             ]));
             assert_eq!(parsed, expected);
         }
@@ -1331,31 +1463,40 @@ mod tests {
 
             let projection = doc! { "comments": { "$slice": [1, -1] } };
             let err = parse_projection(&projection).unwrap_err();
-            assert_eq!(err.to_string(), "$slice with negative limit and non-zero skip is invalid");
+            assert_eq!(
+                err.to_string(),
+                "$slice with negative limit and non-zero skip is invalid"
+            );
         }
 
         #[test]
         fn test_parse_projection_with_elem_match() {
             let projection = doc! { "students": { "$elemMatch": { "school": "Hogwarts" } } };
             let parsed = parse_projection(&projection).unwrap();
-            let expected = Projection::Include(proj_fields([("_id", proj_field()), ("students", proj_elem_match(field_filters(field(["school"]), [eq(lit("Hogwarts"))])))]));
+            let expected = Projection::Include(proj_fields([
+                ("_id", proj_field()),
+                (
+                    "students",
+                    proj_elem_match(field_filters(field(["school"]), [eq(lit("Hogwarts"))])),
+                ),
+            ]));
             assert_eq!(parsed, expected);
         }
 
         #[test]
         fn test_parse_projection_with_elem_match_complex() {
-            let projection =
-                doc! { "grades": { "$elemMatch": { "grade": { "$gte": 85 }, "mean": { "$gt": 90 } } } };
+            let projection = doc! { "grades": { "$elemMatch": { "grade": { "$gte": 85 }, "mean": { "$gt": 90 } } } };
             let parsed = parse_projection(&projection).unwrap();
             let expected = Projection::Include(proj_fields([
                 ("_id", proj_field()),
-                ("grades", proj_elem_match(
-                    and([
+                (
+                    "grades",
+                    proj_elem_match(and([
                         field_filters(field(["grade"]), [gte(lit(85))]),
                         field_filters(field(["mean"]), [gt(lit(90))]),
-                    ]),
-                )
-                )]));
+                    ])),
+                ),
+            ]));
             assert_eq!(parsed, expected);
         }
 
@@ -1410,10 +1551,8 @@ mod tests {
             let projection = doc! { "a": 0, "b": 0 };
             let parsed = parse_projection(&projection).unwrap();
             // _id is implicitly included
-            let expected = Projection::Exclude(proj_fields([
-                ("a", proj_field()),
-                ("b", proj_field()),
-            ]));
+            let expected =
+                Projection::Exclude(proj_fields([("a", proj_field()), ("b", proj_field())]));
             assert_eq!(parsed, expected);
         }
 
@@ -1433,10 +1572,8 @@ mod tests {
         fn test_parse_projection_inclusion_and_id_exclusion() {
             let projection = doc! { "a": 1, "b": 1, "_id": 0 };
             let parsed = parse_projection(&projection).unwrap();
-            let expected = Projection::Include(proj_fields([
-                ("a", proj_field()),
-                ("b", proj_field()),
-            ]));
+            let expected =
+                Projection::Include(proj_fields([("a", proj_field()), ("b", proj_field())]));
             assert_eq!(parsed, expected);
         }
 
@@ -1505,7 +1642,7 @@ mod tests {
             let parsed = parse_update(&update_doc, None).unwrap();
             let expected = update([
                 set([field_name("a")], 1),
-                set([field_name("b"), field_name("c")], "hello")
+                set([field_name("b"), field_name("c")], "hello"),
             ]);
             assert_eq!(parsed, expected);
         }
@@ -1539,9 +1676,10 @@ mod tests {
         fn test_parse_update_set_on_insert_nested_path() {
             let update_doc = doc! { "$setOnInsert": { "meta.created": true } };
             let parsed = parse_update(&update_doc, None).unwrap();
-            let expected = update([
-                set_on_insert([field_name("meta"), field_name("created")], true),
-            ]);
+            let expected = update([set_on_insert(
+                [field_name("meta"), field_name("created")],
+                true,
+            )]);
             assert_eq!(parsed, expected);
         }
 
@@ -1589,16 +1727,11 @@ mod tests {
                 push_single([field_name("scores")], 89),
                 push_spec(
                     [field_name("quizzes")],
-                    push_each_spec([
-                            doc! { "wk": 5, "score": 8 },
-                            doc! { "wk": 6, "score": 7 },
-                        ],
+                    push_each_spec(
+                        [doc! { "wk": 5, "score": 8 }, doc! { "wk": 6, "score": 7 }],
                         None,
                         Some(-2),
-                        Some(by_fields_sort(BTreeMap::from([(
-                            "score".to_string(),
-                            -1
-                        )]))),
+                        Some(by_fields_sort(BTreeMap::from([("score".to_string(), -1)]))),
                     ),
                 ),
             ]);
@@ -1613,8 +1746,10 @@ mod tests {
                 }
             };
             let parsed = parse_update(&update_doc, None).unwrap();
-            let expected =
-                update([push_single([field_name("items")], doc! { "name": "item1", "$slice": 5 })]);
+            let expected = update([push_single(
+                [field_name("items")],
+                doc! { "name": "item1", "$slice": 5 },
+            )]);
             assert_eq!(parsed, expected);
         }
 
@@ -1684,13 +1819,18 @@ mod tests {
             let update_doc = doc! { "$set": { "grades.$[elem].mean": 100 } };
             let array_filters = Some(vec![doc! { "elem": { "grade": { "$gte": 85 } } }]);
             let parsed = parse_update(&update_doc, array_filters).unwrap();
-            let expected_ops =
-                vec![set([field_name("grades"), filter("elem"), field_name("mean")], 100)];
+            let expected_ops = vec![set(
+                [field_name("grades"), filter("elem"), field_name("mean")],
+                100,
+            )];
             let expected_filters = BTreeMap::from([(
                 "elem".to_string(),
                 field_filters(field(["grade"]), [gte(lit(85))]),
             )]);
-            let expected = UpdateExpr { ops: expected_ops, array_filters: expected_filters };
+            let expected = UpdateExpr {
+                ops: expected_ops,
+                array_filters: expected_filters,
+            };
             assert_eq!(parsed, expected);
         }
 
@@ -1816,8 +1956,101 @@ mod tests {
             fn test_parse_array_filters_error_numeric_identifier() {
                 let filters = vec![doc! { "0.grade": { "$gte": 85 } }];
                 let err = parse_array_filters(&filters).unwrap_err();
-                assert_eq!(err.to_string(), "Array filter identifier must be a field name");
+                assert_eq!(
+                    err.to_string(),
+                    "Array filter identifier must be a field name"
+                );
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod index_key_parsing {
+        use super::*;
+
+        #[test]
+        fn test_parse_index_keys_valid_compound() {
+            let keys = doc! { "name": 1, "age": -1 };
+
+            let parsed = parse_index_keys(&keys).unwrap();
+
+            assert_eq!(
+                parsed,
+                IndexKeySpec::new(vec![
+                    IndexKeyField::asc(vec!["name".into()]),
+                    IndexKeyField::desc(vec!["age".into()]),
+                ])
+            );
+        }
+
+        #[test]
+        fn test_parse_index_keys_accepts_int64_orders() {
+            let keys = doc! { "name": Bson::Int64(1), "age": Bson::Int64(-1) };
+
+            let parsed = parse_index_keys(&keys).unwrap();
+
+            assert_eq!(
+                parsed,
+                IndexKeySpec::new(vec![
+                    IndexKeyField::asc(vec!["name".into()]),
+                    IndexKeyField::desc(vec!["age".into()]),
+                ])
+            );
+        }
+
+        #[test]
+        fn test_parse_index_keys_rejects_empty_document() {
+            let err = parse_index_keys(&Document::new()).unwrap_err();
+
+            assert_eq!(err.to_string(), "Index key specification cannot be empty");
+        }
+
+        #[test]
+        fn test_parse_index_keys_rejects_invalid_integer_order() {
+            let keys = doc! { "name": 2 };
+
+            let err = parse_index_keys(&keys).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "Invalid index key order for field 'name': expected 1 or -1"
+            );
+        }
+
+        #[test]
+        fn test_parse_index_keys_rejects_non_integer_order() {
+            let keys = doc! { "name": "asc" };
+
+            let err = parse_index_keys(&keys).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "Invalid index key order for field 'name': expected an integer value of 1 or -1"
+            );
+        }
+
+        #[test]
+        fn test_parse_index_keys_rejects_prefix_conflict() {
+            let keys = doc! { "name": 1, "name.first": -1 };
+
+            let err = parse_index_keys(&keys).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "Indexed paths 'name' and 'name.first' conflict: no indexed path may be a prefix of another"
+            );
+        }
+
+        #[test]
+        fn test_parse_index_keys_rejects_array_path() {
+            let keys = doc! { "items.0.sku": 1 };
+
+            let err = parse_index_keys(&keys).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "Indexed path 'items.0.sku' cannot contain array elements"
+            );
         }
     }
 }

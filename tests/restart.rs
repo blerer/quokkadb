@@ -14,8 +14,8 @@ fn test_restart_with_multiple_collections() {
 
     {
         let db = get_db(db_path);
-        let collection1 = db.collection("collection1");
-        let collection2 = db.collection("collection2");
+        let collection1 = db.collection("collection1").create_if_missing();
+        let collection2 = db.collection("collection2").create_if_missing();
 
         collection1
             .insert_many(vec![
@@ -79,7 +79,7 @@ fn test_restart_after_parallel_operations_from_clones() {
     {
         let db = get_db(db_path);
         let collection_name = "clone_parallel_ops";
-        let collection = db.collection(collection_name);
+        let collection = db.collection(collection_name).create_if_missing();
 
         // Seed document so the collection exists, and validate basic write path.
         collection
@@ -91,7 +91,7 @@ fn test_restart_after_parallel_operations_from_clones() {
                 let db_clone = db.clone();
 
                 s.spawn(move || {
-                    let coll = db_clone.collection(collection_name);
+                    let coll = db_clone.collection(collection_name).create_if_missing();
 
                     for i in 0..INSERTS_PER_THREAD {
                         coll.insert_one(doc! {
@@ -148,7 +148,12 @@ fn test_restart_after_parallel_operations_from_clones() {
         let i = d.get_i32("i").unwrap() as usize;
         assert!(thread < THREADS);
         assert!(i < INSERTS_PER_THREAD);
-        assert!(seen.insert((thread, i)), "duplicate doc for (thread={}, i={})", thread, i);
+        assert!(
+            seen.insert((thread, i)),
+            "duplicate doc for (thread={}, i={})",
+            thread,
+            i
+        );
     }
     assert_eq!(seen.len(), THREADS * INSERTS_PER_THREAD);
 }

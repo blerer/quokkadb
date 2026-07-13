@@ -1,11 +1,12 @@
+use crate::io::bitset::BitSet;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
+use crate::io::invalid_data;
+use crate::io::serializable::Serializable;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
-use crate::io::bitset::BitSet;
-use crate::io::serializable::Serializable;
 use std::io::Result;
+use std::sync::Arc;
 
 /// The `Catalog` maintains the mapping from collection names to their metadata.
 ///
@@ -32,8 +33,11 @@ impl Serializable for Catalog {
             let id = reader.read_varint_u32()?;
             let collection = Arc::new(CollectionMetadata::read_from(reader)?);
             let name = collection.name.clone();
+            let include_in_name_lookup = collection.dropped_at.is_none();
             collections.insert(id, collection);
-            id_by_name.insert(name, id);
+            if include_in_name_lookup {
+                id_by_name.insert(name, id);
+            }
         }
         Ok(Catalog {
             next_collection_id,
@@ -90,12 +94,7 @@ impl Catalog {
 
     #[cfg(test)]
     pub fn add_collection(&self, name: &str, id: u32, created_at: u64) -> Self {
-        self.add_collection_with_options(
-            name,
-            id,
-            created_at,
-            CollectionOptions::default(),
-        )
+        self.add_collection_with_options(name, id, created_at, CollectionOptions::default())
     }
 
     pub fn add_collection_with_options(
@@ -103,7 +102,7 @@ impl Catalog {
         name: &str,
         id: u32,
         created_at: u64,
-        options: CollectionOptions
+        options: CollectionOptions,
     ) -> Self {
         assert_eq!(self.next_collection_id, id);
         let mut collections = self.collections.clone();
@@ -179,6 +178,55 @@ impl Catalog {
             id_by_name,
         }
     }
+
+    /// Adds an index to an existing collection in the catalog.
+    pub fn add_index_to_collection(
+        &self,
+        collection_id: u32,
+        index_id: u32,
+        definition: &IndexDefinition,
+        options: &IndexOptions,
+        created_at: u64,
+    ) -> Self {
+        let col = self.collections.get(&collection_id).cloned().unwrap();
+        let index = IndexMetadata {
+            id: index_id,
+            definition: definition.clone(),
+            created_at,
+            queryable_at: None,
+            dropped_at: None,
+            options: options.clone(),
+        };
+        let updated = Arc::new(col.add_index(index));
+        let mut collections = self.collections.clone();
+        collections.insert(collection_id, updated);
+        Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+            id_by_name: self.id_by_name.clone(),
+        }
+    }
+
+    pub fn drop_index(&self, collection_id: u32, index_id: u32, dropped_at: u64) -> Self {
+        let col = self.collections.get(&collection_id).cloned().unwrap();
+        let mut collections = self.collections.clone();
+        collections.insert(
+            collection_id,
+            Arc::new(col.drop_index(index_id, dropped_at)),
+        );
+
+        Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+            id_by_name: self.id_by_name.clone(),
+        }
+    }
+}
+
+mod id_creation_strategy_tags {
+    pub(super) const GENERATED: u8 = 0;
+    pub(super) const MANUAL: u8 = 1;
+    pub(super) const MIXED: u8 = 2;
 }
 
 /// Strategy for creating collection IDs.
@@ -208,18 +256,21 @@ impl Serializable for IdCreationStrategy {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
-            0 => Ok(IdCreationStrategy::Generated),
-            1 => Ok(IdCreationStrategy::Manual),
-            2 => Ok(IdCreationStrategy::Mixed),
-            _ => unreachable!("Invalid IdCreationStrategy byte: {}", byte),
+            id_creation_strategy_tags::GENERATED => Ok(IdCreationStrategy::Generated),
+            id_creation_strategy_tags::MANUAL => Ok(IdCreationStrategy::Manual),
+            id_creation_strategy_tags::MIXED => Ok(IdCreationStrategy::Mixed),
+            _ => Err(invalid_data(format!(
+                "Invalid IdCreationStrategy byte: {}",
+                byte
+            ))),
         }
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         let byte = match self {
-            IdCreationStrategy::Generated => 0,
-            IdCreationStrategy::Manual => 1,
-            IdCreationStrategy::Mixed => 2,
+            IdCreationStrategy::Generated => id_creation_strategy_tags::GENERATED,
+            IdCreationStrategy::Manual => id_creation_strategy_tags::MANUAL,
+            IdCreationStrategy::Mixed => id_creation_strategy_tags::MIXED,
         };
         writer.write_u8(byte);
     }
@@ -244,10 +295,13 @@ impl CollectionOptions {
 
 impl fmt::Display for CollectionOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CollectionOptions {{ id_creation_strategy: {:?} }}", self.id_creation_strategy)
+        write!(
+            f,
+            "CollectionOptions {{ id_creation_strategy: {:?} }}",
+            self.id_creation_strategy
+        )
     }
 }
-
 
 impl Serializable for CollectionOptions {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
@@ -273,6 +327,52 @@ impl Serializable for CollectionOptions {
     }
 }
 
+/// Options for creating an index.
+#[derive(Debug, PartialEq, Clone)]
+pub struct IndexOptions {
+    pub name: Option<String>,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        IndexOptions { name: None }
+    }
+}
+
+impl IndexOptions {
+    fn create_bitset(&self) -> BitSet {
+        let mut bitset = BitSet::new();
+        if self.name.is_some() {
+            bitset.insert(0);
+        }
+        bitset
+    }
+
+    pub fn is_equivalent_to(&self, _other: &IndexOptions) -> bool {
+        true // This method is a placeholder where future options should be taken into account
+    }
+}
+
+impl Serializable for IndexOptions {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let bitset = BitSet::read_from(reader)?;
+        Ok(IndexOptions {
+            name: if bitset.contains(0) {
+                Some(String::read_from(reader)?)
+            } else {
+                None
+            },
+        })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        let bitset = self.create_bitset();
+        bitset.write_to(writer);
+        if bitset.contains(0) {
+            self.name.as_ref().unwrap().write_to(writer);
+        }
+    }
+}
 
 /// Describes a collection's metadata, including its ID, name, and declared indexes.
 ///
@@ -301,7 +401,7 @@ pub struct CollectionMetadata {
 impl CollectionMetadata {
     pub fn new(id: u32, name: &str, created_at: u64, options: CollectionOptions) -> Self {
         CollectionMetadata {
-            next_index_id: 0,
+            next_index_id: 1, // zero is reserved for the collection data
             id,
             name: name.to_string(),
             created_at,
@@ -330,6 +430,24 @@ impl CollectionMetadata {
         self.indexes.get(&id).cloned()
     }
 
+    pub fn active_indexes(&self) -> Vec<Arc<IndexMetadata>> {
+        self.indexes
+            .values()
+            .filter(|idx| idx.dropped_at.is_none())
+            .cloned()
+            .collect()
+    }
+
+    pub fn find_index_equivalent_to(
+        &self,
+        definition: &IndexDefinition,
+        options: &IndexOptions,
+    ) -> Option<Arc<IndexMetadata>> {
+        self.active_indexes()
+            .into_iter()
+            .find(|index| index.is_equivalent_to(&definition, &options))
+    }
+
     fn add_index(&self, index: IndexMetadata) -> CollectionMetadata {
         assert_eq!(self.dropped_at, None);
         assert_eq!(self.next_index_id, index.id);
@@ -337,7 +455,7 @@ impl CollectionMetadata {
         let mut indexes = self.indexes.clone();
         let mut index_id_by_name = self.index_id_by_name.clone();
         let index_id = index.id;
-        let index_name = index.name.clone();
+        let index_name = index.name();
         indexes.insert(index_id, Arc::new(index));
         index_id_by_name.insert(index_name, index_id);
         CollectionMetadata {
@@ -348,6 +466,36 @@ impl CollectionMetadata {
             dropped_at: self.dropped_at,
             indexes,
             index_id_by_name,
+            options: self.options.clone(),
+        }
+    }
+
+    fn drop_index(&self, id: u32, dropped_at: u64) -> Self {
+        let index = self.indexes.get(&id).cloned().unwrap();
+        let name = &index.name();
+        let mut id_by_name = self.index_id_by_name.clone();
+        let index_id = id_by_name.remove(name);
+        assert_eq!(index_id, Some(id));
+        let dropped_index = Arc::new(IndexMetadata {
+            id,
+            definition: index.definition.clone(),
+            created_at: index.created_at,
+            queryable_at: index.queryable_at,
+            dropped_at: Some(dropped_at),
+            options: index.options.clone(),
+        });
+
+        let mut indexes = self.indexes.clone();
+        indexes.insert(id, dropped_index);
+
+        CollectionMetadata {
+            next_index_id: self.next_index_id,
+            id: self.id,
+            name: self.name.clone(),
+            created_at: self.created_at,
+            dropped_at: self.dropped_at,
+            indexes,
+            index_id_by_name: id_by_name,
             options: self.options.clone(),
         }
     }
@@ -380,9 +528,12 @@ impl Serializable for CollectionMetadata {
         for _ in 0..size {
             let index_id = reader.read_varint_u32()?;
             let index = Arc::new(IndexMetadata::read_from(reader)?);
-            let index_name = index.name.clone();
+            let include_in_name_lookup = index.dropped_at.is_none();
+            if include_in_name_lookup {
+                let index_name = index.name();
+                index_id_by_name.insert(index_name, index_id);
+            }
             indexes.insert(index_id, index);
-            index_id_by_name.insert(index_name, index_id);
         }
         let options = CollectionOptions::read_from(reader)?;
 
@@ -421,48 +572,253 @@ impl Serializable for CollectionMetadata {
     }
 }
 
-/// Specifies the ordering of an index field.
-#[derive(Debug, PartialEq)]
-pub enum Order {
+#[derive(Debug, PartialEq, Clone)]
+pub enum IndexDirection {
     Ascending,
     Descending,
 }
 
-impl Serializable for Order {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+impl IndexDirection {
+    fn as_string(&self) -> &'static str {
+        match self {
+            IndexDirection::Ascending => "1",
+            IndexDirection::Descending => "-1",
+        }
+    }
+}
+
+impl fmt::Display for IndexDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndexDirection::Ascending => write!(f, "ASC"),
+            IndexDirection::Descending => write!(f, "DESC"),
+        }
+    }
+}
+
+mod index_direction_tags {
+    pub(super) const ASCENDING: u8 = 0;
+    pub(super) const DESCENDING: u8 = 1;
+}
+
+impl Serializable for IndexDirection {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
-            0 => Ok(Order::Ascending),
-            1 => Ok(Order::Descending),
-            _ => unreachable!("Invalid Order byte: {}", byte),
+            index_direction_tags::ASCENDING => Ok(IndexDirection::Ascending),
+            index_direction_tags::DESCENDING => Ok(IndexDirection::Descending),
+            _ => Err(invalid_data(format!("Invalid SortOrder byte: {}", byte))),
         }
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         let byte = match self {
-            Order::Ascending => 0,
-            Order::Descending => 1,
+            IndexDirection::Ascending => index_direction_tags::ASCENDING,
+            IndexDirection::Descending => index_direction_tags::DESCENDING,
         };
         writer.write_u8(byte);
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct OrderedIndexField {
+    pub path: IndexPath,
+    pub direction: IndexDirection,
+}
+
+impl OrderedIndexField {
+    pub fn asc<P: Into<IndexPath>>(path: P) -> Self {
+        OrderedIndexField {
+            path: path.into(),
+            direction: IndexDirection::Ascending,
+        }
+    }
+
+    pub fn desc<P: Into<IndexPath>>(path: P) -> Self {
+        OrderedIndexField {
+            path: path.into(),
+            direction: IndexDirection::Descending,
+        }
+    }
+
+    fn as_string(&self) -> String {
+        format!("{}_{}", self.path.as_string(), self.direction.as_string())
+    }
+}
+
+impl fmt::Display for OrderedIndexField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.path, self.direction)
+    }
+}
+
+impl Serializable for OrderedIndexField {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let path = IndexPath::read_from(reader)?;
+        let order = IndexDirection::read_from(reader)?;
+        Ok(OrderedIndexField {
+            path,
+            direction: order,
+        })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        self.path.write_to(writer);
+        self.direction.write_to(writer);
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct IndexPath {
+    pub(crate) components: Vec<String>,
+}
+
+impl IndexPath {
+    fn as_string(&self) -> String {
+        self.components.join(".")
+    }
+}
+
+impl fmt::Display for IndexPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_string())
+    }
+}
+
+impl Into<IndexPath> for &str {
+    fn into(self) -> IndexPath {
+        IndexPath {
+            components: vec![self.to_string()],
+        }
+    }
+}
+
+impl Into<IndexPath> for Vec<&str> {
+    fn into(self) -> IndexPath {
+        IndexPath {
+            components: self.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+}
+
+impl Serializable for IndexPath {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let size = reader.read_varint_u64()? as usize;
+        let mut components = Vec::with_capacity(size);
+        for _ in 0..size {
+            components.push(reader.read_str()?.to_string());
+        }
+        Ok(IndexPath { components })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u64(self.components.len() as u64);
+        for component in &self.components {
+            writer.write_str(component);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum IndexDefinition {
+    Regular(Vec<OrderedIndexField>),
+}
+
+impl IndexDefinition {
+    pub fn as_string(&self) -> String {
+        match self {
+            IndexDefinition::Regular(fields) => {
+                let field_strings: Vec<String> = fields.iter().map(|f| f.as_string()).collect();
+                field_strings.join("_")
+            }
+        }
+    }
+}
+
+impl fmt::Display for IndexDefinition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndexDefinition::Regular(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|field| field.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Regular({})", fields)
+            }
+        }
+    }
+}
+
+mod index_definition_tags {
+    pub(super) const REGULAR: u8 = 0;
+}
+
+impl Serializable for IndexDefinition {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            index_definition_tags::REGULAR => Ok(IndexDefinition::Regular(
+                Vec::<OrderedIndexField>::read_from(reader)?,
+            )),
+            _ => Err(invalid_data(format!(
+                "Invalid IndexDefinition tag: {}",
+                tag
+            ))),
+        }
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        match self {
+            IndexDefinition::Regular(keys) => {
+                writer.write_u8(index_definition_tags::REGULAR);
+                keys.write_to(writer);
+            }
+        }
+    }
+}
+
 /// Describes a single index within a collection.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct IndexMetadata {
     /// Unique identifier for the index.
     pub id: u32,
-    /// Name of the index (e.g., "by_name").
-    pub name: String,
-    /// List of fields and their orderings that comprise the index.
-    pub fields: Vec<(String, Order)>,
+    /// The index definition.
+    pub definition: IndexDefinition,
     /// Timestamp when the index was created.
     pub created_at: u64,
-    /// Timestamp when the index was dropped (if applicable).
+    /// Timestamp when the index was queryable.
+    pub queryable_at: Option<u64>,
+    /// Timestamp when the index was dropped.
     pub dropped_at: Option<u64>,
+    /// Additional index options.
+    pub options: IndexOptions,
 }
 
 impl IndexMetadata {
+    pub fn new(id: u32, definition: IndexDefinition, created_at: u64) -> Self {
+        IndexMetadata {
+            id,
+            definition,
+            created_at,
+            queryable_at: None,
+            dropped_at: None,
+            options: IndexOptions::default(),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        if let Some(name) = &self.options.name {
+            name.clone()
+        } else {
+            self.definition.as_string()
+        }
+    }
+
+    pub fn is_equivalent_to(&self, definition: &IndexDefinition, options: &IndexOptions) -> bool {
+        self.definition == *definition && self.options.is_equivalent_to(options)
+    }
+
     fn was_created_at(&self, snapshot: u64) -> bool {
         self.created_at <= snapshot
     }
@@ -475,31 +831,28 @@ impl IndexMetadata {
 impl Serializable for IndexMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let id = reader.read_varint_u32()?;
-        let name = reader.read_str()?.to_string();
-        let fields = Vec::<(String, Order)>::read_from(reader)?;
+        let definition = IndexDefinition::read_from(reader)?;
         let created_at = reader.read_varint_u64()?;
-        let dropped_at = if reader.read_u8()? == 1 {
-            Some(reader.read_varint_u64()?)
-        } else {
-            None
-        };
-        Ok(IndexMetadata { id, name, fields, created_at, dropped_at })
+        let queryable_at = Option::<u64>::read_from(&reader)?;
+        let dropped_at = Option::<u64>::read_from(&reader)?;
+        let config = IndexOptions::read_from(reader)?;
+        Ok(IndexMetadata {
+            id,
+            definition,
+            created_at,
+            queryable_at,
+            dropped_at,
+            options: config,
+        })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         writer.write_varint_u32(self.id);
-        writer.write_str(&self.name);
-        self.fields.write_to(writer);
+        self.definition.write_to(writer);
         writer.write_varint_u64(self.created_at);
-        match self.dropped_at {
-            Some(ts) => {
-                writer.write_u8(1);
-                writer.write_varint_u64(ts);
-            }
-            None => {
-                writer.write_u8(0);
-            }
-        }
+        self.queryable_at.write_to(writer);
+        self.dropped_at.write_to(writer);
+        self.options.write_to(writer);
     }
 }
 
@@ -509,25 +862,94 @@ mod tests {
     use crate::io::serializable::check_serialization_round_trip;
 
     #[test]
+    fn test_index_name_formatting_single_asc_field() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let index = IndexMetadata::new(0, definition, 1627846261);
+        assert_eq!(index.name(), "name_1");
+    }
+
+    #[test]
+    fn test_index_name_formatting_single_desc_field() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::desc("age")]);
+        let index = IndexMetadata::new(0, definition, 1627846261);
+        assert_eq!(index.name(), "age_-1");
+    }
+
+    #[test]
+    fn test_index_name_formatting_multiple_fields() {
+        let definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc("name"),
+            OrderedIndexField::desc("age"),
+        ]);
+        let index = IndexMetadata::new(0, definition, 1627846261);
+        assert_eq!(index.name(), "name_1_age_-1");
+    }
+
+    #[test]
+    fn test_index_name_formatting_nested_path() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc(IndexPath {
+            components: vec!["address".to_string(), "city".to_string()],
+        })]);
+        let index = IndexMetadata::new(0, definition, 1627846261);
+        assert_eq!(index.name(), "address.city_1");
+    }
+
+    #[test]
+    fn test_index_name_formatting_mixed_nested_paths() {
+        let definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc(IndexPath {
+                components: vec!["address".to_string(), "city".to_string()],
+            }),
+            OrderedIndexField::desc("score"),
+        ]);
+        let index = IndexMetadata::new(0, definition, 1627846261);
+        assert_eq!(index.name(), "address.city_1_score_-1");
+    }
+
+    #[test]
+    fn test_index_definition_display_is_descriptive() {
+        let definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc(IndexPath {
+                components: vec!["address".to_string(), "city".to_string()],
+            }),
+            OrderedIndexField::desc("score"),
+        ]);
+
+        assert_eq!(
+            definition.to_string(),
+            "Regular(address.city ASC, score DESC)"
+        );
+    }
+
+    #[test]
     fn test_index_metadata_serialization() {
         check_serialization_round_trip(IndexMetadata {
             id: 11,
-            name: "by_name".to_string(),
-            fields: vec![
-                ("name".to_string(), Order::Ascending),
-                ("age".to_string(), Order::Descending),
-            ],
+            definition: IndexDefinition::Regular(vec![
+                OrderedIndexField::asc("name"),
+                OrderedIndexField::desc("age"),
+            ]),
             created_at: 1627846261,
+            queryable_at: None,
             dropped_at: None,
+            options: IndexOptions {
+                name: Some("by_name".to_string()),
+            },
         });
 
         check_serialization_round_trip(IndexMetadata {
             id: 12,
-            name: "by_age".to_string(),
-            fields: vec![("age".to_string(), Order::Descending)],
+            definition: IndexDefinition::Regular(vec![OrderedIndexField::desc("age")]),
             created_at: 1627846261,
+            queryable_at: Some(1627846270),
             dropped_at: Some(1627846300),
+            options: IndexOptions::default(),
         });
+    }
+
+    #[test]
+    fn test_index_config_serialization() {
+        check_serialization_round_trip(IndexOptions::default());
     }
 
     #[test]
@@ -560,23 +982,69 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_serialization_round_trip() {
+        let users_definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc("name"),
+            OrderedIndexField::desc("age"),
+        ]);
+        let products_definition =
+            IndexDefinition::Regular(vec![OrderedIndexField::asc(IndexPath {
+                components: vec!["category".to_string(), "name".to_string()],
+            })]);
+
+        let catalog = Catalog::new()
+            .add_collection_with_options(
+                "users",
+                10,
+                100,
+                CollectionOptions {
+                    id_creation_strategy: IdCreationStrategy::Generated,
+                },
+            )
+            .add_index_to_collection(
+                10,
+                1,
+                &users_definition,
+                &IndexOptions {
+                    name: Some("by_name".to_string()),
+                },
+                110,
+            )
+            .add_index_to_collection(
+                10,
+                2,
+                &IndexDefinition::Regular(vec![OrderedIndexField::desc("age")]),
+                &IndexOptions {
+                    name: Some("by_age".to_string()),
+                },
+                120,
+            )
+            .drop_index(10, 2, 150)
+            .add_collection("products", 11, 200)
+            .add_index_to_collection(11, 1, &products_definition, &IndexOptions::default(), 210)
+            .drop_collection(11, 300);
+
+        check_serialization_round_trip(catalog);
+    }
+
+    #[test]
     fn test_get_collection_at() {
         let catalog = Catalog::new()
             .add_collection("users", 10, 100)
             .add_collection("products", 11, 200);
-        
+
         // Before creation
         assert!(catalog.get_collection_at(10, 99).is_none());
         assert!(catalog.get_collection_at(11, 199).is_none());
-        
+
         // At creation time
         assert!(catalog.get_collection_at(10, 100).is_some());
         assert!(catalog.get_collection_at(11, 200).is_some());
-        
+
         // After creation
         assert!(catalog.get_collection_at(10, 150).is_some());
         assert!(catalog.get_collection_at(11, 300).is_some());
-        
+
         // Non-existent collection
         assert!(catalog.get_collection_at(99, 100).is_none());
     }
@@ -586,44 +1054,225 @@ mod tests {
         let catalog = Catalog::new()
             .add_collection("users", 10, 100)
             .drop_collection(10, 300);
-        
+
         // Before creation
         assert!(catalog.get_collection_at(10, 99).is_none());
-        
+
         // At creation time
         assert!(catalog.get_collection_at(10, 100).is_some());
-        
+
         // Between creation and drop
         assert!(catalog.get_collection_at(10, 200).is_some());
         assert!(catalog.get_collection_at(10, 299).is_some());
-        
+
         // At drop time (dropped_at > snapshot, so ts=300 means dropped)
         assert!(catalog.get_collection_at(10, 300).is_none());
-        
+
         // After drop
         assert!(catalog.get_collection_at(10, 400).is_none());
+    }
+
+    #[test]
+    fn test_drop_index_preserves_metadata_and_removes_active_lookup() {
+        let metadata = create_collections_with_indexes();
+
+        let before_drop = metadata.get_index_by_name("by_name").unwrap();
+        assert_eq!(before_drop.id, 1);
+        assert_eq!(metadata.active_indexes().len(), 2);
+
+        let dropped = metadata.drop_index(1, 1627846300);
+
+        assert!(dropped.get_index_by_name("by_name").is_none());
+        assert_eq!(dropped.active_indexes().len(), 1);
+        assert_eq!(dropped.active_indexes()[0].name(), "by_price");
+
+        let dropped_index = dropped.get_index_by_id(1).unwrap();
+        assert_eq!(dropped_index.name(), "by_name");
+        assert_eq!(dropped_index.created_at, 1627846262);
+        assert_eq!(dropped_index.dropped_at, Some(1627846300));
+        assert_eq!(
+            dropped_index.definition,
+            IndexDefinition::Regular(vec![
+                OrderedIndexField::asc("name"),
+                OrderedIndexField::desc("age"),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_get_index_at_respects_mvcc_boundaries() {
+        let metadata = create_collections_with_indexes();
+
+        assert!(metadata.get_index_at(1, 1627846261).is_none());
+        assert!(metadata.get_index_at(1, 1627846262).is_some());
+        assert!(metadata.get_index_at(1, 1627846299).is_some());
+
+        let dropped = metadata.drop_index(1, 1627846300);
+        assert!(dropped.get_index_at(1, 1627846299).is_some());
+        assert!(dropped.get_index_at(1, 1627846300).is_none());
+        assert!(dropped.get_index_at(1, 1627846301).is_none());
+
+        assert!(metadata.get_index_at(99, 1627846262).is_none());
+    }
+
+    #[test]
+    fn test_collection_or_index_exist_at_respects_mvcc_boundaries() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_index_to_collection(
+                10,
+                1,
+                &definition,
+                &IndexOptions {
+                    name: Some("by_name".to_string()),
+                },
+                200,
+            );
+
+        assert!(!catalog.collection_or_index_exist_at(10, 0, 99));
+        assert!(catalog.collection_or_index_exist_at(10, 0, 100));
+        assert!(catalog.collection_or_index_exist_at(10, 0, 250));
+
+        assert!(!catalog.collection_or_index_exist_at(10, 1, 199));
+        assert!(catalog.collection_or_index_exist_at(10, 1, 200));
+        assert!(catalog.collection_or_index_exist_at(10, 1, 299));
+
+        let dropped_index_catalog = catalog.drop_index(10, 1, 300);
+        assert!(dropped_index_catalog.collection_or_index_exist_at(10, 0, 300));
+        assert!(dropped_index_catalog.collection_or_index_exist_at(10, 1, 299));
+        assert!(!dropped_index_catalog.collection_or_index_exist_at(10, 1, 300));
+        assert!(!dropped_index_catalog.collection_or_index_exist_at(10, 1, 301));
+
+        let dropped_collection_catalog = dropped_index_catalog.drop_collection(10, 400);
+        assert!(dropped_collection_catalog.collection_or_index_exist_at(10, 0, 399));
+        assert!(!dropped_collection_catalog.collection_or_index_exist_at(10, 0, 400));
+        assert!(!dropped_collection_catalog.collection_or_index_exist_at(10, 1, 400));
+
+        assert!(!catalog.collection_or_index_exist_at(10, 99, 250));
+        assert!(!catalog.collection_or_index_exist_at(99, 0, 250));
+        assert!(!catalog.collection_or_index_exist_at(99, 1, 250));
+    }
+
+    #[test]
+    fn test_rename_collection_updates_name_lookup_and_preserves_id() {
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_collection("products", 11, 200);
+
+        let renamed = catalog.rename_collection(10, "customers");
+
+        assert!(renamed.get_collection_by_name("users").is_none());
+
+        let renamed_collection = renamed.get_collection_by_name("customers").unwrap();
+        assert_eq!(renamed_collection.id, 10);
+        assert_eq!(renamed_collection.name, "customers");
+        assert_eq!(renamed.get_collection_by_id(&10).unwrap().name, "customers");
+        assert_eq!(renamed.next_collection_id, 12);
+    }
+
+    #[test]
+    fn test_drop_collection_removes_name_lookup_but_preserves_id_lookup() {
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_collection("products", 11, 200);
+
+        let dropped = catalog.drop_collection(10, 300);
+
+        assert!(dropped.get_collection_by_name("users").is_none());
+
+        let dropped_collection = dropped.get_collection_by_id(&10).unwrap();
+        assert_eq!(dropped_collection.name, "users");
+        assert_eq!(dropped_collection.dropped_at, Some(300));
+        assert_eq!(dropped.next_collection_id, 12);
+    }
+
+    #[test]
+    fn test_list_collections_excludes_dropped_collections() {
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_collection("products", 11, 200)
+            .drop_collection(10, 300);
+
+        let collection_names: Vec<_> = catalog
+            .list_collections()
+            .map(|collection| collection.name.as_str())
+            .collect();
+
+        assert_eq!(collection_names, vec!["products"]);
+    }
+
+    #[test]
+    fn test_add_index_to_collection_with_explicit_name() {
+        let definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc("name"),
+            OrderedIndexField::desc("age"),
+        ]);
+        let options = IndexOptions {
+            name: Some("by_name".to_string()),
+        };
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_index_to_collection(10, 1, &definition, &options, 200);
+
+        let collection = catalog.get_collection_by_id(&10).unwrap();
+        assert_eq!(collection.next_index_id, 2);
+
+        let index = collection.get_index_by_id(1).unwrap();
+        assert_eq!(index.name(), "by_name");
+        assert_eq!(index.definition, definition);
+        assert_eq!(index.options, options);
+        assert_eq!(index.created_at, 200);
+        assert_eq!(index.queryable_at, None);
+        assert_eq!(index.dropped_at, None);
+    }
+
+    #[test]
+    fn test_add_index_to_collection_generates_name_from_definition() {
+        let definition = IndexDefinition::Regular(vec![
+            OrderedIndexField::asc(IndexPath {
+                components: vec!["profile".to_string(), "email".to_string()],
+            }),
+            OrderedIndexField::desc("score"),
+        ]);
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 100)
+            .add_index_to_collection(10, 1, &definition, &IndexOptions::default(), 200);
+
+        let collection = catalog.get_collection_by_id(&10).unwrap();
+        assert_eq!(collection.next_index_id, 2);
+
+        let index = collection.get_index_by_id(1).unwrap();
+        assert_eq!(index.name(), "profile.email_1_score_-1");
+        assert_eq!(index.definition, definition);
+        assert_eq!(index.queryable_at, None);
+        assert_eq!(index.dropped_at, None);
     }
 
     fn create_collections_with_indexes() -> CollectionMetadata {
         CollectionMetadata::new(2, "products", 1627846261, CollectionOptions::default())
             .add_index(IndexMetadata {
-                id: 0,
-                name: "by_name".to_string(),
-                fields: vec![
-                    ("name".to_string(), Order::Ascending),
-                    ("age".to_string(), Order::Descending),
-                ],
+                id: 1,
+                definition: IndexDefinition::Regular(vec![
+                    OrderedIndexField::asc("name"),
+                    OrderedIndexField::desc("age"),
+                ]),
                 created_at: 1627846262,
+                queryable_at: None,
                 dropped_at: None,
+                options: IndexOptions {
+                    name: Some("by_name".to_string()),
+                },
             })
             .add_index(IndexMetadata {
-                id: 1,
-                name: "by_price".to_string(),
-                fields: vec![
-                    ("price".to_string(), Order::Ascending),
-                ],
+                id: 2,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField::asc("price")]),
                 created_at: 1627846263,
+                queryable_at: None,
                 dropped_at: None,
+                options: IndexOptions {
+                    name: Some("by_price".to_string()),
+                },
             })
     }
 }

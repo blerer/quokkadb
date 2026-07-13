@@ -1,9 +1,9 @@
 use bson::{doc, Bson, Document};
+use quokkadb::collection::{Collection, UpdateOptions};
 use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
-use quokkadb::collection::{Collection, UpdateOptions};
 
 fn get_sample_data() -> Vec<Document> {
     vec![
@@ -22,7 +22,7 @@ fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
     let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
 }
@@ -42,7 +42,11 @@ fn test_set_simple() {
     let collection = db.collection("test");
 
     collection
-        .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } }, UpdateOptions::default())
+        .update_one(
+            doc! { "_id": 1 },
+            doc! { "$set": { "qty": 30 } },
+            UpdateOptions::default(),
+        )
         .unwrap();
 
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -79,7 +83,7 @@ fn test_unset() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$unset": { "qty": "", "size.uom": "" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -99,7 +103,7 @@ fn test_inc() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$inc": { "qty": 5, "views": 1 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -117,7 +121,7 @@ fn test_mul() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$mul": { "qty": 2.0, "views": 10 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -135,7 +139,7 @@ fn test_rename() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$rename": { "qty": "quantity", "size.h": "size.height" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -158,7 +162,7 @@ fn test_min_max() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$min": { "qty": 20 }, "$max": {"stock": 100} },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -169,7 +173,7 @@ fn test_min_max() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$min": { "qty": 22 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -179,7 +183,7 @@ fn test_min_max() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$max": { "qty": 50 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -214,7 +218,7 @@ fn test_add_to_set() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$addToSet": { "tags": "new" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -227,7 +231,7 @@ fn test_add_to_set() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$addToSet": { "tags": "red" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -243,7 +247,7 @@ fn test_push() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$push": { "tags": "new" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -256,7 +260,7 @@ fn test_push() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$push": { "comments": "first" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -275,7 +279,7 @@ fn test_pop() {
         .update_one(
             doc! { "_id": 1 },
             doc! { "$pop": { "tags": 1 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
@@ -287,7 +291,7 @@ fn test_pop() {
         .update_one(
             doc! { "_id": 2 },
             doc! { "$pop": { "tags": -1 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
     let doc = find_one(&collection, doc! { "_id": 2 }).unwrap();
@@ -304,14 +308,16 @@ fn test_pull() {
         .update_one(
             doc! { "_id": 3 },
             doc! { "$pull": { "tags": "blank" } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
     let doc = find_one(&collection, doc! { "_id": 3 }).unwrap();
     let tags = doc.get_array("tags").unwrap();
     assert_eq!(
-        tags.iter().map(|s| s.as_str().unwrap()).collect::<BTreeSet<_>>(),
+        tags.iter()
+            .map(|s| s.as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
         vec!["red", "plain"].into_iter().collect()
     );
 }
@@ -325,7 +331,7 @@ fn test_pull_all() {
         .update_one(
             doc! { "_id": 3 },
             doc! { "$pullAll": { "tags": ["red", "plain"] } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -343,7 +349,7 @@ fn test_pull_from_array_of_documents() {
         .update_one(
             doc! { "_id": 6 },
             doc! { "$pull": { "ratings": { "score": 8 } } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
 
@@ -380,13 +386,16 @@ fn test_update_many() {
     let collection = db.collection("test");
 
     // Set status to 'C' and inc qty for all 'A' status documents
-    collection
+    let result = collection
         .update_many(
             doc! { "status": "A" },
             doc! { "$set": { "status": "C" }, "$inc": { "qty": 10 } },
-            UpdateOptions::default()
+            UpdateOptions::default(),
         )
         .unwrap();
+    assert_eq!(result.matched_count, 4);
+    assert_eq!(result.modified_count, 4);
+    assert_eq!(result.upserted_id, None);
 
     let results: Vec<Document> = collection
         .find(doc! { "status": "C" })
@@ -512,7 +521,9 @@ fn test_add_to_set_with_each() {
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
     let tags = doc.get_array("tags").unwrap();
     assert_eq!(
-        tags.iter().map(|s| s.as_str().unwrap()).collect::<BTreeSet<_>>(),
+        tags.iter()
+            .map(|s| s.as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
         vec!["blank", "red", "green"].into_iter().collect()
     );
 }
@@ -635,12 +646,8 @@ fn test_positional_push_to_nested_array() {
     assert_eq!(
         ratings,
         &vec![
-            Bson::from(
-                doc! { "user": "A", "score": 8, "comments": ["a comment"] }
-            ),
-            Bson::from(
-                doc! { "user": "B", "score": 7, "comments": ["a comment"] }
-            ),
+            Bson::from(doc! { "user": "A", "score": 8, "comments": ["a comment"] }),
+            Bson::from(doc! { "user": "B", "score": 7, "comments": ["a comment"] }),
         ]
     );
 }
@@ -649,24 +656,28 @@ fn test_positional_push_to_nested_array() {
 fn test_nested_positional_operators_set() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
-    collection.insert_one(doc! {
-        "_id": 100,
-        "schools": [
-            { "classes": [
-                { "students": [ {"name": "A"}, {"name": "B"} ] },
-                { "students": [ {"name": "C"} ] }
-            ] },
-            { "classes": [
-                { "students": [ {"name": "D"} ] }
-            ] }
-        ]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 100,
+            "schools": [
+                { "classes": [
+                    { "students": [ {"name": "A"}, {"name": "B"} ] },
+                    { "students": [ {"name": "C"} ] }
+                ] },
+                { "classes": [
+                    { "students": [ {"name": "D"} ] }
+                ] }
+            ]
+        })
+        .unwrap();
 
-    collection.update_one(
-        doc! { "_id": 100 },
-        doc! { "$set": { "schools.$[].classes.$[].students.$[].passed": true } },
-        UpdateOptions::default()
-    ).unwrap();
+    collection
+        .update_one(
+            doc! { "_id": 100 },
+            doc! { "$set": { "schools.$[].classes.$[].students.$[].passed": true } },
+            UpdateOptions::default(),
+        )
+        .unwrap();
 
     let doc = find_one(&collection, doc! { "_id": 100 }).unwrap();
     let expected = doc! {
@@ -807,7 +818,7 @@ fn test_filtered_positional_inc() {
     );
     assert_eq!(
         ratings[1].as_document().unwrap().get_i32("score").unwrap(),
-        8  // was 7, incremented by 1
+        8 // was 7, incremented by 1
     );
 }
 
@@ -815,19 +826,21 @@ fn test_filtered_positional_inc() {
 fn test_filtered_positional_multiple_filters() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
-    collection.insert_one(doc! {
-        "_id": 300,
-        "grades": [
-            { "subject": "math", "score": 80 },
-            { "subject": "english", "score": 90 },
-            { "subject": "math", "score": 70 },
-        ]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 300,
+            "grades": [
+                { "subject": "math", "score": 80 },
+                { "subject": "english", "score": 90 },
+                { "subject": "math", "score": 70 },
+            ]
+        })
+        .unwrap();
 
     // Update only math subjects with score >= 75
     let options = UpdateOptions {
         array_filters: Some(vec![
-            doc! { "g.subject": "math", "g.score": { "$gte": 75 } }
+            doc! { "g.subject": "math", "g.score": { "$gte": 75 } },
         ]),
         ..Default::default()
     };
@@ -840,7 +853,8 @@ fn test_filtered_positional_multiple_filters() {
         .unwrap();
 
     let doc = find_one(&collection, doc! { "_id": 300 }).unwrap();
-    assert_eq!(&doc,
+    assert_eq!(
+        &doc,
         &doc! {
             "_id": 300,
             "grades": [
@@ -880,24 +894,26 @@ fn test_filtered_positional_no_matching_elements() {
 fn test_filtered_positional_nested_arrays() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
-    collection.insert_one(doc! {
-        "_id": 301,
-        "departments": [
-            {
-                "name": "engineering",
-                "employees": [
-                    { "name": "Alice", "level": 3 },
-                    { "name": "Bob", "level": 2 },
-                ]
-            },
-            {
-                "name": "sales",
-                "employees": [
-                    { "name": "Carol", "level": 4 },
-                ]
-            }
-        ]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 301,
+            "departments": [
+                {
+                    "name": "engineering",
+                    "employees": [
+                        { "name": "Alice", "level": 3 },
+                        { "name": "Bob", "level": 2 },
+                    ]
+                },
+                {
+                    "name": "sales",
+                    "employees": [
+                        { "name": "Carol", "level": 4 },
+                    ]
+                }
+            ]
+        })
+        .unwrap();
 
     // Update all employees with level >= 3 across all departments
     let options = UpdateOptions {
@@ -914,13 +930,32 @@ fn test_filtered_positional_nested_arrays() {
 
     let doc = find_one(&collection, doc! { "_id": 301 }).unwrap();
     let departments = doc.get_array("departments").unwrap();
-    
-    let eng_employees = departments[0].as_document().unwrap().get_array("employees").unwrap();
-    assert!(eng_employees[0].as_document().unwrap().get_bool("senior").unwrap());
-    assert!(!eng_employees[1].as_document().unwrap().contains_key("senior"));
-    
-    let sales_employees = departments[1].as_document().unwrap().get_array("employees").unwrap();
-    assert!(sales_employees[0].as_document().unwrap().get_bool("senior").unwrap());
+
+    let eng_employees = departments[0]
+        .as_document()
+        .unwrap()
+        .get_array("employees")
+        .unwrap();
+    assert!(eng_employees[0]
+        .as_document()
+        .unwrap()
+        .get_bool("senior")
+        .unwrap());
+    assert!(!eng_employees[1]
+        .as_document()
+        .unwrap()
+        .contains_key("senior"));
+
+    let sales_employees = departments[1]
+        .as_document()
+        .unwrap()
+        .get_array("employees")
+        .unwrap();
+    assert!(sales_employees[0]
+        .as_document()
+        .unwrap()
+        .get_bool("senior")
+        .unwrap());
 }
 
 #[test]
@@ -944,14 +979,26 @@ fn test_filtered_positional_update_many() {
     // Doc 7: scores 9 and 5
     let doc7 = find_one(&collection, doc! { "_id": 7 }).unwrap();
     let ratings7 = doc7.get_array("ratings").unwrap();
-    assert!(ratings7[0].as_document().unwrap().get_bool("excellent").unwrap());
+    assert!(ratings7[0]
+        .as_document()
+        .unwrap()
+        .get_bool("excellent")
+        .unwrap());
     assert!(!ratings7[1].as_document().unwrap().contains_key("excellent"));
 
     // Doc 8: scores 10 and 9
     let doc8 = find_one(&collection, doc! { "_id": 8 }).unwrap();
     let ratings8 = doc8.get_array("ratings").unwrap();
-    assert!(ratings8[0].as_document().unwrap().get_bool("excellent").unwrap());
-    assert!(ratings8[1].as_document().unwrap().get_bool("excellent").unwrap());
+    assert!(ratings8[0]
+        .as_document()
+        .unwrap()
+        .get_bool("excellent")
+        .unwrap());
+    assert!(ratings8[1]
+        .as_document()
+        .unwrap()
+        .get_bool("excellent")
+        .unwrap());
 
     // Doc 6: scores 8 and 7 - neither >= 9
     let doc6 = find_one(&collection, doc! { "_id": 6 }).unwrap();
@@ -1036,10 +1083,12 @@ fn test_push_with_sort_ascending() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! {
-        "_id": 400,
-        "scores": [5, 3, 8]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 400,
+            "scores": [5, 3, 8]
+        })
+        .unwrap();
 
     collection
         .update_one(
@@ -1060,10 +1109,12 @@ fn test_push_with_sort_descending() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! {
-        "_id": 401,
-        "scores": [5, 3, 8]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 401,
+            "scores": [5, 3, 8]
+        })
+        .unwrap();
 
     collection
         .update_one(
@@ -1084,13 +1135,15 @@ fn test_push_with_sort_by_field() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! {
-        "_id": 402,
-        "items": [
-            { "name": "b", "price": 20 },
-            { "name": "a", "price": 10 },
-        ]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 402,
+            "items": [
+                { "name": "b", "price": 20 },
+                { "name": "a", "price": 10 },
+            ]
+        })
+        .unwrap();
 
     collection
         .update_one(
@@ -1102,9 +1155,18 @@ fn test_push_with_sort_by_field() {
 
     let doc = find_one(&collection, doc! { "_id": 402 }).unwrap();
     let items = doc.get_array("items").unwrap();
-    assert_eq!(items[0].as_document().unwrap().get_i32("price").unwrap(), 10);
-    assert_eq!(items[1].as_document().unwrap().get_i32("price").unwrap(), 15);
-    assert_eq!(items[2].as_document().unwrap().get_i32("price").unwrap(), 20);
+    assert_eq!(
+        items[0].as_document().unwrap().get_i32("price").unwrap(),
+        10
+    );
+    assert_eq!(
+        items[1].as_document().unwrap().get_i32("price").unwrap(),
+        15
+    );
+    assert_eq!(
+        items[2].as_document().unwrap().get_i32("price").unwrap(),
+        20
+    );
 }
 
 #[test]
@@ -1153,10 +1215,12 @@ fn test_push_with_sort_and_slice() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! {
-        "_id": 403,
-        "top_scores": [50, 30]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 403,
+            "top_scores": [50, 30]
+        })
+        .unwrap();
 
     // Add scores, sort descending, keep top 3
     collection
@@ -1178,10 +1242,12 @@ fn test_push_with_position_and_slice() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! {
-        "_id": 404,
-        "queue": ["b", "c", "d"]
-    }).unwrap();
+    collection
+        .insert_one(doc! {
+            "_id": 404,
+            "queue": ["b", "c", "d"]
+        })
+        .unwrap();
 
     // Insert at position 0, then keep last 3
     collection
@@ -1226,7 +1292,10 @@ fn test_bit_xor_toggle() {
     let collection = db.collection("test");
 
     // XOR twice with same value should return original
-    let original_qty = find_one(&collection, doc! { "_id": 1 }).unwrap().get_i32("qty").unwrap();
+    let original_qty = find_one(&collection, doc! { "_id": 1 })
+        .unwrap()
+        .get_i32("qty")
+        .unwrap();
 
     collection
         .update_one(
@@ -1253,7 +1322,9 @@ fn test_bit_combined_and_or_xor() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    collection.insert_one(doc! { "_id": 500, "flags": 0b11110000_i32 }).unwrap();
+    collection
+        .insert_one(doc! { "_id": 500, "flags": 0b11110000_i32 })
+        .unwrap();
 
     // and: 0b11110000 & 0b11111100 = 0b11110000
     // or:  0b11110000 | 0b00000011 = 0b11110011
@@ -1769,14 +1840,20 @@ fn test_upsert_insert_when_no_match() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
-    collection
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
+    let result = collection
         .update_one(
             doc! { "_id": 100 },
             doc! { "$set": { "item": "new_item", "qty": 10 } },
             options,
         )
         .unwrap();
+    assert_eq!(result.matched_count, 0);
+    assert_eq!(result.modified_count, 0);
+    assert_eq!(result.upserted_id, Some(100.into()));
 
     let doc = find_one(&collection, doc! { "_id": 100 }).unwrap();
     assert_eq!(doc.get_i32("_id").unwrap(), 100);
@@ -1789,14 +1866,16 @@ fn test_upsert_updates_when_match_exists() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
-    collection
-        .update_one(
-            doc! { "_id": 1 },
-            doc! { "$set": { "qty": 999 } },
-            options,
-        )
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
+    let result = collection
+        .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 999 } }, options)
         .unwrap();
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+    assert_eq!(result.upserted_id, None);
 
     let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
     assert_eq!(doc.get_i32("qty").unwrap(), 999);
@@ -1811,7 +1890,10 @@ fn test_upsert_generates_id_when_not_in_filter() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "item": "unique_item" },
@@ -1831,7 +1913,10 @@ fn test_upsert_preserves_equality_filter_fields() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "item": "gadget", "status": "P", "category": "electronics" },
@@ -1852,7 +1937,10 @@ fn test_upsert_with_nested_filter_fields() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "info.type": "special", "info.level": 5 },
@@ -1872,7 +1960,10 @@ fn test_upsert_inc_initializes_missing_field() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 200 },
@@ -1891,7 +1982,10 @@ fn test_upsert_mul_initializes_to_zero() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 201 },
@@ -1909,7 +2003,10 @@ fn test_upsert_with_push_creates_array() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 202 },
@@ -1929,7 +2026,10 @@ fn test_upsert_with_add_to_set_creates_array() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 203 },
@@ -1950,14 +2050,20 @@ fn test_upsert_update_many_inserts_one_when_no_match() {
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
-    collection
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
+    let result = collection
         .update_many(
             doc! { "status": "NONEXISTENT" },
             doc! { "$set": { "processed": true } },
             options,
         )
         .unwrap();
+    assert_eq!(result.matched_count, 0);
+    assert_eq!(result.modified_count, 0);
+    assert!(result.upserted_id.is_some());
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count + 1);
@@ -1973,7 +2079,10 @@ fn test_upsert_update_many_updates_all_when_matches_exist() {
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_many(
             doc! { "status": "A" },
@@ -1998,7 +2107,10 @@ fn test_upsert_with_min_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 204 },
@@ -2016,7 +2128,10 @@ fn test_upsert_with_max_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 205 },
@@ -2034,7 +2149,10 @@ fn test_upsert_with_current_date() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 206 },
@@ -2052,7 +2170,10 @@ fn test_upsert_with_rename_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 207, "oldName": "value" },
@@ -2071,7 +2192,10 @@ fn test_upsert_with_bit_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 208 },
@@ -2089,7 +2213,10 @@ fn test_upsert_combines_filter_and_update_fields() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "region": "west", "type": "premium" },
@@ -2110,7 +2237,10 @@ fn test_upsert_with_complex_nested_structure() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 209 },
@@ -2143,7 +2273,10 @@ fn test_set_on_insert_applies_on_upsert_insert() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 300 },
@@ -2167,7 +2300,10 @@ fn test_set_on_insert_ignored_on_update() {
     let doc_before = find_one(&collection, doc! { "_id": 1 }).unwrap();
     let original_qty = doc_before.get_i32("qty").unwrap();
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 1 },
@@ -2187,7 +2323,10 @@ fn test_set_on_insert_alone_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 301 },
@@ -2209,7 +2348,10 @@ fn test_set_on_insert_with_nested_fields() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 302 },
@@ -2231,7 +2373,10 @@ fn test_set_on_insert_combined_with_inc() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 303 },
@@ -2274,7 +2419,10 @@ fn test_set_on_insert_update_many_inserts_one() {
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_many(
             doc! { "category": "nonexistent" },
@@ -2296,7 +2444,10 @@ fn test_set_on_insert_update_many_ignores_on_existing() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_many(
             doc! { "status": "A" },
@@ -2345,7 +2496,10 @@ fn test_upsert_with_unset_on_new_document() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
 
-    let options = UpdateOptions { upsert: true, ..Default::default() };
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
     collection
         .update_one(
             doc! { "_id": 210, "name": "test" },

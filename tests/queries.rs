@@ -1,9 +1,9 @@
 use bson::{doc, Document};
+use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
 use tempfile::TempDir;
-use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 
 fn get_sample_data() -> Vec<Document> {
     vec![
@@ -24,16 +24,13 @@ fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
     let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
 }
 
 fn get_ids(results: &[Document]) -> Vec<i32> {
-    results
-        .iter()
-        .map(|d| d.get_i32("_id").unwrap())
-        .collect()
+    results.iter().map(|d| d.get_i32("_id").unwrap()).collect()
 }
 
 fn assert_ids(results: &[Document], expected_ids: &[i32]) {
@@ -332,10 +329,7 @@ fn test_sort() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    let qtys: Vec<i32> = results
-        .iter()
-        .map(|d| d.get_i32("qty").unwrap())
-        .collect();
+    let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
     assert_eq!(qtys, vec![100, 85, 75, 50, 45, 30, 25, 20]);
 }
 
@@ -354,10 +348,7 @@ fn test_skip_limit() {
         .collect();
 
     assert_eq!(results.len(), 3);
-    let qtys: Vec<i32> = results
-        .iter()
-        .map(|d| d.get_i32("qty").unwrap())
-        .collect();
+    let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
     assert_eq!(qtys, vec![30, 45, 50]);
 }
 
@@ -375,18 +366,9 @@ fn test_complex_query() {
         .collect();
 
     assert_eq!(results.len(), 3);
-    assert_eq!(
-        results[0],
-        doc! { "item": "journal", "qty": 25 }
-    );
-    assert_eq!(
-        results[1],
-        doc! { "item": "postcard", "qty": 45 }
-    );
-    assert_eq!(
-        results[2],
-        doc! { "item": "mat", "qty": 85 }
-    );
+    assert_eq!(results[0], doc! { "item": "journal", "qty": 25 });
+    assert_eq!(results[1], doc! { "item": "postcard", "qty": 45 });
+    assert_eq!(results[2], doc! { "item": "mat", "qty": 85 });
 }
 
 #[test]
@@ -479,7 +461,7 @@ fn test_multi_collection_queries() {
     let (_dir, db) = setup_db_with_data(); // This sets up collection "test" with sample data
 
     // Create and populate a second collection
-    let collection2 = db.collection("test2");
+    let collection2 = db.collection("test2").create_if_missing();
     let collection2_data = vec![
         doc! { "_id": 101, "item": "widget", "status": "A" },
         doc! { "_id": 102, "item": "gadget", "status": "B" },
@@ -589,10 +571,7 @@ fn test_id_in_query() {
         .map(Result::unwrap)
         .collect();
 
-    let ids: Vec<i32> = results
-        .iter()
-        .map(|d| d.get_i32("_id").unwrap())
-        .collect();
+    let ids: Vec<i32> = results.iter().map(|d| d.get_i32("_id").unwrap()).collect();
     assert_eq!(ids, vec![9, 5, 1]);
 }
 
@@ -706,7 +685,7 @@ fn test_point_query_f64_stored_queried_as_i32() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
     let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
-    let collection = db.collection("float_ids");
+    let collection = db.collection("float_ids").create_if_missing();
 
     // Store documents with f64 _id values that are whole numbers.
     collection

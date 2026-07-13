@@ -1,3 +1,14 @@
+use crate::error;
+use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
+use crate::io::serializable::Serializable;
+use crate::query::tree_node::TreeNode;
+use crate::storage::catalog::{IndexDefinition, IndexDirection, IndexPath, OrderedIndexField};
+use crate::util::bson_utils;
+use crate::util::bson_utils::{BsonKey, TypedKey};
+use crate::util::interval::Interval;
+use bson::spec::ElementType;
+use bson::{Bson, Document, RawArray, RawBsonRef, RawDocument};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -5,25 +16,16 @@ use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
-use bson::{Bson, Document};
-use crate::error;
-use crate::io::byte_reader::ByteReader;
-use crate::io::byte_writer::ByteWriter;
-use crate::io::serializable::Serializable;
-use crate::query::tree_node::TreeNode;
-use crate::util::bson_utils;
-use crate::util::bson_utils::BsonKey;
-use crate::util::interval::Interval;
 
 pub(crate) mod execution;
-pub (crate) mod optimizer;
-pub(crate) mod parser;
-pub(crate) mod logical_plan;
-pub(crate) mod physical_plan;
-pub(crate) mod update;
-mod tree_node;
 #[cfg(test)]
 pub(crate) mod expr_fn;
+pub(crate) mod logical_plan;
+pub(crate) mod optimizer;
+pub(crate) mod parser;
+pub(crate) mod physical_plan;
+mod tree_node;
+pub(crate) mod update;
 #[cfg(test)]
 mod update_fn;
 
@@ -46,7 +48,7 @@ pub enum Expr {
     /// A single comparison (e.g., `$gt: 5`, `$eq: "Alice"`)
     Comparison {
         operator: ComparisonOperator, // `$eq`, `$ne`, `$gt`, `$lt`, etc.
-        value: Arc<Expr>,              // The literal value
+        value: Arc<Expr>,             // The literal value
     },
     /// Represents an interval for range queries
     Interval(Interval<Arc<Expr>>),
@@ -134,7 +136,6 @@ impl TreeNode for Expr {
             Expr::Nor(_) => Arc::new(Expr::Nor(children)),
             Expr::ElemMatch { .. } => Arc::new(Expr::ElemMatch(children)),
             Expr::Interval(interval) => {
-
                 let mut iter = children.into_iter();
 
                 let start_bound = match interval.start_bound() {
@@ -148,7 +149,7 @@ impl TreeNode for Expr {
                     Bound::Unbounded => Bound::Unbounded,
                 };
                 Arc::new(Expr::Interval(Interval::new(start_bound, end_bound)))
-            },
+            }
             Expr::Type { negated, .. } => Arc::new(Expr::Type {
                 bson_type: Self::get_first(children),
                 negated: *negated,
@@ -158,7 +159,11 @@ impl TreeNode for Expr {
                 negated: *negated,
             }),
             Expr::All(..) => {
-                assert_eq!(children.len(), 1, "All operator should have exactly one child");
+                assert_eq!(
+                    children.len(),
+                    1,
+                    "All operator should have exactly one child"
+                );
                 Arc::new(Expr::All(Self::get_first(children)))
             }
             _ => self, // No changes needed for leaf nodes
@@ -210,12 +215,10 @@ impl Expr {
                 value: value.clone(),
             }),
             Expr::Exists(bool) => Arc::new(Expr::Exists(!*bool)),
-            Expr::All(values) => {
-                Arc::new(Expr::Comparison {
-                    operator: ComparisonOperator::Nin,
-                    value: values.clone(),
-                })
-            }
+            Expr::All(values) => Arc::new(Expr::Comparison {
+                operator: ComparisonOperator::Nin,
+                value: values.clone(),
+            }),
             Expr::Type {
                 bson_type,
                 negated: not,
@@ -240,7 +243,7 @@ impl Expr {
                     Arc::new(Expr::Not(Arc::new(self.clone())))
                 }
             }
-            _ => Arc::new(Expr::Not(Arc::new(self.clone())))
+            _ => Arc::new(Expr::Not(Arc::new(self.clone()))),
         }
     }
 }
@@ -286,10 +289,7 @@ impl Serializable for Expr {
             9 => {
                 let bson_type = Arc::new(Self::read_from(reader)?);
                 let negated = reader.read_u8()? == 1;
-                Ok(Expr::Type {
-                    bson_type,
-                    negated,
-                })
+                Ok(Expr::Type { bson_type, negated })
             }
             10 => {
                 let size = Arc::new(Self::read_from(reader)?);
@@ -327,23 +327,20 @@ impl Serializable for Expr {
             Expr::Not(expr) => {
                 writer.write_u8(1);
                 expr.write_to(writer);
-            },
+            }
             Expr::Nor(exprs) => {
                 writer.write_u8(2);
                 exprs.write_to(writer);
-            },
+            }
             Expr::And(exprs) => {
                 writer.write_u8(3);
                 exprs.write_to(writer);
-            },
+            }
             Expr::Or(exprs) => {
                 writer.write_u8(4);
                 exprs.write_to(writer);
-            },
-            Expr::FieldFilters {
-                field,
-                filters,
-            } => {
+            }
+            Expr::FieldFilters { field, filters } => {
                 writer.write_u8(5);
                 field.write_to(writer);
                 filters.write_to(writer);
@@ -352,34 +349,31 @@ impl Serializable for Expr {
                 writer.write_u8(6);
                 operator.write_to(writer);
                 value.write_to(writer);
-            },
+            }
             Expr::Exists(bool) => {
                 writer.write_u8(7);
                 writer.write_u8(if *bool { 1 } else { 0 });
-            },
+            }
             Expr::All(values) => {
                 writer.write_u8(8);
                 values.write_to(writer);
             }
-            Expr::Type {
-                bson_type,
-                negated,
-            } => {
+            Expr::Type { bson_type, negated } => {
                 writer.write_u8(9);
                 bson_type.write_to(writer);
                 writer.write_u8(if *negated { 1 } else { 0 });
-            },
+            }
             Expr::Size { size, negated } => {
                 writer.write_u8(10);
                 size.write_to(writer);
                 writer.write_u8(if *negated { 1 } else { 0 });
-            },
+            }
             Expr::AlwaysTrue => {
                 writer.write_u8(11);
-            },
+            }
             Expr::AlwaysFalse => {
                 writer.write_u8(12);
-            },
+            }
             Expr::Field(path) => {
                 writer.write_u8(13);
                 path.write_to(writer);
@@ -409,34 +403,66 @@ impl Serializable for Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionExpr {
-    Fields { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
-    ArrayElements { children: BTreeMap<PathComponent, Arc<ProjectionExpr>> },
+    Fields {
+        children: BTreeMap<PathComponent, Arc<ProjectionExpr>>,
+    },
+    ArrayElements {
+        children: BTreeMap<PathComponent, Arc<ProjectionExpr>>,
+    },
     Field,
-    Slice { skip: Option<i32>, limit: i32 },
-    ElemMatch { filter: Arc<Expr>, },
+    Slice {
+        skip: Option<i32>,
+        limit: i32,
+    },
+    ElemMatch {
+        filter: Arc<Expr>,
+    },
 }
 
 impl ProjectionExpr {
-
-    fn get_children_for_component_mut<'a, 'b: 'a>(&'a mut self, path: &'b [PathComponent], component: usize) -> error::Result<&'a mut BTreeMap<PathComponent, Arc<ProjectionExpr>>> {
+    fn get_children_for_component_mut<'a, 'b: 'a>(
+        &'a mut self,
+        path: &'b [PathComponent],
+        component: usize,
+    ) -> error::Result<&'a mut BTreeMap<PathComponent, Arc<ProjectionExpr>>> {
         match self {
             ProjectionExpr::Fields { children } => {
-                if component < path.len() && matches!(&path[component], &PathComponent::ArrayElement(_)) {
-                    return Err(error::Error::InvalidRequest(format!("Cannot use the array index {} in path: {}. Expecting a field name.", &path[component], format_path(path))));
+                if component < path.len()
+                    && matches!(&path[component], &PathComponent::ArrayElement(_))
+                {
+                    return Err(error::Error::InvalidRequest(format!(
+                        "Cannot use the array index {} in path: {}. Expecting a field name.",
+                        &path[component],
+                        format_path(path)
+                    )));
                 }
                 Ok(children)
             }
             ProjectionExpr::ArrayElements { children } => {
-                if component < path.len() && matches!(&path[component], &PathComponent::FieldName(_)) {
-                    return Err(error::Error::InvalidRequest(format!("Cannot use the field name {} in path: {}. Expecting an array element.", &path[component], format_path(path))));
+                if component < path.len()
+                    && matches!(&path[component], &PathComponent::FieldName(_))
+                {
+                    return Err(error::Error::InvalidRequest(format!(
+                        "Cannot use the field name {} in path: {}. Expecting an array element.",
+                        &path[component],
+                        format_path(path)
+                    )));
                 }
                 Ok(children)
             }
-            _ => Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path)))),
+            _ => Err(error::Error::InvalidRequest(format!(
+                "Invalid projection specification for path {}",
+                format_path(path)
+            ))),
         }
     }
 
-    pub fn add_expr(&mut self, path: &[PathComponent], component: usize, expr: Arc<ProjectionExpr>) -> error::Result<()> {
+    pub fn add_expr(
+        &mut self,
+        path: &[PathComponent],
+        component: usize,
+        expr: Arc<ProjectionExpr>,
+    ) -> error::Result<()> {
         let children = self.get_children_for_component_mut(path, component)?;
         Self::add_to_children(path, component, expr, children)
     }
@@ -450,9 +476,8 @@ impl ProjectionExpr {
         path: &[PathComponent],
         component: usize,
         expr: Arc<ProjectionExpr>,
-        children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>
+        children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>,
     ) -> error::Result<()> {
-
         let current_component = &path[component];
         let existing = children.get_mut(&current_component);
         match existing {
@@ -461,33 +486,48 @@ impl ProjectionExpr {
                     children.insert(current_component.clone(), expr);
                 } else {
                     let mut sub_node = if matches!(path[1], PathComponent::FieldName(_)) {
-                        ProjectionExpr::Fields { children: BTreeMap::new() }
+                        ProjectionExpr::Fields {
+                            children: BTreeMap::new(),
+                        }
                     } else {
-                        ProjectionExpr::ArrayElements { children: BTreeMap::new() }
+                        ProjectionExpr::ArrayElements {
+                            children: BTreeMap::new(),
+                        }
                     };
                     sub_node.add_expr(path, component + 1, expr)?;
                     children.insert(current_component.clone(), Arc::new(sub_node));
                 }
             }
-            Some(existing) => {
-                match existing.as_ref() {
-                    ProjectionExpr::Fields { children: _ } | ProjectionExpr::ArrayElements { children: _ } => {
-                        if path.len() == component + 1 {
-                            return Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path))))
-                        } else if let Some(existing) = Arc::get_mut(existing) {
-                            existing.add_expr(path, component + 1, expr)?;
-                        } else {
-                            panic!("Arc strong count is not 1 but should be ")
-                        }
-                    },
-                    _ => return Err(error::Error::InvalidRequest(format!("Invalid projection specification for path {}", format_path(path))))
+            Some(existing) => match existing.as_ref() {
+                ProjectionExpr::Fields { children: _ }
+                | ProjectionExpr::ArrayElements { children: _ } => {
+                    if path.len() == component + 1 {
+                        return Err(error::Error::InvalidRequest(format!(
+                            "Invalid projection specification for path {}",
+                            format_path(path)
+                        )));
+                    } else if let Some(existing) = Arc::get_mut(existing) {
+                        existing.add_expr(path, component + 1, expr)?;
+                    } else {
+                        panic!("Arc strong count is not 1 but should be ")
+                    }
                 }
-            }
+                _ => {
+                    return Err(error::Error::InvalidRequest(format!(
+                        "Invalid projection specification for path {}",
+                        format_path(path)
+                    )))
+                }
+            },
         }
         Ok(())
     }
 
-    fn remove_from_children(path: &[PathComponent], component: usize, children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>) -> error::Result<()> {
+    fn remove_from_children(
+        path: &[PathComponent],
+        component: usize,
+        children: &mut BTreeMap<PathComponent, Arc<ProjectionExpr>>,
+    ) -> error::Result<()> {
         let current_component = &path[component];
 
         if path.len() == component + 1 {
@@ -533,8 +573,7 @@ impl TreeNode for ProjectionExpr {
 
     fn children(&self) -> Vec<Arc<Self>> {
         match self {
-            ProjectionExpr::Fields { children } |
-            ProjectionExpr::ArrayElements { children } => {
+            ProjectionExpr::Fields { children } | ProjectionExpr::ArrayElements { children } => {
                 children.values().cloned().collect()
             }
             _ => vec![],
@@ -544,13 +583,17 @@ impl TreeNode for ProjectionExpr {
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<Self>>) -> Arc<Self> {
         match self.as_ref() {
             ProjectionExpr::Fields { children: old } => {
-                if old.is_empty() { return self; }
+                if old.is_empty() {
+                    return self;
+                }
                 assert_eq!(old.len(), children.len(), "child count mismatch");
                 let new_map = old.keys().cloned().zip(children.into_iter()).collect();
                 Arc::new(ProjectionExpr::Fields { children: new_map })
             }
             ProjectionExpr::ArrayElements { children: old } => {
-                if old.is_empty() { return self; }
+                if old.is_empty() {
+                    return self;
+                }
                 assert_eq!(old.len(), children.len(), "child count mismatch");
                 let new_map = old.keys().cloned().zip(children.into_iter()).collect();
                 Arc::new(ProjectionExpr::ArrayElements { children: new_map })
@@ -564,11 +607,20 @@ impl Serializable for ProjectionExpr {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
-            0 => Ok(ProjectionExpr::Fields { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
-            1 => Ok(ProjectionExpr::ArrayElements { children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)? }),
+            0 => Ok(ProjectionExpr::Fields {
+                children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)?,
+            }),
+            1 => Ok(ProjectionExpr::ArrayElements {
+                children: BTreeMap::<PathComponent, Arc<ProjectionExpr>>::read_from(reader)?,
+            }),
             2 => Ok(ProjectionExpr::Field),
-            3 => Ok(ProjectionExpr::Slice { skip: Option::<i32>::read_from(reader)?, limit: reader.read_varint_i32()? }),
-            4 => Ok(ProjectionExpr::ElemMatch { filter: Arc::<Expr>::read_from(reader)? }),
+            3 => Ok(ProjectionExpr::Slice {
+                skip: Option::<i32>::read_from(reader)?,
+                limit: reader.read_varint_i32()?,
+            }),
+            4 => Ok(ProjectionExpr::ElemMatch {
+                filter: Arc::<Expr>::read_from(reader)?,
+            }),
             _ => unreachable!("Invalid tag for ProjectionExpr: {}", tag),
         }
     }
@@ -578,23 +630,23 @@ impl Serializable for ProjectionExpr {
             ProjectionExpr::Fields { children } => {
                 writer.write_u8(0);
                 children.write_to(writer);
-            },
+            }
             ProjectionExpr::ArrayElements { children } => {
                 writer.write_u8(1);
                 children.write_to(writer);
-            },
+            }
             ProjectionExpr::Field => {
                 writer.write_u8(2);
-            },
+            }
             ProjectionExpr::Slice { skip, limit } => {
                 writer.write_u8(3);
                 skip.write_to(writer);
                 writer.write_varint_i32(*limit);
-            },
+            }
             ProjectionExpr::ElemMatch { filter } => {
                 writer.write_u8(4);
                 filter.write_to(writer);
-            },
+            }
         }
     }
 }
@@ -611,8 +663,12 @@ impl Serializable for Projection {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
-            0 => Ok(Projection::Include(Arc::<ProjectionExpr>::read_from(reader)?)),
-            1 => Ok(Projection::Exclude(Arc::<ProjectionExpr>::read_from(reader)?)),
+            0 => Ok(Projection::Include(Arc::<ProjectionExpr>::read_from(
+                reader,
+            )?)),
+            1 => Ok(Projection::Exclude(Arc::<ProjectionExpr>::read_from(
+                reader,
+            )?)),
             _ => unreachable!("Invalid tag for Projection: {}", tag),
         }
     }
@@ -668,13 +724,18 @@ pub struct SortField {
 }
 
 impl SortField {
-
     pub fn asc(field: Arc<Expr>) -> SortField {
-        SortField { field, order: SortOrder::Ascending }
+        SortField {
+            field,
+            order: SortOrder::Ascending,
+        }
     }
 
     pub fn desc(field: Arc<Expr>) -> SortField {
-        SortField { field, order: SortOrder::Descending }
+        SortField {
+            field,
+            order: SortOrder::Descending,
+        }
     }
 }
 
@@ -697,6 +758,117 @@ pub fn make_sort_field(path: Vec<PathComponent>, order: SortOrder) -> SortField 
         field: Arc::new(Expr::Field(path)),
         order,
     }
+}
+
+/// Represents the ordered key specification of an index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexKeySpec {
+    pub fields: Vec<IndexKeyField>,
+}
+
+impl IndexKeySpec {
+    pub fn new(fields: Vec<IndexKeyField>) -> Self {
+        Self { fields }
+    }
+
+    pub fn validate(&self) -> error::Result<()> {
+        for (i, left) in self.fields.iter().enumerate() {
+            if left
+                .path
+                .iter()
+                .any(|component| matches!(component, PathComponent::ArrayElement(_)))
+            {
+                return Err(error::Error::InvalidRequest(format!(
+                    "Indexed path '{}' cannot contain array elements",
+                    format_path(&left.path)
+                )));
+            }
+
+            for right in self.fields.iter().skip(i + 1) {
+                if left.path == right.path {
+                    return Err(error::Error::InvalidRequest(format!(
+                        "Indexed path '{}' is specified more than once",
+                        format_path(&left.path)
+                    )));
+                }
+
+                if left.path.starts_with(&right.path) || right.path.starts_with(&left.path) {
+                    return Err(error::Error::InvalidRequest(format!(
+                        "Indexed paths '{}' and '{}' conflict: no indexed path may be a prefix of another",
+                        format_path(&left.path),
+                        format_path(&right.path)
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl From<IndexKeySpec> for IndexDefinition {
+    fn from(spec: IndexKeySpec) -> Self {
+        let fields = spec
+            .fields
+            .into_iter()
+            .map(|field| {
+                let direction = match field.kind {
+                    IndexKeyKind::Regular(SortOrder::Ascending) => IndexDirection::Ascending,
+                    IndexKeyKind::Regular(SortOrder::Descending) => IndexDirection::Descending,
+                };
+
+                let path = IndexPath {
+                    components: field
+                        .path
+                        .into_iter()
+                        .map(|component| match component {
+                            PathComponent::FieldName(name) => name,
+                            PathComponent::ArrayElement(index) => {
+                                unreachable!("Array elements should not be present in index paths")
+                            }
+                        })
+                        .collect(),
+                };
+
+                OrderedIndexField { path, direction }
+            })
+            .collect();
+
+        IndexDefinition::Regular(fields)
+    }
+}
+
+/// Represents a single field entry in an index key specification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexKeyField {
+    pub path: Vec<PathComponent>,
+    pub kind: IndexKeyKind,
+}
+
+impl IndexKeyField {
+    pub fn new(path: Vec<PathComponent>, kind: IndexKeyKind) -> Self {
+        Self { path, kind }
+    }
+
+    pub fn asc(path: Vec<PathComponent>) -> Self {
+        Self {
+            path,
+            kind: IndexKeyKind::Regular(SortOrder::Ascending),
+        }
+    }
+
+    pub fn desc(path: Vec<PathComponent>) -> Self {
+        Self {
+            path,
+            kind: IndexKeyKind::Regular(SortOrder::Descending),
+        }
+    }
+}
+
+/// Represents the index-specific behavior associated with a key field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IndexKeyKind {
+    Regular(SortOrder),
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -727,7 +899,6 @@ impl ComparisonOperator {
 }
 
 impl Serializable for ComparisonOperator {
-
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
@@ -739,7 +910,10 @@ impl Serializable for ComparisonOperator {
             5 => Ok(ComparisonOperator::Lte),
             6 => Ok(ComparisonOperator::In),
             7 => Ok(ComparisonOperator::Nin),
-            _ => Err(Error::new(ErrorKind::InvalidData, "Unknown comparison operator byte",)),
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Unknown comparison operator byte",
+            )),
         }
     }
 
@@ -795,7 +969,9 @@ impl Serializable for PathComponent {
                 let index = reader.read_varint_u32()? as usize;
                 Ok(PathComponent::ArrayElement(index))
             }
-            _ => Err(Error::new(ErrorKind::InvalidData, "Unknown path component type",
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
+                "Unknown path component type",
             )),
         }
     }
@@ -823,6 +999,15 @@ impl From<&str> for PathComponent {
 impl From<usize> for PathComponent {
     fn from(index: usize) -> Self {
         PathComponent::ArrayElement(index)
+    }
+}
+
+impl Into<Vec<PathComponent>> for &IndexPath {
+    fn into(self) -> Vec<PathComponent> {
+        self.components
+            .iter()
+            .map(|e| PathComponent::from(e.as_str()))
+            .collect()
     }
 }
 
@@ -857,6 +1042,33 @@ pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<B
     Some(BsonValueRef(current))
 }
 
+fn raw_array_get(array: &RawArray, index: usize) -> Option<RawBsonRef> {
+    array.get(index).ok().flatten()
+}
+
+pub fn get_path_value_from_raw(doc: &RawDocument, path: &[PathComponent]) -> Option<BsonValue> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut current = match path.first()? {
+        PathComponent::FieldName(name) => doc.get(name).ok().flatten()?,
+        _ => return None,
+    };
+
+    for component in path.iter().skip(1) {
+        current = match (component, current) {
+            (PathComponent::FieldName(name), RawBsonRef::Document(d)) => {
+                d.get(name).ok().flatten()?
+            }
+            (PathComponent::ArrayElement(index), RawBsonRef::Array(a)) => raw_array_get(a, *index)?,
+            _ => return None,
+        };
+    }
+
+    Some(BsonValue(Bson::try_from(current).ok()?))
+}
+
 pub fn format_path(path: &[PathComponent]) -> String {
     path.iter()
         .map(|c| c.to_string())
@@ -871,7 +1083,6 @@ pub struct Limit {
 }
 
 impl Serializable for Limit {
-
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let skip = Option::<usize>::read_from(reader)?;
         let limit = Option::<usize>::read_from(reader)?;
@@ -890,6 +1101,10 @@ pub struct BsonValue(pub Bson);
 impl BsonValue {
     pub fn to_bson(&self) -> Bson {
         self.0.clone()
+    }
+
+    pub fn element_type(&self) -> ElementType {
+        self.0.element_type()
     }
 
     pub fn as_ref(&self) -> BsonValueRef<'_> {
@@ -955,7 +1170,7 @@ impl From<bool> for BsonValue {
 
 impl<T> From<BTreeSet<T>> for BsonValue
 where
-    T: Into<Bson>// Ensure each element can be converted into `Bson`
+    T: Into<Bson>, // Ensure each element can be converted into `Bson`
 {
     fn from(values: BTreeSet<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
@@ -964,7 +1179,7 @@ where
 
 impl<T> From<Vec<T>> for BsonValue
 where
-    T: Into<Bson>// Ensure each element can be converted into `Bson`
+    T: Into<Bson>, // Ensure each element can be converted into `Bson`
 {
     fn from(values: Vec<T>) -> Self {
         BsonValue(Bson::Array(values.into_iter().map(|v| v.into()).collect()))
@@ -984,13 +1199,12 @@ impl From<Bson> for BsonValue {
 }
 
 impl BsonKey for BsonValue {
-
     fn try_into_key(&self) -> Result<Vec<u8>> {
         self.0.try_into_key()
     }
 
-    fn try_into_key_with_type(&self) -> Result<(Vec<u8>, Vec<u8>)> {
-        self.0.try_into_key_with_type()
+    fn try_into_typed_key(&self) -> Result<TypedKey> {
+        self.0.try_into_typed_key()
     }
 }
 
@@ -1034,7 +1248,9 @@ impl<'a> Ord for BsonValueRef<'a> {
 }
 
 impl From<BsonValueRef<'_>> for Bson {
-    fn from(value: BsonValueRef) -> Self { value.to_owned().to_bson() }
+    fn from(value: BsonValueRef) -> Self {
+        value.to_owned().to_bson()
+    }
 }
 
 #[macro_export]
@@ -1086,8 +1302,8 @@ mod tests {
     use super::*;
     use crate::io::byte_writer::ByteWriter;
     use crate::io::serializable::check_serialization_round_trip;
-    use bson::{doc, Bson, Regex};
     use crate::query::expr_fn::*;
+    use bson::{doc, Bson, Regex};
 
     #[test]
     fn test_get_path_value() {
@@ -1431,10 +1647,7 @@ mod tests {
         // Complex ProjectionExpr
         let complex_projection_expr = proj_fields([
             ("field_a", proj_field()),
-            (
-                "field_b",
-                proj_fields([("nested_field", proj_field())]),
-            ),
+            ("field_b", proj_fields([("nested_field", proj_field())])),
             (
                 "array_field",
                 proj_array_elements([(0, proj_slice(Some(5), 10))]),
@@ -1553,8 +1766,7 @@ mod tests {
 
         // Error: Invalid path component type (field name for ArrayElements)
         let path_invalid_component_for_array: Vec<PathComponent> = vec!["field".into()];
-        let result =
-            proj_array.add_expr(&path_invalid_component_for_array, 0, proj_field());
+        let result = proj_array.add_expr(&path_invalid_component_for_array, 0, proj_field());
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -1566,5 +1778,115 @@ mod tests {
         let original_proj = proj.clone();
         proj.remove_expr(&path_z, 0).unwrap();
         assert_eq!(proj, original_proj);
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_accepts_distinct_paths() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["name".into()]),
+            IndexKeyField::desc(vec!["age".into()]),
+            IndexKeyField::asc(vec!["address".into(), "city".into()]),
+        ]);
+
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_accepts_sibling_nested_paths() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["address".into(), "city".into()]),
+            IndexKeyField::desc(vec!["address".into(), "zip".into()]),
+        ]);
+
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_index_key_spec_converts_to_index_definition() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["name".into()]),
+            IndexKeyField::desc(vec!["address".into(), "zip".into()]),
+        ]);
+
+        let definition = IndexDefinition::from(spec);
+
+        assert_eq!(
+            definition,
+            IndexDefinition::Regular(vec![
+                OrderedIndexField::asc("name"),
+                OrderedIndexField::desc(vec!["address", "zip"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_rejects_array_path() {
+        let spec = IndexKeySpec::new(vec![IndexKeyField::asc(vec![
+            "items".into(),
+            0.into(),
+            "sku".into(),
+        ])]);
+
+        let err = spec.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Indexed path 'items.0.sku' cannot contain array elements"
+        );
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_rejects_duplicate_path() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["name".into()]),
+            IndexKeyField::desc(vec!["name".into()]),
+        ]);
+
+        let err = spec.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Indexed path 'name' is specified more than once"
+        );
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_rejects_parent_before_child() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["name".into()]),
+            IndexKeyField::desc(vec!["name".into(), "first".into()]),
+        ]);
+
+        let err = spec.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Indexed paths 'name' and 'name.first' conflict: no indexed path may be a prefix of another"
+        );
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_rejects_child_before_parent() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["name".into(), "first".into()]),
+            IndexKeyField::desc(vec!["name".into()]),
+        ]);
+
+        let err = spec.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Indexed paths 'name.first' and 'name' conflict: no indexed path may be a prefix of another"
+        );
+    }
+
+    #[test]
+    fn test_index_key_spec_validate_rejects_array_prefix_conflict() {
+        let spec = IndexKeySpec::new(vec![
+            IndexKeyField::asc(vec!["items".into(), 0.into()]),
+            IndexKeyField::desc(vec!["items".into(), 0.into(), "sku".into()]),
+        ]);
+
+        let err = spec.validate().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Indexed path 'items.0' cannot contain array elements"
+        );
     }
 }

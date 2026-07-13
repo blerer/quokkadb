@@ -1,19 +1,20 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
-use crate::util::interval::Interval;
-use std::cmp::Ordering;
-use std::collections::HashSet;
-use std::fmt;
-use std::io::{Error, ErrorKind, Result};
-use std::iter::once;
-use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
-use bson::Bson;
+use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::options::options::Options;
 use crate::storage::internal_key::encode_record_key;
+use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::util::bson_utils::BsonKey;
+use crate::util::interval::Interval;
+use bson::Bson;
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::fmt;
+use std::io::Result;
+use std::iter::once;
+use std::ops::{Bound, RangeBounds};
+use std::sync::Arc;
 
 /// Represents the persisted physical state of the LSM tree, excluding memtables.
 ///
@@ -69,8 +70,8 @@ impl LsmVersion {
         oldest_log_number: u64,
         sst: &Arc<SSTableMetadata>,
     ) -> LsmVersion {
-
-        let (pending_drops, drops): (Vec<_>, Vec<_>) = self.pending_drops
+        let (pending_drops, drops): (Vec<_>, Vec<_>) = self
+            .pending_drops
             .iter()
             .cloned()
             .partition(|drop| drop.drop_sequence_number > sst.max_sequence_number);
@@ -121,13 +122,13 @@ impl LsmVersion {
         }
     }
 
-    pub fn with_compaction(&self,
-                           output_level: usize,
-                           removed_sstables: &Vec<Arc<SSTableMetadata>>,
-                           added_sstables: &Vec<Arc<SSTableMetadata>>,
-                           drops: &Vec<Arc<DropMetadata>>
+    pub fn with_compaction(
+        &self,
+        output_level: usize,
+        removed_sstables: &Vec<Arc<SSTableMetadata>>,
+        added_sstables: &Vec<Arc<SSTableMetadata>>,
+        drops: &Vec<Arc<DropMetadata>>,
     ) -> LsmVersion {
-
         let input_level = output_level - 1;
 
         let (removed_from_input, removed_from_output): (HashSet<_>, HashSet<_>) = removed_sstables
@@ -135,13 +136,23 @@ impl LsmVersion {
             .cloned()
             .partition(|sst| sst.level == input_level as u8);
 
-        let drops : HashSet<Arc<DropMetadata>> = drops.into_iter().cloned().collect();
+        let drops: HashSet<Arc<DropMetadata>> = drops.into_iter().cloned().collect();
 
-        let next_file_number = self.next_file_number.max(added_sstables.iter().map(|sst| sst.number).max().unwrap_or(0) + 1);
+        let next_file_number = self.next_file_number.max(
+            added_sstables
+                .iter()
+                .map(|sst| sst.number)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
 
-        let sst_levels = Arc::new(self.sst_levels.remove(input_level, &removed_from_input, &drops)
-            .remove(output_level, &removed_from_output, &HashSet::new())
-            .add(output_level, added_sstables.into_iter().cloned(), drops));
+        let sst_levels = Arc::new(
+            self.sst_levels
+                .remove(input_level, &removed_from_input, &drops)
+                .remove(output_level, &removed_from_output, &HashSet::new())
+                .add(output_level, added_sstables.into_iter().cloned(), drops),
+        );
 
         LsmVersion {
             current_log_number: self.current_log_number,
@@ -155,6 +166,11 @@ impl LsmVersion {
 
     pub fn add_collection_drop(&self, collection: u32, sequence_number: u64) -> LsmVersion {
         let drop = DropMetadata::new_collection_drop(collection, sequence_number);
+        self.add_drop(drop)
+    }
+
+    pub fn add_index_drop(&self, collection: u32, index: u32, sequence_number: u64) -> LsmVersion {
+        let drop = DropMetadata::new_index_drop(collection, index, sequence_number);
         self.add_drop(drop)
     }
 
@@ -189,7 +205,8 @@ impl LsmVersion {
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.sst_levels.find_sstables(record_key, snapshot, min_snapshot)
+        self.sst_levels
+            .find_sstables(record_key, snapshot, min_snapshot)
     }
 
     pub fn find_sstables_in_range<'a>(
@@ -197,7 +214,8 @@ impl LsmVersion {
         record_key_range: &'a Interval<Vec<u8>>,
         snapshot: u64,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.sst_levels.find_sstables_in_range(record_key_range, snapshot)
+        self.sst_levels
+            .find_sstables_in_range(record_key_range, snapshot)
     }
 }
 
@@ -240,7 +258,6 @@ pub struct Levels {
 }
 
 impl Levels {
-
     pub fn new(max_levels: usize) -> Self {
         let levels: Vec<_> = (0..max_levels)
             .map(|i| Arc::new(Level::empty(i as u8)))
@@ -253,18 +270,18 @@ impl Levels {
         S: IntoIterator<Item = Arc<SSTableMetadata>>,
         D: IntoIterator<Item = Arc<DropMetadata>>,
     {
-        let mut new_levels: Vec<_>  = self.levels.iter().cloned().collect();
+        let mut new_levels: Vec<_> = self.levels.iter().cloned().collect();
         new_levels[level] = Arc::new(self.levels[level].add(sstables, drops));
         Levels { levels: new_levels }
     }
 
-    pub fn remove(&self,
-                  level: usize,
-                  sstables: &HashSet<Arc<SSTableMetadata>>,
-                  drops: &HashSet<Arc<DropMetadata>>
-    ) -> Self
-    {
-        let mut new_levels: Vec<_>  = self.levels.iter().cloned().collect();
+    pub fn remove(
+        &self,
+        level: usize,
+        sstables: &HashSet<Arc<SSTableMetadata>>,
+        drops: &HashSet<Arc<DropMetadata>>,
+    ) -> Self {
+        let mut new_levels: Vec<_> = self.levels.iter().cloned().collect();
         new_levels[level] = Arc::new(self.levels[level].remove(sstables, drops));
         Levels { levels: new_levels }
     }
@@ -300,7 +317,7 @@ impl Levels {
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.levels.iter().map( |level| level.total_bytes()).sum()
+        self.levels.iter().map(|level| level.total_bytes()).sum()
     }
 
     pub fn find_sstables_in_range<'a>(
@@ -308,9 +325,11 @@ impl Levels {
         record_key_range: &'a Interval<Vec<u8>>,
         snapshot: u64,
     ) -> impl Iterator<Item = Arc<SSTableMetadata>> + 'a {
-        self.levels
-            .iter()
-            .flat_map(move |level| level.find_sstables_in_range(record_key_range, snapshot).into_iter())
+        self.levels.iter().flat_map(move |level| {
+            level
+                .find_sstables_in_range(record_key_range, snapshot)
+                .into_iter()
+        })
     }
 
     pub fn find_drops_in_range<'a>(
@@ -325,7 +344,7 @@ impl Levels {
 
 impl Serializable for Levels {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let levels= Vec::<Arc<Level>>::read_from(reader)?;
+        let levels = Vec::<Arc<Level>>::read_from(reader)?;
         Ok(Levels { levels })
     }
 
@@ -345,14 +364,14 @@ pub enum Level {
         level: u8,
         sstables: Vec<Arc<SSTableMetadata>>,
         drops: Vec<Arc<DropMetadata>>, // Drops that are relevant for this level, used to filter out data during compaction.
-        size: u64, // Total size of all SSTables in this level
+        size: u64,                     // Total size of all SSTables in this level
     },
     // For L1+ levels, files are non-overlapping and sorted by min_key.
     NonOverlapping {
         level: u8,
         sstables: Vec<Arc<SSTableMetadata>>,
         drops: Vec<Arc<DropMetadata>>, // Drops that are relevant for this level, used to filter out data during compaction.
-        size: u64, // Total size of all SSTables in this level
+        size: u64,                     // Total size of all SSTables in this level
     },
 }
 
@@ -379,13 +398,23 @@ impl Level {
         level: u8,
         mut sstables: Vec<Arc<SSTableMetadata>>,
         drops: Vec<Arc<DropMetadata>>,
-        size: u64
+        size: u64,
     ) -> Self {
         if level == 0 {
-            Overlapping { level: 0, sstables, drops, size }
+            Overlapping {
+                level: 0,
+                sstables,
+                drops,
+                size,
+            }
         } else {
             sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
-            NonOverlapping { level, sstables, drops, size }
+            NonOverlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            }
         }
     }
 
@@ -395,8 +424,18 @@ impl Level {
         D: IntoIterator<Item = Arc<DropMetadata>>,
     {
         match &self {
-            Overlapping { level, sstables, drops, size }
-            | NonOverlapping { level, sstables, drops, size } => {
+            Overlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            }
+            | NonOverlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            } => {
                 let mut sstables_copy = sstables.iter().cloned().collect::<Vec<_>>();
                 let new_sstables: Vec<_> = new_sstables.into_iter().collect();
                 let new_size = size + new_sstables.iter().map(|sst| sst.size).sum::<u64>();
@@ -412,12 +451,29 @@ impl Level {
         }
     }
 
-    fn remove(&self, sstables_to_remove: &HashSet<Arc<SSTableMetadata>>, drops_to_remove: &HashSet<Arc<DropMetadata>>) -> Self
-    {
+    fn remove(
+        &self,
+        sstables_to_remove: &HashSet<Arc<SSTableMetadata>>,
+        drops_to_remove: &HashSet<Arc<DropMetadata>>,
+    ) -> Self {
         match &self {
-            Overlapping { level, sstables, drops, size }
-            | NonOverlapping { level, sstables, drops, size } => {
-                let new_sstables = sstables.iter().cloned().filter(|sst| !sstables_to_remove.contains(sst)).collect::<Vec<_>>();
+            Overlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            }
+            | NonOverlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            } => {
+                let new_sstables = sstables
+                    .iter()
+                    .cloned()
+                    .filter(|sst| !sstables_to_remove.contains(sst))
+                    .collect::<Vec<_>>();
 
                 assert_eq!(sstables.len(), new_sstables.len() + sstables_to_remove.len(),
                            "unexpected issue with sstables removal. [previous: {:?}, new: {:?}, removed: {:?}]",
@@ -427,7 +483,11 @@ impl Level {
 
                 let new_size = size - sstables_to_remove.iter().map(|sst| sst.size).sum::<u64>();
 
-                let new_drops: Vec<_> = drops.iter().cloned().filter(|drop| !drops_to_remove.contains(drop)).collect();
+                let new_drops: Vec<_> = drops
+                    .iter()
+                    .cloned()
+                    .filter(|drop| !drops_to_remove.contains(drop))
+                    .collect();
                 assert_eq!(drops.len(), new_drops.len() + drops_to_remove.len());
 
                 Level::new(*level, new_sstables, new_drops, new_size)
@@ -452,8 +512,14 @@ impl Level {
     /// Returns all items in the level, including both SSTables and drops, as a single vector.
     pub fn items(&self) -> Vec<Arc<dyn LevelItem>> {
         match self {
-            Overlapping { sstables, drops, .. } | NonOverlapping { sstables, drops, .. } => {
-                let mut items: Vec<Arc<dyn LevelItem>> = Vec::with_capacity(sstables.len() + drops.len());
+            Overlapping {
+                sstables, drops, ..
+            }
+            | NonOverlapping {
+                sstables, drops, ..
+            } => {
+                let mut items: Vec<Arc<dyn LevelItem>> =
+                    Vec::with_capacity(sstables.len() + drops.len());
                 items.extend(sstables.iter().map(|sst| sst.clone() as Arc<dyn LevelItem>));
                 items.extend(drops.iter().map(|drop| drop.clone() as Arc<dyn LevelItem>));
                 items
@@ -463,19 +529,34 @@ impl Level {
 
     /// Computes the key range that spans all items in the level, including both SSTables and drops.
     pub fn items_range(&self) -> Option<Interval<Vec<u8>>> {
-        span(self.items().iter().map(|item| item.as_ref()).collect::<Vec<_>>())
+        span(
+            self.items()
+                .iter()
+                .map(|item| item.as_ref())
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub fn compaction_score(&self, db_options: &Options) -> f64 {
         match &self {
-            Overlapping { level: _, sstables: _, drops: _, size } => {
+            Overlapping {
+                level: _,
+                sstables: _,
+                drops: _,
+                size,
+            } => {
                 let trigger = db_options.level0_file_num_compaction_trigger();
                 let base_bytes = db_options.max_bytes_for_level_base().to_bytes() as f64;
                 let file_score = self.sst_count() as f64 / trigger as f64;
                 let size_score = *size as f64 / base_bytes;
                 file_score.max(size_score)
             }
-            NonOverlapping { level, sstables: _, drops: _, size } => {
+            NonOverlapping {
+                level,
+                sstables: _,
+                drops: _,
+                size,
+            } => {
                 let base_bytes = db_options.max_bytes_for_level_base().to_bytes() as f64;
                 let multiplier = db_options.max_bytes_for_level_multiplier();
                 let target_bytes = base_bytes * multiplier.powi((level - 1) as i32);
@@ -501,7 +582,8 @@ impl Level {
                         record_key >= sst.min_key.as_slice()
                             && record_key <= sst.max_key.as_slice()
                             && snapshot >= sst.min_sequence_number
-                            && min_snapshot.map_or(true, |min_snap| sst.max_sequence_number > min_snap)
+                            && min_snapshot
+                                .map_or(true, |min_snap| sst.max_sequence_number > min_snap)
                     })
                     .cloned(),
             ),
@@ -521,7 +603,8 @@ impl Level {
                     .filter_map(move |i| {
                         let sst = &sstables[i];
                         if snapshot >= sst.min_sequence_number
-                            && min_snapshot.map_or(true, |min_snap| sst.max_sequence_number > min_snap)
+                            && min_snapshot
+                                .map_or(true, |min_snap| sst.max_sequence_number > min_snap)
                         {
                             Some(sst.clone())
                         } else {
@@ -540,12 +623,24 @@ impl Level {
         snapshot: u64,
     ) -> Vec<Arc<SSTableMetadata>> {
         match self {
-            Overlapping { level: _, sstables, drops: _, size: _ } => sstables
+            Overlapping {
+                level: _,
+                sstables,
+                drops: _,
+                size: _,
+            } => sstables
                 .iter()
-                .filter(|sst| overlaps(record_key_range, sst) && snapshot >= sst.min_sequence_number)
+                .filter(|sst| {
+                    overlaps(record_key_range, sst) && snapshot >= sst.min_sequence_number
+                })
                 .cloned()
                 .collect(),
-            NonOverlapping { level: _, sstables, drops: _, size: _ } => {
+            NonOverlapping {
+                level: _,
+                sstables,
+                drops: _,
+                size: _,
+            } => {
                 // Use binary search to find the first candidate SSTable.
                 // Here we use the interval's start bound as the lower limit.
                 let lower = match record_key_range.start_bound() {
@@ -566,7 +661,9 @@ impl Level {
                 let mut result = Vec::new();
                 for sst in &sstables[start_idx..] {
                     // If the SSTable's min_key is beyond the interval's end, stop scanning.
-                    if let Bound::Included(end) | Bound::Excluded(end) = record_key_range.end_bound() {
+                    if let Bound::Included(end) | Bound::Excluded(end) =
+                        record_key_range.end_bound()
+                    {
                         if sst.min_key.as_slice() > end.as_slice() {
                             break;
                         }
@@ -581,7 +678,10 @@ impl Level {
     }
 
     /// Finds all drops that overlap the given interval.
-    pub fn find_drops_in_range(&self, record_key_range: &Interval<Vec<u8>>) -> Vec<Arc<DropMetadata>> {
+    pub fn find_drops_in_range(
+        &self,
+        record_key_range: &Interval<Vec<u8>>,
+    ) -> Vec<Arc<DropMetadata>> {
         match self {
             Overlapping { drops, .. } | NonOverlapping { drops, .. } => drops
                 .iter()
@@ -626,15 +726,35 @@ impl Serializable for Level {
         let drops = Vec::<Arc<DropMetadata>>::read_from(reader)?;
         let size = sstables.iter().map(|sst| sst.size).sum();
         match level {
-            0 => Ok(Overlapping { level, sstables, drops, size }),
-            _ => Ok(NonOverlapping { level, sstables, drops, size }),
+            0 => Ok(Overlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            }),
+            _ => Ok(NonOverlapping {
+                level,
+                sstables,
+                drops,
+                size,
+            }),
         }
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         match &self {
-            Overlapping { level, sstables, drops, size: _size,  }
-            | NonOverlapping { level, sstables, drops, size: _size, } => {
+            Overlapping {
+                level,
+                sstables,
+                drops,
+                size: _size,
+            }
+            | NonOverlapping {
+                level,
+                sstables,
+                drops,
+                size: _size,
+            } => {
                 writer.write_u8(*level);
                 sstables.write_to(writer);
                 drops.write_to(writer);
@@ -646,7 +766,6 @@ impl Serializable for Level {
 /// A trait implemented by both `SSTableMetadata` and `DropMetadata` to provide a common interface
 /// for finding overlapping items in a level.
 pub trait LevelItem {
-
     /// Returns the key range of the item, used to determine overlaps and visibility.
     fn record_key_range(&self) -> Interval<Vec<u8>>;
 
@@ -809,26 +928,32 @@ pub enum DropKind {
     Index(u32),
 }
 
+mod drop_kind_tags {
+    pub const COLLECTION: u8 = 0;
+    pub const INDEX: u8 = 1;
+}
 impl Serializable for DropKind {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
         let tag = reader.read_u8()?;
         match tag {
-            0 => Ok(DropKind::Collection),
-            1 => {
+            drop_kind_tags::COLLECTION => Ok(DropKind::Collection),
+            drop_kind_tags::INDEX => {
                 let index_id = reader.read_varint_u32()?;
                 Ok(DropKind::Index(index_id))
             }
-            _ => Err(Error::new(ErrorKind::InvalidData, format!("Invalid DropKind tag: {}", tag))),
+            _ => Err(invalid_data(format!("Invalid DropKind tag: {}", tag))),
         }
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         match self {
-            DropKind::Collection => writer.write_u8(0),
-            DropKind::Index(index_id) => writer.write_u8(1).write_varint_u32(*index_id),
+            DropKind::Collection => writer.write_u8(drop_kind_tags::COLLECTION),
+            DropKind::Index(index_id) => writer
+                .write_u8(drop_kind_tags::INDEX)
+                .write_varint_u32(*index_id),
         };
     }
 }
@@ -956,10 +1081,13 @@ impl DropMetadata {
     /// This is used to handle the case where a drop need to be split to match the boundaries of
     /// the partition grid when compacting for partial compaction levels.
     pub fn split_at(&self, split_key: &[u8]) -> SplitResults {
-        assert!(self.key_range.contains(split_key), "Split key must be within the drop's key range");
+        assert!(
+            self.key_range.contains(split_key),
+            "Split key must be within the drop's key range"
+        );
 
         if self.key_range.end_bound_value_eq(split_key) {
-            return SplitResults::One(Arc::new(self.clone()))
+            return SplitResults::One(Arc::new(self.clone()));
         }
 
         let left_range = Interval::new(
@@ -1033,7 +1161,7 @@ impl fmt::Display for DropMetadata {
 impl Serializable for DropMetadata {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let collection = reader.read_varint_u32()?;
-        let kind =  DropKind::read_from(reader)?;
+        let kind = DropKind::read_from(reader)?;
         let drop_sequence_number = reader.read_varint_u64()?;
         let key_range = Interval::read_from(reader)?;
 
@@ -1056,8 +1184,8 @@ impl Serializable for DropMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::internal_key::encode_record_key;
     use crate::io::serializable::check_serialization_round_trip;
+    use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;
@@ -1127,7 +1255,12 @@ mod tests {
         let sst1 = create_sstable(1, 0, 1, 50, 100, 200, 1000);
         let sst2 = create_sstable(2, 0, 25, 75, 201, 300, 1000);
         let sst3 = create_sstable(3, 0, 50, 100, 301, 400, 1000);
-        let level = Level::new(0, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![], 3000);
+        let level = Level::new(
+            0,
+            vec![sst1.clone(), sst2.clone(), sst3.clone()],
+            vec![],
+            3000,
+        );
         let key = record_key(50);
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
@@ -1173,7 +1306,12 @@ mod tests {
         let sst1 = create_sstable(1, 1, 1, 50, 100, 200, 1000);
         let sst2 = create_sstable(2, 1, 51, 100, 201, 300, 1000);
         let sst3 = create_sstable(3, 1, 101, 150, 301, 400, 1000);
-        let level = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![],3000);
+        let level = Level::new(
+            1,
+            vec![sst1.clone(), sst2.clone(), sst3.clone()],
+            vec![],
+            3000,
+        );
         let key = record_key(25);
         let empty: Vec<Arc<SSTableMetadata>> = vec![];
 
@@ -1209,7 +1347,12 @@ mod tests {
         let sst1 = create_sstable(1, 0, 1, 60, 100, 200, 53_248);
         let sst2 = create_sstable(2, 0, 40, 100, 201, 300, 79_872);
         let sst3 = create_sstable(3, 0, 70, 100, 301, 400, 32_768);
-        let coll = Level::new(0, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![],165_888);
+        let coll = Level::new(
+            0,
+            vec![sst1.clone(), sst2.clone(), sst3.clone()],
+            vec![],
+            165_888,
+        );
 
         let interval = Interval::closed(record_key(50), record_key(100));
 
@@ -1258,7 +1401,12 @@ mod tests {
         let sst1 = create_sstable(1, 0, 1, 60, 100, 200, 53_248);
         let sst2 = create_sstable(2, 0, 61, 69, 150, 300, 79_872);
         let sst3 = create_sstable(3, 0, 70, 100, 232, 400, 32_768);
-        let coll = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![],165_888);
+        let coll = Level::new(
+            1,
+            vec![sst1.clone(), sst2.clone(), sst3.clone()],
+            vec![],
+            165_888,
+        );
 
         let interval = Interval::closed(record_key(50), record_key(100));
 
@@ -1511,7 +1659,7 @@ mod tests {
     }
 
     fn create_level_0() -> Level {
-        Level::new(0, vec![Arc::new(create_level_0_sstable())], vec![],79_872)
+        Level::new(0, vec![Arc::new(create_level_0_sstable())], vec![], 79_872)
     }
 
     fn create_level_0_sstable() -> SSTableMetadata {
@@ -1538,7 +1686,12 @@ mod tests {
             max_sequence_number: 400,
             size: 1024,
         };
-        Level::new(1, vec![Arc::new(sstable1), Arc::new(sstable2)], vec![],2048)
+        Level::new(
+            1,
+            vec![Arc::new(sstable1), Arc::new(sstable2)],
+            vec![],
+            2048,
+        )
     }
 
     fn create_sstable(
@@ -1561,17 +1714,63 @@ mod tests {
         ))
     }
 
-    mod levels_add_tests {
-        use std::iter::{empty, once};
+    mod levels_aggregation_tests {
         use super::*;
+        use std::iter::empty;
+
+        #[test]
+        fn test_find_sstables_aggregates_across_levels() {
+            let levels = Levels::new(3);
+
+            let l0_old = create_sstable(1, 0, 10, 30, 100, 150, 1000);
+            let l0_new = create_sstable(2, 0, 20, 40, 200, 250, 1000);
+            let l1 = create_sstable(3, 1, 15, 25, 50, 120, 1000);
+
+            let levels = levels.add(0, vec![l0_old.clone(), l0_new.clone()], empty());
+            let levels = levels.add(1, vec![l1.clone()], empty());
+
+            let found: Vec<_> = levels.find_sstables(&record_key(22), 300, None).collect();
+            assert_eq!(found, vec![l0_new.clone(), l0_old.clone(), l1.clone()]);
+
+            let found: Vec<_> = levels
+                .find_sstables(&record_key(22), 300, Some(150))
+                .collect();
+            assert_eq!(found, vec![l0_new.clone()]);
+        }
+
+        #[test]
+        fn test_find_sstables_in_range_aggregates_across_levels() {
+            let levels = Levels::new(3);
+
+            let l0 = create_sstable(1, 0, 10, 30, 100, 150, 1000);
+            let l1 = create_sstable(2, 1, 25, 35, 200, 260, 1000);
+            let l2 = create_sstable(3, 2, 40, 60, 300, 350, 1000);
+
+            let levels = levels.add(0, vec![l0.clone()], empty());
+            let levels = levels.add(1, vec![l1.clone()], empty());
+            let levels = levels.add(2, vec![l2.clone()], empty());
+
+            let interval = Interval::closed(record_key(20), record_key(50));
+
+            let found: Vec<_> = levels.find_sstables_in_range(&interval, 400).collect();
+            assert_eq!(found, vec![l0.clone(), l1.clone(), l2.clone()]);
+
+            let found: Vec<_> = levels.find_sstables_in_range(&interval, 220).collect();
+            assert_eq!(found, vec![l0.clone(), l1.clone()]);
+        }
+    }
+
+    mod levels_add_tests {
+        use super::*;
+        use std::iter::{empty, once};
 
         #[test]
         fn test_add_to_empty_level_0() {
             let levels = Levels::new(4);
-            
+
             let sst = create_sst(1, 0, 10, 20, 1000);
             let levels = levels.add(0, once(sst.clone()), empty());
-            
+
             let level = levels.level(0).unwrap();
             assert_eq!(level.sst_count(), 1);
             assert_eq!(level.total_bytes(), 1000);
@@ -1580,10 +1779,10 @@ mod tests {
         #[test]
         fn test_add_to_empty_level_1() {
             let levels = Levels::new(4);
-            
+
             let sst = create_sst(1, 1, 10, 20, 2000);
             let levels = levels.add(1, once(sst.clone()), empty());
-            
+
             let level = levels.level(1).unwrap();
             assert_eq!(level.sst_count(), 1);
             assert_eq!(level.total_bytes(), 2000);
@@ -1592,11 +1791,11 @@ mod tests {
         #[test]
         fn test_add_multiple_sstables_to_level_0() {
             let levels = Levels::new(4);
-            
+
             let sst1 = create_sst(1, 0, 10, 20, 1000);
             let sst2 = create_sst(2, 0, 15, 25, 1500);
             let levels = levels.add(0, vec![sst1, sst2], empty());
-            
+
             let level = levels.level(0).unwrap();
             assert_eq!(level.sst_count(), 2);
             assert_eq!(level.total_bytes(), 2500);
@@ -1605,25 +1804,25 @@ mod tests {
         #[test]
         fn test_add_incrementally_to_level_0() {
             let levels = Levels::new(4);
-            
+
             // Add first SSTable
             let sst1 = create_sst(1, 0, 10, 20, 1000);
             let levels = levels.add(0, once(sst1), empty());
-            
+
             assert_eq!(levels.level(0).unwrap().sst_count(), 1);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 1000);
-            
+
             // Add second SSTable
             let sst2 = create_sst(2, 0, 30, 40, 2000);
             let levels = levels.add(0, once(sst2), empty());
-            
+
             assert_eq!(levels.level(0).unwrap().sst_count(), 2);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 3000);
-            
+
             // Add third SSTable
             let sst3 = create_sst(3, 0, 50, 60, 500);
             let levels = levels.add(0, once(sst3), empty());
-            
+
             assert_eq!(levels.level(0).unwrap().sst_count(), 3);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 3500);
         }
@@ -1631,18 +1830,18 @@ mod tests {
         #[test]
         fn test_add_incrementally_to_level_1() {
             let levels = Levels::new(4);
-            
+
             // Add first SSTable
             let sst1 = create_sst(1, 1, 10, 20, 1000);
             let levels = levels.add(1, once(sst1), empty());
-            
+
             assert_eq!(levels.level(1).unwrap().sst_count(), 1);
             assert_eq!(levels.level(1).unwrap().total_bytes(), 1000);
-            
+
             // Add second SSTable (non-overlapping, should be sorted by min_key)
             let sst2 = create_sst(2, 1, 30, 40, 2000);
             let levels = levels.add(1, once(sst2), empty());
-            
+
             assert_eq!(levels.level(1).unwrap().sst_count(), 2);
             assert_eq!(levels.level(1).unwrap().total_bytes(), 3000);
         }
@@ -1650,25 +1849,25 @@ mod tests {
         #[test]
         fn test_add_to_different_levels() {
             let levels = Levels::new(4);
-            
+
             let sst0 = create_sst(1, 0, 10, 20, 1000);
             let levels = levels.add(0, once(sst0), empty());
-            
+
             let sst1 = create_sst(2, 1, 30, 40, 2000);
             let levels = levels.add(1, once(sst1), empty());
-            
+
             let sst2 = create_sst(3, 2, 50, 60, 3000);
             let levels = levels.add(2, once(sst2), empty());
-            
+
             assert_eq!(levels.level(0).unwrap().sst_count(), 1);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 1000);
-            
+
             assert_eq!(levels.level(1).unwrap().sst_count(), 1);
             assert_eq!(levels.level(1).unwrap().total_bytes(), 2000);
-            
+
             assert_eq!(levels.level(2).unwrap().sst_count(), 1);
             assert_eq!(levels.level(2).unwrap().total_bytes(), 3000);
-            
+
             assert_eq!(levels.total_bytes(), 6000);
             assert_eq!(levels.sst_count(), 3);
         }
@@ -1681,11 +1880,11 @@ mod tests {
             let drop = DropMetadata::new_collection_drop(1, 50);
 
             let levels = levels.add(0, once(sst), once(drop));
-            
+
             let level = levels.level(0).unwrap();
             assert_eq!(level.sst_count(), 1);
             assert_eq!(level.total_bytes(), 1000);
-            
+
             // Verify drops are stored (accessed via pattern matching)
             match level {
                 Level::Overlapping { drops, .. } => {
@@ -1701,23 +1900,23 @@ mod tests {
         #[test]
         fn test_add_preserves_other_levels() {
             let levels = Levels::new(4);
-            
+
             // Add to level 0
             let sst0 = create_sst(1, 0, 10, 20, 1000);
             let levels = levels.add(0, once(sst0), empty());
-            
+
             // Add to level 2
             let sst2 = create_sst(2, 2, 30, 40, 2000);
             let levels = levels.add(2, once(sst2), empty());
-            
+
             // Verify level 0 is unchanged
             assert_eq!(levels.level(0).unwrap().sst_count(), 1);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 1000);
-            
+
             // Verify level 1 is still empty
             assert_eq!(levels.level(1).unwrap().sst_count(), 0);
             assert_eq!(levels.level(1).unwrap().total_bytes(), 0);
-            
+
             // Verify level 2 has the new SSTable
             assert_eq!(levels.level(2).unwrap().sst_count(), 1);
             assert_eq!(levels.level(2).unwrap().total_bytes(), 2000);
@@ -1726,10 +1925,10 @@ mod tests {
         #[test]
         fn test_add_empty_iterators() {
             let levels = Levels::new(4);
-            
+
             // Add nothing
             let levels = levels.add(0, empty(), empty());
-            
+
             assert_eq!(levels.level(0).unwrap().sst_count(), 0);
             assert_eq!(levels.level(0).unwrap().total_bytes(), 0);
         }
@@ -1779,14 +1978,14 @@ mod tests {
         #[test]
         fn test_level_1_maintains_sorted_order() {
             let levels = Levels::new(4);
-            
+
             // Add SSTables in reverse order of their keys
             let sst3 = create_sst(3, 1, 70, 80, 1000);
             let sst1 = create_sst(1, 1, 10, 20, 1000);
             let sst2 = create_sst(2, 1, 40, 50, 1000);
-            
+
             let levels = levels.add(1, vec![sst3, sst1, sst2], empty());
-            
+
             let level = levels.level(1).unwrap();
             match level {
                 Level::NonOverlapping { sstables, .. } => {
@@ -1812,7 +2011,12 @@ mod tests {
             let sst3 = create_sst(3, 1, 50, 60, 3000);
 
             let total = 1000 + 2000 + 3000;
-            let level = Level::new(1, vec![sst1.clone(), sst2.clone(), sst3.clone()], vec![], total);
+            let level = Level::new(
+                1,
+                vec![sst1.clone(), sst2.clone(), sst3.clone()],
+                vec![],
+                total,
+            );
 
             let mut to_remove: HashSet<Arc<SSTableMetadata>> = HashSet::new();
             to_remove.insert(sst2.clone());
@@ -1823,7 +2027,11 @@ mod tests {
             assert_eq!(removed.total_bytes(), total - 2000);
 
             let remaining_numbers: Vec<u64> = removed.sstables().iter().map(|s| s.number).collect();
-            assert_eq!(remaining_numbers, vec![1, 3], "Expected to remove only sst2");
+            assert_eq!(
+                remaining_numbers,
+                vec![1, 3],
+                "Expected to remove only sst2"
+            );
         }
 
         #[test]
@@ -1915,19 +2123,14 @@ mod tests {
         use super::*;
         use std::iter::empty;
 
-        fn split_to_range(
-            drop: &Arc<DropMetadata>,
-            start: &[u8],
-            end: &[u8],
-        ) -> Arc<DropMetadata> {
-            let (left, right) = drop.split_at(end).expect_two();
+        fn split_to_range(drop: &Arc<DropMetadata>, start: &[u8], end: &[u8]) -> Arc<DropMetadata> {
+            let (left, _right) = drop.split_at(end).expect_two();
             let (_discard, mid) = left.split_at(start).expect_two();
             // `mid` is (start, end] due to split semantics; for these tests, that's sufficient as
             // we only care about containment/overlap behavior.
             // For closed ranges the tests already use Interval constructors on record keys.
             drop_sequence_eq(drop, &mid);
             drop_kind_eq(drop, &mid);
-            right; // keep `right` used to ensure we didn't accidentally use it
             mid
         }
 
@@ -1947,8 +2150,11 @@ mod tests {
             let drop1 = DropMetadata::new_index_drop(1, 1, 100);
             let drop2 = DropMetadata::new_index_drop(2, 1, 200);
 
-            let levels =
-                levels.add(0, empty::<Arc<SSTableMetadata>>(), vec![drop1.clone(), drop2.clone()]);
+            let levels = levels.add(
+                0,
+                empty::<Arc<SSTableMetadata>>(),
+                vec![drop1.clone(), drop2.clone()],
+            );
 
             let level = levels.level(0).unwrap();
             match level {
@@ -1985,7 +2191,12 @@ mod tests {
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
-                    assert_eq!(drops.len(), 3, "Expected 3 drops after split, got {}", drops.len());
+                    assert_eq!(
+                        drops.len(),
+                        3,
+                        "Expected 3 drops after split, got {}",
+                        drops.len()
+                    );
                     assert_eq!(drops[1].kind, DropKind::Index(1));
                     assert_eq!(drops[1].drop_sequence_number, 100);
                     assert_eq!(drops[0].kind, DropKind::Collection);
@@ -2029,7 +2240,11 @@ mod tests {
         fn test_empty_drops() {
             let levels = Levels::new(4);
 
-            let levels = levels.add(0, empty::<Arc<SSTableMetadata>>(), empty::<Arc<DropMetadata>>());
+            let levels = levels.add(
+                0,
+                empty::<Arc<SSTableMetadata>>(),
+                empty::<Arc<DropMetadata>>(),
+            );
 
             let level = levels.level(0).unwrap();
             match level {
@@ -2100,7 +2315,12 @@ mod tests {
             let level = levels.level(0).unwrap();
             match level {
                 Overlapping { drops, .. } => {
-                    assert_eq!(drops.len(), 5, "Expected 5 drops after multiple splits, got {}", drops.len());
+                    assert_eq!(
+                        drops.len(),
+                        5,
+                        "Expected 5 drops after multiple splits, got {}",
+                        drops.len()
+                    );
                     assert_eq!(drops[1].kind, DropKind::Index(1));
                     assert_eq!(drops[3].kind, DropKind::Index(2));
                     assert_eq!(drops[0].kind, DropKind::Collection);
@@ -2192,9 +2412,15 @@ mod tests {
 
             if let Bound::Included(start) = drop.key_range.start_bound().cloned() {
                 let (left_at_start, right_at_start) = drop.split_at(&start).expect_two();
-                assert_eq!(left_at_start.key_range.start_bound(), Bound::Included(&start));
+                assert_eq!(
+                    left_at_start.key_range.start_bound(),
+                    Bound::Included(&start)
+                );
                 assert_eq!(left_at_start.key_range.end_bound(), Bound::Included(&start));
-                assert_eq!(right_at_start.key_range.start_bound(), Bound::Excluded(&start));
+                assert_eq!(
+                    right_at_start.key_range.start_bound(),
+                    Bound::Excluded(&start)
+                );
             }
 
             if let Bound::Included(end) = drop.key_range.end_bound().cloned() {
@@ -2283,14 +2509,19 @@ mod tests {
             assert_eq!(version2.pending_drops[0].drop_sequence_number, 300);
 
             // Pending drops remain sorted.
-            let seqs: Vec<u64> = version2.pending_drops.iter().map(|d| d.drop_sequence_number).collect();
+            let seqs: Vec<u64> = version2
+                .pending_drops
+                .iter()
+                .map(|d| d.drop_sequence_number)
+                .collect();
             assert_eq!(seqs, vec![300]);
 
             // Flushed drops should be added to level 0.
             let l0 = version2.sst_levels.level(0).unwrap();
             match l0 {
                 Overlapping { drops, .. } => {
-                    let drop_seqs: Vec<u64> = drops.iter().map(|d| d.drop_sequence_number).collect();
+                    let drop_seqs: Vec<u64> =
+                        drops.iter().map(|d| d.drop_sequence_number).collect();
                     assert_eq!(drop_seqs, vec![100, 200]);
                 }
                 _ => panic!("Expected Overlapping level"),
@@ -2303,7 +2534,8 @@ mod tests {
         }
 
         #[test]
-        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops() {
+        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops(
+        ) {
             let version = LsmVersion::new(1, 10, 2);
 
             let version = version.add_collection_drop(10, 100);
@@ -2325,7 +2557,8 @@ mod tests {
             let l0 = version2.sst_levels.level(0).unwrap();
             match l0 {
                 Overlapping { drops, .. } => {
-                    let drop_seqs: Vec<u64> = drops.iter().map(|d| d.drop_sequence_number).collect();
+                    let drop_seqs: Vec<u64> =
+                        drops.iter().map(|d| d.drop_sequence_number).collect();
                     assert_eq!(drop_seqs, vec![100, 200]);
                 }
                 _ => panic!("Expected Overlapping level"),
@@ -2345,12 +2578,7 @@ mod tests {
 
         #[test]
         fn test_span_single_sstable() {
-            let sst = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(20),
-                100, 200, 1000,
-            );
+            let sst = SSTableMetadata::new(1, 0, &record_key(10), &record_key(20), 100, 200, 1000);
             let items = vec![sst];
             let result = span(&items);
             assert!(result.is_some());
@@ -2360,24 +2588,9 @@ mod tests {
 
         #[test]
         fn test_span_multiple_sstables_disjoint() {
-            let sst1 = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(20),
-                100, 200, 1000,
-            );
-            let sst2 = SSTableMetadata::new(
-                2, 0,
-                &record_key(50),
-                &record_key(60),
-                201, 300, 1000,
-            );
-            let sst3 = SSTableMetadata::new(
-                3, 0,
-                &record_key(30),
-                &record_key(40),
-                301, 400, 1000,
-            );
+            let sst1 = SSTableMetadata::new(1, 0, &record_key(10), &record_key(20), 100, 200, 1000);
+            let sst2 = SSTableMetadata::new(2, 0, &record_key(50), &record_key(60), 201, 300, 1000);
+            let sst3 = SSTableMetadata::new(3, 0, &record_key(30), &record_key(40), 301, 400, 1000);
             let items = vec![sst1, sst2, sst3];
             let result = span(&items);
             assert!(result.is_some());
@@ -2388,18 +2601,8 @@ mod tests {
 
         #[test]
         fn test_span_multiple_sstables_overlapping() {
-            let sst1 = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(40),
-                100, 200, 1000,
-            );
-            let sst2 = SSTableMetadata::new(
-                2, 0,
-                &record_key(30),
-                &record_key(60),
-                201, 300, 1000,
-            );
+            let sst1 = SSTableMetadata::new(1, 0, &record_key(10), &record_key(40), 100, 200, 1000);
+            let sst2 = SSTableMetadata::new(2, 0, &record_key(30), &record_key(60), 201, 300, 1000);
             let items = vec![sst1, sst2];
             let result = span(&items);
             assert!(result.is_some());
@@ -2409,18 +2612,9 @@ mod tests {
 
         #[test]
         fn test_span_multiple_sstables_contained() {
-            let sst1 = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(100),
-                100, 200, 1000,
-            );
-            let sst2 = SSTableMetadata::new(
-                2, 0,
-                &record_key(30),
-                &record_key(50),
-                201, 300, 1000,
-            );
+            let sst1 =
+                SSTableMetadata::new(1, 0, &record_key(10), &record_key(100), 100, 200, 1000);
+            let sst2 = SSTableMetadata::new(2, 0, &record_key(30), &record_key(50), 201, 300, 1000);
             let items = vec![sst1, sst2];
             let result = span(&items);
             assert!(result.is_some());
@@ -2439,18 +2633,18 @@ mod tests {
         #[test]
         fn test_span_mixed_sstables_and_drops() {
             let sst = Arc::new(SSTableMetadata::new(
-                1, 0,
+                1,
+                0,
                 &record_key(10),
                 &record_key(20),
-                100, 200, 1000,
+                100,
+                200,
+                1000,
             ));
             let drop = DropMetadata::new_collection_drop(1, 300);
 
             // Test with Arc<dyn LevelItem>
-            let items: Vec<Arc<dyn LevelItem>> = vec![
-                sst,
-                drop,
-            ];
+            let items: Vec<Arc<dyn LevelItem>> = vec![sst, drop];
 
             let result: Option<Interval<Vec<u8>>> = items
                 .iter()
@@ -2463,19 +2657,25 @@ mod tests {
         #[test]
         fn test_span_arc_sstables() {
             let sst1 = Arc::new(SSTableMetadata::new(
-                1, 0,
+                1,
+                0,
                 &record_key(10),
                 &record_key(20),
-                100, 200, 1000,
+                100,
+                200,
+                1000,
             ));
             let sst2 = Arc::new(SSTableMetadata::new(
-                2, 0,
+                2,
+                0,
                 &record_key(30),
                 &record_key(40),
-                201, 300, 1000,
+                201,
+                300,
+                1000,
             ));
             let items = vec![sst1, sst2];
-            
+
             // span works with references to Arc<SSTableMetadata>
             let result = span(items.iter().map(|arc| arc.as_ref()));
             assert!(result.is_some());
@@ -2485,18 +2685,8 @@ mod tests {
 
         #[test]
         fn test_span_same_boundaries() {
-            let sst1 = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(20),
-                100, 200, 1000,
-            );
-            let sst2 = SSTableMetadata::new(
-                2, 0,
-                &record_key(10),
-                &record_key(20),
-                201, 300, 1000,
-            );
+            let sst1 = SSTableMetadata::new(1, 0, &record_key(10), &record_key(20), 100, 200, 1000);
+            let sst2 = SSTableMetadata::new(2, 0, &record_key(10), &record_key(20), 201, 300, 1000);
             let items = vec![sst1, sst2];
             let result = span(&items);
             assert!(result.is_some());
@@ -2506,18 +2696,8 @@ mod tests {
 
         #[test]
         fn test_span_adjacent_sstables() {
-            let sst1 = SSTableMetadata::new(
-                1, 0,
-                &record_key(10),
-                &record_key(20),
-                100, 200, 1000,
-            );
-            let sst2 = SSTableMetadata::new(
-                2, 0,
-                &record_key(21),
-                &record_key(30),
-                201, 300, 1000,
-            );
+            let sst1 = SSTableMetadata::new(1, 0, &record_key(10), &record_key(20), 100, 200, 1000);
+            let sst2 = SSTableMetadata::new(2, 0, &record_key(21), &record_key(30), 201, 300, 1000);
             let items = vec![sst1, sst2];
             let result = span(&items);
             assert!(result.is_some());
@@ -2545,28 +2725,48 @@ mod tests {
             let opts = test_db_options();
 
             // 2 files, small total size -> file_score = 2/4 = 0.5, size_score ~ 0
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 10, 100, 200, 1000),
-                create_sstable(2, 0, 11, 20, 201, 300, 1000),
-            ], vec![],000);
+            let level = Level::new(
+                0,
+                vec![
+                    create_sstable(1, 0, 1, 10, 100, 200, 1000),
+                    create_sstable(2, 0, 11, 20, 201, 300, 1000),
+                ],
+                vec![],
+                000,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
 
             // 4 files -> file_score = 4/4 = 1.0
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 10, 100, 200, 1000),
-                create_sstable(2, 0, 11, 20, 201, 300, 1000),
-                create_sstable(3, 0, 21, 30, 301, 400, 1000),
-                create_sstable(4, 0, 31, 40, 401, 500, 1000),
-            ], vec![],4000);
+            let level = Level::new(
+                0,
+                vec![
+                    create_sstable(1, 0, 1, 10, 100, 200, 1000),
+                    create_sstable(2, 0, 11, 20, 201, 300, 1000),
+                    create_sstable(3, 0, 21, 30, 301, 400, 1000),
+                    create_sstable(4, 0, 31, 40, 401, 500, 1000),
+                ],
+                vec![],
+                4000,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
 
             // 8 files -> file_score = 8/4 = 2.0
             let sstables: Vec<_> = (1..=8)
-                .map(|i| create_sstable(i, 0, (i * 10) as i32, (i * 10 + 9) as i32, i * 100, i * 100 + 99, 1000))
+                .map(|i| {
+                    create_sstable(
+                        i,
+                        0,
+                        (i * 10) as i32,
+                        (i * 10 + 9) as i32,
+                        i * 100,
+                        i * 100 + 99,
+                        1000,
+                    )
+                })
                 .collect();
-            let level = Level::new(0, sstables, vec![],8000);
+            let level = Level::new(0, sstables, vec![], 8000);
             let score = level.compaction_score(&opts);
             assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
         }
@@ -2578,25 +2778,36 @@ mod tests {
 
             // 1 file but size = base_bytes -> size_score = 1.0, file_score = 0.25
             // max(0.25, 1.0) = 1.0
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 100, 100, 200, base_bytes),
-            ], vec![], base_bytes);
+            let level = Level::new(
+                0,
+                vec![create_sstable(1, 0, 1, 100, 100, 200, base_bytes)],
+                vec![],
+                base_bytes,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
 
             // 1 file, size = 2 * base_bytes -> size_score = 2.0
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 100, 100, 200, base_bytes * 2),
-            ], vec![],base_bytes * 2);
+            let level = Level::new(
+                0,
+                vec![create_sstable(1, 0, 1, 100, 100, 200, base_bytes * 2)],
+                vec![],
+                base_bytes * 2,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
 
             // 2 files, size = 0.5 * base_bytes -> size_score = 0.5, file_score = 0.5
             let half_size = base_bytes / 2;
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 50, 100, 200, half_size / 2),
-                create_sstable(2, 0, 51, 100, 201, 300, half_size / 2),
-            ], vec![], half_size);
+            let level = Level::new(
+                0,
+                vec![
+                    create_sstable(1, 0, 1, 50, 100, 200, half_size / 2),
+                    create_sstable(2, 0, 51, 100, 201, 300, half_size / 2),
+                ],
+                vec![],
+                half_size,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
         }
@@ -2611,7 +2822,17 @@ mod tests {
             let half_size = base_bytes / 2;
             let per_file = half_size / 6;
             let sstables: Vec<_> = (1..=6)
-                .map(|i| create_sstable(i, 0, (i * 10) as i32, (i * 10 + 9) as i32, i * 100, i * 100 + 99, per_file))
+                .map(|i| {
+                    create_sstable(
+                        i,
+                        0,
+                        (i * 10) as i32,
+                        (i * 10 + 9) as i32,
+                        i * 100,
+                        i * 100 + 99,
+                        per_file,
+                    )
+                })
                 .collect();
             let level = Level::new(0, sstables, vec![], half_size);
             let score = level.compaction_score(&opts);
@@ -2620,10 +2841,15 @@ mod tests {
             // 2 files (file_score = 0.5), size = 1.5 * base (size_score = 1.5)
             // max(0.5, 1.5) = 1.5
             let size = (base_bytes as f64 * 1.5) as u64;
-            let level = Level::new(0, vec![
-                create_sstable(1, 0, 1, 50, 100, 200, size / 2),
-                create_sstable(2, 0, 51, 100, 201, 300, size / 2),
-            ], vec![], size);
+            let level = Level::new(
+                0,
+                vec![
+                    create_sstable(1, 0, 1, 50, 100, 200, size / 2),
+                    create_sstable(2, 0, 51, 100, 201, 300, size / 2),
+                ],
+                vec![],
+                size,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.5).abs() < 0.001, "Expected ~1.5, got {}", score);
         }
@@ -2632,26 +2858,35 @@ mod tests {
         fn test_l1_compaction_score() {
             let opts = test_db_options();
             let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64; // 64 MiB
-            // L1 target = base_bytes * 10^(1-1) = base_bytes
+                                                                                // L1 target = base_bytes * 10^(1-1) = base_bytes
 
             // Size = base_bytes -> score = 1.0
-            let level = Level::new(1, vec![
-                create_sstable(1, 1, 1, 100, 100, 200, base_bytes),
-            ], vec![], base_bytes);
+            let level = Level::new(
+                1,
+                vec![create_sstable(1, 1, 1, 100, 100, 200, base_bytes)],
+                vec![],
+                base_bytes,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
 
             // Size = 0.5 * base_bytes -> score = 0.5
-            let level = Level::new(1, vec![
-                create_sstable(1, 1, 1, 100, 100, 200, base_bytes / 2),
-            ], vec![], base_bytes / 2);
+            let level = Level::new(
+                1,
+                vec![create_sstable(1, 1, 1, 100, 100, 200, base_bytes / 2)],
+                vec![],
+                base_bytes / 2,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
 
             // Size = 2 * base_bytes -> score = 2.0
-            let level = Level::new(1, vec![
-                create_sstable(1, 1, 1, 100, 100, 200, base_bytes * 2),
-            ], vec![], base_bytes * 2);
+            let level = Level::new(
+                1,
+                vec![create_sstable(1, 1, 1, 100, 100, 200, base_bytes * 2)],
+                vec![],
+                base_bytes * 2,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 2.0).abs() < 0.001, "Expected ~2.0, got {}", score);
         }
@@ -2666,16 +2901,22 @@ mod tests {
             let target = (base_bytes as f64 * multiplier) as u64;
 
             // Size = target -> score = 1.0
-            let level = Level::new(2, vec![
-                create_sstable(1, 2, 1, 100, 100, 200, target),
-            ], vec![], target);
+            let level = Level::new(
+                2,
+                vec![create_sstable(1, 2, 1, 100, 100, 200, target)],
+                vec![],
+                target,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
 
             // Size = 0.5 * target -> score = 0.5
-            let level = Level::new(2, vec![
-                create_sstable(1, 2, 1, 100, 100, 200, target / 2),
-            ], vec![], target / 2);
+            let level = Level::new(
+                2,
+                vec![create_sstable(1, 2, 1, 100, 100, 200, target / 2)],
+                vec![],
+                target / 2,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 0.5).abs() < 0.001, "Expected ~0.5, got {}", score);
         }
@@ -2690,17 +2931,23 @@ mod tests {
             let target = (base_bytes as f64 * multiplier.powi(2)) as u64;
 
             // Size = target -> score = 1.0
-            let level = Level::new(3, vec![
-                create_sstable(1, 3, 1, 100, 100, 200, target),
-            ], vec![], target);
+            let level = Level::new(
+                3,
+                vec![create_sstable(1, 3, 1, 100, 100, 200, target)],
+                vec![],
+                target,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.0).abs() < 0.001, "Expected ~1.0, got {}", score);
 
             // Size = 1.5 * target -> score = 1.5
             let size = (target as f64 * 1.5) as u64;
-            let level = Level::new(3, vec![
-                create_sstable(1, 3, 1, 100, 100, 200, size),
-            ], vec![], size);
+            let level = Level::new(
+                3,
+                vec![create_sstable(1, 3, 1, 100, 100, 200, size)],
+                vec![],
+                size,
+            );
             let score = level.compaction_score(&opts);
             assert!((score - 1.5).abs() < 0.001, "Expected ~1.5, got {}", score);
         }
@@ -2724,7 +2971,6 @@ mod tests {
             let score = level.compaction_score(&opts);
             assert!((score - 0.0).abs() < 0.001, "Expected 0.0, got {}", score);
         }
-
     }
 
     fn create_sst(number: u64, level: u8, min: i32, max: i32, size: u64) -> Arc<SSTableMetadata> {

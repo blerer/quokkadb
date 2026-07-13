@@ -1,10 +1,10 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::catalog::{Catalog, CollectionOptions};
-use crate::util::interval::Interval;
+use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
 use crate::storage::lsm_version::{DropMetadata, LsmVersion, SSTableMetadata};
+use crate::util::interval::Interval;
 use std::fmt::Debug;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::sync::Arc;
 
 /// Represents a full snapshot of the database's durable state at a point in time.
@@ -23,14 +23,21 @@ pub struct ManifestState {
 impl ManifestState {
     pub fn new(current_log_number: u64, next_file_number: u64, max_levels: usize) -> Self {
         ManifestState {
-            lsm: Arc::new(LsmVersion::new(current_log_number, next_file_number, max_levels)),
+            lsm: Arc::new(LsmVersion::new(
+                current_log_number,
+                next_file_number,
+                max_levels,
+            )),
             catalog: Arc::new(Catalog::new()),
         }
     }
 
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         match edit {
-            ManifestEdit::WalRotation { log_number, next_seq: _next_seq } => ManifestState {
+            ManifestEdit::WalRotation {
+                log_number,
+                next_seq: _next_seq,
+            } => ManifestState {
                 lsm: Arc::new(self.lsm.with_new_log_file(*log_number)),
                 catalog: self.catalog.clone(),
             },
@@ -41,12 +48,19 @@ impl ManifestState {
                 lsm: Arc::new(self.lsm.with_flushed_sstable(*oldest_log_number, sst)),
                 catalog: self.catalog.clone(),
             },
-            ManifestEdit::CreateCollection { name, id, created_at , options} => ManifestState {
+            ManifestEdit::CreateCollection {
+                name,
+                id,
+                created_at,
+                options,
+            } => ManifestState {
                 lsm: self.lsm.clone(),
-                catalog: Arc::new(self.catalog.add_collection_with_options(name,
-                                                                           *id,
-                                                                           *created_at,
-                                                                           options.clone())),
+                catalog: Arc::new(self.catalog.add_collection_with_options(
+                    name,
+                    *id,
+                    *created_at,
+                    options.clone(),
+                )),
             },
             ManifestEdit::DropCollection { id, dropped_at } => ManifestState {
                 lsm: Arc::new(self.lsm.add_collection_drop(*id, *dropped_at)),
@@ -66,8 +80,8 @@ impl ManifestState {
             },
             ManifestEdit::Snapshot(_) => {
                 unreachable!("Snapshots should not be applied to an LSMTree");
-            },
-            ManifestEdit::IgnoringEmptyMemtable { oldest_log_number} => ManifestState {
+            }
+            ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => ManifestState {
                 lsm: Arc::new(self.lsm.with_ignored_empty_memtable(*oldest_log_number)),
                 catalog: self.catalog.clone(),
             },
@@ -77,8 +91,43 @@ impl ManifestState {
                 added_sstables,
                 drops,
             } => ManifestState {
-                lsm: Arc::new(self.lsm.with_compaction(*output_level, removed_sstables, added_sstables, drops)),
+                lsm: Arc::new(self.lsm.with_compaction(
+                    *output_level,
+                    removed_sstables,
+                    added_sstables,
+                    drops,
+                )),
                 catalog: self.catalog.clone(),
+            },
+            ManifestEdit::CreateIndex {
+                collection_id,
+                index_id,
+                definition,
+                options,
+                created_at,
+            } => ManifestState {
+                lsm: self.lsm.clone(),
+                catalog: Arc::new(self.catalog.add_index_to_collection(
+                    *collection_id,
+                    *index_id,
+                    definition,
+                    options,
+                    *created_at,
+                )),
+            },
+            ManifestEdit::DropIndex {
+                collection_id,
+                index_id,
+                dropped_at,
+            } => ManifestState {
+                lsm: Arc::new(
+                    self.lsm
+                        .add_index_drop(*collection_id, *index_id, *dropped_at),
+                ),
+                catalog: Arc::new(
+                    self.catalog
+                        .drop_index(*collection_id, *index_id, *dropped_at),
+                ),
             },
         }
     }
@@ -107,7 +156,6 @@ impl ManifestState {
 }
 
 impl Serializable for ManifestState {
-
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         Ok(ManifestState {
             lsm: Arc::new(LsmVersion::read_from(reader)?),
@@ -131,7 +179,12 @@ pub enum ManifestEdit {
     Snapshot(Arc<ManifestState>),
 
     /// Adds a new collection to the catalog.
-    CreateCollection { name: String, id: u32, created_at: u64, options: CollectionOptions},
+    CreateCollection {
+        name: String,
+        id: u32,
+        created_at: u64,
+        options: CollectionOptions,
+    },
 
     /// Removes a collection from the catalog.
     DropCollection { id: u32, dropped_at: u64 },
@@ -156,9 +209,7 @@ pub enum ManifestEdit {
 
     /// On replay if a WAL was corrupted and did not result in any update we need to skip it
     /// and drop the empty memtable.
-    IgnoringEmptyMemtable {
-        oldest_log_number: u64,
-    },
+    IgnoringEmptyMemtable { oldest_log_number: u64 },
 
     /// Records a compaction that has been performed, the SSTables removed and added, and any drops
     /// that were applied.
@@ -168,6 +219,37 @@ pub enum ManifestEdit {
         added_sstables: Vec<Arc<SSTableMetadata>>,
         drops: Vec<Arc<DropMetadata>>,
     },
+
+    /// Add a new index to a collection
+    CreateIndex {
+        collection_id: u32,
+        index_id: u32,
+        definition: IndexDefinition,
+        options: IndexOptions,
+        created_at: u64,
+    },
+
+    /// Marks an index as dropped in a collection.
+    DropIndex {
+        collection_id: u32,
+        index_id: u32,
+        dropped_at: u64,
+    },
+}
+
+mod tags {
+    pub const SNAPSHOT: u8 = 0;
+    pub const CREATE_COLLECTION: u8 = 1;
+    pub const DROP_COLLECTION: u8 = 2;
+    pub const RENAME_COLLECTION: u8 = 3;
+    pub const WAL_ROTATION: u8 = 4;
+    pub const MANIFEST_ROTATION: u8 = 5;
+    pub const FLUSH: u8 = 6;
+    pub const FILES_DETECTED_ON_RESTART: u8 = 7;
+    pub const IGNORING_EMPTY_MEMTABLE: u8 = 8;
+    pub const COMPACTION: u8 = 9;
+    pub const CREATE_INDEX: u8 = 10;
+    pub const DROP_INDEX: u8 = 11;
 }
 
 impl ManifestEdit {
@@ -175,41 +257,69 @@ impl ManifestEdit {
         let mut writer = ByteWriter::new();
         match self {
             ManifestEdit::Snapshot(tree) => {
-                writer.write_u8(0);
+                writer.write_u8(tags::SNAPSHOT);
                 tree.write_to(&mut writer);
             }
-            ManifestEdit::CreateCollection { name, id, created_at, options } => {
+            ManifestEdit::CreateCollection {
+                name,
+                id,
+                created_at,
+                options,
+            } => {
                 writer
-                    .write_u8(1)
+                    .write_u8(tags::CREATE_COLLECTION)
                     .write_str(&name)
                     .write_varint_u32(*id)
                     .write_varint_u64(*created_at);
                 options.write_to(&mut writer);
             }
-            ManifestEdit::DropCollection { id, dropped_at: drop_at } => {
-                writer.write_u8(2).write_varint_u32(*id).write_varint_u64(*drop_at);
+            ManifestEdit::DropCollection {
+                id,
+                dropped_at: drop_at,
+            } => {
+                writer
+                    .write_u8(tags::DROP_COLLECTION)
+                    .write_varint_u32(*id)
+                    .write_varint_u64(*drop_at);
             }
             ManifestEdit::RenameCollection { id, new_name } => {
-                writer.write_u8(3).write_varint_u32(*id).write_str(new_name);
+                writer
+                    .write_u8(tags::RENAME_COLLECTION)
+                    .write_varint_u32(*id)
+                    .write_str(new_name);
             }
-            ManifestEdit::WalRotation { log_number, next_seq } => {
-                writer.write_u8(4).write_varint_u64(*log_number).write_varint_u64(*next_seq);
+            ManifestEdit::WalRotation {
+                log_number,
+                next_seq,
+            } => {
+                writer
+                    .write_u8(tags::WAL_ROTATION)
+                    .write_varint_u64(*log_number)
+                    .write_varint_u64(*next_seq);
             }
             ManifestEdit::ManifestRotation { manifest_number } => {
-                writer.write_u8(5).write_varint_u64(*manifest_number);
+                writer
+                    .write_u8(tags::MANIFEST_ROTATION)
+                    .write_varint_u64(*manifest_number);
             }
             ManifestEdit::Flush {
                 oldest_log_number,
                 sst,
             } => {
-                writer.write_u8(6).write_varint_u64(*oldest_log_number);
+                writer
+                    .write_u8(tags::FLUSH)
+                    .write_varint_u64(*oldest_log_number);
                 sst.write_to(&mut writer);
             }
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => {
-                writer.write_u8(7).write_varint_u64(*next_file_number);
+                writer
+                    .write_u8(tags::FILES_DETECTED_ON_RESTART)
+                    .write_varint_u64(*next_file_number);
             }
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => {
-                writer.write_u8(8).write_varint_u64(*oldest_log_number);
+                writer
+                    .write_u8(tags::IGNORING_EMPTY_MEMTABLE)
+                    .write_varint_u64(*oldest_log_number);
             }
             ManifestEdit::Compaction {
                 output_level,
@@ -217,11 +327,35 @@ impl ManifestEdit {
                 added_sstables,
                 drops,
             } => {
-                writer.write_u8(9);
+                writer.write_u8(tags::COMPACTION);
                 writer.write_u8(*output_level as u8);
                 Vec::<Arc<SSTableMetadata>>::write_to(removed_sstables, &mut writer);
                 Vec::<Arc<SSTableMetadata>>::write_to(added_sstables, &mut writer);
                 Vec::<Arc<DropMetadata>>::write_to(drops, &mut writer);
+            }
+            ManifestEdit::CreateIndex {
+                collection_id,
+                index_id,
+                definition,
+                options,
+                created_at,
+            } => {
+                writer.write_u8(tags::CREATE_INDEX);
+                writer.write_varint_u32(*collection_id);
+                writer.write_varint_u32(*index_id);
+                definition.write_to(&mut writer);
+                options.write_to(&mut writer);
+                writer.write_varint_u64(*created_at);
+            }
+            ManifestEdit::DropIndex {
+                collection_id,
+                index_id,
+                dropped_at,
+            } => {
+                writer.write_u8(tags::DROP_INDEX);
+                writer.write_varint_u32(*collection_id);
+                writer.write_varint_u32(*index_id);
+                writer.write_varint_u64(*dropped_at);
             }
         }
         writer.take_buffer()
@@ -231,36 +365,44 @@ impl ManifestEdit {
         let reader = ByteReader::new(input);
         let edit = reader.read_u8()?;
         match edit {
-            0 => Ok(ManifestEdit::Snapshot(Arc::new(ManifestState::read_from(
+            tags::SNAPSHOT => Ok(ManifestEdit::Snapshot(Arc::new(ManifestState::read_from(
                 &reader,
             )?))),
-            1 => {
+            tags::CREATE_COLLECTION => {
                 let name = reader.read_str()?.to_string();
                 let id = reader.read_varint_u32()?;
                 let created_at = reader.read_varint_u64()?;
                 let options = CollectionOptions::read_from(&reader)?;
-                Ok(ManifestEdit::CreateCollection { name, id, created_at, options })
+                Ok(ManifestEdit::CreateCollection {
+                    name,
+                    id,
+                    created_at,
+                    options,
+                })
             }
-            2 => {
+            tags::DROP_COLLECTION => {
                 let id = reader.read_varint_u32()?;
                 let dropped_at = reader.read_varint_u64()?;
                 Ok(ManifestEdit::DropCollection { id, dropped_at })
             }
-            3 => {
+            tags::RENAME_COLLECTION => {
                 let id = reader.read_varint_u32()?;
                 let new_name = reader.read_str()?.to_string();
                 Ok(ManifestEdit::RenameCollection { id, new_name })
             }
-            4 => {
+            tags::WAL_ROTATION => {
                 let log_number = reader.read_varint_u64()?;
                 let next_seq = reader.read_varint_u64()?;
-                Ok(ManifestEdit::WalRotation { log_number, next_seq })
+                Ok(ManifestEdit::WalRotation {
+                    log_number,
+                    next_seq,
+                })
             }
-            5 => {
+            tags::MANIFEST_ROTATION => {
                 let manifest_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::ManifestRotation { manifest_number })
             }
-            6 => {
+            tags::FLUSH => {
                 let oldest_log_number = reader.read_varint_u64()?;
                 let sst = Arc::new(SSTableMetadata::read_from(&reader)?);
                 Ok(ManifestEdit::Flush {
@@ -268,15 +410,15 @@ impl ManifestEdit {
                     sst,
                 })
             }
-            7 => {
+            tags::FILES_DETECTED_ON_RESTART => {
                 let next_file_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::FilesDetectedOnRestart { next_file_number })
             }
-            8 => {
+            tags::IGNORING_EMPTY_MEMTABLE => {
                 let oldest_log_number = reader.read_varint_u64()?;
                 Ok(ManifestEdit::IgnoringEmptyMemtable { oldest_log_number })
             }
-            9 => {
+            tags::COMPACTION => {
                 let output_level = reader.read_u8()? as usize;
                 let removed_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
                 let added_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
@@ -288,16 +430,38 @@ impl ManifestEdit {
                     drops,
                 })
             }
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("ManifestEdit: {}", edit),
-            )),
+            tags::CREATE_INDEX => {
+                let collection_id = reader.read_varint_u32()?;
+                let index_id = reader.read_varint_u32()?;
+                let definition = IndexDefinition::read_from(&reader)?;
+                let options = IndexOptions::read_from(&reader)?;
+                let created_at = reader.read_varint_u64()?;
+                Ok(ManifestEdit::CreateIndex {
+                    collection_id,
+                    index_id,
+                    definition,
+                    options,
+                    created_at,
+                })
+            }
+            tags::DROP_INDEX => {
+                let collection_id = reader.read_varint_u32()?;
+                let index_id = reader.read_varint_u32()?;
+                let dropped_at = reader.read_varint_u64()?;
+                Ok(ManifestEdit::DropIndex {
+                    collection_id,
+                    index_id,
+                    dropped_at,
+                })
+            }
+            _ => Err(invalid_data(format!("ManifestEdit: {}", edit))),
         }
     }
 }
 
-use std::fmt;
+use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
+use std::fmt;
 
 impl fmt::Display for ManifestEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -348,6 +512,32 @@ impl fmt::Display for ManifestEdit {
                 "Compaction {{ output_level: {}, removed_sstables: {:?}, added_sstables: {:?}, drops: {:?} }}",
                 output_level, removed_sstables, added_sstables, drops
             ),
+            ManifestEdit::CreateIndex {
+                collection_id,
+                index_id,
+                definition,
+                options,
+                created_at
+            } => write!(
+                f,
+                "CreateIndex {{ collection_id: {}, index_id: {}, definition: {}, options: {:?}, created_at: {} }}",
+                collection_id,
+                index_id,
+                definition,
+                options,
+                created_at
+            ),
+            ManifestEdit::DropIndex {
+                collection_id,
+                index_id,
+                dropped_at,
+            } => write!(
+                f,
+                "DropIndex {{ collection_id: {}, index_id: {}, dropped_at: {} }}",
+                collection_id,
+                index_id,
+                dropped_at
+            ),
         }
     }
 }
@@ -355,11 +545,13 @@ impl fmt::Display for ManifestEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::catalog::{
+        CollectionMetadata, CollectionOptions, IndexDirection, IndexPath, OrderedIndexField,
+    };
     use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;
-    use crate::storage::catalog::{CollectionMetadata, CollectionOptions};
 
     #[test]
     fn test_create_and_drop_collection_serialization() {
@@ -408,12 +600,18 @@ mod tests {
 
         assert!(tree.catalog.get_collection_by_name("old_name").is_none());
         assert!(tree.catalog.get_collection_by_name("new_name").is_some());
-        assert_eq!(tree.catalog.get_collection_by_name("new_name").unwrap().id, 10);
+        assert_eq!(
+            tree.catalog.get_collection_by_name("new_name").unwrap().id,
+            10
+        );
     }
 
     #[test]
     fn test_wal_and_manifest_rotation_serialization() {
-        check_edit_serialization_roundtrip(ManifestEdit::WalRotation { log_number: 123, next_seq: 456 });
+        check_edit_serialization_roundtrip(ManifestEdit::WalRotation {
+            log_number: 123,
+            next_seq: 456,
+        });
         check_edit_serialization_roundtrip(ManifestEdit::ManifestRotation {
             manifest_number: 456,
         });
@@ -446,6 +644,7 @@ mod tests {
         check_edit_serialization_roundtrip(edit);
     }
 
+    #[test]
     fn test_compaction_serialization() {
         let sst1 = Arc::new(SSTableMetadata::new(
             1,
@@ -466,13 +665,50 @@ mod tests {
             2048,
         ));
         let drop1 = DropMetadata::new_collection_drop(10, 150);
-        let drop2 = DropMetadata::new_index_drop(20,  1,160);
+        let drop2 = DropMetadata::new_index_drop(20, 1, 160);
 
         let edit = ManifestEdit::Compaction {
             output_level: 1,
             removed_sstables: vec![sst1.clone()],
             added_sstables: vec![sst2.clone()],
             drops: vec![drop1, drop2],
+        };
+
+        check_edit_serialization_roundtrip(edit);
+    }
+
+    #[test]
+    fn test_create_index_serialization() {
+        let edit = ManifestEdit::CreateIndex {
+            collection_id: 10,
+            index_id: 2,
+            definition: IndexDefinition::Regular(vec![
+                OrderedIndexField {
+                    path: IndexPath {
+                        components: vec!["address".to_string(), "city".to_string()],
+                    },
+                    direction: IndexDirection::Ascending,
+                },
+                OrderedIndexField {
+                    path: "score".into(),
+                    direction: IndexDirection::Descending,
+                },
+            ]),
+            options: IndexOptions {
+                name: Some("by_address_and_score".to_string()),
+            },
+            created_at: 1627846261,
+        };
+
+        check_edit_serialization_roundtrip(edit);
+    }
+
+    #[test]
+    fn test_drop_index_serialization() {
+        let edit = ManifestEdit::DropIndex {
+            collection_id: 10,
+            index_id: 2,
+            dropped_at: 1627846262,
         };
 
         check_edit_serialization_roundtrip(edit);
@@ -490,7 +726,12 @@ mod tests {
         });
 
         assert_eq!(
-            Some(Arc::new(CollectionMetadata::new(10, "docs", 1000, CollectionOptions::default()))),
+            Some(Arc::new(CollectionMetadata::new(
+                10,
+                "docs",
+                1000,
+                CollectionOptions::default()
+            ))),
             tree.catalog.get_collection_by_name(&"docs".to_string())
         );
 
@@ -498,14 +739,20 @@ mod tests {
             id: 10,
             dropped_at: 2000,
         });
-        assert_eq!(None, tree.catalog.get_collection_by_name(&"docs".to_string()));
+        assert_eq!(
+            None,
+            tree.catalog.get_collection_by_name(&"docs".to_string())
+        );
     }
 
     #[test]
     fn test_apply_wal_and_manifest_rotation() {
         let tree = ManifestState::new(1, 2, 3);
 
-        let tree = tree.apply(&ManifestEdit::WalRotation { log_number: 99, next_seq: 567 });
+        let tree = tree.apply(&ManifestEdit::WalRotation {
+            log_number: 99,
+            next_seq: 567,
+        });
         assert_eq!(tree.lsm.current_log_number, 99);
         assert_eq!(tree.lsm.next_file_number, 100);
 

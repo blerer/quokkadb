@@ -16,49 +16,51 @@ fn setup() -> (tempfile::TempDir, QuokkaDB) {
 #[test]
 fn mixed_strategy_generates_id_when_missing() {
     let (_dir, db) = setup();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
 
     // Insert without _id
     let doc = doc! {"x": 1};
     let result = collection.insert_one(doc).unwrap();
 
     // Should have generated an _id
-    let inserted_id = result.get("inserted_id").unwrap();
+    let inserted_id = &result.inserted_id;
     assert!(matches!(inserted_id, Bson::Int64(_)));
     let generated_id = inserted_id.as_i64().unwrap();
 
     // Verify that the document can be retrieved using the generated _id
-    let mut result =
-        collection.find(doc! {"_id": generated_id}).limit(1).execute().unwrap();
-    assert_eq!(result.next().unwrap().unwrap(), doc! {"_id": generated_id, "x": 1});
+    let mut result = collection
+        .find(doc! {"_id": generated_id})
+        .limit(1)
+        .execute()
+        .unwrap();
+    assert_eq!(
+        result.next().unwrap().unwrap(),
+        doc! {"_id": generated_id, "x": 1}
+    );
 }
 
 #[test]
 fn mixed_strategy_uses_provided_id() {
     let (_dir, db) = setup();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
 
     // Insert with explicit _id
     let doc = doc! {"_id": 42, "x": 1};
     let result = collection.insert_one(doc).unwrap();
 
     // Should use the provided _id
-    assert_eq!(result.get_i32("inserted_id").unwrap(), 42);
+    assert_eq!(result.inserted_id.as_i32().unwrap(), 42);
 }
 
 #[test]
 fn mixed_strategy_insert_many_generates_ids_when_missing() {
     let (_dir, db) = setup();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
 
-    let docs = vec![
-        doc! {"x": 1},
-        doc! {"_id": 100, "x": 2},
-        doc! {"x": 3},
-    ];
+    let docs = vec![doc! {"x": 1}, doc! {"_id": 100, "x": 2}, doc! {"x": 3}];
     let result = collection.insert_many(docs).unwrap();
 
-    let inserted_ids = result.get_array("inserted_ids").unwrap();
+    let inserted_ids = &result.inserted_ids;
     assert_eq!(inserted_ids.len(), 3);
 
     // First and third should be generated (Int64), second should be provided (Int32)
@@ -70,14 +72,21 @@ fn mixed_strategy_insert_many_generates_ids_when_missing() {
     let first_id = inserted_ids[0].as_i64().unwrap();
     let last_id = inserted_ids[2].as_i64().unwrap();
 
-    let mut result =
-        collection.find(doc! {"_id": {"$in" : [first_id, 100, last_id]}})
-            .sort(doc! { "x": 1 })
-            .execute().unwrap();
+    let mut result = collection
+        .find(doc! {"_id": {"$in" : [first_id, 100, last_id]}})
+        .sort(doc! { "x": 1 })
+        .execute()
+        .unwrap();
 
-    assert_eq!(result.next().unwrap().unwrap(), doc! {"_id": first_id, "x": 1});
+    assert_eq!(
+        result.next().unwrap().unwrap(),
+        doc! {"_id": first_id, "x": 1}
+    );
     assert_eq!(result.next().unwrap().unwrap(), doc! {"_id": 100, "x": 2});
-    assert_eq!(result.next().unwrap().unwrap(), doc! {"_id": last_id, "x": 3});
+    assert_eq!(
+        result.next().unwrap().unwrap(),
+        doc! {"_id": last_id, "x": 3}
+    );
 }
 
 // =============================================================================
@@ -102,14 +111,20 @@ fn generated_strategy_creates_id_automatically() {
     let result = collection.insert_one(doc).unwrap();
 
     // Should have generated an _id
-    let inserted_id = result.get("inserted_id").unwrap();
+    let inserted_id = &result.inserted_id;
     assert!(matches!(inserted_id, Bson::Int64(_)));
 
     // Verify that the document can be retrieved using the generated _id
     let generated_id = inserted_id.as_i64().unwrap();
-    let mut result =
-        collection.find(doc! {"_id": generated_id}).limit(1).execute().unwrap();
-    assert_eq!(result.next().unwrap().unwrap(), doc! {"_id": generated_id, "x": 1});
+    let mut result = collection
+        .find(doc! {"_id": generated_id})
+        .limit(1)
+        .execute()
+        .unwrap();
+    assert_eq!(
+        result.next().unwrap().unwrap(),
+        doc! {"_id": generated_id, "x": 1}
+    );
 }
 
 #[test]
@@ -218,7 +233,7 @@ fn manual_strategy_accepts_user_provided_id() {
     let doc = doc! {"_id": "my-custom-id", "x": 1};
     let result = collection.insert_one(doc).unwrap();
 
-    assert_eq!(result.get_str("inserted_id").unwrap(), "my-custom-id");
+    assert_eq!(result.inserted_id.as_str().unwrap(), "my-custom-id");
 }
 
 #[test]
@@ -272,7 +287,7 @@ fn manual_strategy_insert_many_succeeds_with_all_ids() {
     ];
     let result = collection.insert_many(docs).unwrap();
 
-    let inserted_ids = result.get_array("inserted_ids").unwrap();
+    let inserted_ids = &result.inserted_ids;
     assert_eq!(inserted_ids.len(), 3);
     assert_eq!(inserted_ids[0].as_str().unwrap(), "a");
     assert_eq!(inserted_ids[1].as_str().unwrap(), "b");
@@ -314,7 +329,7 @@ fn manual_strategy_detects_duplicate_ids() {
 #[test]
 fn insert_duplicate_id_is_version_conflict() {
     let (_dir, db) = setup();
-    let collection = db.collection("test");
+    let collection = db.collection("test").create_if_missing();
 
     let doc = doc! {"_id": 365, "x": 1};
 

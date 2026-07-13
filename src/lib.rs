@@ -9,26 +9,36 @@ mod query;
 mod storage;
 mod util;
 
+use crate::collection::{
+    Collection, CreateCollectionOptions, CreateIndexOptions, IdCreationStrategy,
+};
 use crate::error::Error;
-use std::path::{Path};
-use std::sync::Arc;
-use bson::Document;
-use bson::doc;
-use crate::collection::{Collection, CreateCollectionOptions};
-use crate::obs::logger::{LoggerAndTracer, NoOpLogger, LogLevel};
+use crate::obs::logger::{LogLevel, LoggerAndTracer, NoOpLogger};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
+use crate::query::optimizer::optimizer::Optimizer;
+use crate::query::physical_plan::PhysicalPlan;
+use crate::query::{IndexKeySpec, Parameters};
+use crate::storage::catalog::CollectionMetadata;
+use crate::storage::storage_engine::StorageEngine;
+use bson::Document;
 use query::execution::executor::QueryExecutor;
 use query::logical_plan::LogicalPlan;
-use crate::query::optimizer::optimizer::Optimizer;
-use crate::query::Parameters;
-use crate::query::physical_plan::PhysicalPlan;
-use crate::storage::storage_engine::StorageEngine;
+use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct QuokkaDB {
     options: Arc<Options>,
     db_impl: Arc<DbImpl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionInfo {
+    pub id: u32,
+    pub name: String,
+    pub created_at: u64,
+    pub id_creation_strategy: IdCreationStrategy,
 }
 
 impl QuokkaDB {
@@ -44,14 +54,17 @@ impl QuokkaDB {
         Self::open_with_options_and_logger(path, Options::default(), logger)
     }
 
-    pub fn open_with_options_and_logger(path: &Path,
-                                        options: Options,
-                                        logger: Arc<dyn LoggerAndTracer>) -> error::Result<Self> {
+    pub fn open_with_options_and_logger(
+        path: &Path,
+        options: Options,
+        logger: Arc<dyn LoggerAndTracer>,
+    ) -> error::Result<Self> {
         options.validate()?;
 
         let options = Arc::new(options);
         let mut metric_registry = MetricRegistry::new();
-        let storage_engine = StorageEngine::new(logger.clone(), &mut metric_registry, options.clone(), path)?;
+        let storage_engine =
+            StorageEngine::new(logger.clone(), &mut metric_registry, options.clone(), path)?;
         let optimizer = Arc::new(Optimizer::new(logger.clone())); // Add normalization rules as needed
         let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
         let db_impl = Arc::new(DbImpl {
@@ -61,10 +74,7 @@ impl QuokkaDB {
             storage_engine,
         });
 
-        Ok(QuokkaDB {
-            options,
-            db_impl,
-        })
+        Ok(QuokkaDB { options, db_impl })
     }
 
     pub fn options(&self) -> &Options {
@@ -78,7 +88,8 @@ impl QuokkaDB {
     /// Creates a new collection with the given name and default options.
     /// Returns an error if a collection with the same name already exists.
     pub fn create_collection(&self, name: &str) -> error::Result<()> {
-        self.db_impl.create_collection(name, CreateCollectionOptions::default())?;
+        self.db_impl
+            .create_collection(name, CreateCollectionOptions::default())?;
         Ok(())
     }
 
@@ -93,38 +104,16 @@ impl QuokkaDB {
         Ok(())
     }
 
-    /// Drops the collection with the given name.
-    /// Returns an error if the collection does not exist.
-    pub fn drop_collection(&self, name: &str) -> error::Result<()> {
-        self.db_impl.drop_collection(name)?;
-        Ok(())
-    }
-
-    /// Renames a collection from `old_name` to `new_name`.
-    /// Returns an error if the source collection does not exist or if the target name already exists.
-    pub fn rename_collection(&self, old_name: &str, new_name: &str) -> error::Result<()> {
-        self.db_impl.rename_collection(old_name, new_name)?;
-        Ok(())
-    }
-
-    /// Returns a list of all collections in the database.
-    /// Each document contains metadata about a collection, similar to MongoDB's listCollections.
-    pub fn list_collections(&self) -> Vec<Document> {
+    /// Returns typed metadata for all collections in the database.
+    pub fn list_collections(&self) -> Vec<CollectionInfo> {
         let catalog = self.db_impl.storage_engine.catalog();
         catalog
             .list_collections()
-            .map(|c| {
-                doc! {
-                    "name": &c.name,
-                    "type": "collection",
-                    "options": {
-                        "idCreationStrategy": format!("{:?}", c.options.id_creation_strategy)
-                    },
-                    "info": {
-                        "id": c.id as i64,
-                        "createdAt": c.created_at as i64,
-                    }
-                }
+            .map(|c| CollectionInfo {
+                id: c.id,
+                name: c.name.clone(),
+                created_at: c.created_at,
+                id_creation_strategy: c.options.id_creation_strategy.clone().into(),
             })
             .collect()
     }
@@ -142,46 +131,116 @@ impl DbImpl {
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
     }
 
-    pub fn create_collection(self: &Arc<Self>, name: &str, options: CreateCollectionOptions) -> error::Result<u32> {
-        Ok(self.storage_engine.create_collection(name, options.into())?)
+    pub fn create_collection(
+        self: &Arc<Self>,
+        name: &str,
+        options: CreateCollectionOptions,
+    ) -> error::Result<u32> {
+        Ok(self
+            .storage_engine
+            .create_collection(name, options.into())?)
     }
 
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
         Ok(self.storage_engine.drop_collection(name)?)
     }
 
-    pub fn rename_collection(self: &Arc<Self>, old_name: &str, new_name: &str) -> error::Result<()> {
+    pub fn rename_collection(
+        self: &Arc<Self>,
+        old_name: &str,
+        new_name: &str,
+    ) -> error::Result<()> {
         Ok(self.storage_engine.rename_collection(old_name, new_name)?)
     }
 
-    pub fn get_collection_id(self: &Arc<Self>, name: &str) -> Option<u32> {
-        self.storage_engine.catalog().get_collection_by_name(name).and_then(|c| Some(c.id))
+    pub fn get_collection(self: &Arc<Self>, name: &str) -> Option<Arc<CollectionMetadata>> {
+        self.storage_engine.catalog().get_collection_by_name(name)
+    }
+
+    pub fn create_index(
+        self: &Arc<Self>,
+        collection_id: u32,
+        spec: IndexKeySpec,
+        options: CreateIndexOptions,
+    ) -> error::Result<String> {
+        Ok(self
+            .storage_engine
+            .create_index(collection_id, spec.into(), options.into())?)
+    }
+
+    pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {
+        Ok(self.storage_engine.drop_index(collection_id, index_id)?)
     }
 
     pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<Document> {
         let (physical_plan, parameters) = match logical_plan {
-            LogicalPlan::InsertOne { collection, document } => {
-                (PhysicalPlan::InsertOne { collection, document, }, None)
-            }
-            LogicalPlan::InsertMany { collection, documents } => {
-                (PhysicalPlan::InsertMany { collection, documents, }, None)
-            }
-            LogicalPlan::UpdateOne { collection, query, update, upsert} => {
+            LogicalPlan::InsertOne {
+                collection,
+                document,
+            } => (
+                PhysicalPlan::InsertOne {
+                    collection,
+                    document,
+                },
+                None,
+            ),
+            LogicalPlan::InsertMany {
+                collection,
+                documents,
+            } => (
+                PhysicalPlan::InsertMany {
+                    collection,
+                    documents,
+                },
+                None,
+            ),
+            LogicalPlan::UpdateOne {
+                collection,
+                query,
+                update,
+                upsert,
+            } => {
                 let (parameters, query) = self.optimize_query(query);
-                (PhysicalPlan::UpdateOne { collection, query, update, upsert}, Some(parameters))
+                (
+                    PhysicalPlan::UpdateOne {
+                        collection,
+                        query,
+                        update,
+                        upsert,
+                    },
+                    Some(parameters),
+                )
             }
-            LogicalPlan::UpdateMany { collection, query, update, upsert} => {
+            LogicalPlan::UpdateMany {
+                collection,
+                query,
+                update,
+                upsert,
+            } => {
                 let (parameters, query) = self.optimize_query(query);
-                (PhysicalPlan::UpdateMany { collection, query, update, upsert}, Some(parameters))
+                (
+                    PhysicalPlan::UpdateMany {
+                        collection,
+                        query,
+                        update,
+                        upsert,
+                    },
+                    Some(parameters),
+                )
             }
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
 
-        self.executor.execute_direct(physical_plan, parameters)?.next().unwrap()
+        self.executor
+            .execute_direct(physical_plan, parameters)?
+            .next()
+            .unwrap()
     }
 
-    pub fn execute_query(&self, logical_plan: Arc<LogicalPlan>) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
-
+    pub fn execute_query(
+        &self,
+        logical_plan: Arc<LogicalPlan>,
+    ) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
         let (parameters, physical_plan) = self.optimize_query(logical_plan);
 
         self.executor.execute_cached(physical_plan, &parameters)
