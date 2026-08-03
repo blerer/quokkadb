@@ -1,5 +1,5 @@
 use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
-use bson::{from_slice, to_vec};
+use bson::{deserialize_from_slice, serialize_to_vec};
 use serde::{Deserialize, Serialize};
 use std::io::{Error, ErrorKind};
 use std::time::SystemTime;
@@ -83,11 +83,11 @@ impl SSTableProperties {
     }
 
     pub fn to_vec(&self) -> std::io::Result<Vec<u8>> {
-        to_vec(self).map_err(|e| Error::new(ErrorKind::Other, e))
+        serialize_to_vec(self).map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     pub fn from_slice(slice: &[u8]) -> std::io::Result<Self> {
-        from_slice(slice).map_err(|e| Error::new(ErrorKind::Other, e))
+        deserialize_from_slice(slice).map_err(|e| Error::new(ErrorKind::Other, e))
     }
 }
 

@@ -527,15 +527,17 @@ impl SharedFile {
 
     #[cfg(unix)]
     fn fadvise_random(file: &File) -> Result<()> {
+        use std::num::NonZeroU64;
         use rustix::fs::{fadvise, Advice};
-        fadvise(file, 0, 0, Advice::Random)?;
+        fadvise(file, 0, None::<NonZeroU64>, Advice::Random)?;
         Ok(())
     }
 
     #[cfg(unix)]
     fn fadvise_dontneed(file: &File, offset: u64, size: usize) -> Result<()> {
+        use std::num::NonZeroU64;
         use rustix::fs::{fadvise, Advice};
-        fadvise(file, offset, size as u64, Advice::DontNeed)?;
+        fadvise(file, offset, NonZeroU64::new(size as u64), Advice::DontNeed)?;
         Ok(())
     }
 }

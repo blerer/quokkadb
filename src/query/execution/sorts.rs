@@ -1,11 +1,18 @@
 use crate::error::Result;
 use crate::query::{get_path_value, BsonValueRef, Expr, SortField, SortOrder};
+use bson::error::{Error as BsonError, ErrorKind as BsonErrorKind};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::{BufReader, BufWriter, ErrorKind, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom};
 use std::sync::Arc;
 use tempfile::{tempdir, NamedTempFile, TempDir};
+
+fn is_bson_stream_exhausted(err: &BsonError) -> bool {
+    matches!(&err.kind, BsonErrorKind::EndOfStream { .. })
+        || matches!(&err.kind, BsonErrorKind::Io { .. })
+            && err.message.as_deref() == Some("failed to fill whole buffer")
+}
 
 /// Compares two BSON documents according to the provided sort fields.
 /// Returns an `Ordering` based on multi-key, multi-order comparison.
@@ -212,7 +219,7 @@ impl MergeIterator {
                         sort_fields: sort_fields.clone(),
                     });
                 }
-                Err(bson::de::Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
+                Err(e) if is_bson_stream_exhausted(&e) => {
                     // Empty run, which is fine.
                 }
                 Err(e) => return Err(e.into()),
@@ -243,7 +250,7 @@ impl Iterator for MergeIterator {
                     });
                     Some(Ok(smallest.doc))
                 }
-                Err(bson::de::Error::Io(e)) if e.kind() == ErrorKind::UnexpectedEof => {
+                Err(e) if is_bson_stream_exhausted(&e) => {
                     // This run is exhausted.
                     Some(Ok(smallest.doc))
                 }

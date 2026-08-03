@@ -7,9 +7,7 @@ pub enum Error {
     Io(io::Error),
     DeserializationError(String),
     InvalidRequest(String),
-    BsonDeError(bson::de::Error),
-    BsonSerError(bson::ser::Error),
-    BsonRawError(bson::raw::Error),
+    BsonError(bson::error::Error),
     ErrorMode(String),
     UnexpectedError(String),
     VersionConflict(String),
@@ -39,9 +37,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{}", e),
-            Error::BsonSerError(e) => write!(f, "{}", e),
-            Error::BsonDeError(e) => write!(f, "{}", e),
-            Error::BsonRawError(e) => write!(f, "{}", e),
+            Error::BsonError(e) => write!(f, "{}", e),
             Error::DeserializationError(reason)
             | Error::InvalidRequest(reason)
             | Error::ErrorMode(reason)
@@ -104,21 +100,9 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<bson::de::Error> for Error {
-    fn from(err: bson::de::Error) -> Self {
-        Error::BsonDeError(err)
-    }
-}
-
-impl From<bson::ser::Error> for Error {
-    fn from(err: bson::ser::Error) -> Self {
-        Error::BsonSerError(err)
-    }
-}
-
-impl From<bson::raw::Error> for Error {
-    fn from(err: bson::raw::Error) -> Self {
-        Error::BsonRawError(err)
+impl From<bson::error::Error> for Error {
+    fn from(err: bson::error::Error) -> Self {
+        Error::BsonError(err)
     }
 }
 

@@ -53,7 +53,7 @@ impl Default for Options {
             block_size: StorageQuantity::new(4, StorageUnit::Kibibytes),
             restart_interval: 8,
             bloom_filter_false_positive: 0.01,
-            compressor_type: CompressorType::Snappy,
+            compressor_type: CompressorType::LZ4,
         }
     }
 }

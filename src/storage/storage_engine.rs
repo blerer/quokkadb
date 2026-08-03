@@ -1927,7 +1927,7 @@ mod tests {
         assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key,
     };
     use crate::storage::write_batch::{Precondition, Preconditions};
-    use bson::{doc, to_vec};
+    use bson::doc;
     use std::fs::{self, OpenOptions};
     use std::io::{ErrorKind, Seek, SeekFrom, Write};
     use std::path::Path;
@@ -2285,7 +2285,7 @@ mod tests {
         // Write enough data to trigger a memtable rotation.
         // We write four ~1MB values to fill up the 4MB memtable.
         let val_1mb_string = "a".repeat(1024 * 1024);
-        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+        let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
         for i in 1..=4 {
             engine
                 .write(WriteBatch::new(vec![Operation::new_put(
@@ -2298,7 +2298,7 @@ mod tests {
         }
 
         // This fifth write will trigger rotation, creating an immutable memtable.
-        let val_active = to_vec(&doc! { "v": "active" }).unwrap();
+        let val_active = doc! { "v": "active" }.to_vec().unwrap();
         engine
             .write(WriteBatch::new(vec![Operation::new_put(
                 col,
@@ -2354,7 +2354,7 @@ mod tests {
         assert_eq!(snapshot, 5);
 
         // Update a key that is in the immutable memtable. The update goes to the active memtable.
-        let val_update = to_vec(&doc! { "v": "updated" }).unwrap();
+        let val_update = doc! { "v": "updated" }.to_vec().unwrap();
         engine
             .write(WriteBatch::new(vec![Operation::new_put(
                 col,
@@ -2420,7 +2420,7 @@ mod tests {
         let idx = 0;
 
         let val_1mb_string = "a".repeat(1024 * 1024);
-        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+        let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
 
         let col = {
             let old_engine =
@@ -2840,7 +2840,7 @@ mod tests {
                         .read(col, idx, &user_key(key), None)
                         .unwrap()
                         .unwrap();
-                    let expected_value = to_vec(&document(key, value)).unwrap();
+                    let expected_value = document(key, value).to_vec().unwrap();
                     assert_eq!(
                         record_value, expected_value,
                         "Record value does not match expected value for key {}",
@@ -3402,7 +3402,7 @@ mod tests {
         // Write enough data to trigger a memtable rotation.
         // We write five ~1MB values to fill up the 4MB memtable.
         let val_1mb_string = "a".repeat(1024 * 1024);
-        let val_1mb = to_vec(&doc! { "v": val_1mb_string }).unwrap();
+        let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
         for i in 1..=5 {
             let rs = engine.write(WriteBatch::new(vec![Operation::new_put(
                 col,

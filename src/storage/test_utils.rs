@@ -5,7 +5,7 @@ use crate::storage::internal_key::encode_record_key;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::{StorageEngine, StorageResult};
 use crate::util::bson_utils::BsonKey;
-use bson::{doc, to_vec, Bson, Document};
+use bson::{doc, Bson, Document};
 use std::fmt::Debug;
 use std::io::Result;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ pub fn delete_rec(collection: u32, user_key: i32, sequence_num: u64) -> (Vec<u8>
 
 pub fn put_op(collection: u32, user_key_val: i32, version: u32) -> Operation {
     let doc = document(user_key_val, version);
-    Operation::new_put(collection, 0, user_key(user_key_val), to_vec(&doc).unwrap())
+    Operation::new_put(collection, 0, user_key(user_key_val), doc.to_vec().unwrap())
 }
 
 pub fn delete_op(collection: u32, user_key_val: i32) -> Operation {

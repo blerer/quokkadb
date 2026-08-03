@@ -1317,6 +1317,7 @@ mod tests {
     use crate::io::serializable::check_serialization_round_trip;
     use crate::query::expr_fn::*;
     use bson::{doc, Bson, Regex};
+    use bson::raw::CString;
 
     #[test]
     fn test_get_path_value() {
@@ -1523,18 +1524,18 @@ mod tests {
     #[test]
     fn test_regex_equality() {
         let regex1 = BsonValue(Bson::RegularExpression(Regex {
-            pattern: "abc.*".to_string(),
-            options: "i".to_string(),
+            pattern: CString::try_from("abc.*").unwrap(),
+            options: CString::try_from("i").unwrap(),
         }));
 
         let regex2 = BsonValue(Bson::RegularExpression(Regex {
-            pattern: "abc.*".to_string(),
-            options: "i".to_string(),
+            pattern: CString::try_from("abc.*").unwrap(),
+            options: CString::try_from("i").unwrap(),
         }));
 
         let regex3 = BsonValue(Bson::RegularExpression(Regex {
-            pattern: "abc.*".to_string(),
-            options: "".to_string(),
+            pattern: CString::try_from("abc.*").unwrap(),
+            options: CString::try_from("").unwrap(),
         }));
 
         assert_eq!(&regex1, &regex2);

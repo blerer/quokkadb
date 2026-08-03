@@ -7,7 +7,7 @@ use crate::storage::catalog::{
     IndexDirection as InternalIndexDirection, IndexOptions, OrderedIndexField,
 };
 use crate::DbImpl;
-use bson::{to_vec, Bson, Document};
+use bson::{serialize_to_vec, Bson, Document};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -254,7 +254,7 @@ impl Collection {
 
         let plan = LogicalPlan::InsertOne {
             collection: collection_id,
-            document: to_vec(&document)?,
+            document: serialize_to_vec(&document)?,
         };
 
         Self::parse_insert_one_result(self.db_impl.execute_write(plan)?)
@@ -272,7 +272,7 @@ impl Collection {
 
         let mut serialized = Vec::new();
         for doc in documents {
-            serialized.push(to_vec(&doc)?);
+            serialized.push(serialize_to_vec(&doc)?);
         }
 
         let plan = LogicalPlan::InsertMany {

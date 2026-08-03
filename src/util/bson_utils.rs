@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::{invalid_data, unexpected_eof, varint, ZeroCopy};
 use bson::spec::BinarySubtype;
-use bson::{to_vec, Bson};
+use bson::{serialize_to_vec, Bson};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -29,7 +29,7 @@ pub fn make_raw_bson_element(key: &str, value: &Bson) -> std::io::Result<Vec<u8>
     let mut doc = bson::Document::new();
     doc.insert(key, value.clone());
 
-    let mut buf = to_vec(&doc).map_err(|e| invalid_data(&e.to_string()))?;
+    let mut buf = serialize_to_vec(&doc).map_err(|e| invalid_data(&e.to_string()))?;
     buf.pop();
     Ok(buf.split_off(4))
 }
@@ -799,7 +799,7 @@ mod key_code {
     pub const TYPE_MAX_KEY: u8 = 0xFF;
 }
 
-/// Sub-type tags written immediately after the `TYPE_NUMBER` (0x20) byte.
+/// Subtype tags written immediately after the `TYPE_NUMBER` (0x20) byte.
 ///
 /// The tags are ordered so that their numeric values sort correctly as raw bytes:
 ///
@@ -1773,22 +1773,22 @@ mod tests {
 
     mod prepend_raw_bson_field {
         use crate::util::bson_utils::{make_raw_bson_element, prepend_raw_bson_field};
-        use bson::{doc, to_vec, Bson};
+        use bson::{doc, Bson};
 
         #[test]
         fn inserts_string_field_as_first() {
-            let mut doc_buf = to_vec(&doc! { "a": 1_i32, "b": true }).unwrap();
+            let mut doc_buf = doc! { "a": 1_i32, "b": true }.to_vec().unwrap();
             let field = make_raw_bson_element("x", &Bson::String("bar".into())).unwrap();
             prepend_raw_bson_field(&mut doc_buf, &field).unwrap();
             assert_eq!(
                 doc_buf,
-                to_vec(&doc! { "x": "bar", "a": 1_i32, "b": true }).unwrap()
+                doc! { "x": "bar", "a": 1_i32, "b": true }.to_vec().unwrap()
             );
         }
 
         #[test]
         fn rejects_length_mismatch() {
-            let mut bad = to_vec(&doc! { "a": 1_i32 }).unwrap();
+            let mut bad = doc! { "a": 1_i32 }.to_vec().unwrap();
             bad[0..4].copy_from_slice(&0_i32.to_le_bytes());
             let field = make_raw_bson_element("x", &Bson::Int32(0)).unwrap();
             assert!(prepend_raw_bson_field(&mut bad, &field).is_err());
@@ -1796,7 +1796,7 @@ mod tests {
 
         #[test]
         fn rejects_missing_terminator() {
-            let mut bad = to_vec(&doc! { "a": 1_i32 }).unwrap();
+            let mut bad = doc! { "a": 1_i32 }.to_vec().unwrap();
             bad.pop();
             let field = make_raw_bson_element("x", &Bson::String("y".into())).unwrap();
             assert!(prepend_raw_bson_field(&mut bad, &field).is_err());
@@ -1807,6 +1807,7 @@ mod tests {
         use crate::util::bson_utils::BsonKey;
         use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
         use std::str::FromStr;
+        use bson::raw::CString;
 
         fn assert_ordering(a: &Bson, b: &Bson) {
             let key_a = a.try_into_key().expect("Failed to encode BSON A");
@@ -2167,8 +2168,8 @@ mod tests {
             assert!(symbol_result.is_err());
 
             let regex_result = Bson::RegularExpression(bson::Regex {
-                pattern: "x".into(),
-                options: "".into(),
+                pattern: CString::try_from("x").unwrap(),
+                options: CString::try_from("").unwrap(),
             })
             .try_into_key();
             assert!(regex_result.is_err());
@@ -3225,6 +3226,7 @@ mod tests {
     mod bson_eq {
         use crate::util::bson_utils::bson_eq;
         use bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime};
+        use bson::raw::CString;
 
         #[test]
         fn nan_equality() {
@@ -3285,16 +3287,16 @@ mod tests {
         #[test]
         fn regular_expression_equality_and_inequality() {
             let a = Bson::RegularExpression(bson::Regex {
-                pattern: "abc".into(),
-                options: "im".into(),
+                pattern: CString::try_from("abc").unwrap(),
+                options: CString::try_from("im").unwrap(),
             });
             let b = Bson::RegularExpression(bson::Regex {
-                pattern: "abc".into(),
-                options: "im".into(),
+                pattern: CString::try_from("abc").unwrap(),
+                options: CString::try_from("im").unwrap(),
             });
             let c = Bson::RegularExpression(bson::Regex {
-                pattern: "abc".into(),
-                options: "i".into(),
+                pattern: CString::try_from("abc").unwrap(),
+                options: CString::try_from("i").unwrap(),
             });
 
             assert!(bson_eq(&a, &b));
@@ -3343,7 +3345,7 @@ mod tests {
         use std::hash::Hasher;
 
         use bson::{doc, Bson};
-
+        use bson::raw::CString;
         use crate::util::bson_utils::{bson_eq, bson_hash};
 
         fn hash(value: &Bson) -> u64 {
@@ -3425,12 +3427,12 @@ mod tests {
         #[test]
         fn regex_equal_pattern_and_options_hash_equal() {
             let a = Bson::RegularExpression(bson::Regex {
-                pattern: "abc".into(),
-                options: "im".into(),
+                pattern: CString::try_from("abc").unwrap(),
+                options: CString::try_from("im").unwrap(),
             });
             let b = Bson::RegularExpression(bson::Regex {
-                pattern: "abc".into(),
-                options: "im".into(),
+                pattern: CString::try_from("abc").unwrap(),
+                options: CString::try_from("im").unwrap(),
             });
             assert_eq_implies_hash_eq(&a, &b);
         }

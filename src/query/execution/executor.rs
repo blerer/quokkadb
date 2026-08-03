@@ -12,7 +12,7 @@ use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::storage::Direction;
 use crate::util::bson_utils::{self, BsonKey};
 use crate::util::interval::Interval;
-use bson::{doc, Bson, Document, RawDocument};
+use bson::{doc, serialize_to_vec, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -248,7 +248,7 @@ impl QueryExecutor {
                     collection,
                     0,
                     user_key.clone(),
-                    bson::to_vec(&new_doc)?,
+                    new_doc.to_vec()?,
                 ));
                 indices.append_put_ops(&mut operations, &new_doc)?;
 
@@ -271,7 +271,7 @@ impl QueryExecutor {
                 collection,
                 0,
                 user_key.clone(),
-                bson::to_vec(&new_doc)?,
+                new_doc.to_vec()?,
             ));
             preconditions.push(Precondition::VersionMatch {
                 collection,
@@ -320,7 +320,7 @@ impl QueryExecutor {
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
 
-                let new_doc_bytes = bson::to_vec(&new_doc)?;
+                let new_doc_bytes = serialize_to_vec(&new_doc)?;
                 match self.write_document(
                     collection,
                     snapshot,
@@ -339,7 +339,7 @@ impl QueryExecutor {
                 let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
                 let user_key = upserted_id.clone().try_into_key()?;
 
-                let new_doc_bytes = bson::to_vec(&new_doc)?;
+                let new_doc_bytes = serialize_to_vec(&new_doc)?;
                 match self.write_document(
                     collection,
                     snapshot,
@@ -553,13 +553,13 @@ impl QueryExecutor {
                 Ok(bson)
             }
             IdCreationStrategy::Manual => match existing_id {
-                Some(id) => Ok(id.to_raw_bson().try_into()?),
+                Some(id) => Ok(Bson::try_from(id)?),
                 None => Err(Error::InvalidRequest(
                     "Document must contain an _id field for this collection".to_string(),
                 )),
             },
             IdCreationStrategy::Mixed => match existing_id {
-                Some(id) => Ok(id.to_raw_bson().try_into()?),
+                Some(id) => Ok(Bson::try_from(id)?),
                 None => {
                     let bson = self.generate_id();
                     bson_utils::prepend_field(doc, "_id", &bson)?;
@@ -571,7 +571,9 @@ impl QueryExecutor {
 
     fn generate_id(&self) -> Bson {
         let new_id = self.id_generator.lock().unwrap().next_id().unwrap();
-        let bson = Bson::Int64(new_id as i64);
+        let bson = Bson::Int64(
+            i64::try_from(new_id.to_u64()).expect("Sonyflake IDs must fit into signed 64-bit BSON"),
+        );
         bson
     }
 
@@ -1048,7 +1050,7 @@ impl QueryExecutor {
 /// sleeps for the appropriate backoff duration, increments `attempt`, and returns
 /// `Ok(())` so the caller can `continue` to the next iteration.
 ///
-/// Otherwise returns the error converted to [`crate::error::Error`].
+/// Otherwise, returns the error converted to [`Error`].
 fn on_version_conflict(e: StorageError, start_time: &Instant, attempt: &mut u32) -> Result<()> {
     match e {
         StorageError::VersionConflict { .. } => {
@@ -1109,7 +1111,7 @@ mod tests {
         let doc1 = doc! { "_id": 1_i32, "name": "doc1" };
         let insert_one_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&doc1)?,
+            document: doc1.to_vec()?,
         };
         executor.execute_direct(insert_one_plan, None)?.count(); // Consume iterator
 
@@ -1117,7 +1119,7 @@ mod tests {
         let doc1_dup = doc! { "_id": 1_i32, "name": "doc1_dup" };
         let insert_dup_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&doc1_dup)?,
+            document: doc1_dup.to_vec()?,
         };
         let result = executor.execute_direct(insert_dup_plan, None);
         match result {
@@ -1134,7 +1136,7 @@ mod tests {
         let doc2_dup = doc! { "_id": 2_i32, "name": "doc2_dup" };
         let insert_many_intra_batch_dup_plan = PhysicalPlan::InsertMany {
             collection: collection_id,
-            documents: vec![bson::to_vec(&doc2)?, bson::to_vec(&doc2_dup)?],
+            documents: vec![doc2.to_vec()?, doc2_dup.to_vec()?],
         };
         let result_many_intra = executor.execute_direct(insert_many_intra_batch_dup_plan, None);
         match result_many_intra {
@@ -1150,7 +1152,7 @@ mod tests {
         let doc3 = doc! { "_id": 3_i32, "name": "doc3" };
         let insert_many_existing_dup_plan = PhysicalPlan::InsertMany {
             collection: collection_id,
-            documents: vec![bson::to_vec(&doc3)?, bson::to_vec(&doc1)?], // doc1 has _id: 1
+            documents: vec![doc3.to_vec()?, doc1.to_vec()?,], // doc1 has _id: 1
         };
         let result_many_existing = executor.execute_direct(insert_many_existing_dup_plan, None);
         match result_many_existing {
@@ -1189,7 +1191,7 @@ mod tests {
 
         // 2. InsertOne
         let doc1 = doc! { "name": "doc1", "value": 1 };
-        let doc1_bytes = bson::to_vec(&doc1)?;
+        let doc1_bytes = doc1.to_vec()?;
         let insert_one_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
             document: doc1_bytes,
@@ -1222,13 +1224,13 @@ mod tests {
         let doc3 = doc! { "name": "doc3", "value": 3 };
         let insert_many_plan = PhysicalPlan::InsertMany {
             collection: collection_id,
-            documents: vec![bson::to_vec(&doc2)?, bson::to_vec(&doc3)?],
+            documents: vec![doc2.to_vec()?, doc3.to_vec()?],
         };
 
         let mut insert_many_result = executor.execute_direct(insert_many_plan, None)?;
         let result_doc_many = insert_many_result.next().unwrap()?;
         assert!(insert_many_result.next().is_none());
-        let inserted_ids = result_doc_many.get_array("inserted_ids").unwrap();
+        let inserted_ids = result_doc_many.get_array("inserted_ids")?;
         assert_eq!(inserted_ids.len(), 2);
         let inserted_id2 = inserted_ids[0].clone();
         let inserted_id3 = inserted_ids[1].clone();
@@ -1291,7 +1293,7 @@ mod tests {
         let doc_to_delete = doc! { "_id": 40i32, "name": "doc40_to_delete" };
 
         for doc in [&doc1, &doc2, &doc3, &doc_to_delete] {
-            let doc_bytes = bson::to_vec(doc)?;
+            let doc_bytes = doc.to_vec()?;
             let insert_plan = PhysicalPlan::InsertOne {
                 collection: collection_id,
                 document: doc_bytes,
@@ -1456,7 +1458,7 @@ mod tests {
             let mut result = executor.execute_direct(
                 PhysicalPlan::InsertOne {
                     collection: collection_id,
-                    document: bson::to_vec(&doc)?,
+                    document: doc.to_vec()?,
                 },
                 None,
             )?;
@@ -1509,7 +1511,7 @@ mod tests {
             let mut result = executor.execute_direct(
                 PhysicalPlan::InsertOne {
                     collection: collection_id,
-                    document: bson::to_vec(&doc)?,
+                    document: doc.to_vec()?,
                 },
                 None,
             )?;
@@ -1570,7 +1572,7 @@ mod tests {
             let mut result = executor.execute_direct(
                 PhysicalPlan::InsertOne {
                     collection: collection_id,
-                    document: bson::to_vec(&doc)?,
+                    document: doc.to_vec()?,
                 },
                 None,
             )?;
@@ -1614,7 +1616,7 @@ mod tests {
         for doc in &docs {
             let insert_plan = PhysicalPlan::InsertOne {
                 collection: collection_id,
-                document: bson::to_vec(doc)?,
+                document: doc.to_vec()?,
             };
             // We use execute_direct for inserts which returns a result document.
             // We need to consume it.
@@ -1642,9 +1644,9 @@ mod tests {
         let results = executor.execute_cached(limit_plan, &Parameters::new())?;
         let found_docs: Vec<Document> = results.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs.len(), 3);
-        assert_eq!(found_docs[0].get_i32("_id").unwrap(), 1);
-        assert_eq!(found_docs[1].get_i32("_id").unwrap(), 2);
-        assert_eq!(found_docs[2].get_i32("_id").unwrap(), 3);
+        assert_eq!(found_docs[0].get_i32("_id")?, 1);
+        assert_eq!(found_docs[1].get_i32("_id")?, 2);
+        assert_eq!(found_docs[2].get_i32("_id")?, 3);
 
         // Case 2: skip only
         let limit_plan_skip = Arc::new(PhysicalPlan::Limit {
@@ -1655,9 +1657,9 @@ mod tests {
         let results_skip = executor.execute_cached(limit_plan_skip, &Parameters::new())?;
         let found_docs_skip: Vec<Document> = results_skip.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_skip.len(), 3);
-        assert_eq!(found_docs_skip[0].get_i32("_id").unwrap(), 3);
-        assert_eq!(found_docs_skip[1].get_i32("_id").unwrap(), 4);
-        assert_eq!(found_docs_skip[2].get_i32("_id").unwrap(), 5);
+        assert_eq!(found_docs_skip[0].get_i32("_id")?, 3);
+        assert_eq!(found_docs_skip[1].get_i32("_id")?, 4);
+        assert_eq!(found_docs_skip[2].get_i32("_id")?, 5);
 
         // Case 3: skip and limit
         let limit_plan_both = Arc::new(PhysicalPlan::Limit {
@@ -1668,8 +1670,8 @@ mod tests {
         let results_both = executor.execute_cached(limit_plan_both, &Parameters::new())?;
         let found_docs_both: Vec<Document> = results_both.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_both.len(), 2);
-        assert_eq!(found_docs_both[0].get_i32("_id").unwrap(), 2);
-        assert_eq!(found_docs_both[1].get_i32("_id").unwrap(), 3);
+        assert_eq!(found_docs_both[0].get_i32("_id")?, 2);
+        assert_eq!(found_docs_both[1].get_i32("_id")?, 3);
 
         // Case 4: limit > number of docs
         let limit_plan_large = Arc::new(PhysicalPlan::Limit {
@@ -1712,8 +1714,8 @@ mod tests {
         let results_edge = executor.execute_cached(limit_plan_edge, &Parameters::new())?;
         let found_docs_edge: Vec<Document> = results_edge.collect::<Result<Vec<_>>>()?;
         assert_eq!(found_docs_edge.len(), 2);
-        assert_eq!(found_docs_edge[0].get_i32("_id").unwrap(), 4);
-        assert_eq!(found_docs_edge[1].get_i32("_id").unwrap(), 5);
+        assert_eq!(found_docs_edge[0].get_i32("_id")?, 4);
+        assert_eq!(found_docs_edge[1].get_i32("_id")?, 5);
 
         Ok(())
     }
@@ -1751,7 +1753,7 @@ mod tests {
         for doc in &docs {
             let insert_plan = PhysicalPlan::InsertOne {
                 collection: collection_id,
-                document: bson::to_vec(doc)?,
+                document: doc.to_vec()?,
             };
             let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?; // consume result
@@ -1871,7 +1873,7 @@ mod tests {
         for doc in &docs {
             let insert_plan = PhysicalPlan::InsertOne {
                 collection: collection_id,
-                document: bson::to_vec(doc)?,
+                document: doc.to_vec()?,
             };
             let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?; // consume result
@@ -2061,7 +2063,7 @@ mod tests {
         };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&test_doc)?,
+            document: test_doc.to_vec()?,
         };
         let mut result = executor.execute_direct(insert_plan, None)?;
         result.next().unwrap()?; // consume result
@@ -2252,7 +2254,7 @@ mod tests {
         for doc in &docs {
             let insert_plan = PhysicalPlan::InsertOne {
                 collection: collection_id,
-                document: bson::to_vec(doc)?,
+                document: doc.to_vec()?,
             };
             let mut result = executor.execute_direct(insert_plan, None)?;
             result.next().unwrap()?; // consume result
@@ -2348,7 +2350,7 @@ mod tests {
         let initial_doc = doc! { "_id": 1_i32, "value": "initial" };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&initial_doc)?,
+            document: initial_doc.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count(); // Consume iterator
 
@@ -2361,7 +2363,7 @@ mod tests {
             collection_id,
             0,
             key.clone(),
-            bson::to_vec(&doc! { "_id": 1_i32, "value": "updated" })?,
+            doc! { "_id": 1_i32, "value": "updated" }.to_vec()?,
         );
         storage_engine.write(WriteBatch::new(vec![update_op]))?;
 
@@ -2388,13 +2390,13 @@ mod tests {
         let mut result_latest = executor.execute_cached(point_search_plan, &params)?;
         let doc_latest = result_latest.next().unwrap()?;
         assert!(result_latest.next().is_none());
-        assert_eq!(doc_latest.get_str("value").unwrap(), "updated");
+        assert_eq!(doc_latest.get_str("value")?, "updated");
 
         // 7. Test with scan and deletes
         let doc_to_delete = doc! { "_id": 2_i32, "value": "to_delete" };
         let insert_plan_2 = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&doc_to_delete)?,
+            document: doc_to_delete.to_vec()?,
         };
         executor.execute_direct(insert_plan_2, None)?.count();
 
@@ -2422,17 +2424,17 @@ mod tests {
         assert_eq!(docs_at_snapshot2.len(), 2);
         docs_at_snapshot2.sort_by_key(|d| d.get_i32("_id").unwrap());
 
-        assert_eq!(docs_at_snapshot2[0].get_i32("_id").unwrap(), 1);
-        assert_eq!(docs_at_snapshot2[0].get_str("value").unwrap(), "updated");
-        assert_eq!(docs_at_snapshot2[1].get_i32("_id").unwrap(), 2);
-        assert_eq!(docs_at_snapshot2[1].get_str("value").unwrap(), "to_delete");
+        assert_eq!(docs_at_snapshot2[0].get_i32("_id")?, 1);
+        assert_eq!(docs_at_snapshot2[0].get_str("value")?, "updated");
+        assert_eq!(docs_at_snapshot2[1].get_i32("_id")?, 2);
+        assert_eq!(docs_at_snapshot2[1].get_str("value")?, "to_delete");
 
         // Scan at latest should see only one document
         let results_latest_scan = executor.execute_cached(scan_plan, &Parameters::new())?;
         let docs_latest_scan: Vec<Document> = results_latest_scan.collect::<Result<_>>()?;
         assert_eq!(docs_latest_scan.len(), 1);
-        assert_eq!(docs_latest_scan[0].get_i32("_id").unwrap(), 1);
-        assert_eq!(docs_latest_scan[0].get_str("value").unwrap(), "updated");
+        assert_eq!(docs_latest_scan[0].get_i32("_id")?, 1);
+        assert_eq!(docs_latest_scan[0].get_str("value")?, "updated");
 
         Ok(())
     }
@@ -2447,7 +2449,7 @@ mod tests {
         let initial_doc = doc! { "_id": 1, "value": "initial" };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&initial_doc)?,
+            document: initial_doc.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count();
 
@@ -2476,8 +2478,8 @@ mod tests {
         // The executor will attempt the update, fail, retry, and then succeed.
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
-        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 1);
-        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 1);
+        assert_eq!(result_doc.get_i32("matched_count")?, 1);
+        assert_eq!(result_doc.get_i32("modified_count")?, 1);
 
         // 4. Assert final state
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
@@ -2486,8 +2488,8 @@ mod tests {
             .unwrap()
             .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
-        assert_eq!(final_doc.get_str("value").unwrap(), "updated");
-        assert_eq!(final_doc.get_i32("_id").unwrap(), 1);
+        assert_eq!(final_doc.get_str("value")?, "updated");
+        assert_eq!(final_doc.get_i32("_id")?, 1);
 
         Ok(())
     }
@@ -2502,7 +2504,7 @@ mod tests {
         let initial_doc = doc! { "_id": 1, "value": "initial" };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&initial_doc)?,
+            document: initial_doc.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count();
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
@@ -2546,7 +2548,7 @@ mod tests {
             .unwrap()
             .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
-        assert_eq!(final_doc.get_str("value").unwrap(), "initial");
+        assert_eq!(final_doc.get_str("value")?, "initial");
 
         Ok(())
     }
@@ -2580,9 +2582,9 @@ mod tests {
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
 
-        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
-        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
-        assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 1);
+        assert_eq!(result_doc.get_i32("matched_count")?, 0);
+        assert_eq!(result_doc.get_i32("modified_count")?, 0);
+        assert_eq!(result_doc.get_i32("upserted_id")?, 1);
 
         // 3. Verify the document was inserted
         let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
@@ -2591,8 +2593,8 @@ mod tests {
             .unwrap()
             .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
-        assert_eq!(doc.get_i32("_id").unwrap(), 1);
-        assert_eq!(doc.get_str("value").unwrap(), "created");
+        assert_eq!(doc.get_i32("_id")?, 1);
+        assert_eq!(doc.get_str("value")?, "created");
 
         Ok(())
     }
@@ -2608,7 +2610,7 @@ mod tests {
         let initial_doc = doc! { "_id": 1, "value": "initial" };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&initial_doc)?,
+            document: initial_doc.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count();
 
@@ -2634,8 +2636,8 @@ mod tests {
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
 
-        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 1);
-        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 1);
+        assert_eq!(result_doc.get_i32("matched_count")?, 1);
+        assert_eq!(result_doc.get_i32("modified_count")?, 1);
         assert!(result_doc.get("upserted_id").is_none());
 
         // 3. Verify the document was updated
@@ -2645,7 +2647,7 @@ mod tests {
             .unwrap()
             .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
-        assert_eq!(doc.get_str("value").unwrap(), "updated");
+        assert_eq!(doc.get_str("value")?, "updated");
 
         Ok(())
     }
@@ -2684,8 +2686,8 @@ mod tests {
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
 
-        assert_eq!(result_doc.get_i32("matched_count").unwrap(), 0);
-        assert_eq!(result_doc.get_i32("modified_count").unwrap(), 0);
+        assert_eq!(result_doc.get_i32("matched_count")?, 0);
+        assert_eq!(result_doc.get_i32("modified_count")?, 0);
         assert!(result_doc.get("upserted_id").is_some());
 
         // 3. Verify document was created with equality condition from query
@@ -2699,8 +2701,8 @@ mod tests {
         let results = executor.execute_cached(scan_plan, &Parameters::new())?;
         let docs: Vec<Document> = results.collect::<Result<_>>()?;
         assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].get_str("name").unwrap(), "target");
-        assert_eq!(docs[0].get_str("status").unwrap(), "processed");
+        assert_eq!(docs[0].get_str("name")?, "target");
+        assert_eq!(docs[0].get_str("status")?, "processed");
 
         Ok(())
     }
@@ -2738,7 +2740,7 @@ mod tests {
         let result = executor.execute_direct(update_plan, Some(params))?;
         let result_doc = result.into_iter().next().unwrap()?;
 
-        assert_eq!(result_doc.get_i32("upserted_id").unwrap(), 42);
+        assert_eq!(result_doc.get_i32("upserted_id")?, 42);
 
         // 3. Verify the nested structure was created
         let user_key = BsonValue(Bson::Int32(42)).try_into_key()?;
@@ -2747,10 +2749,10 @@ mod tests {
             .unwrap()
             .1;
         let doc = Document::from_reader(Cursor::new(doc_bytes))?;
-        assert_eq!(doc.get_i32("_id").unwrap(), 42);
-        assert_eq!(doc.get_str("extra").unwrap(), "added");
-        let data = doc.get_document("data").unwrap();
-        assert_eq!(data.get_str("inner").unwrap(), "nested_val");
+        assert_eq!(doc.get_i32("_id")?, 42);
+        assert_eq!(doc.get_str("extra")?, "added");
+        let data = doc.get_document("data")?;
+        assert_eq!(data.get_str("inner")?, "nested_val");
 
         Ok(())
     }
@@ -2765,7 +2767,7 @@ mod tests {
         let doc1 = doc! { "_id": 1, "value": "initial" };
         let insert_plan = PhysicalPlan::InsertOne {
             collection: collection_id,
-            document: bson::to_vec(&doc1)?,
+            document: doc1.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count();
 
@@ -2809,7 +2811,7 @@ mod tests {
             .unwrap()
             .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
-        assert_eq!(final_doc.get_str("value").unwrap(), "initial");
+        assert_eq!(final_doc.get_str("value")?, "initial");
 
         Ok(())
     }

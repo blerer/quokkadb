@@ -504,7 +504,7 @@ mod tests {
     use crate::storage::Direction;
     use crate::util::bson_utils::BsonKey;
     use crate::util::interval::Interval;
-    use bson::{doc, to_vec, Bson};
+    use bson::{doc, Bson};
     use std::fmt::Debug;
 
     #[test]
@@ -613,46 +613,49 @@ mod tests {
         builder
             .add(
                 &put(1, 1),
-                to_vec(&doc! {"id": 1, "name": "Iron Man", "year": 2008}).unwrap(),
+                doc! {"id": 1, "name": "Iron Man", "year": 2008}.to_vec().unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(2, 2),
-                to_vec(&doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}).unwrap(),
+                doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}.to_vec().unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(3, 3),
-                to_vec(&doc! {"id": 3, "name": "Iron Man 2", "year": 2010}).unwrap(),
+                doc! {"id": 3, "name": "Iron Man 2", "year": 2010}.to_vec().unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(4, 4),
-                to_vec(&doc! {"id": 4, "name": "Thor", "year": 2011}).unwrap(),
+                doc! {"id": 4, "name": "Thor", "year": 2011}.to_vec().unwrap(),
             )
             .unwrap();
         builder.add(&delete(5, 9), vec![]).unwrap();
         builder
             .add(
                 &put(5, 8),
-                to_vec(&doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011})
+                doc! {"id": 5, "name": "Captain America: The First Avenger", "year": 2011}
+                    .to_vec()
                     .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(5, 7),
-                to_vec(&doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011})
+                doc! {"id": 5, "name": "Captain Omerica: The First Avenger", "year": 2011}
+                    .to_vec()
                     .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(5, 6),
-                to_vec(&doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011})
+                doc! {"id": 5, "name": "Captan America: The First Avenger", "year": 2011}
+                    .to_vec()
                     .unwrap(),
             )
             .unwrap();
@@ -660,20 +663,21 @@ mod tests {
         builder
             .add(
                 &put(5, 5),
-                to_vec(&doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011})
+                doc! {"id": 5, "name": "Captoin America: The First Avenger", "year": 2011}
+                    .to_vec()
                     .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(7, 11),
-                to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2013}).unwrap(),
+                doc! {"id": 7, "name": "The Avengers", "year": 2013}.to_vec().unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(7, 10),
-                to_vec(&doc! {"id": 7, "name": "The Avengers", "year": 2012}).unwrap(),
+                doc! {"id": 7, "name": "The Avengers", "year": 2012}.to_vec().unwrap(),
             )
             .unwrap();
 
@@ -905,7 +909,7 @@ mod tests {
     #[test]
     fn test_scan_data_with_gaps() {
         use super::*;
-        use bson::{doc, to_vec};
+        use bson::doc;
 
         let mut builder = BlockBuilder::new(3, DataEntryWriter);
 
@@ -913,38 +917,38 @@ mod tests {
         let mut entries = vec![
             (
                 put(1, 1),
-                to_vec(&doc! {"id": 1, "name": "Iron Man"}).unwrap(),
+                doc! {"id": 1, "name": "Iron Man"}.to_vec().unwrap(),
             ),
             (
                 put(3, 2),
-                to_vec(&doc! {"id": 3, "name": "Iron Man 2"}).unwrap(),
+                doc! {"id": 3, "name": "Iron Man 2"}.to_vec().unwrap(),
             ),
             (
                 put(5, 3),
-                to_vec(&doc! {"id": 5, "name": "Captain America"}).unwrap(),
+                doc! {"id": 5, "name": "Captain America"}.to_vec().unwrap(),
             ),
-            (put(7, 4), to_vec(&doc! {"id": 7, "name": "Thor"}).unwrap()),
+            (put(7, 4), doc! {"id": 7, "name": "Thor"}.to_vec().unwrap()),
             (delete(9, 9), Vec::new()),
-            (put(9, 8), to_vec(&doc! {"id": 9, "name": "Hulk"}).unwrap()),
+            (put(9, 8), doc! {"id": 9, "name": "Hulk"}.to_vec().unwrap()),
             (
                 put(9, 7),
-                to_vec(&doc! {"id": 9, "name": "Hawkeye"}).unwrap(),
+                doc! {"id": 9, "name": "Hawkeye"}.to_vec().unwrap(),
             ),
             (
                 put(9, 6),
-                to_vec(&doc! {"id": 9, "name": "Black Widow"}).unwrap(),
+                doc! {"id": 9, "name": "Black Widow"}.to_vec().unwrap(),
             ),
             (
                 put(9, 5),
-                to_vec(&doc! {"id": 9, "name": "Vision"}).unwrap(),
+                doc! {"id": 9, "name": "Vision"}.to_vec().unwrap(),
             ),
             (
                 put(11, 11),
-                to_vec(&doc! {"id": 11, "name": "Loki"}).unwrap(),
+                doc! {"id": 11, "name": "Loki"}.to_vec().unwrap(),
             ),
             (
                 put(11, 10),
-                to_vec(&doc! {"id": 11, "name": "Ultron"}).unwrap(),
+                doc! {"id": 11, "name": "Ultron"}.to_vec().unwrap(),
             ),
         ];
 

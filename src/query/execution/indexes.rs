@@ -1113,7 +1113,7 @@ mod tests {
             "_id": 7i64,
             "address": { "city": "London" }
         };
-        let raw = RawDocumentBuf::from_document(&document).unwrap();
+        let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
         let mut bson_ops = Vec::new();
         let mut raw_ops = Vec::new();
 
