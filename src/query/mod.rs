@@ -839,7 +839,7 @@ impl From<IndexKeySpec> for IndexDefinition {
                         .into_iter()
                         .map(|component| match component {
                             PathComponent::FieldName(name) => name,
-                            PathComponent::ArrayElement(index) => {
+                            PathComponent::ArrayElement(_index) => {
                                 unreachable!("Array elements should not be present in index paths")
                             }
                         })
