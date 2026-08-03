@@ -10,7 +10,7 @@ use crate::storage::compaction::compaction_picker::CompactionJob;
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
 use crate::storage::lsm_tree::LsmTree;
-use crate::storage::lsm_version::{DropMetadata, Levels, SSTableMetadata};
+use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
 use crate::storage::manifest::Manifest;
 use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
@@ -335,7 +335,6 @@ impl StorageEngine {
                 next_file_number.clone(),
             )?;
 
-            let levels = &lsm_tree.levels();
             let lsm_tree = Arc::new(ArcSwap::new(Arc::new(lsm_tree)));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
@@ -363,7 +362,7 @@ impl StorageEngine {
 
             info!(logger, "Storage engine started");
 
-            engine.schedule_compaction_if_needed(levels);
+            engine.schedule_compaction_if_needed();
 
             Ok(engine)
         } else {
@@ -1261,7 +1260,7 @@ impl StorageEngine {
                         // the LSM tree
                         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
-                        let lsm_tree = self.lsm_tree.load();
+                        let lsm_tree = self.lsm_tree.load_full();
                         let oldest_log_number = lsm_tree.next_log_number_after(log_number);
 
                         let edit = ManifestEdit::Flush {
@@ -1289,7 +1288,7 @@ impl StorageEngine {
                         // the LSM tree
                         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
-                        let lsm_tree = self.lsm_tree.load();
+                        let lsm_tree = self.lsm_tree.load_full();
 
                         for sst in &removed_sstables {
                             let sst_path = self.db_dir.join(DbFile::new_sst(sst.number).filename());
@@ -1324,7 +1323,7 @@ impl StorageEngine {
                         new_lsm_tree
                     }
                 };
-                self.schedule_compaction_if_needed(&lsm_tree.levels());
+                self.schedule_compaction_if_needed();
                 drop(lsm_tree);
                 self.delete_obsolete_sst_files()?;
                 Ok(())
@@ -1333,13 +1332,16 @@ impl StorageEngine {
         }
     }
 
-    fn schedule_compaction_if_needed(self: &Arc<Self>, levels: &Levels) {
+    fn schedule_compaction_if_needed(self: &Arc<Self>) {
         #[cfg(test)]
         if self.disable_auto_compaction.load(Ordering::Relaxed) {
             return;
         }
+
+        let _wal_and_manifest = self.db_mutex.lock().unwrap();
+        let levels = self.lsm_tree.load_full().levels();
         self.compaction_manager
-            .schedule_compaction_if_needed(levels, self.get_async_callback());
+            .schedule_compaction_if_needed(&levels, self.get_async_callback());
     }
 
     fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {

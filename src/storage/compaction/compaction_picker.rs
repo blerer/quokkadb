@@ -312,8 +312,6 @@ impl CompactionPicker {
                     event!(self.logger, "compaction_picking done type=full, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
                         job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
 
-                    println!("{:?}", self.compacting_ranges);
-
                     return Some(job);
                 }
             }
