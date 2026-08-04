@@ -127,6 +127,7 @@ impl FlushManager {
                                         let operation = SSTableOperation::Flush {
                                             log_number: memtable.log_number,
                                             flushed: Arc::new(sst),
+                                            count_stats: memtable.count_stats_for_flush(),
                                         };
                                         callback.call(Ok(operation));
                                     }

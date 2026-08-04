@@ -38,6 +38,26 @@ impl Serializable for i32 {
     }
 }
 
+impl Serializable for i64 {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        reader.read_varint_i64()
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_i64(*self);
+    }
+}
+
+impl Serializable for u32 {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+        reader.read_varint_u32()
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_varint_u32(*self);
+    }
+}
+
 impl Serializable for u64 {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         reader.read_varint_u64()

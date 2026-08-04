@@ -1,5 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
+use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
 use crate::storage::lsm_version::{DropMetadata, LsmVersion, SSTableMetadata};
 use crate::util::interval::Interval;
@@ -18,6 +19,8 @@ pub struct ManifestState {
     pub lsm: Arc<LsmVersion>,
     /// The catalog of collections and indexes.
     pub catalog: Arc<Catalog>,
+    /// Aggregated current logical totals for collections and indexes.
+    pub count_stats: CountStats,
 }
 
 impl ManifestState {
@@ -29,6 +32,7 @@ impl ManifestState {
                 max_levels,
             )),
             catalog: Arc::new(Catalog::new()),
+            count_stats: CountStats::default(),
         }
     }
 
@@ -40,13 +44,16 @@ impl ManifestState {
             } => ManifestState {
                 lsm: Arc::new(self.lsm.with_new_log_file(*log_number)),
                 catalog: self.catalog.clone(),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::Flush {
                 oldest_log_number,
                 sst,
+                count_stats,
             } => ManifestState {
                 lsm: Arc::new(self.lsm.with_flushed_sstable(*oldest_log_number, sst)),
                 catalog: self.catalog.clone(),
+                count_stats: apply_count_stats_delta(&self.count_stats, count_stats),
             },
             ManifestEdit::CreateCollection {
                 name,
@@ -61,22 +68,27 @@ impl ManifestState {
                     *created_at,
                     options.clone(),
                 )),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::DropCollection { id, dropped_at } => ManifestState {
                 lsm: Arc::new(self.lsm.add_collection_drop(*id, *dropped_at)),
                 catalog: Arc::new(self.catalog.drop_collection(*id, *dropped_at)),
+                count_stats: without_collection_count_stats(&self.count_stats, *id),
             },
             ManifestEdit::RenameCollection { id, new_name } => ManifestState {
                 lsm: self.lsm.clone(),
                 catalog: Arc::new(self.catalog.rename_collection(*id, new_name)),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => ManifestState {
                 lsm: Arc::new(self.lsm.adjust_file_number(*next_file_number)),
                 catalog: self.catalog.clone(),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::ManifestRotation { manifest_number } => ManifestState {
                 lsm: Arc::new(self.lsm.manifest_rotation(*manifest_number)),
                 catalog: self.catalog.clone(),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::Snapshot(_) => {
                 unreachable!("Snapshots should not be applied to an LSMTree");
@@ -84,6 +96,7 @@ impl ManifestState {
             ManifestEdit::IgnoringEmptyMemtable { oldest_log_number } => ManifestState {
                 lsm: Arc::new(self.lsm.with_ignored_empty_memtable(*oldest_log_number)),
                 catalog: self.catalog.clone(),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::Compaction {
                 output_level,
@@ -98,6 +111,7 @@ impl ManifestState {
                     drops,
                 )),
                 catalog: self.catalog.clone(),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::CreateIndex {
                 collection_id,
@@ -114,6 +128,7 @@ impl ManifestState {
                     options,
                     *created_at,
                 )),
+                count_stats: self.count_stats.clone(),
             },
             ManifestEdit::DropIndex {
                 collection_id,
@@ -128,6 +143,11 @@ impl ManifestState {
                     self.catalog
                         .drop_index(*collection_id, *index_id, *dropped_at),
                 ),
+                count_stats: without_index_count_stats(
+                    &self.count_stats,
+                    *collection_id,
+                    *index_id,
+                ),
             },
         }
     }
@@ -135,6 +155,10 @@ impl ManifestState {
     /// Returns the drops with a sequence number smaller or equal to the given sequence_number.
     pub fn get_drops_before_or_at(&self, sequence_number: u64) -> Vec<Arc<DropMetadata>> {
         self.lsm.get_drops_before_or_at(sequence_number)
+    }
+
+    pub fn count_stat(&self, key: &CountStatsKey) -> Option<i64> {
+        self.count_stats.count_stat(key)
     }
 
     pub fn find_sstables<'a>(
@@ -160,13 +184,69 @@ impl Serializable for ManifestState {
         Ok(ManifestState {
             lsm: Arc::new(LsmVersion::read_from(reader)?),
             catalog: Arc::new(Catalog::read_from(reader)?),
+            count_stats: CountStats::read_from(reader)?,
         })
     }
 
     fn write_to(&self, writer: &mut ByteWriter) {
         self.lsm.write_to(writer);
         self.catalog.write_to(writer);
+        self.count_stats.write_to(writer);
     }
+}
+
+fn apply_count_stats_delta(current: &CountStats, delta: &CountStats) -> CountStats {
+    let mut merged = current.deltas.clone();
+
+    for (key, value) in &delta.deltas {
+        let new_value = merged.get(key).copied().unwrap_or_default() + value;
+        if new_value == 0 {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), new_value);
+        }
+    }
+
+    CountStats::new(merged)
+}
+
+fn without_collection_count_stats(current: &CountStats, collection: u32) -> CountStats {
+    CountStats::new(
+        current
+            .deltas
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(key, CountStatsKey::Collection(id) if *id == collection)
+                    && !matches!(
+                        key,
+                        CountStatsKey::Index {
+                            collection: id,
+                            ..
+                        } if *id == collection
+                    )
+            })
+            .map(|(key, delta)| (key.clone(), *delta))
+            .collect(),
+    )
+}
+
+fn without_index_count_stats(current: &CountStats, collection: u32, index: u32) -> CountStats {
+    CountStats::new(
+        current
+            .deltas
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key,
+                    CountStatsKey::Index {
+                        collection: c,
+                        index: i
+                    } if *c == collection && *i == index
+                )
+            })
+            .map(|(key, delta)| (key.clone(), *delta))
+            .collect(),
+    )
 }
 
 /// Represents a single atomic change to the manifest state.
@@ -202,6 +282,7 @@ pub enum ManifestEdit {
     Flush {
         oldest_log_number: u64,
         sst: Arc<SSTableMetadata>,
+        count_stats: CountStats,
     },
 
     /// Updates file number tracking based on files detected during recovery.
@@ -305,11 +386,13 @@ impl ManifestEdit {
             ManifestEdit::Flush {
                 oldest_log_number,
                 sst,
+                count_stats,
             } => {
                 writer
                     .write_u8(tags::FLUSH)
                     .write_varint_u64(*oldest_log_number);
                 sst.write_to(&mut writer);
+                count_stats.write_to(&mut writer);
             }
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => {
                 writer
@@ -405,9 +488,15 @@ impl ManifestEdit {
             tags::FLUSH => {
                 let oldest_log_number = reader.read_varint_u64()?;
                 let sst = Arc::new(SSTableMetadata::read_from(&reader)?);
+                let count_stats = if reader.has_remaining() {
+                    CountStats::read_from(&reader)?
+                } else {
+                    CountStats::default()
+                };
                 Ok(ManifestEdit::Flush {
                     oldest_log_number,
                     sst,
+                    count_stats,
                 })
             }
             tags::FILES_DETECTED_ON_RESTART => {
@@ -487,10 +576,11 @@ impl fmt::Display for ManifestEdit {
             ManifestEdit::Flush {
                 oldest_log_number,
                 sst,
+                count_stats,
             } => write!(
                 f,
-                "Flush {{ oldest_log_number: {}, sst: {:?}}}",
-                oldest_log_number, sst,
+                "Flush {{ oldest_log_number: {}, sst: {:?}, count_stats: {:?} }}",
+                oldest_log_number, sst, count_stats,
             ),
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => write!(
                 f,
@@ -551,6 +641,7 @@ mod tests {
     use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     #[test]
@@ -626,6 +717,8 @@ mod tests {
 
     #[test]
     fn test_flush_serialization() {
+        use crate::storage::count_stats::CountStats;
+
         let sst = Arc::new(SSTableMetadata::new(
             1,
             0,
@@ -639,9 +732,269 @@ mod tests {
         let edit = ManifestEdit::Flush {
             oldest_log_number: 8,
             sst: sst.clone(),
+            count_stats: CountStats::default(),
         };
 
         check_edit_serialization_roundtrip(edit);
+    }
+
+    #[test]
+    fn test_apply_flush_merges_count_stats_into_manifest_state() {
+        let state = ManifestState::new(1, 10, 4);
+        let sst1 = Arc::new(SSTableMetadata::new(
+            1,
+            0,
+            &record_key(1),
+            &record_key(250),
+            100,
+            200,
+            1024,
+        ));
+        let delta = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(7), 3),
+            (
+                CountStatsKey::Index {
+                    collection: 7,
+                    index: 2,
+                },
+                5,
+            ),
+        ]));
+
+        let state = state.apply(&ManifestEdit::Flush {
+            oldest_log_number: 8,
+            sst: sst1,
+            count_stats: delta.clone(),
+        });
+
+        let sst2 = Arc::new(SSTableMetadata::new(
+            2,
+            0,
+            &record_key(251),
+            &record_key(500),
+            101,
+            201,
+            2048,
+        ));
+        let delta2 = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(7), 2),
+            (
+                CountStatsKey::Index {
+                    collection: 7,
+                    index: 2,
+                },
+                -1,
+            ),
+            (
+                CountStatsKey::Index {
+                    collection: 7,
+                    index: 3,
+                },
+                4,
+            ),
+        ]));
+
+        let state = state.apply(&ManifestEdit::Flush {
+            oldest_log_number: 9,
+            sst: sst2,
+            count_stats: delta2,
+        });
+
+        assert_eq!(
+            state.count_stats,
+            CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(7), 5),
+                (
+                    CountStatsKey::Index {
+                        collection: 7,
+                        index: 2,
+                    },
+                    4,
+                ),
+                (
+                    CountStatsKey::Index {
+                        collection: 7,
+                        index: 3,
+                    },
+                    4,
+                ),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_apply_drop_collection_removes_collection_and_index_count_stats() {
+        let state = ManifestState::new(1, 10, 4)
+            .apply(&ManifestEdit::CreateCollection {
+                name: "docs".to_string(),
+                id: 10,
+                created_at: 10,
+                options: CollectionOptions::default(),
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 10,
+                index_id: 1,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField {
+                    path: "a".into(),
+                    direction: IndexDirection::Ascending,
+                }]),
+                options: IndexOptions::default(),
+                created_at: 11,
+            });
+        let state = ManifestState {
+            count_stats: CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(10), 5),
+                (
+                    CountStatsKey::Index {
+                        collection: 10,
+                        index: 1,
+                    },
+                    4,
+                ),
+                (
+                    CountStatsKey::Index {
+                        collection: 8,
+                        index: 1,
+                    },
+                    3,
+                ),
+            ])),
+            ..state
+        };
+
+        let state = state.apply(&ManifestEdit::DropCollection {
+            id: 10,
+            dropped_at: 100,
+        });
+
+        assert_eq!(
+            state.count_stats,
+            CountStats::new(BTreeMap::from([(
+                CountStatsKey::Index {
+                    collection: 8,
+                    index: 1,
+                },
+                3,
+            )]))
+        );
+    }
+
+    #[test]
+    fn test_apply_drop_index_removes_only_target_index_count_stats() {
+        let state = ManifestState::new(1, 10, 4)
+            .apply(&ManifestEdit::CreateCollection {
+                name: "docs".to_string(),
+                id: 10,
+                created_at: 10,
+                options: CollectionOptions::default(),
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 10,
+                index_id: 1,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField {
+                    path: "a".into(),
+                    direction: IndexDirection::Ascending,
+                }]),
+                options: IndexOptions::default(),
+                created_at: 11,
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 10,
+                index_id: 2,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField {
+                    path: "b".into(),
+                    direction: IndexDirection::Ascending,
+                }]),
+                options: IndexOptions::default(),
+                created_at: 12,
+            });
+        let state = ManifestState {
+            count_stats: CountStats::new(std::collections::BTreeMap::from([
+                (CountStatsKey::Collection(10), 5),
+                (
+                    CountStatsKey::Index {
+                        collection: 10,
+                        index: 1,
+                    },
+                    4,
+                ),
+                (
+                    CountStatsKey::Index {
+                        collection: 10,
+                        index: 2,
+                    },
+                    6,
+                ),
+            ])),
+            ..state
+        };
+
+        let state = state.apply(&ManifestEdit::DropIndex {
+            collection_id: 10,
+            index_id: 1,
+            dropped_at: 100,
+        });
+
+        assert_eq!(
+            state.count_stats,
+            CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(10), 5),
+                (
+                    CountStatsKey::Index {
+                        collection: 10,
+                        index: 2,
+                    },
+                    6,
+                ),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_apply_flush_removes_count_stats_entry_when_total_reaches_zero() {
+        let state = ManifestState {
+            lsm: Arc::new(LsmVersion::new(1, 10, 4)),
+            catalog: Arc::new(Catalog::new()),
+            count_stats: CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(10), 5),
+                (
+                    CountStatsKey::Index {
+                        collection: 10,
+                        index: 1,
+                    },
+                    4,
+                ),
+            ])),
+        };
+        let sst = Arc::new(SSTableMetadata::new(
+            1,
+            0,
+            &record_key(1),
+            &record_key(250),
+            100,
+            200,
+            1024,
+        ));
+
+        let state = state.apply(&ManifestEdit::Flush {
+            oldest_log_number: 8,
+            sst,
+            count_stats: CountStats::new(BTreeMap::from([(
+                CountStatsKey::Index {
+                    collection: 10,
+                    index: 1,
+                },
+                -4,
+            )])),
+        });
+
+        assert_eq!(
+            state.count_stats,
+            CountStats::new(BTreeMap::from([(
+                CountStatsKey::Collection(10),
+                5,
+            )]))
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::storage::catalog::Catalog;
+use crate::storage::count_stats::CountStatsKey;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_record_key, encode_record_key_range};
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
@@ -74,6 +75,7 @@ impl LsmTree {
             ManifestEdit::Flush {
                 oldest_log_number: _oldest_log_number,
                 sst: _sst,
+                ..
             } => {
                 let mut imm_memtables: VecDeque<Arc<Memtable>> =
                     self.imm_memtables.iter().cloned().collect();
@@ -266,5 +268,80 @@ impl LsmTree {
 
     pub fn get_drops_before_or_at(&self, sequence: u64) -> Vec<Arc<DropMetadata>> {
         self.manifest.get_drops_before_or_at(sequence)
+    }
+
+    pub fn count_stat(&self, key: &CountStatsKey) -> Option<i64> {
+        let option = self.manifest.count_stat(key);
+        let mut total = option.unwrap_or_default();
+        let mut found = option.is_some();
+
+        if let Some(delta) = self.memtable.count_stat(key) {
+            total += delta;
+            found = true;
+        }
+
+        for imm_memtable in self.imm_memtables.iter() {
+            if let Some(delta) = imm_memtable.count_stat(key) {
+                total += delta;
+                found = true;
+            }
+        }
+
+        if found && total != 0 {
+            Some(total)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::count_stats::{CountStats, CountStatsKey};
+    use crate::storage::lsm_version::LsmVersion;
+    use crate::storage::manifest_state::ManifestState;
+    use crate::storage::write_batch::WriteBatch;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn count_stat_aggregates_manifest_active_and_immutable_memtables() {
+        let tree = LsmTree::from(ManifestState {
+            lsm: Arc::new(LsmVersion::new(1, 10, 4)),
+            catalog: Arc::new(Catalog::new()),
+            count_stats: CountStats::new(BTreeMap::from([(
+                CountStatsKey::Collection(10),
+                5,
+            )])),
+        });
+
+        tree.memtable.write(
+            1,
+            &WriteBatch::new(
+                vec![],
+                CountStats::new(BTreeMap::from([(
+                    CountStatsKey::Collection(10),
+                    2,
+                )])),
+            ),
+        );
+
+        let tree = tree.apply(&ManifestEdit::WalRotation {
+            log_number: 2,
+            next_seq: 2,
+        });
+
+        tree.memtable.write(
+            2,
+            &WriteBatch::new(
+                vec![],
+                CountStats::new(BTreeMap::from([(
+                    CountStatsKey::Collection(10),
+                    -1,
+                )])),
+            ),
+        );
+
+        assert_eq!(tree.count_stat(&CountStatsKey::Collection(10)), Some(6));
     }
 }

@@ -1,4 +1,5 @@
 use crate::options::options::Options;
+use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, InternalKeyRange};
 use crate::storage::iterators::{ForwardIterator, ReverseIterator};
@@ -20,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
     size: AtomicUsize,                   // Current size of the memtable
+    count_stats: SkipMap<CountStatsKey, i64>, // Aggregated logical count deltas
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
     pub min_seq: u64,    // The minimum sequence number of the operations in this memtable
     #[cfg(test)]
@@ -31,6 +33,7 @@ impl Memtable {
         Memtable {
             skiplist: SkipMap::new(),
             size: AtomicUsize::new(0),
+            count_stats: SkipMap::new(),
             log_number,
             min_seq,
             #[cfg(test)]
@@ -64,6 +67,21 @@ impl Memtable {
             // Update the size
             self.size
                 .fetch_add(key_size + value_size, Ordering::Relaxed);
+        }
+
+        for (key, delta) in &batch.count_stats().deltas {
+            let new_value = self
+                .count_stats
+                .get(key)
+                .map(|entry| *entry.value())
+                .unwrap_or_default()
+                + delta;
+
+            if new_value == 0 {
+                self.count_stats.remove(key);
+            } else {
+                self.count_stats.insert(key.clone(), new_value);
+            }
         }
     }
 
@@ -130,6 +148,19 @@ impl Memtable {
 
     pub fn size(&self) -> usize {
         self.size.load(Ordering::Relaxed)
+    }
+
+    pub fn count_stat(&self, key: &CountStatsKey) -> Option<i64> {
+        self.count_stats.get(key).map(|entry| *entry.value())
+    }
+
+    pub fn count_stats_for_flush(&self) -> CountStats {
+        CountStats::new(
+            self.count_stats
+                .iter()
+                .map(|entry| (entry.key().clone(), *entry.value()))
+                .collect(),
+        )
     }
 
     pub fn flush(
@@ -625,7 +656,6 @@ mod tests {
         );
         assert_eq!(sst, expected);
     }
-
     fn forward_range(collection: u32, range: &Interval<Vec<u8>>, seq: u64) -> Rc<InternalKeyRange> {
         encode_internal_key_range(collection, 0, range, seq, Direction::Forward)
     }
@@ -635,6 +665,6 @@ mod tests {
     }
 
     fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-        WriteBatch::new(operations)
+        WriteBatch::new(operations, crate::storage::count_stats::CountStats::default())
     }
 }

@@ -256,7 +256,9 @@ impl DbImpl {
 
         // If the plan is not cached, optimize it
         let catalog = self.storage_engine.catalog();
-        let physical_plan = self.optimizer.optimize(logical_plan, catalog);
+        let physical_plan = self
+            .optimizer
+            .optimize(logical_plan, catalog, self.storage_engine.as_ref());
         (parameters, physical_plan)
     }
 }

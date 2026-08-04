@@ -7,6 +7,7 @@ use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::catalog::IdCreationStrategy;
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::{Operation, OperationType};
+use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::storage_engine::{StorageEngine, StorageError};
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::storage::Direction;
@@ -225,6 +226,7 @@ impl QueryExecutor {
 
         let mut operations = Vec::new();
         let mut preconditions = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
         let mut matched_count = 0;
         let mut modified_count = 0;
         let mut upserted_id: Option<Bson> = None;
@@ -241,7 +243,7 @@ impl QueryExecutor {
 
                 let indices = self.indices(collection);
 
-                indices.append_delete_ops(&mut operations, &old_doc)?;
+                indices.append_delete_ops(&mut operations, &old_doc, &mut count_stats)?;
 
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
                 operations.push(Operation::new_put(
@@ -250,7 +252,7 @@ impl QueryExecutor {
                     user_key.clone(),
                     new_doc.to_vec()?,
                 ));
-                indices.append_put_ops(&mut operations, &new_doc)?;
+                indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
 
                 preconditions.push(Precondition::VersionMatch {
                     collection,
@@ -266,7 +268,8 @@ impl QueryExecutor {
 
             let user_key = generated_id.try_into_key()?;
             let indices = self.indices(collection);
-            indices.append_put_ops(&mut operations, &new_doc)?;
+            count_stats.inc_collection(collection, 1);
+            indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
             operations.push(Operation::new_put(
                 collection,
                 0,
@@ -286,6 +289,7 @@ impl QueryExecutor {
         let batch = WriteBatch::new_with_preconditions(
             operations,
             Preconditions::new(snapshot, preconditions),
+            count_stats.build(),
         );
         self.storage_engine.write(batch)?;
 
@@ -371,6 +375,7 @@ impl QueryExecutor {
         let user_key = id.try_into_key()?;
 
         let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
         operations.push(Operation::new_put(
             collection,
             0,
@@ -380,11 +385,12 @@ impl QueryExecutor {
 
         let indices = self.indices(collection);
         let raw_doc = RawDocument::from_bytes(&doc)?;
-        indices.append_put_ops_raw(&mut operations, raw_doc)?;
+        count_stats.inc_collection(collection, 1);
+        indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
 
         // For Generated strategy, IDs are guaranteed unique, so skip precondition checks.
         let batch = if id_strategy == IdCreationStrategy::Generated {
-            WriteBatch::new(operations)
+            WriteBatch::new(operations, count_stats.build())
         } else {
             let snapshot = self.storage_engine.last_visible_sequence();
 
@@ -405,6 +411,7 @@ impl QueryExecutor {
             WriteBatch::new_with_preconditions(
                 operations,
                 Preconditions::new(snapshot, vec![precondition]),
+                count_stats.build(),
             )
         };
 
@@ -440,9 +447,11 @@ impl QueryExecutor {
         // For Generated strategy, IDs are guaranteed unique, so skip duplicate checks.
         let (batch, ids, seen_keys) = if id_strategy == IdCreationStrategy::Generated {
             let mut operations = Vec::new();
+            let mut count_stats = CountStatsBuilder::new();
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
                 ids.push(id);
+                count_stats.inc_collection(collection, 1);
                 operations.push(Operation::new_put(
                     collection,
                     0,
@@ -450,9 +459,13 @@ impl QueryExecutor {
                     doc.clone(),
                 ));
                 let raw_doc = RawDocument::from_bytes(&doc)?;
-                indices.append_put_ops_raw(&mut operations, raw_doc)?;
+                indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
             }
-            (WriteBatch::new(operations), ids, None)
+            (
+                WriteBatch::new(operations, count_stats.build()),
+                ids,
+                None,
+            )
         } else {
             let snapshot = self.storage_engine.last_visible_sequence();
 
@@ -472,9 +485,11 @@ impl QueryExecutor {
 
             // build operations if all checks passed.
             let mut operations = Vec::new();
+            let mut count_stats = CountStatsBuilder::new();
             let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
+                count_stats.inc_collection(collection, 1);
                 preconditions_vec.push(Precondition::VersionMatch {
                     collection,
                     index: 0,
@@ -487,7 +502,7 @@ impl QueryExecutor {
                     doc.clone(),
                 ));
                 let raw_doc = RawDocument::from_bytes(&doc)?;
-                indices.append_put_ops_raw(&mut operations, raw_doc)?;
+                indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
                 ids.push(id);
             }
 
@@ -495,6 +510,7 @@ impl QueryExecutor {
                 WriteBatch::new_with_preconditions(
                     operations,
                     Preconditions::new(snapshot, preconditions_vec),
+                    count_stats.build(),
                 ),
                 ids,
                 Some(seen_keys),
@@ -964,11 +980,12 @@ impl QueryExecutor {
         new_doc_bytes: Vec<u8>,
     ) -> std::result::Result<(), StorageError> {
         let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
 
         let indices = self.indices(collection);
 
         if let Some(doc) = old_doc.as_ref() {
-            indices.append_delete_ops(&mut operations, doc)?;
+            indices.append_delete_ops(&mut operations, doc, &mut count_stats)?;
         }
 
         operations.push(Operation::new_put(
@@ -978,7 +995,10 @@ impl QueryExecutor {
             new_doc_bytes,
         ));
 
-        indices.append_put_ops(&mut operations, &new_doc)?;
+        if old_doc.is_none() {
+            count_stats.inc_collection(collection, 1);
+        }
+        indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
 
         let precondition = Precondition::VersionMatch {
             collection,
@@ -988,6 +1008,7 @@ impl QueryExecutor {
         let batch = WriteBatch::new_with_preconditions(
             operations,
             Preconditions::new(snapshot, vec![precondition]),
+            count_stats.build(),
         );
         self.storage_engine.write(batch)
     }
@@ -1094,11 +1115,16 @@ mod tests {
     use crate::query::{BsonValue, Expr, Parameters, Projection};
     use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use crate::storage::operation::Operation;
+    use crate::storage::count_stats::CountStats;
     use crate::storage::test_utils::storage_engine;
     use crate::storage::write_batch::WriteBatch;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
     use std::sync::Arc;
+
+    fn write_batch(operations: Vec<Operation>) -> WriteBatch {
+        WriteBatch::new(operations, CountStats::default())
+    }
 
     #[test]
     fn test_insert_duplicate_key_preflight_check() -> Result<()> {
@@ -1326,7 +1352,7 @@ mod tests {
         // 3a. Delete the document via direct storage engine write
         let key_to_delete = BsonValue(Bson::Int32(40)).try_into_key()?;
         let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
-        storage_engine.write(WriteBatch::new(vec![delete_op]))?;
+        storage_engine.write(write_batch(vec![delete_op]))?;
 
         // 3b. Search for it
         let mut params_deleted = Parameters::new();
@@ -2365,7 +2391,7 @@ mod tests {
             key.clone(),
             doc! { "_id": 1_i32, "value": "updated" }.to_vec()?,
         );
-        storage_engine.write(WriteBatch::new(vec![update_op]))?;
+        storage_engine.write(write_batch(vec![update_op]))?;
 
         // 5. Query at snapshot
         let mut params = Parameters::new();
@@ -2404,7 +2430,7 @@ mod tests {
 
         let key_to_delete = BsonValue(Bson::Int32(2)).try_into_key()?;
         let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
-        storage_engine.write(WriteBatch::new(vec![delete_op]))?;
+        storage_engine.write(write_batch(vec![delete_op]))?;
 
         let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,

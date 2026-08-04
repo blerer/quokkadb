@@ -333,6 +333,8 @@ mod tests {
 
     #[test]
     fn test_rebuild_lsm_tree_from_valid_manifest() {
+        use crate::storage::count_stats::CountStats;
+
         let dir = tempdir().unwrap();
         let path = dir.path();
         let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
@@ -389,10 +391,12 @@ mod tests {
             ManifestEdit::Flush {
                 oldest_log_number: 2,
                 sst,
+                count_stats: CountStats::default(),
             },
             ManifestEdit::Flush {
                 oldest_log_number: 3,
                 sst: sst2,
+                count_stats: CountStats::default(),
             },
         ];
 

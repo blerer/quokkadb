@@ -8,6 +8,7 @@ use crate::storage::catalog::{
     CollectionMetadata, IndexDefinition, IndexDirection, IndexMetadata, OrderedIndexField,
 };
 use crate::storage::operation::Operation;
+use crate::storage::count_stats::CountStatsBuilder;
 use crate::util::bson_utils::{decode_bson_from_key_readers, BsonKey, TypedKey};
 use crate::util::interval::Interval;
 use bson::{Bson, Document, RawDocument};
@@ -35,11 +36,12 @@ impl Indexes {
         &self,
         operations: &mut Vec<Operation>,
         document: &Document,
+        count_stats: &mut CountStatsBuilder,
     ) -> Result<()> {
         let key_source = &DocumentKeySource::BsonDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
         for index in self.indices.iter() {
-            index.append_put_op(operations, key_source, &doc_id)?;
+            index.append_put_op(operations, key_source, &doc_id, count_stats)?;
         }
         Ok(())
     }
@@ -48,11 +50,12 @@ impl Indexes {
         &self,
         operations: &mut Vec<Operation>,
         document: &RawDocument,
+        count_stats: &mut CountStatsBuilder,
     ) -> Result<()> {
         let key_source = &DocumentKeySource::RawDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
         for index in self.indices.iter() {
-            index.append_put_op(operations, key_source, &doc_id)?;
+            index.append_put_op(operations, key_source, &doc_id, count_stats)?;
         }
         Ok(())
     }
@@ -61,11 +64,12 @@ impl Indexes {
         &self,
         operations: &mut Vec<Operation>,
         document: &Document,
+        count_stats: &mut CountStatsBuilder,
     ) -> Result<()> {
         let key_source = &DocumentKeySource::BsonDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
         for index in self.indices.iter() {
-            index.append_delete_op(operations, key_source, &doc_id)?;
+            index.append_delete_op(operations, key_source, &doc_id, count_stats)?;
         }
         Ok(())
     }
@@ -146,10 +150,12 @@ impl Index {
         operations: &mut Vec<Operation>,
         key_source: &DocumentKeySource,
         doc_id: &TypedKey,
+        count_stats: &mut CountStatsBuilder,
     ) -> Result<()> {
         let IndexKeyValue { key, value } = self.extract_index_entry(key_source, doc_id)?;
         let op = Operation::new_put(self.collection_id, self.id, key, value);
         operations.push(op);
+        count_stats.inc_index(self.collection_id, self.id, 1);
         Ok(())
     }
 
@@ -158,10 +164,12 @@ impl Index {
         operations: &mut Vec<Operation>,
         key_source: &DocumentKeySource,
         doc_id: &TypedKey,
+        count_stats: &mut CountStatsBuilder,
     ) -> Result<()> {
         let IndexKeyValue { key, value: _ } = self.extract_index_entry(key_source, doc_id)?;
         let op = Operation::new_delete(self.collection_id, self.id, key);
         operations.push(op);
+        count_stats.inc_index(self.collection_id, self.id, -1);
         Ok(())
     }
 
@@ -626,6 +634,7 @@ mod tests {
         IndexPath, OrderedIndexField,
     };
     use crate::storage::operation::OperationType;
+    use crate::storage::count_stats::CountStatsBuilder;
     use crate::util::interval::Interval;
     use crate::util::bson_utils::BsonKey;
     use bson::{
@@ -1071,8 +1080,11 @@ mod tests {
         let indices = Indexes::from_collection(&collection);
         let document = doc! { "_id": 7i64, "name": "alice", "age": 30_i32 };
         let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
 
-        indices.append_put_ops(&mut operations, &document).unwrap();
+        indices
+            .append_put_ops(&mut operations, &document, &mut count_stats)
+            .unwrap();
 
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].operation_type, OperationType::Put);
@@ -1090,9 +1102,10 @@ mod tests {
         let indices = Indexes::from_collection(&collection);
         let document = doc! { "_id": 7i64, "name": "alice" };
         let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
 
         indices
-            .append_delete_ops(&mut operations, &document)
+            .append_delete_ops(&mut operations, &document, &mut count_stats)
             .unwrap();
 
         assert_eq!(operations.len(), 1);
@@ -1116,10 +1129,14 @@ mod tests {
         let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
         let mut bson_ops = Vec::new();
         let mut raw_ops = Vec::new();
+        let mut bson_count_stats = CountStatsBuilder::new();
+        let mut raw_count_stats = CountStatsBuilder::new();
 
-        indices.append_put_ops(&mut bson_ops, &document).unwrap();
         indices
-            .append_put_ops_raw(&mut raw_ops, raw.as_ref())
+            .append_put_ops(&mut bson_ops, &document, &mut bson_count_stats)
+            .unwrap();
+        indices
+            .append_put_ops_raw(&mut raw_ops, raw.as_ref(), &mut raw_count_stats)
             .unwrap();
 
         assert_eq!(bson_ops.len(), 1);

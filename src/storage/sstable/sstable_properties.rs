@@ -1,8 +1,10 @@
+use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
+use crate::io::invalid_data;
+use crate::io::serializable::Serializable;
+use crate::storage::count_stats::CountStats;
 use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
-use bson::{deserialize_from_slice, serialize_to_vec};
-use serde::{Deserialize, Serialize};
-use std::io::{Error, ErrorKind};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BSON_MIN_KEY: &[u8] = &[0x00]; // Represent BSON MinKey with the smallest possible binary
 const BSON_MAX_KEY: &[u8] = &[0xFF]; // Represent BSON MaxKey with the largest possible binary
@@ -23,7 +25,7 @@ const BSON_MAX_KEY: &[u8] = &[0xFF]; // Represent BSON MaxKey with the largest p
 /// - Supports serialization and deserialization for persistence.
 ///
 /// This struct is designed to be compatible with BSON for key storage and comparison
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SSTableProperties {
     /// The time when the SSTable was created.
     pub creation_time: SystemTime,
@@ -83,11 +85,83 @@ impl SSTableProperties {
     }
 
     pub fn to_vec(&self) -> std::io::Result<Vec<u8>> {
-        serialize_to_vec(self).map_err(|e| Error::new(ErrorKind::Other, e))
+        let mut writer = ByteWriter::new();
+        self.write_to(&mut writer);
+        Ok(writer.take_buffer())
     }
 
     pub fn from_slice(slice: &[u8]) -> std::io::Result<Self> {
-        deserialize_from_slice(slice).map_err(|e| Error::new(ErrorKind::Other, e))
+        let reader = ByteReader::new(slice);
+        let properties = Self::read_from(&reader)?;
+        if reader.has_remaining() {
+            // Backward compatibility for the short-lived format that appended CountStats.
+            let _ = CountStats::read_from(&reader)?;
+        }
+        if reader.has_remaining() {
+            return Err(invalid_data("trailing bytes in SSTableProperties"));
+        }
+        Ok(properties)
+    }
+}
+
+impl Serializable for SSTableProperties {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+        let creation_time = UNIX_EPOCH
+            .checked_add(Duration::from_millis(reader.read_varint_u64()?))
+            .ok_or_else(|| invalid_data("SSTableProperties creation_time overflow"))?;
+
+        let sstable_version = reader.read_u8()?;
+        let compression_type = reader.read_u8()?;
+        let min_key = reader.read_length_prefixed_slice()?.to_vec();
+        let max_key = reader.read_length_prefixed_slice()?.to_vec();
+        let min_sequence = reader.read_varint_u64()?;
+        let max_sequence = reader.read_varint_u64()?;
+        let num_entries = reader.read_varint_u64()? as usize;
+        let raw_key_size = reader.read_varint_u64()? as usize;
+        let raw_value_size = reader.read_varint_u64()? as usize;
+        let data_size = reader.read_varint_u64()? as usize;
+        let index_size = reader.read_varint_u64()? as usize;
+        let filter_size = reader.read_varint_u64()? as usize;
+        Ok(SSTableProperties {
+            creation_time,
+            sstable_version,
+            compression_type,
+            min_key,
+            max_key,
+            min_sequence,
+            max_sequence,
+            num_entries,
+            raw_key_size,
+            raw_value_size,
+            data_size,
+            index_size,
+            filter_size,
+        })
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        let creation_millis = self
+            .creation_time
+            .duration_since(UNIX_EPOCH)
+            .expect("SSTableProperties creation_time must not be before UNIX_EPOCH")
+            .as_millis()
+            .try_into()
+            .expect("SSTableProperties creation_time must fit in u64 milliseconds");
+
+        writer
+            .write_varint_u64(creation_millis)
+            .write_u8(self.sstable_version)
+            .write_u8(self.compression_type)
+            .write_length_prefixed_slice(&self.min_key)
+            .write_length_prefixed_slice(&self.max_key)
+            .write_varint_u64(self.min_sequence)
+            .write_varint_u64(self.max_sequence)
+            .write_varint_u64(self.num_entries as u64)
+            .write_varint_u64(self.raw_key_size as u64)
+            .write_varint_u64(self.raw_value_size as u64)
+            .write_varint_u64(self.data_size as u64)
+            .write_varint_u64(self.index_size as u64)
+            .write_varint_u64(self.filter_size as u64);
     }
 }
 

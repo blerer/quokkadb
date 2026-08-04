@@ -11,6 +11,7 @@ use crate::query::{
     ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder,
 };
 use crate::storage::catalog::{Catalog, IndexDefinition, IndexDirection, OrderedIndexField};
+use crate::storage::count_stats::{CountStatSource, CountStatsKey};
 use crate::storage::Direction;
 use std::collections::HashMap;
 use std::convert::Into;
@@ -23,10 +24,52 @@ pub struct CostEstimator {}
 
 impl CostEstimator {
     /// Estimates the cost of a single physical plan node, without considering its inputs.
-    pub fn estimate_node_cost(&self, plan: &PhysicalPlan) -> Cost {
+    pub fn estimate_node_cost(
+        &self,
+        plan: &PhysicalPlan,
+        count_stats: &dyn CountStatSource,
+    ) -> Cost {
         match plan {
-            PhysicalPlan::CollectionScan { .. } => 1000.0,
-            PhysicalPlan::IndexScan { .. } => 100.0,
+            PhysicalPlan::CollectionScan { collection, .. } => count_stats
+                .count_stat(&CountStatsKey::Collection(*collection))
+                .map(|count| count.max(1) as f64)
+                .unwrap_or(1000.0),
+            PhysicalPlan::IndexScan {
+                collection,
+                index,
+                range,
+                filter,
+                ..
+            } => {
+                if let Some(index_count) = count_stats.count_stat(&CountStatsKey::Index {
+                    collection: *collection,
+                    index: *index,
+                }) {
+                    let mut cost = index_count.max(1) as f64;
+
+                    cost /= 1.0 + range.equal_prefix.len() as f64;
+                    if range.tail.is_some() {
+                        cost *= 0.75;
+                    }
+                    if filter.is_some() {
+                        cost *= 1.1;
+                    }
+
+                    cost.max(1.0)
+                } else {
+                    let mut cost = 100.0;
+
+                    cost -= range.equal_prefix.len() as f64 * 20.0;
+                    if range.tail.is_some() {
+                        cost -= 10.0;
+                    }
+                    if filter.is_some() {
+                        cost += 5.0;
+                    }
+
+                    cost.max(10.0)
+                }
+            }
             PhysicalPlan::PointSearch { .. } => 1.0,
             PhysicalPlan::MultiPointSearch { .. } => 10.0,
             PhysicalPlan::Filter { .. } => 1.0,
@@ -221,7 +264,12 @@ impl Optimizer {
         }
     }
 
-    pub fn optimize(&self, plan: Arc<LogicalPlan>, catalog: Arc<Catalog>) -> Arc<PhysicalPlan> {
+    pub fn optimize(
+        &self,
+        plan: Arc<LogicalPlan>,
+        catalog: Arc<Catalog>,
+        count_stats: &dyn CountStatSource,
+    ) -> Arc<PhysicalPlan> {
         event!(self.logger, "optimization start, logical_plan={:?}", plan);
         let start = Instant::now();
 
@@ -235,7 +283,13 @@ impl Optimizer {
         let required_props = ReqProps::default(); // No required properties for the root
 
         let physical_plan = self
-            .best_expr(catalog.as_ref(), &mut memo, root_group_id, &required_props)
+            .best_expr(
+                catalog.as_ref(),
+                count_stats,
+                &mut memo,
+                root_group_id,
+                &required_props,
+            )
             .plan
             .clone();
 
@@ -305,6 +359,7 @@ impl Optimizer {
     fn best_expr(
         &self,
         catalog: &Catalog,
+        count_stats: &dyn CountStatSource,
         memo: &mut Memo,
         group_id: GroupId,
         req: &ReqProps,
@@ -324,12 +379,19 @@ impl Optimizer {
         let mut child_bests: Vec<Arc<Best>> = Vec::with_capacity(child_nodes.len());
         for child_node in child_nodes.into_iter() {
             let child_group = memo.add_group(child_node);
-            let child_best = self.best_expr(catalog, memo, child_group, &child_reqs);
+            let child_best =
+                self.best_expr(catalog, count_stats, memo, child_group, &child_reqs);
             child_bests.push(child_best);
         }
 
         // 4. Implement this node directly into physical alternatives
-        let mut candidates = self.implement_node(catalog, logical_plan.as_ref(), &child_bests, req);
+        let mut candidates = self.implement_node(
+            catalog,
+            count_stats,
+            logical_plan.as_ref(),
+            &child_bests,
+            req,
+        );
 
         // 5. Select best candidate based on cost
         let mut best: Option<Candidate> = None;
@@ -356,6 +418,7 @@ impl Optimizer {
     fn implement_node(
         &self,
         catalog: &Catalog,
+        count_stats: &dyn CountStatSource,
         node: &LogicalPlan,
         child_bests: &[Arc<Best>],
         req: &ReqProps,
@@ -365,23 +428,29 @@ impl Optimizer {
                 collection, filter, ..
             } => {
                 assert!(child_bests.is_empty());
-                self.implement_collection_scan_node(catalog, *collection, filter, req)
+                self.implement_collection_scan_node(
+                    catalog,
+                    count_stats,
+                    *collection,
+                    filter,
+                    req,
+                )
             }
             LogicalPlan::Filter { condition, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_filter_node(&child_bests, condition)
+                self.implement_filter_node(count_stats, &child_bests, condition)
             }
             LogicalPlan::Projection { projection, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_projection_node(&child_bests, projection)
+                self.implement_projection_node(count_stats, &child_bests, projection)
             }
             LogicalPlan::Sort { sort_fields, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_sort_node(&child_bests, sort_fields, req)
+                self.implement_sort_node(count_stats, &child_bests, sort_fields, req)
             }
             LogicalPlan::Limit { limit, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_limit_node(&child_bests, limit)
+                self.implement_limit_node(count_stats, &child_bests, limit)
             }
             _ => panic!(
                 "Unsupported logical plan node in implementation: {:?}",
@@ -392,6 +461,7 @@ impl Optimizer {
 
     fn implement_filter_node(
         &self,
+        count_stats: &dyn CountStatSource,
         child_bests: &[Arc<Best>],
         condition: &Arc<Expr>,
     ) -> Vec<Candidate> {
@@ -402,13 +472,14 @@ impl Optimizer {
         });
         vec![Candidate {
             provides: child.provides.clone(),
-            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
+            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }]
     }
 
     fn implement_projection_node(
         &self,
+        count_stats: &dyn CountStatSource,
         child_bests: &[Arc<Best>],
         projection: &Arc<Projection>,
     ) -> Vec<Candidate> {
@@ -419,12 +490,17 @@ impl Optimizer {
         });
         vec![Candidate {
             provides: child.provides.clone(),
-            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
+            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }]
     }
 
-    fn implement_limit_node(&self, child_bests: &[Arc<Best>], limit: &Limit) -> Vec<Candidate> {
+    fn implement_limit_node(
+        &self,
+        count_stats: &dyn CountStatSource,
+        child_bests: &[Arc<Best>],
+        limit: &Limit,
+    ) -> Vec<Candidate> {
         let child = &child_bests[0];
 
         if let Some(provided_limit) = &child.provides.limit {
@@ -457,7 +533,7 @@ impl Optimizer {
                 order: child.provides.order.clone(),
                 limit: Some(limit.clone()),
             },
-            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
+            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }]
     }
@@ -465,12 +541,14 @@ impl Optimizer {
     fn implement_collection_scan_node(
         &self,
         catalog: &Catalog,
+        count_stats: &dyn CountStatSource,
         collection: u32,
         filter: &Option<Arc<Expr>>,
         req: &ReqProps,
     ) -> Vec<Candidate> {
         let primary_key = Expr::Field(vec!["_id".into()]);
         let mut candidates = vec![self.create_pk_range_scan_candidate(
+            count_stats,
             collection,
             primary_key.clone(),
             Interval::all(),
@@ -479,7 +557,15 @@ impl Optimizer {
         )];
 
         let Some(expr) = filter else {
-            self.add_index_scan_candidates(catalog, collection, filter, None, req, &mut candidates);
+            self.add_index_scan_candidates(
+                count_stats,
+                catalog,
+                collection,
+                filter,
+                None,
+                req,
+                &mut candidates,
+            );
             return candidates;
         };
 
@@ -527,6 +613,7 @@ impl Optimizer {
                         ComparisonOperator::In => {
                             let residual = compute_residual_filter(expr.clone(), &primary_key);
                             let candidate = self.create_multipoint_search_candidate(
+                                count_stats,
                                 collection,
                                 value.clone(),
                                 residual,
@@ -542,7 +629,12 @@ impl Optimizer {
                             // Point search
                             let key = interval.start_bound_value().unwrap().clone();
                             let candidate =
-                                self.create_point_search_candidate(collection, key, residual);
+                                self.create_point_search_candidate(
+                                    count_stats,
+                                    collection,
+                                    key,
+                                    residual,
+                                );
                             // If we can answer to the query with a point search, we know that it is
                             // the fastest that we can use. So, instead of exploring other alternative
                             // we can directly return it
@@ -550,6 +642,7 @@ impl Optimizer {
                         } else {
                             // Range scan
                             candidates[0] = self.create_pk_range_scan_candidate(
+                                count_stats,
                                 collection,
                                 primary_key,
                                 interval.clone(),
@@ -560,6 +653,7 @@ impl Optimizer {
                     }
                     Expr::Exists(true) => {
                         candidates[0] = self.create_pk_range_scan_candidate(
+                            count_stats,
                             collection,
                             primary_key.clone(),
                             Interval::all(),
@@ -573,6 +667,7 @@ impl Optimizer {
         }
 
         self.add_index_scan_candidates(
+            count_stats,
             catalog,
             collection,
             filter,
@@ -585,6 +680,7 @@ impl Optimizer {
 
     fn add_index_scan_candidates(
         &self,
+        count_stats: &dyn CountStatSource,
         catalog: &Catalog,
         collection: u32,
         filter: &Option<Arc<Expr>>,
@@ -616,6 +712,7 @@ impl Optimizer {
                 });
 
                 candidates.push(self.create_index_scan_candidate(
+                    count_stats,
                     collection,
                     index.id,
                     range,
@@ -629,6 +726,7 @@ impl Optimizer {
                 .is_some_and(|order| index_scan_direction(index_fields, order.as_slice()).is_some())
             {
                 candidates.push(self.create_index_scan_candidate(
+                    count_stats,
                     collection,
                     index.id,
                     IndexScanRangeExpr {
@@ -645,6 +743,7 @@ impl Optimizer {
 
     fn create_point_search_candidate(
         &self,
+        count_stats: &dyn CountStatSource,
         collection: u32,
         key: Arc<Expr>,
         residual: Option<Arc<Expr>>,
@@ -666,13 +765,14 @@ impl Optimizer {
 
         Candidate {
             provides,
-            cost: self.cost_estimator.estimate_node_cost(&plan),
+            cost: self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }
     }
 
     fn create_pk_range_scan_candidate(
         &self,
+        count_stats: &dyn CountStatSource,
         collection: u32,
         primary_key: Expr,
         interval: Interval<Arc<Expr>>,
@@ -702,7 +802,7 @@ impl Optimizer {
 
         let candidate = Candidate {
             provides,
-            cost: self.cost_estimator.estimate_node_cost(&plan),
+            cost: self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         };
         candidate
@@ -710,6 +810,7 @@ impl Optimizer {
 
     fn create_index_scan_candidate(
         &self,
+        count_stats: &dyn CountStatSource,
         collection: u32,
         index: u32,
         range: IndexScanRangeExpr,
@@ -741,13 +842,14 @@ impl Optimizer {
                 order: provides_order,
                 limit: None,
             },
-            cost: self.cost_estimator.estimate_node_cost(&plan),
+            cost: self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }
     }
 
     fn create_multipoint_search_candidate(
         &self,
+        count_stats: &dyn CountStatSource,
         collection: u32,
         keys: Arc<Expr>,
         residual: Option<Arc<Expr>>,
@@ -784,13 +886,14 @@ impl Optimizer {
 
         Candidate {
             provides,
-            cost: self.cost_estimator.estimate_node_cost(&plan),
+            cost: self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         }
     }
 
     fn implement_sort_node(
         &self,
+        count_stats: &dyn CountStatSource,
         child_bests: &[Arc<Best>],
         sort_fields: &Arc<Vec<SortField>>,
         req: &ReqProps,
@@ -837,7 +940,8 @@ impl Optimizer {
                         }),
                     };
 
-                    let cost = child.cost + self.cost_estimator.estimate_node_cost(&plan);
+                    let cost =
+                        child.cost + self.cost_estimator.estimate_node_cost(&plan, count_stats);
 
                     candidates.push(Candidate {
                         plan,
@@ -861,7 +965,7 @@ impl Optimizer {
 
         candidates.push(Candidate {
             provides,
-            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan),
+            cost: child.cost + self.cost_estimator.estimate_node_cost(&plan, count_stats),
             plan,
         });
 
@@ -1131,6 +1235,7 @@ mod parametrize_test {
 
 #[cfg(test)]
 mod optimizer_tests {
+    use std::collections::BTreeMap;
     use super::*;
     use crate::obs::logger::test_instance;
     use crate::query::expr_fn::{
@@ -1139,6 +1244,7 @@ mod optimizer_tests {
     };
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
+    use crate::storage::count_stats::{CountStats, CountStatsKey};
     use bson::Bson;
 
     const COLLECTION: u32 = 10;
@@ -1497,12 +1603,21 @@ mod optimizer_tests {
         catalog: Arc<Catalog>,
         output: PhysicalPlan,
     ) {
+        check_optimization_with_catalog_and_stats(input, catalog, CountStats::default(), output);
+    }
+
+    fn check_optimization_with_catalog_and_stats(
+        input: Arc<LogicalPlan>,
+        catalog: Arc<Catalog>,
+        count_stats: CountStats,
+        output: PhysicalPlan,
+    ) {
         let optimizer = Optimizer::new(test_instance());
         // First, normalize the logical plan
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, _parameters) = optimizer.parametrize(normalized_plan);
-        let physical_plan = optimizer.optimize(logical_plan, catalog);
+        let physical_plan = optimizer.optimize(logical_plan, catalog, &count_stats);
         assert_eq!(physical_plan.as_ref(), &output)
     }
 
@@ -1634,6 +1749,30 @@ mod optimizer_tests {
     }
 
     #[test]
+    fn test_optimize_prefers_more_selective_compound_index_for_two_field_equality() {
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(and(vec![
+                field_filters(field(["a"]), vec![eq(lit(10))]),
+                field_filters(field(["b"]), vec![eq(lit(20))]),
+            ]))
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0), placeholder(1)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
     fn test_optimize_non_indexed_field_still_uses_collection_scan() {
         let filters = field_filters(field(["z"]), vec![eq(lit(99))]);
         let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
@@ -1650,6 +1789,75 @@ mod optimizer_tests {
         };
 
         check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_optimize_prefers_index_scan_when_count_stats_favor_index() {
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input,
+            indexed_test_catalog(),
+            CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(COLLECTION), 10_000),
+                (
+                    CountStatsKey::Index {
+                        collection: COLLECTION,
+                        index: 1,
+                    },
+                    100,
+                ),
+            ])),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_prefers_collection_scan_when_count_stats_favor_collection() {
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["a"]),
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input,
+            indexed_test_catalog(),
+            CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(COLLECTION), 10),
+                (
+                    CountStatsKey::Index {
+                        collection: COLLECTION,
+                        index: 1,
+                    },
+                    10_000,
+                ),
+            ])),
+            output,
+        );
     }
 
     fn test_catalog() -> Arc<Catalog> {

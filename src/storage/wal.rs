@@ -344,7 +344,13 @@ mod tests {
     use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::operation::Operation;
+    use crate::storage::count_stats::{CountStats, CountStatsKey};
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
+
+    fn write_batch(operations: Vec<Operation>) -> WriteBatch {
+        WriteBatch::new(operations, CountStats::default())
+    }
 
     #[test]
     fn test_replay_write_ahead_log() {
@@ -363,15 +369,15 @@ mod tests {
         let batches = vec![
             (
                 10,
-                WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
+                write_batch(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
             ),
             (
                 20,
-                WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
+                write_batch(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
             ),
             (
                 30,
-                WriteBatch::new(vec![Operation::new_delete(1, 1, b"a".to_vec())]),
+                write_batch(vec![Operation::new_delete(1, 1, b"a".to_vec())]),
             ),
         ];
 
@@ -417,6 +423,53 @@ mod tests {
             replayed[2].1.operations()[0],
             Operation::new_delete(1, 1, b"a".to_vec())
         );
+
+        assert_eq!(replayed[0].1.count_stats(), &CountStats::default());
+    }
+
+    #[test]
+    fn test_replay_write_ahead_log_preserves_count_stats() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let options = Options::default();
+        let mut wal = WriteAheadLog::new(
+            logger::test_instance(),
+            &mut MetricRegistry::default(),
+            &options,
+            &path,
+            1,
+        )
+        .unwrap();
+
+        let batch = WriteBatch::new(
+            vec![
+                Operation::new_put(7, 0, b"doc".to_vec(), b"value".to_vec()),
+                Operation::new_put(7, 1, b"idx".to_vec(), b"doc".to_vec()),
+            ],
+            CountStats::new(BTreeMap::from([
+                (CountStatsKey::Collection(7), 1),
+                (
+                    CountStatsKey::Index {
+                        collection: 7,
+                        index: 1,
+                    },
+                    1,
+                ),
+            ])),
+        );
+
+        wal.append(10, &batch).unwrap();
+        wal.sync().unwrap();
+
+        let wal_file = path.join("000001.log");
+        let replayed: Vec<_> = WriteAheadLog::replay(&wal_file)
+            .unwrap()
+            .map(|res| res.unwrap())
+            .collect();
+
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].0, 10);
+        assert_eq!(replayed[0].1, batch);
     }
 
     #[test]
@@ -437,7 +490,7 @@ mod tests {
         // Append and rotate to log 2
         wal.append(
             1,
-            &WriteBatch::new(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
+            &write_batch(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
         )
         .unwrap();
         wal.rotate(2).unwrap();
@@ -445,7 +498,7 @@ mod tests {
         // Append and rotate to log 3
         wal.append(
             2,
-            &WriteBatch::new(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
+            &write_batch(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
         )
         .unwrap();
         wal.rotate(3).unwrap();
@@ -514,7 +567,7 @@ mod tests {
             batch.push(new_operation(i));
         }
 
-        wal.append(1, &WriteBatch::new(batch)).unwrap();
+        wal.append(1, &write_batch(batch)).unwrap();
 
         // Should have triggered sync
         assert_eq!(wal.pending_bytes, 0);
@@ -538,7 +591,7 @@ mod tests {
         )
         .unwrap();
         for i in 0..3 {
-            wal.append(100 + i as u64, &WriteBatch::new(vec![new_operation(i)]))
+            wal.append(100 + i as u64, &write_batch(vec![new_operation(i)]))
                 .unwrap();
         }
         wal.rotate(8).unwrap();
@@ -559,9 +612,9 @@ mod tests {
             .collect();
 
         assert_eq!(replayed.len(), 3);
-        assert_eq!(replayed[0], (100, WriteBatch::new(vec![new_operation(0)])));
-        assert_eq!(replayed[1], (101, WriteBatch::new(vec![new_operation(1)])));
-        assert_eq!(replayed[2], (102, WriteBatch::new(vec![new_operation(2)])));
+        assert_eq!(replayed[0], (100, write_batch(vec![new_operation(0)])));
+        assert_eq!(replayed[1], (101, write_batch(vec![new_operation(1)])));
+        assert_eq!(replayed[2], (102, write_batch(vec![new_operation(2)])));
     }
 
     #[test]
@@ -610,7 +663,7 @@ mod tests {
         .unwrap();
         wal.append(
             1,
-            &WriteBatch::new(vec![Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())]),
+            &write_batch(vec![Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())]),
         )
         .unwrap();
         wal.rotate(14).unwrap();

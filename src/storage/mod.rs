@@ -8,6 +8,7 @@ mod lsm_tree;
 mod lsm_version;
 mod manifest_state;
 mod memtable;
+pub(crate) mod count_stats;
 pub(crate) mod operation;
 mod sstable;
 pub(crate) mod storage_engine;
