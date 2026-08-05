@@ -2049,6 +2049,8 @@ fn test_upsert_update_many_inserts_one_when_no_match() {
     let collection = db.collection("test");
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
+    let initial_estimated_count = collection.estimated_document_count().unwrap();
+    assert_eq!(initial_estimated_count as usize, initial_count);
 
     let options = UpdateOptions {
         upsert: true,
@@ -2067,6 +2069,10 @@ fn test_upsert_update_many_inserts_one_when_no_match() {
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count + 1);
+    assert_eq!(
+        collection.estimated_document_count().unwrap() as usize,
+        initial_count + 1
+    );
 
     let doc = find_one(&collection, doc! { "status": "NONEXISTENT" }).unwrap();
     assert!(doc.get_bool("processed").unwrap());
@@ -2078,6 +2084,8 @@ fn test_upsert_update_many_updates_all_when_matches_exist() {
     let collection = db.collection("test");
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
+    let initial_estimated_count = collection.estimated_document_count().unwrap();
+    assert_eq!(initial_estimated_count as usize, initial_count);
 
     let options = UpdateOptions {
         upsert: true,
@@ -2093,6 +2101,10 @@ fn test_upsert_update_many_updates_all_when_matches_exist() {
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count);
+    assert_eq!(
+        collection.estimated_document_count().unwrap() as usize,
+        initial_count
+    );
 
     let reviewed_count = collection
         .find(doc! { "reviewed": true })
@@ -2396,6 +2408,8 @@ fn test_set_on_insert_without_upsert_no_effect() {
     let collection = db.collection("test");
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
+    let initial_estimated_count = collection.estimated_document_count().unwrap();
+    assert_eq!(initial_estimated_count as usize, initial_count);
 
     collection
         .update_one(
@@ -2407,6 +2421,10 @@ fn test_set_on_insert_without_upsert_no_effect() {
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count);
+    assert_eq!(
+        collection.estimated_document_count().unwrap() as usize,
+        initial_count
+    );
 
     let doc = find_one(&collection, doc! { "_id": 999 });
     assert!(doc.is_none());
@@ -2418,6 +2436,8 @@ fn test_set_on_insert_update_many_inserts_one() {
     let collection = db.collection("test");
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
+    let initial_estimated_count = collection.estimated_document_count().unwrap();
+    assert_eq!(initial_estimated_count as usize, initial_count);
 
     let options = UpdateOptions {
         upsert: true,
@@ -2433,6 +2453,10 @@ fn test_set_on_insert_update_many_inserts_one() {
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count + 1);
+    assert_eq!(
+        collection.estimated_document_count().unwrap() as usize,
+        initial_count + 1
+    );
 
     let doc = find_one(&collection, doc! { "category": "nonexistent" }).unwrap();
     assert!(doc.get_bool("isNew").unwrap());
@@ -2475,6 +2499,8 @@ fn test_upsert_false_does_not_insert() {
     let collection = db.collection("test");
 
     let initial_count = collection.find(doc! {}).execute().unwrap().count();
+    let initial_estimated_count = collection.estimated_document_count().unwrap();
+    assert_eq!(initial_estimated_count as usize, initial_count);
 
     collection
         .update_one(
@@ -2486,6 +2512,10 @@ fn test_upsert_false_does_not_insert() {
 
     let new_count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(new_count, initial_count);
+    assert_eq!(
+        collection.estimated_document_count().unwrap() as usize,
+        initial_count
+    );
 
     let doc = find_one(&collection, doc! { "_id": 999 });
     assert!(doc.is_none());

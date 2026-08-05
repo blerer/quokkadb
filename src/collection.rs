@@ -242,6 +242,19 @@ impl Collection {
         })
     }
 
+    /// Returns the estimated number of documents in the collection based on storage count stats.
+    pub fn estimated_document_count(&self) -> Result<u64> {
+        let collection_id = match self.policy {
+            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
+            CollectionPolicy::CreateIfMissing => match self.db_impl.get_collection(&self.collection) {
+                Some(collection) => collection.id,
+                None => return Ok(0),
+            },
+        };
+
+        self.db_impl.estimated_document_count(collection_id)
+    }
+
     /// Inserts a single document into the collection.
     /// # Arguments
     /// * `document` - The document to insert, which must implement the `Serialize` trait.

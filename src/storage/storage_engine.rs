@@ -750,7 +750,16 @@ impl StorageEngine {
 
     pub fn count_stat(&self, key: &CountStatsKey) -> Option<i64> {
         let lsm_tree = self.lsm_tree.load();
-        lsm_tree.count_stat(key)
+        let count = lsm_tree.count_stat(key);
+
+        assert!(
+            count.is_none_or(|count| count >= 0),
+            "Count stat for key {:?} was negative: {:?}",
+            key,
+            count
+        );
+
+        count
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch) -> StorageResult<()> {

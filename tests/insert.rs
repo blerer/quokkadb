@@ -18,9 +18,13 @@ fn mixed_strategy_generates_id_when_missing() {
     let (_dir, db) = setup();
     let collection = db.collection("test").create_if_missing();
 
+    assert_eq!(collection.estimated_document_count().unwrap(), 0);
+
     // Insert without _id
     let doc = doc! {"x": 1};
     let result = collection.insert_one(doc).unwrap();
+
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
 
     // Should have generated an _id
     let inserted_id = &result.inserted_id;
@@ -59,6 +63,8 @@ fn mixed_strategy_insert_many_generates_ids_when_missing() {
 
     let docs = vec![doc! {"x": 1}, doc! {"_id": 100, "x": 2}, doc! {"x": 3}];
     let result = collection.insert_many(docs).unwrap();
+
+    assert_eq!(collection.estimated_document_count().unwrap(), 3);
 
     let inserted_ids = &result.inserted_ids;
     assert_eq!(inserted_ids.len(), 3);
@@ -287,6 +293,8 @@ fn manual_strategy_insert_many_succeeds_with_all_ids() {
     ];
     let result = collection.insert_many(docs).unwrap();
 
+    assert_eq!(collection.estimated_document_count().unwrap(), 3);
+
     let inserted_ids = &result.inserted_ids;
     assert_eq!(inserted_ids.len(), 3);
     assert_eq!(inserted_ids[0].as_str().unwrap(), "a");
@@ -310,6 +318,7 @@ fn manual_strategy_detects_duplicate_ids() {
 
     // First insert succeeds
     collection.insert_one(doc! {"_id": 1, "x": 1}).unwrap();
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
 
     // Second insert with same _id should fail
     let result = collection.insert_one(doc! {"_id": 1, "x": 2});
@@ -320,6 +329,7 @@ fn manual_strategy_detects_duplicate_ids() {
         "Error message should mention duplicate key, got: {}",
         error
     );
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
 }
 
 // =============================================================================
@@ -335,6 +345,7 @@ fn insert_duplicate_id_is_version_conflict() {
 
     // First insert should succeed.
     collection.insert_one(doc.clone()).unwrap();
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
 
     // Second insert with the same _id should fail with VersionConflict.
     let result = collection.insert_one(doc);
@@ -344,4 +355,5 @@ fn insert_duplicate_id_is_version_conflict() {
         format!("{}", error),
         "Duplicate key error. dup key: { _id: 365 }"
     );
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
 }

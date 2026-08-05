@@ -20,6 +20,7 @@ use crate::query::optimizer::optimizer::Optimizer;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{IndexKeySpec, Parameters};
 use crate::storage::catalog::CollectionMetadata;
+use crate::storage::count_stats::CountStatsKey;
 use crate::storage::storage_engine::StorageEngine;
 use bson::Document;
 use query::execution::executor::QueryExecutor;
@@ -170,6 +171,15 @@ impl DbImpl {
 
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {
         Ok(self.storage_engine.drop_index(collection_id, index_id)?)
+    }
+
+    pub fn estimated_document_count(&self, collection_id: u32) -> error::Result<u64> {
+        let count = self
+            .storage_engine
+            .count_stat(&CountStatsKey::Collection(collection_id))
+            .unwrap_or(0);
+
+        Ok(count as u64)
     }
 
     pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<Document> {
