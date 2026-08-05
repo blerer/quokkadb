@@ -220,17 +220,6 @@ impl BloomFilterBuilder {
         }
     }
 
-    pub fn false_positive_rate(&self) -> f64 {
-        self.false_positive_rate
-    }
-
-    pub fn with_capacity(false_positive_rate: f64, capacity: usize) -> Self {
-        Self {
-            false_positive_rate,
-            hashes: Vec::with_capacity(capacity),
-        }
-    }
-
     /// Cheap estimate of the serialized Bloom filter block size (uncompressed) that `build()` will
     /// produce.
     ///
@@ -256,10 +245,6 @@ impl BloomFilterBuilder {
 
     pub fn len(&self) -> usize {
         self.hashes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.hashes.is_empty()
     }
 
     pub fn build(&self) -> BloomFilter<'static> {
@@ -566,34 +551,12 @@ mod tests {
     // --- Builder Tests ---
 
     #[test]
-    fn builder_with_capacity() {
-        let mut builder = BloomFilterBuilder::with_capacity(0.01, 100);
-
-        for i in 0..50 {
-            let key = format!("key_{}", i);
-            builder.add(key.as_bytes());
-        }
-
-        assert_eq!(builder.len(), 50);
-        assert!(!builder.is_empty());
-
-        let bloom = builder.build();
-
-        for i in 0..50 {
-            let key = format!("key_{}", i);
-            assert!(bloom.contains(key.as_bytes()));
-        }
-    }
-
-    #[test]
-    fn builder_len_and_is_empty() {
+    fn builder_len() {
         let mut builder = BloomFilterBuilder::new(0.01);
 
-        assert!(builder.is_empty());
         assert_eq!(builder.len(), 0);
 
         builder.add(b"first");
-        assert!(!builder.is_empty());
         assert_eq!(builder.len(), 1);
 
         builder.add(b"second");

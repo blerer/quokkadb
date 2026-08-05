@@ -155,23 +155,6 @@ where
     }
 }
 
-pub fn push_each<T, V, B>(path: T, values: V) -> UpdateOp
-where
-    T: IntoIterator<Item = UpdatePathComponent>,
-    V: IntoIterator<Item = B>,
-    B: Into<BsonValue>,
-{
-    UpdateOp::Push {
-        path: path.into_iter().collect(),
-        spec: PushSpec {
-            values: EachOrSingle::Each(values.into_iter().map(lit).collect()),
-            position: None,
-            slice: None,
-            sort: None,
-        },
-    }
-}
-
 pub fn pop<T>(path: T, from: PopFrom) -> UpdateOp
 where
     T: IntoIterator<Item = UpdatePathComponent>,

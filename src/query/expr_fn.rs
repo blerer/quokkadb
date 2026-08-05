@@ -194,10 +194,6 @@ pub fn include(proj_expr: Arc<ProjectionExpr>) -> Arc<Projection> {
     Arc::new(Projection::Include(proj_expr))
 }
 
-pub fn exclude(proj_expr: Arc<ProjectionExpr>) -> Arc<Projection> {
-    Arc::new(Projection::Exclude(proj_expr))
-}
-
 pub fn sort_asc(field: Arc<Expr>) -> SortField {
     SortField::asc(field)
 }

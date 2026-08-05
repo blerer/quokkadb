@@ -188,6 +188,7 @@ impl LsmVersion {
     }
 
     /// Returns the drops with a drop_sequence_number smaller or equal to the given sequence_number.
+    #[cfg(test)]
     pub fn get_drops_before_or_at(&self, sequence_number: u64) -> Vec<Arc<DropMetadata>> {
         let mut result = Vec::new();
         for drop in &self.pending_drops {

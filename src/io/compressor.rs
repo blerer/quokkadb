@@ -1,6 +1,5 @@
 use lz4::block;
-use std::io::Error;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
 /// Enumeration representing supported compressor types.

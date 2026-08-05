@@ -84,6 +84,7 @@ impl Operation {
         )
     }
 
+    #[cfg(test)]
     pub fn user_key(&self) -> &[u8] {
         &self.user_key
     }

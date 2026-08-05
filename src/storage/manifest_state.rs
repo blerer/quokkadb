@@ -153,6 +153,7 @@ impl ManifestState {
     }
 
     /// Returns the drops with a sequence number smaller or equal to the given sequence_number.
+    #[cfg(test)]
     pub fn get_drops_before_or_at(&self, sequence_number: u64) -> Vec<Arc<DropMetadata>> {
         self.lsm.get_drops_before_or_at(sequence_number)
     }

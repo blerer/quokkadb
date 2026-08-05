@@ -850,6 +850,7 @@ pub struct IndexMetadata {
 }
 
 impl IndexMetadata {
+    #[cfg(test)]
     pub fn new(id: u32, definition: IndexDefinition, created_at: u64) -> Self {
         IndexMetadata {
             id,

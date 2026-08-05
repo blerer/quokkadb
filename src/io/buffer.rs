@@ -22,15 +22,6 @@ impl Buffer {
         }
     }
 
-    /// Creates a buffer from an existing `Vec<u8>`.
-    pub fn from_vec(data: Vec<u8>) -> Self {
-        Buffer {
-            data,
-            read_index: 0,
-            write_index: 0,
-        }
-    }
-
     /// Writes a single byte to the buffer.
     ///
     /// # Panics
@@ -141,15 +132,6 @@ mod tests {
         let buffer = Buffer::with_capacity(10);
         assert_eq!(buffer.writable_bytes(), 10);
         assert_eq!(buffer.readable_bytes(), 0);
-    }
-
-    #[test]
-    fn test_from_vec() {
-        let data = vec![1, 2, 3];
-        let buffer = Buffer::from_vec(data.clone());
-        let empty: Vec<u8> = vec![];
-        assert_eq!(buffer.as_slice(), &empty);
-        assert_eq!(buffer.writable_bytes(), 3);
     }
 
     #[test]

@@ -9,7 +9,9 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::internal_key::encode_internal_key_range;
 
 use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator};
-use crate::storage::lsm_version::{DropMetadata, Levels};
+use crate::storage::lsm_version::Levels;
+#[cfg(test)]
+use crate::storage::lsm_version::DropMetadata;
 use crate::storage::Direction;
 use std::collections::VecDeque;
 use std::io::Result;
@@ -266,6 +268,7 @@ impl LsmTree {
         self.manifest.lsm.sst_levels.clone()
     }
 
+    #[cfg(test)]
     pub fn get_drops_before_or_at(&self, sequence: u64) -> Vec<Arc<DropMetadata>> {
         self.manifest.get_drops_before_or_at(sequence)
     }

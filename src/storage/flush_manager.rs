@@ -55,6 +55,7 @@ pub enum FlushTask {
 /// In test builds, the flush thread can be paused and resumed for deterministic testing.
 pub struct FlushManager {
     sender: SyncSender<FlushTask>,
+    #[cfg(test)]
     sync_control: Option<Arc<(Mutex<bool>, Condvar)>>,
 }
 
@@ -148,6 +149,7 @@ impl FlushManager {
 
         Ok(Self {
             sender,
+            #[cfg(test)]
             sync_control,
         })
     }
