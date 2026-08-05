@@ -1,7 +1,8 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::varint;
+use crate::io::invalid_data;
 use crate::storage::internal_key::{encode_internal_key, encode_record_key};
-use std::io::{Error, ErrorKind};
+use crate::io::byte_writer::ByteWriter;
+use crate::io::serializable::Serializable;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum OperationType {
@@ -92,30 +93,14 @@ impl Operation {
     pub fn value(&self) -> &[u8] {
         &self.value
     }
+}
 
-    pub fn wal_record_size(&self) -> usize {
-        1 + varint::compute_u32_vint_size(self.collection)
-            + varint::compute_u32_vint_size(self.index)
-            + varint::compute_u64_vint_size(self.user_key.len() as u64)
-            + self.user_key.len()
-            + varint::compute_u64_vint_size(self.value.len() as u64)
-            + self.value.len()
-    }
-
-    pub fn append_wal_record(&self, vec: &mut Vec<u8>) {
-        vec.push(u8::from(self.operation_type));
-        varint::write_u32(self.collection, vec);
-        varint::write_u32(self.index, vec);
-        varint::write_u64(self.user_key.len() as u64, vec);
-        vec.extend_from_slice(&self.user_key);
-        varint::write_u64(self.value.len() as u64, vec);
-        vec.extend_from_slice(&self.value);
-    }
-
-    pub fn from_wal_record<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Operation> {
+impl Serializable for Operation {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
+    {
         let op_byte = reader.read_u8()?;
         let operation_type = OperationType::try_from(op_byte)
-            .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid operation type"))?;
+            .map_err(|_| invalid_data("Invalid operation type"))?;
 
         let collection = reader.read_varint_u32()?;
         let index = reader.read_varint_u32()?;
@@ -134,40 +119,30 @@ impl Operation {
             value: value.to_vec(),
         })
     }
+
+    fn write_to(&self, writer: &mut ByteWriter) {
+        writer.write_u8(u8::from(self.operation_type));
+        writer.write_varint_u32(self.collection);
+        writer.write_varint_u32(self.index);
+        writer.write_length_prefixed_slice(&self.user_key);
+        writer.write_length_prefixed_slice(&self.value);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::byte_reader::ByteReader;
+    use crate::io::serializable::check_serialization_round_trip;
 
     #[test]
     fn test_operation_wal_round_trip_put() {
         let original = Operation::new_put(42, 7, b"key123".to_vec(), b"value456".to_vec());
-        let mut buf = Vec::new();
-        original.append_wal_record(&mut buf);
-
-        let computed_size = Operation::wal_record_size(&original);
-        assert_eq!(computed_size, buf.len());
-
-        let reader = ByteReader::new(&buf);
-        let decoded = Operation::from_wal_record(&reader).expect("Deserialization failed");
-
-        assert_eq!(original, decoded);
+        check_serialization_round_trip(original);
     }
 
     #[test]
     fn test_operation_wal_round_trip_delete() {
         let original = Operation::new_delete(99, 3, b"delete_me".to_vec());
-        let mut buf = Vec::new();
-        original.append_wal_record(&mut buf);
-
-        let computed_size = Operation::wal_record_size(&original);
-        assert_eq!(computed_size, buf.len());
-
-        let reader = ByteReader::new(&buf);
-        let decoded = Operation::from_wal_record(&reader).expect("Deserialization failed");
-
-        assert_eq!(original, decoded);
+        check_serialization_round_trip(original);
     }
 }

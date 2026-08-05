@@ -1,7 +1,6 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::io::varint;
 use crate::storage::operation::Operation;
 use crate::storage::count_stats::CountStats;
 use std::collections::BTreeSet;
@@ -111,22 +110,13 @@ impl WriteBatch {
     }
 
     fn precompute_wal_record(operations: &[Operation], count_stats: &CountStats) -> Vec<u8> {
-        let mut record_size = varint::compute_u64_vint_size(operations.len() as u64);
+        let mut writer = ByteWriter::new();
+        writer.write_varint_u64(operations.len() as u64);
         for operation in operations {
-            record_size += operation.wal_record_size();
+            operation.write_to(&mut writer);
         }
-        let mut count_stats_writer = ByteWriter::new();
-        count_stats.write_to(&mut count_stats_writer);
-        let count_stats_bytes = count_stats_writer.take_buffer();
-        record_size += count_stats_bytes.len();
-
-        let mut vec = Vec::with_capacity(record_size);
-        varint::write_u64(operations.len() as u64, &mut vec);
-        for operation in operations {
-            operation.append_wal_record(&mut vec);
-        }
-        vec.extend_from_slice(&count_stats_bytes);
-        vec
+        count_stats.write_to(&mut writer);
+        writer.take_buffer()
     }
 
     pub fn from_wal_record(bytes: &[u8]) -> Result<Self> {
@@ -134,14 +124,9 @@ impl WriteBatch {
         let nbr_operations = reader.read_varint_u64()? as usize;
         let mut operations = Vec::with_capacity(nbr_operations);
         for _ in 0..nbr_operations {
-            operations.push(Operation::from_wal_record(&reader)?);
+            operations.push(Operation::read_from(&reader)?);
         }
-        let count_stats = if reader.has_remaining() {
-            CountStats::read_from(&reader)?
-        } else {
-            CountStats::default()
-        };
-
+        let count_stats = CountStats::read_from(&reader)?;
         Ok(WriteBatch {
             operations,
             preconditions: None,

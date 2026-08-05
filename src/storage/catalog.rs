@@ -884,7 +884,7 @@ impl IndexMetadata {
 }
 
 impl Serializable for IndexMetadata {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
         let id = reader.read_varint_u32()?;
         let definition = IndexDefinition::read_from(reader)?;
         let created_at = reader.read_varint_u64()?;
