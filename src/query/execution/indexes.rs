@@ -634,7 +634,7 @@ mod tests {
         IndexPath, OrderedIndexField,
     };
     use crate::storage::operation::OperationType;
-    use crate::storage::count_stats::CountStatsBuilder;
+    use crate::storage::count_stats::{CountStatsBuilder, CountStatsKey};
     use crate::util::interval::Interval;
     use crate::util::bson_utils::BsonKey;
     use bson::{
@@ -1091,6 +1091,21 @@ mod tests {
         assert_eq!(operations[0].collection, 42);
         assert_eq!(operations[0].index, 1);
         assert!(!operations[0].value().is_empty());
+        let count_stats = count_stats.build();
+        assert_eq!(
+            count_stats.count_stat(&CountStatsKey::Index {
+                collection: 42,
+                index: 1,
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            count_stats.count_stat(&CountStatsKey::Index {
+                collection: 42,
+                index: 2,
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1113,6 +1128,14 @@ mod tests {
         assert_eq!(operations[0].collection, 42);
         assert_eq!(operations[0].index, 1);
         assert!(operations[0].value().is_empty());
+        let count_stats = count_stats.build();
+        assert_eq!(
+            count_stats.count_stat(&CountStatsKey::Index {
+                collection: 42,
+                index: 1,
+            }),
+            Some(-1)
+        );
     }
 
     #[test]
@@ -1142,6 +1165,7 @@ mod tests {
         assert_eq!(bson_ops.len(), 1);
         assert_eq!(raw_ops.len(), 1);
         assert_eq!(bson_ops[0], raw_ops[0]);
+        assert_eq!(bson_count_stats.build(), raw_count_stats.build());
     }
 
     #[test]

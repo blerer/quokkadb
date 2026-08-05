@@ -1115,7 +1115,7 @@ mod tests {
     use crate::query::{BsonValue, Expr, Parameters, Projection};
     use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use crate::storage::operation::Operation;
-    use crate::storage::count_stats::CountStats;
+    use crate::storage::count_stats::{CountStats, CountStatsKey};
     use crate::storage::test_utils::storage_engine;
     use crate::storage::write_batch::WriteBatch;
     use crate::storage::Direction;
@@ -2478,6 +2478,10 @@ mod tests {
             document: initial_doc.to_vec()?,
         };
         executor.execute_direct(insert_plan, None)?.count();
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
 
         // 2. Arrange to fail the next precondition check, simulating a conflict
         storage_engine.fail_next_precondition_checks(1);
@@ -2516,6 +2520,10 @@ mod tests {
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value")?, "updated");
         assert_eq!(final_doc.get_i32("_id")?, 1);
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
 
         Ok(())
     }

@@ -2,7 +2,6 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
-use crate::storage::count_stats::CountStats;
 use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -93,13 +92,6 @@ impl SSTableProperties {
     pub fn from_slice(slice: &[u8]) -> std::io::Result<Self> {
         let reader = ByteReader::new(slice);
         let properties = Self::read_from(&reader)?;
-        if reader.has_remaining() {
-            // Backward compatibility for the short-lived format that appended CountStats.
-            let _ = CountStats::read_from(&reader)?;
-        }
-        if reader.has_remaining() {
-            return Err(invalid_data("trailing bytes in SSTableProperties"));
-        }
         Ok(properties)
     }
 }
