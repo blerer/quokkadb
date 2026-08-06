@@ -476,11 +476,7 @@ impl QueryExecutor {
             let snapshot = self.storage_engine.last_visible_sequence();
 
             // check for duplicate key.
-            if self
-                .storage_engine
-                .read(collection, 0, &user_key, None)?
-                .is_some()
-            {
+            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, snapshot)? {
                 return Err(Self::duplicate_key_error(&id));
             }
 
@@ -557,10 +553,7 @@ impl QueryExecutor {
             let mut seen_keys = HashMap::new();
             for (_, id, user_key) in &documents_with_ids {
                 if seen_keys.insert(user_key.clone(), id.clone()).is_some()
-                    || self
-                        .storage_engine
-                        .read(collection, 0, user_key, Some(snapshot))?
-                        .is_some()
+                    || Self::primary_key_exists(&self.storage_engine, collection, user_key, snapshot)?
                 {
                     return Err(Self::duplicate_key_error(id));
                 }
@@ -626,6 +619,17 @@ impl QueryExecutor {
 
     fn duplicate_key_error(id: &Bson) -> Error {
         Error::InvalidRequest(format!("Duplicate key error. dup key: {{ _id: {} }}", id))
+    }
+
+    fn primary_key_exists(
+        storage_engine: &StorageEngine,
+        collection: u32,
+        user_key: &[u8],
+        snapshot: u64,
+    ) -> Result<bool> {
+        Ok(storage_engine
+            .read(collection, 0, user_key, Some(snapshot))?
+            .is_some_and(|(internal_key, _)| extract_operation_type(&internal_key) != OperationType::Delete))
     }
 
     /// Returns the `IdCreationStrategy` for the given collection.
@@ -3435,6 +3439,43 @@ mod tests {
 
         let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc, doc! { "_id": 1, "value": "concurrent" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+
+        let inserted_doc = insert_one(
+            &executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "initial" },
+        )?;
+        assert_eq!(inserted_doc, doc! { "inserted_id": 1 });
+
+        let delete_doc = execute_delete_one(&executor, collection_id, 1)?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut verify_result = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(verify_result.next().is_none());
+
+        let reinserted_doc = insert_one(
+            &executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "replacement" },
+        )?;
+        assert_eq!(reinserted_doc, doc! { "inserted_id": 1 });
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)

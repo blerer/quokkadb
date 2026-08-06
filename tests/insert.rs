@@ -357,3 +357,23 @@ fn insert_duplicate_id_is_version_conflict() {
     );
     assert_eq!(collection.estimated_document_count().unwrap(), 1);
 }
+
+#[test]
+fn insert_same_id_succeeds_after_delete() {
+    let (_dir, db) = setup();
+    let collection = db.collection("test").create_if_missing();
+
+    collection.insert_one(doc! {"_id": 365, "x": 1}).unwrap();
+
+    let delete_result = collection.delete_one(doc! {"_id": 365}).unwrap();
+    assert_eq!(delete_result.deleted_count, 1);
+    assert_eq!(collection.estimated_document_count().unwrap(), 0);
+
+    let result = collection.insert_one(doc! {"_id": 365, "x": 2}).unwrap();
+    assert_eq!(result.inserted_id.as_i32().unwrap(), 365);
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
+
+    let mut docs = collection.find(doc! {"_id": 365}).execute().unwrap();
+    assert_eq!(docs.next().unwrap().unwrap(), doc! {"_id": 365, "x": 2});
+    assert!(docs.next().is_none());
+}

@@ -484,6 +484,28 @@ fn test_update_many_no_match() {
 }
 
 #[test]
+fn test_update_one_no_match_after_delete() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let delete_result = collection.delete_one(doc! { "_id": 1 }).unwrap();
+    assert_eq!(delete_result.deleted_count, 1);
+
+    let result = collection
+        .update_one(
+            doc! { "_id": 1 },
+            doc! { "$set": { "qty": 999 } },
+            UpdateOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(result.matched_count, 0);
+    assert_eq!(result.modified_count, 0);
+    assert_eq!(result.upserted_id, None);
+
+    assert!(find_one(&collection, doc! { "_id": 1 }).is_none());
+}
+
+#[test]
 fn test_push_with_each_and_slice() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
@@ -1883,6 +1905,33 @@ fn test_upsert_updates_when_match_exists() {
 
     let count = collection.find(doc! {}).execute().unwrap().count();
     assert_eq!(count, 8);
+}
+
+#[test]
+fn test_upsert_inserts_after_matching_document_was_deleted() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let delete_result = collection.delete_one(doc! { "_id": 1 }).unwrap();
+    assert_eq!(delete_result.deleted_count, 1);
+
+    let options = UpdateOptions {
+        upsert: true,
+        ..Default::default()
+    };
+    let result = collection
+        .update_one(
+            doc! { "_id": 1 },
+            doc! { "$set": { "qty": 999, "item": "replacement" } },
+            options,
+        )
+        .unwrap();
+    assert_eq!(result.matched_count, 0);
+    assert_eq!(result.modified_count, 0);
+    assert_eq!(result.upserted_id, Some(1.into()));
+
+    let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
+    assert_eq!(doc, doc! { "_id": 1, "item": "replacement", "qty": 999 });
 }
 
 #[test]
