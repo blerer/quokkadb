@@ -129,6 +129,14 @@ pub enum PhysicalPlan {
         upsert: bool,
     },
 
+    /// Deletes a single document from a collection.
+    DeleteOne {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to delete.
+        query: Arc<PhysicalPlan>,
+    },
+
     /// Filters rows from its input based on a predicate.
     /// This is typically executed in memory on the data returned by the child operator.
     Filter {

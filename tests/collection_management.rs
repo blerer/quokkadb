@@ -77,6 +77,21 @@ fn test_drop_collection_not_found() {
 }
 
 #[test]
+fn test_delete_one_create_if_missing_returns_zero_without_creating_collection() {
+    let dir = tempdir().unwrap();
+    let db = QuokkaDB::open(dir.path()).unwrap();
+
+    let result = db
+        .collection("missing")
+        .create_if_missing()
+        .delete_one(doc! { "_id": 1 })
+        .unwrap();
+
+    assert_eq!(result.deleted_count, 0);
+    assert!(db.list_collections().is_empty());
+}
+
+#[test]
 fn test_rename_collection() {
     let dir = tempdir().unwrap();
     let db = QuokkaDB::open(dir.path()).unwrap();

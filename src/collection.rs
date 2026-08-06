@@ -90,6 +90,11 @@ pub struct UpdateResult {
     pub upserted_id: Option<Bson>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteResult {
+    pub deleted_count: u64,
+}
+
 impl Collection {
     pub(crate) fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
         Collection {
@@ -175,6 +180,12 @@ impl Collection {
             modified_count,
             upserted_id,
         })
+    }
+
+    fn parse_delete_result(result: Document) -> Result<DeleteResult> {
+        let deleted_count = Self::extract_u64_field(&result, "deleted_count")?;
+
+        Ok(DeleteResult { deleted_count })
     }
 
     /// Creates an index on the collection with the specified keys and options.
@@ -354,6 +365,32 @@ impl Collection {
         };
 
         Self::parse_update_result(self.db_impl.execute_write(plan)?)
+    }
+
+    /// Deletes a single document in the collection that matches the filter.
+    /// # Arguments
+    /// * `filter` - The filter document to match the document to delete.
+    /// Returns a `Result` containing delete metadata or an error.
+    pub fn delete_one(&self, filter: Document) -> Result<DeleteResult> {
+        let collection_id = match self.policy {
+            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
+            CollectionPolicy::CreateIfMissing => match self.db_impl.get_collection(&self.collection) {
+                Some(collection) => collection.id,
+                None => return Ok(DeleteResult { deleted_count: 0 }),
+            },
+        };
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let query = LogicalPlanBuilder::scan(collection_id)
+            .filter(conditions)
+            .build();
+
+        let plan = LogicalPlan::DeleteOne {
+            collection: collection_id,
+            query,
+        };
+
+        Self::parse_delete_result(self.db_impl.execute_write(plan)?)
     }
 
     /// Creates a query to find documents in the collection that match the filter.

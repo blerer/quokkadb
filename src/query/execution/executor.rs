@@ -77,6 +77,11 @@ impl QueryExecutor {
 
                 self.perform_update_many(collection, query, &update, upsert, &parameters)
             }
+            PhysicalPlan::DeleteOne { collection, query } => {
+                let parameters = parameters.expect("Parameters must be provided for DeleteOne");
+
+                self.perform_delete_one(collection, query, &parameters)
+            }
             _ => {
                 // Other plans, should be cached
                 unreachable!("Direct execution not supported for plan: {:?}", plan);
@@ -362,6 +367,39 @@ impl QueryExecutor {
                 }
             } else {
                 doc! { "matched_count": 0, "modified_count": 0 }
+            };
+
+            return Ok(Box::new(std::iter::once(Ok(result_doc))));
+        }
+    }
+
+    fn perform_delete_one(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+    ) -> Result<QueryOutput> {
+        let start_time = Instant::now();
+        let mut attempt = 0;
+
+        loop {
+            let snapshot = self.storage_engine.last_visible_sequence();
+            let mut iter =
+                self.execute_cached_at_snapshot(query.clone(), &parameters, Some(snapshot))?;
+
+            let result_doc = if let Some(doc_result) = iter.next() {
+                let old_doc = doc_result?;
+                let user_key = old_doc.get("_id").unwrap().try_into_key()?;
+
+                match self.delete_document(collection, snapshot, user_key, &old_doc) {
+                    Ok(_) => doc! { "deleted_count": 1 },
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        continue;
+                    }
+                }
+            } else {
+                doc! { "deleted_count": 0 }
             };
 
             return Ok(Box::new(std::iter::once(Ok(result_doc))));
@@ -999,6 +1037,35 @@ impl QueryExecutor {
             count_stats.inc_collection(collection, 1);
         }
         indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
+
+        let precondition = Precondition::VersionMatch {
+            collection,
+            index: 0,
+            user_key,
+        };
+        let batch = WriteBatch::new_with_preconditions(
+            operations,
+            Preconditions::new(snapshot, vec![precondition]),
+            count_stats.build(),
+        );
+        self.storage_engine.write(batch)
+    }
+
+    /// Deletes a single document from storage with a `VersionMatch` precondition.
+    fn delete_document(
+        &self,
+        collection: u32,
+        snapshot: u64,
+        user_key: Vec<u8>,
+        old_doc: &Document,
+    ) -> std::result::Result<(), StorageError> {
+        let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
+
+        let indices = self.indices(collection);
+        indices.append_delete_ops(&mut operations, old_doc, &mut count_stats)?;
+        operations.push(Operation::new_delete(collection, 0, user_key.clone()));
+        count_stats.inc_collection(collection, -1);
 
         let precondition = Precondition::VersionMatch {
             collection,
@@ -2583,6 +2650,212 @@ mod tests {
             .1;
         let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
         assert_eq!(final_doc.get_str("value")?, "initial");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_deletes_matching_document() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: initial_doc.to_vec()?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+        let delete_plan = PhysicalPlan::DeleteOne {
+            collection: collection_id,
+            query: query_plan,
+        };
+
+        let result = executor.execute_direct(delete_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        assert_eq!(result_doc.get_i32("deleted_count")?, 1);
+
+        let mut verify_params = Parameters::new();
+        let verify_key = verify_params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let verify_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: verify_key,
+            filter: None,
+            projection: None,
+        });
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id =
+            storage_engine.create_collection_if_not_exists("test_delete_one_no_match")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: initial_doc.to_vec()?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(2)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+        let delete_plan = PhysicalPlan::DeleteOne {
+            collection: collection_id,
+            query: query_plan,
+        };
+
+        let result = executor.execute_direct(delete_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        assert_eq!(result_doc.get_i32("deleted_count")?, 0);
+
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+        let final_doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
+        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        assert_eq!(final_doc.get_str("value")?, "initial");
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_succeeds_on_retry() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id =
+            storage_engine.create_collection_if_not_exists("test_delete_one_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: initial_doc.to_vec()?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        storage_engine.fail_next_precondition_checks(1);
+
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+        let delete_plan = PhysicalPlan::DeleteOne {
+            collection: collection_id,
+            query: query_plan,
+        };
+
+        let result = executor.execute_direct(delete_plan, Some(params))?;
+        let result_doc = result.into_iter().next().unwrap()?;
+        assert_eq!(result_doc.get_i32("deleted_count")?, 1);
+
+        let mut verify_params = Parameters::new();
+        let verify_key = verify_params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let verify_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: verify_key,
+            filter: None,
+            projection: None,
+        });
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id =
+            storage_engine.create_collection_if_not_exists("test_delete_one_retry_timeout")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        let insert_plan = PhysicalPlan::InsertOne {
+            collection: collection_id,
+            document: initial_doc.to_vec()?,
+        };
+        executor.execute_direct(insert_plan, None)?.count();
+        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
+
+        storage_engine.fail_next_precondition_checks(20);
+
+        let mut params = Parameters::new();
+        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
+        let query_plan = Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key: key_expr,
+            filter: None,
+            projection: None,
+        });
+        let delete_plan = PhysicalPlan::DeleteOne {
+            collection: collection_id,
+            query: query_plan,
+        };
+
+        let result = executor.execute_direct(delete_plan, Some(params));
+
+        match result {
+            Err(Error::VersionConflict { .. }) => {}
+            Err(e) => panic!("Expected a VersionConflict error, but got {:?}", e),
+            Ok(_) => panic!("Expected an error, but the delete succeeded"),
+        }
+
+        let final_doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
+        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        assert_eq!(final_doc.get_str("value")?, "initial");
+        assert_eq!(final_doc.get_i32("_id")?, 1);
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
 
         Ok(())
     }
