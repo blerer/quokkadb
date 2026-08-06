@@ -23,10 +23,27 @@ use std::time::{Duration, Instant};
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutorFailpoint {
+    UpdateOneAfterRead,
+    UpdateOneUpsertAfterNoMatch,
+    UpdateManyBeforeCommit,
+    InsertManualAfterPreflightBeforeWrite,
+    DeleteOneAfterRead,
+}
+
+#[cfg(test)]
+pub(crate) trait ExecutorTestHook: Send + Sync {
+    fn hit(&self, point: ExecutorFailpoint);
+}
+
 /// Executes a physical query plan.
 pub struct QueryExecutor {
     storage_engine: Arc<StorageEngine>,
     id_generator: Mutex<Sonyflake>,
+    #[cfg(test)]
+    test_hook: Option<Arc<dyn ExecutorTestHook>>,
 }
 
 impl QueryExecutor {
@@ -34,13 +51,31 @@ impl QueryExecutor {
     pub fn new(storage_engine: Arc<StorageEngine>) -> Self {
         Self {
             storage_engine,
-            id_generator: Mutex::new(
-                Sonyflake::builder()
-                    .machine_id(&|| Ok(0))
-                    .finalize()
-                    .unwrap(),
-            ),
+            id_generator: Self::new_id_generator(),
+            #[cfg(test)]
+            test_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_hook(
+        storage_engine: Arc<StorageEngine>,
+        test_hook: Arc<dyn ExecutorTestHook>,
+    ) -> Self {
+        Self {
+            storage_engine,
+            id_generator: Self::new_id_generator(),
+            test_hook: Some(test_hook),
+        }
+    }
+
+    fn new_id_generator() -> Mutex<Sonyflake> {
+        Mutex::new(
+            Sonyflake::builder()
+                .machine_id(&|| Ok(0))
+                .finalize()
+                .unwrap(),
+        )
     }
 
     pub fn execute_direct(
@@ -296,6 +331,8 @@ impl QueryExecutor {
             Preconditions::new(snapshot, preconditions),
             count_stats.build(),
         );
+        #[cfg(test)]
+        self.invoke_test_hook(ExecutorFailpoint::UpdateManyBeforeCommit);
         self.storage_engine.write(batch)?;
 
         let result = if let Some(id) = upserted_id {
@@ -330,6 +367,8 @@ impl QueryExecutor {
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
 
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
                 match self.write_document(
                     collection,
                     snapshot,
@@ -349,6 +388,8 @@ impl QueryExecutor {
                 let user_key = upserted_id.clone().try_into_key()?;
 
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::UpdateOneUpsertAfterNoMatch);
                 match self.write_document(
                     collection,
                     snapshot,
@@ -391,6 +432,8 @@ impl QueryExecutor {
                 let old_doc = doc_result?;
                 let user_key = old_doc.get("_id").unwrap().try_into_key()?;
 
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
                 match self.delete_document(collection, snapshot, user_key, &old_doc) {
                     Ok(_) => doc! { "deleted_count": 1 },
                     Err(e) => {
@@ -446,6 +489,8 @@ impl QueryExecutor {
                 index: 0,
                 user_key,
             };
+            #[cfg(test)]
+            self.invoke_test_hook(ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite);
             WriteBatch::new_with_preconditions(
                 operations,
                 Preconditions::new(snapshot, vec![precondition]),
@@ -554,6 +599,11 @@ impl QueryExecutor {
                 Some(seen_keys),
             )
         };
+
+        #[cfg(test)]
+        if id_strategy != IdCreationStrategy::Generated {
+            self.invoke_test_hook(ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite);
+        }
 
         if let Err(e) = self.storage_engine.write(batch) {
             match e {
@@ -1099,6 +1149,13 @@ impl QueryExecutor {
         Ok(range)
     }
 
+    #[cfg(test)]
+    fn invoke_test_hook(&self, point: ExecutorFailpoint) {
+        if let Some(test_hook) = &self.test_hook {
+            test_hook.hit(point);
+        }
+    }
+
     fn bind_key_bound_parameter(
         start: Bound<&Arc<Expr>>,
         parameters: &Parameters,
@@ -1187,7 +1244,60 @@ mod tests {
     use crate::storage::write_batch::WriteBatch;
     use crate::storage::Direction;
     use bson::{doc, Bson, Document};
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread::{self, JoinHandle};
+
+    #[derive(Default)]
+    struct PauseState {
+        hit: bool,
+        released: bool,
+    }
+
+    struct PausingHook {
+        point: ExecutorFailpoint,
+        state: Arc<(Mutex<PauseState>, Condvar)>,
+    }
+
+    impl PausingHook {
+        fn new(point: ExecutorFailpoint) -> Self {
+            Self {
+                point,
+                state: Arc::new((Mutex::new(PauseState::default()), Condvar::new())),
+            }
+        }
+
+        fn wait_until_hit(&self) {
+            let (lock, condvar) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            while !state.hit {
+                state = condvar.wait(state).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            let (lock, condvar) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            state.released = true;
+            condvar.notify_all();
+        }
+    }
+
+    impl ExecutorTestHook for PausingHook {
+        fn hit(&self, point: ExecutorFailpoint) {
+            if point != self.point {
+                return;
+            }
+
+            let (lock, condvar) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            state.hit = true;
+            condvar.notify_all();
+
+            while !state.released {
+                state = condvar.wait(state).unwrap();
+            }
+        }
+    }
 
     fn write_batch(operations: Vec<Operation>) -> WriteBatch {
         WriteBatch::new(operations, CountStats::default())
@@ -1251,6 +1361,176 @@ mod tests {
             key,
             filter: None,
             projection: None,
+        })
+    }
+
+    fn execute_update_one(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        id: i32,
+        value: &str,
+    ) -> Result<Document> {
+        let mut params = Parameters::new();
+        let query_plan = point_search_query(collection_id, &mut params, id);
+        let update_expr = update([set([field_name("value")], value)]);
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: false,
+        };
+
+        let mut result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn execute_update_one_with_expr(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        id: i32,
+        update_expr: UpdateExpr,
+    ) -> Result<Document> {
+        let mut params = Parameters::new();
+        let query_plan = point_search_query(collection_id, &mut params, id);
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert: false,
+        };
+
+        let mut result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn execute_delete_one(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        id: i32,
+    ) -> Result<Document> {
+        let mut params = Parameters::new();
+        let query_plan = point_search_query(collection_id, &mut params, id);
+        let delete_plan = PhysicalPlan::DeleteOne {
+            collection: collection_id,
+            query: query_plan,
+        };
+
+        let mut result = executor.execute_direct(delete_plan, Some(params))?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn spawn_paused_update_one(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        id: i32,
+        value: &'static str,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || execute_update_one(executor.as_ref(), collection_id, id, value))
+    }
+
+    fn spawn_paused_delete_one(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        id: i32,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || execute_delete_one(executor.as_ref(), collection_id, id))
+    }
+
+    fn spawn_paused_update_one_with_expr(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        id: i32,
+        update_expr: UpdateExpr,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || {
+            execute_update_one_with_expr(executor.as_ref(), collection_id, id, update_expr)
+        })
+    }
+
+    fn execute_update_one_with_expr_and_upsert(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        id: i32,
+        update_expr: UpdateExpr,
+        upsert: bool,
+    ) -> Result<Document> {
+        let mut params = Parameters::new();
+        let query_plan = point_search_query(collection_id, &mut params, id);
+        let update_plan = PhysicalPlan::UpdateOne {
+            collection: collection_id,
+            query: query_plan,
+            update: update_expr,
+            upsert,
+        };
+
+        let mut result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn execute_update_many(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        query: Arc<PhysicalPlan>,
+        update_expr: UpdateExpr,
+        upsert: bool,
+    ) -> Result<Document> {
+        let params = Parameters::new();
+        let update_plan = PhysicalPlan::UpdateMany {
+            collection: collection_id,
+            query,
+            update: update_expr,
+            upsert,
+        };
+
+        let mut result = executor.execute_direct(update_plan, Some(params))?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn spawn_paused_update_many(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        query: Arc<PhysicalPlan>,
+        update_expr: UpdateExpr,
+        upsert: bool,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || {
+            execute_update_many(executor.as_ref(), collection_id, query, update_expr, upsert)
+        })
+    }
+
+    fn spawn_paused_insert_one(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        doc: Document,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || insert_one(executor.as_ref(), collection_id, &doc))
+    }
+
+    fn spawn_paused_update_one_with_expr_and_upsert(
+        executor: Arc<QueryExecutor>,
+        collection_id: u32,
+        id: i32,
+        update_expr: UpdateExpr,
+        upsert: bool,
+    ) -> JoinHandle<Result<Document>> {
+        thread::spawn(move || {
+            execute_update_one_with_expr_and_upsert(
+                executor.as_ref(),
+                collection_id,
+                id,
+                update_expr,
+                upsert,
+            )
         })
     }
 
@@ -2538,6 +2818,45 @@ mod tests {
     }
 
     #[test]
+    fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let update_handle =
+            spawn_paused_update_one(executor.clone(), collection_id, 1, "updated");
+
+        hook.wait_until_hit();
+
+        let delete_executor = QueryExecutor::new(storage_engine.clone());
+        let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        hook.release();
+
+        let update_doc = update_handle.join().unwrap()?;
+        assert_eq!(update_doc, doc! { "matched_count": 0, "modified_count": 0 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_delete_one_deletes_matching_document() -> Result<()> {
         let (storage_engine, _dir) = storage_engine()?;
         let executor = QueryExecutor::new(storage_engine.clone());
@@ -2672,6 +2991,450 @@ mod tests {
         let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "initial");
         assert_eq!(final_doc.get_i32("_id")?, 1);
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+
+        hook.wait_until_hit();
+
+        let update_executor = QueryExecutor::new(storage_engine.clone());
+        let update_doc = execute_update_one(&update_executor, collection_id, 1, "updated")?;
+        assert_eq!(update_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let updated_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(updated_doc, doc! { "_id": 1, "value": "updated" });
+
+        hook.release();
+
+        let delete_doc = delete_handle.join().unwrap()?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+
+        hook.wait_until_hit();
+
+        let second_delete_executor = QueryExecutor::new(storage_engine.clone());
+        let second_delete_doc = execute_delete_one(&second_delete_executor, collection_id, 1)?;
+        assert_eq!(second_delete_doc, doc! { "deleted_count": 1 });
+
+        hook.release();
+
+        let delete_doc = delete_handle.join().unwrap()?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 0 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let paused_update_handle =
+            spawn_paused_update_one(executor.clone(), collection_id, 1, "paused");
+
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let concurrent_doc =
+            execute_update_one(&concurrent_executor, collection_id, 1, "concurrent")?;
+        assert_eq!(concurrent_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
+
+        hook.release();
+
+        let paused_doc = paused_update_handle.join().unwrap()?;
+        assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let paused_expr = update([set([field_name("paused_field")], "paused")]);
+        let paused_update_handle = spawn_paused_update_one_with_expr(
+            executor.clone(),
+            collection_id,
+            1,
+            paused_expr,
+        );
+
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let concurrent_expr = update([set([field_name("concurrent_field")], "concurrent")]);
+        let concurrent_doc =
+            execute_update_one_with_expr(&concurrent_executor, collection_id, 1, concurrent_expr)?;
+        assert_eq!(concurrent_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(
+            mid_doc,
+            doc! {
+                "_id": 1,
+                "value": "initial",
+                "concurrent_field": "concurrent",
+            }
+        );
+
+        hook.release();
+
+        let paused_doc = paused_update_handle.join().unwrap()?;
+        assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(
+            final_doc,
+            doc! {
+                "_id": 1,
+                "value": "initial",
+                "concurrent_field": "concurrent",
+                "paused_field": "paused",
+            }
+        );
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(
+            ExecutorFailpoint::UpdateOneUpsertAfterNoMatch,
+        ));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        let paused_expr = update([set([field_name("value")], "paused")]);
+        let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
+            executor.clone(),
+            collection_id,
+            1,
+            paused_expr,
+            true,
+        );
+
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let concurrent_expr = update([set([field_name("value")], "concurrent")]);
+        let concurrent_doc = execute_update_one_with_expr_and_upsert(
+            &concurrent_executor,
+            collection_id,
+            1,
+            concurrent_expr,
+            true,
+        )?;
+        assert_eq!(
+            concurrent_doc,
+            doc! { "matched_count": 0, "modified_count": 0, "upserted_id": 1 }
+        );
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
+
+        hook.release();
+
+        let paused_doc = paused_handle.join().unwrap()?;
+        assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(
+            ExecutorFailpoint::UpdateOneUpsertAfterNoMatch,
+        ));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+        let paused_expr = update([set([field_name("value")], "paused")]);
+        let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
+            executor.clone(),
+            collection_id,
+            1,
+            paused_expr,
+            true,
+        );
+
+        hook.wait_until_hit();
+
+        let insert_executor = QueryExecutor::new(storage_engine.clone());
+        let insert_doc = insert_one(
+            &insert_executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "inserted" },
+        )?;
+        assert_eq!(insert_doc, doc! { "inserted_id": 1 });
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "inserted" });
+
+        hook.release();
+
+        let paused_doc = paused_handle.join().unwrap()?;
+        assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
+
+        let doc1 = doc! { "_id": 1, "value": "first" };
+        let doc2 = doc! { "_id": 2, "value": "second" };
+        insert_docs(executor.as_ref(), collection_id, [&doc1, &doc2])?;
+
+        let paused_query = full_scan_plan(collection_id);
+        let paused_expr = update([set([field_name("status")], "updated")]);
+        let paused_handle = spawn_paused_update_many(
+            executor.clone(),
+            collection_id,
+            paused_query,
+            paused_expr,
+            false,
+        );
+
+        hook.wait_until_hit();
+
+        let delete_executor = QueryExecutor::new(storage_engine.clone());
+        let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        hook.release();
+
+        match paused_handle.join().unwrap() {
+            Err(Error::VersionConflict(_)) => {}
+            Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+            Ok(doc) => panic!("Expected VersionConflict, got success {:?}", doc),
+        }
+
+        let mut missing_params = Parameters::new();
+        let missing_plan = point_search_query(collection_id, &mut missing_params, 1_i32);
+        let mut missing_results = executor.execute_cached(missing_plan, &missing_params)?;
+        assert!(missing_results.next().is_none());
+
+        let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+        assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_many_fails_after_concurrent_update_without_partial_success() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
+
+        let doc1 = doc! { "_id": 1, "value": "first" };
+        let doc2 = doc! { "_id": 2, "value": "second" };
+        insert_docs(executor.as_ref(), collection_id, [&doc1, &doc2])?;
+
+        let paused_query = full_scan_plan(collection_id);
+        let paused_expr = update([set([field_name("status")], "updated")]);
+        let paused_handle = spawn_paused_update_many(
+            executor.clone(),
+            collection_id,
+            paused_query,
+            paused_expr,
+            false,
+        );
+
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "changed")?;
+        assert_eq!(concurrent_doc, doc! { "matched_count": 1, "modified_count": 1 });
+
+        let mid_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc1, doc! { "_id": 1, "value": "changed" });
+
+        hook.release();
+
+        match paused_handle.join().unwrap() {
+            Err(Error::VersionConflict(_)) => {}
+            Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+            Ok(doc) => panic!("Expected VersionConflict, got success {:?}", doc),
+        }
+
+        let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc1, doc! { "_id": 1, "value": "changed" });
+
+        let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+        assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(2)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(
+            ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite,
+        ));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+
+        let paused_handle = spawn_paused_insert_one(
+            executor.clone(),
+            collection_id,
+            doc! { "_id": 1, "value": "paused" },
+        );
+
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let concurrent_doc = insert_one(
+            &concurrent_executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "concurrent" },
+        )?;
+        assert_eq!(concurrent_doc, doc! { "inserted_id": 1 });
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
+
+        hook.release();
+
+        match paused_handle.join().unwrap() {
+            Err(Error::InvalidRequest(message)) => {
+                assert_eq!(message, "Duplicate key error. dup key: { _id: 1 }");
+            }
+            Err(err) => panic!("Expected duplicate key InvalidRequest, got {:?}", err),
+            Ok(doc) => panic!("Expected duplicate key error, got success {:?}", doc),
+        }
+
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc, doc! { "_id": 1, "value": "concurrent" });
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)
