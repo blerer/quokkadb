@@ -1193,6 +1193,67 @@ mod tests {
         WriteBatch::new(operations, CountStats::default())
     }
 
+    fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<Document> {
+        let mut result = executor.execute_direct(
+            PhysicalPlan::InsertOne {
+                collection: collection_id,
+                document: doc.to_vec()?,
+            },
+            None,
+        )?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
+    fn insert_docs<'a>(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        docs: impl IntoIterator<Item = &'a Document>,
+    ) -> Result<()> {
+        for doc in docs {
+            insert_one(executor, collection_id, doc)?;
+        }
+        Ok(())
+    }
+
+    fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
+        Arc::new(PhysicalPlan::CollectionScan {
+            collection: collection_id,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        })
+    }
+
+    fn read_stored_doc(
+        storage_engine: &StorageEngine,
+        collection_id: u32,
+        id: impl Into<BsonValue>,
+    ) -> Result<Document> {
+        let user_key = id.into().try_into_key()?;
+        let doc_bytes = storage_engine
+            .read(collection_id, 0, &user_key, None)?
+            .unwrap()
+            .1;
+        Ok(Document::from_reader(Cursor::new(doc_bytes))?)
+    }
+
+    fn point_search_query(
+        collection_id: u32,
+        params: &mut Parameters,
+        id: impl Into<BsonValue>,
+    ) -> Arc<PhysicalPlan> {
+        let key = params.collect_parameter(id.into());
+        Arc::new(PhysicalPlan::PointSearch {
+            collection: collection_id,
+            key,
+            filter: None,
+            projection: None,
+        })
+    }
+
     #[test]
     fn test_insert_duplicate_key_preflight_check() -> Result<()> {
         // 1. Setup
@@ -1202,11 +1263,7 @@ mod tests {
 
         // 2. Insert a document with a known ID
         let doc1 = doc! { "_id": 1_i32, "name": "doc1" };
-        let insert_one_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: doc1.to_vec()?,
-        };
-        executor.execute_direct(insert_one_plan, None)?.count(); // Consume iterator
+        insert_one(&executor, collection_id, &doc1)?;
 
         // 3. Try to insert another document with the same ID
         let doc1_dup = doc! { "_id": 1_i32, "name": "doc1_dup" };
@@ -1259,13 +1316,7 @@ mod tests {
 
         // 6. Verify that no partial insert happened from the failed InsertMany
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(3)));
-        let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let point_search_plan = point_search_query(collection_id, &mut params, 3_i32);
         let mut search_result = executor.execute_cached(point_search_plan, &params)?;
         assert!(
             search_result.next().is_none(),
@@ -1284,25 +1335,13 @@ mod tests {
 
         // 2. InsertOne
         let doc1 = doc! { "name": "doc1", "value": 1 };
-        let doc1_bytes = doc1.to_vec()?;
-        let insert_one_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: doc1_bytes,
-        };
-        let mut insert_one_result = executor.execute_direct(insert_one_plan, None)?;
-        let result_doc = insert_one_result.next().unwrap()?;
-        assert!(insert_one_result.next().is_none());
+        let result_doc = insert_one(&executor, collection_id, &doc1)?;
         let inserted_id1 = result_doc.get("inserted_id").unwrap().clone();
 
         // 3. PointSearch for the inserted doc
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(inserted_id1.clone()));
-        let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr.clone(),
-            filter: None,
-            projection: None,
-        });
+        let point_search_plan =
+            point_search_query(collection_id, &mut params, BsonValue(inserted_id1.clone()));
 
         let mut point_search_result = executor.execute_cached(point_search_plan, &params)?;
         let found_doc1 = point_search_result.next().unwrap()?;
@@ -1329,13 +1368,7 @@ mod tests {
         let inserted_id3 = inserted_ids[1].clone();
 
         // 5. CollectionScan
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
 
         let scan_results = executor.execute_cached(scan_plan, &Parameters::new())?;
         let mut found_docs: Vec<Document> = scan_results.collect::<Result<Vec<_>>>()?;
@@ -1386,29 +1419,16 @@ mod tests {
         let doc_to_delete = doc! { "_id": 40i32, "name": "doc40_to_delete" };
 
         for doc in [&doc1, &doc2, &doc3, &doc_to_delete] {
-            let doc_bytes = doc.to_vec()?;
-            let insert_plan = PhysicalPlan::InsertOne {
-                collection: collection_id,
-                document: doc_bytes,
-            };
-            let mut result = executor.execute_direct(insert_plan, None)?;
-            let result_doc = result.next().unwrap()?;
+            let result_doc = insert_one(&executor, collection_id, doc)?;
             assert_eq!(
                 doc.get("_id").unwrap(),
                 result_doc.get("inserted_id").unwrap()
             );
-            assert!(result.next().is_none());
         }
 
         // 2. PointSearch for non-existent key
         let mut params_non_exist = Parameters::new();
-        let key_expr_non_exist = params_non_exist.collect_parameter(BsonValue(Bson::Int32(99)));
-        let plan_non_exist = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr_non_exist.clone(),
-            filter: None,
-            projection: None,
-        });
+        let plan_non_exist = point_search_query(collection_id, &mut params_non_exist, 99_i32);
         let mut result_non_exist = executor.execute_cached(plan_non_exist, &params_non_exist)?;
         assert!(
             result_non_exist.next().is_none(),
@@ -1423,13 +1443,7 @@ mod tests {
 
         // 3b. Search for it
         let mut params_deleted = Parameters::new();
-        let key_expr_deleted = params_deleted.collect_parameter(BsonValue(Bson::Int32(40)));
-        let plan_deleted = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr_deleted.clone(),
-            filter: None,
-            projection: None,
-        });
+        let plan_deleted = point_search_query(collection_id, &mut params_deleted, 40_i32);
         let mut result_deleted = executor.execute_cached(plan_deleted, &params_deleted)?;
         assert!(
             result_deleted.next().is_none(),
@@ -1548,14 +1562,7 @@ mod tests {
             doc! { "_id": 2_i32, "a": 20_i32, "tag": "y" },
             doc! { "_id": 3_i32, "a": 10_i32, "tag": "z" },
         ] {
-            let mut result = executor.execute_direct(
-                PhysicalPlan::InsertOne {
-                    collection: collection_id,
-                    document: doc.to_vec()?,
-                },
-                None,
-            )?;
-            result.next().unwrap()?;
+            insert_one(&executor, collection_id, &doc)?;
         }
 
         let mut params = Parameters::new();
@@ -1601,14 +1608,7 @@ mod tests {
             doc! { "_id": 3_i32, "a": 10_i32, "b": 10_i32 },
             doc! { "_id": 4_i32, "a": 9_i32, "b": 50_i32 },
         ] {
-            let mut result = executor.execute_direct(
-                PhysicalPlan::InsertOne {
-                    collection: collection_id,
-                    document: doc.to_vec()?,
-                },
-                None,
-            )?;
-            result.next().unwrap()?;
+            insert_one(&executor, collection_id, &doc)?;
         }
 
         let mut params = Parameters::new();
@@ -1662,14 +1662,7 @@ mod tests {
             doc! { "_id": 2_i32, "a": 20_i32, "kind": "drop" },
             doc! { "_id": 3_i32, "a": 30_i32, "kind": "keep" },
         ] {
-            let mut result = executor.execute_direct(
-                PhysicalPlan::InsertOne {
-                    collection: collection_id,
-                    document: doc.to_vec()?,
-                },
-                None,
-            )?;
-            result.next().unwrap()?;
+            insert_one(&executor, collection_id, &doc)?;
         }
 
         let mut params = Parameters::new();
@@ -1706,25 +1699,10 @@ mod tests {
             .map(|i| doc! { "_id": i, "name": format!("doc{}", i) })
             .collect();
 
-        for doc in &docs {
-            let insert_plan = PhysicalPlan::InsertOne {
-                collection: collection_id,
-                document: doc.to_vec()?,
-            };
-            // We use execute_direct for inserts which returns a result document.
-            // We need to consume it.
-            let mut result = executor.execute_direct(insert_plan, None)?;
-            result.next().unwrap()?;
-        }
+        insert_docs(&executor, collection_id, docs.iter())?;
 
         // 3. Create a base scan plan to feed the limit plan
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
 
         // 4. Test cases
 
@@ -1843,14 +1821,7 @@ mod tests {
             doc! { "_id": 4, "name": "a", "value": 10.0 },
             doc! { "_id": 5, "name": "c", "value": 5.0 },
         ];
-        for doc in &docs {
-            let insert_plan = PhysicalPlan::InsertOne {
-                collection: collection_id,
-                document: doc.to_vec()?,
-            };
-            let mut result = executor.execute_direct(insert_plan, None)?;
-            result.next().unwrap()?; // consume result
-        }
+        insert_docs(&executor, collection_id, docs.iter())?;
 
         // 3. Define sort fields and expected order
         let sort_fields = Arc::new(vec![
@@ -1859,13 +1830,7 @@ mod tests {
         ]);
         let expected_ids = vec![4, 2, 3, 5, 1];
 
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
 
         // --- In-Memory Sort ---
         let mem_sort_plan = Arc::new(PhysicalPlan::InMemorySort {
@@ -1918,13 +1883,7 @@ mod tests {
         parameters: Parameters,
         expected_ids: &[i32],
     ) -> Result<()> {
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
 
         let filter_plan = Arc::new(PhysicalPlan::Filter {
             input: scan_plan,
@@ -1963,14 +1922,7 @@ mod tests {
             doc! { "_id": 5, "name": "c", "value": 5.0 }, // no tags
             doc! { "_id": 6, "name": "d", "value": Bson::Null, "tags": [] },
         ];
-        for doc in &docs {
-            let insert_plan = PhysicalPlan::InsertOne {
-                collection: collection_id,
-                document: doc.to_vec()?,
-            };
-            let mut result = executor.execute_direct(insert_plan, None)?;
-            result.next().unwrap()?; // consume result
-        }
+        insert_docs(&executor, collection_id, docs.iter())?;
 
         // $eq
         let mut params = Parameters::new();
@@ -2154,12 +2106,7 @@ mod tests {
                 doc!{ "val": 40, "tag": "c" },
             ]
         };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: test_doc.to_vec()?,
-        };
-        let mut result = executor.execute_direct(insert_plan, None)?;
-        result.next().unwrap()?; // consume result
+        insert_one(&executor, collection_id, &test_doc)?;
 
         // Helper to run a projection and check the result
         fn run_projection_test(
@@ -2169,13 +2116,7 @@ mod tests {
             parameters: Parameters,
             expected_doc: Document,
         ) -> Result<()> {
-            let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-                collection: collection_id,
-                range: Interval::all(),
-                direction: Direction::Forward,
-                filter: None,
-                projection: None,
-            });
+            let scan_plan = full_scan_plan(collection_id);
 
             let projection_plan = Arc::new(PhysicalPlan::Projection {
                 input: scan_plan,
@@ -2344,14 +2285,7 @@ mod tests {
             doc! { "_id": 4, "name": "d", "value": 20 },
             doc! { "_id": 5, "name": "e", "value": 10 },
         ];
-        for doc in &docs {
-            let insert_plan = PhysicalPlan::InsertOne {
-                collection: collection_id,
-                document: doc.to_vec()?,
-            };
-            let mut result = executor.execute_direct(insert_plan, None)?;
-            result.next().unwrap()?; // consume result
-        }
+        insert_docs(&executor, collection_id, docs.iter())?;
 
         // --- Test Cases ---
 
@@ -2441,11 +2375,7 @@ mod tests {
 
         // 2. Insert initial doc
         let initial_doc = doc! { "_id": 1_i32, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count(); // Consume iterator
+        insert_one(&executor, collection_id, &initial_doc)?;
 
         // 3. Get snapshot
         let snapshot1 = storage_engine.last_visible_sequence();
@@ -2462,13 +2392,7 @@ mod tests {
 
         // 5. Query at snapshot
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let point_search_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let point_search_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let mut result_at_snapshot = executor.execute_cached_at_snapshot(
             point_search_plan.clone(),
@@ -2487,11 +2411,7 @@ mod tests {
 
         // 7. Test with scan and deletes
         let doc_to_delete = doc! { "_id": 2_i32, "value": "to_delete" };
-        let insert_plan_2 = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: doc_to_delete.to_vec()?,
-        };
-        executor.execute_direct(insert_plan_2, None)?.count();
+        insert_one(&executor, collection_id, &doc_to_delete)?;
 
         let snapshot2 = storage_engine.last_visible_sequence();
 
@@ -2499,13 +2419,7 @@ mod tests {
         let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
         storage_engine.write(write_batch(vec![delete_op]))?;
 
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
 
         // Scan at snapshot2 should see both documents (doc1 is updated, doc2 exists)
         let results_at_snapshot2 = executor.execute_cached_at_snapshot(
@@ -2540,11 +2454,7 @@ mod tests {
         let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &initial_doc)?;
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)
@@ -2555,13 +2465,7 @@ mod tests {
 
         // 3. Act: prepare and execute UpdateOne
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let update_expr = update([set([field_name("value")], "updated")]);
 
@@ -2579,12 +2483,7 @@ mod tests {
         assert_eq!(result_doc.get_i32("modified_count")?, 1);
 
         // 4. Assert final state
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let final_doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "updated");
         assert_eq!(final_doc.get_i32("_id")?, 1);
         assert_eq!(
@@ -2603,25 +2502,13 @@ mod tests {
         let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-
+        insert_one(&executor, collection_id, &initial_doc)?;
         // 2. Arrange to fail many times to ensure timeout is reached
         storage_engine.fail_next_precondition_checks(20);
 
         // 3. Act: prepare UpdateOne
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let update_expr = update([set([field_name("value")], "updated")]);
 
@@ -2644,11 +2531,7 @@ mod tests {
         }
 
         // 5. Assert that the document was not changed
-        let final_doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "initial");
 
         Ok(())
@@ -2661,24 +2544,14 @@ mod tests {
         let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &initial_doc)?;
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)
         );
 
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
         let delete_plan = PhysicalPlan::DeleteOne {
             collection: collection_id,
             query: query_plan,
@@ -2689,13 +2562,7 @@ mod tests {
         assert_eq!(result_doc.get_i32("deleted_count")?, 1);
 
         let mut verify_params = Parameters::new();
-        let verify_key = verify_params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let verify_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: verify_key,
-            filter: None,
-            projection: None,
-        });
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
         let mut results = executor.execute_cached(verify_plan, &verify_params)?;
         assert!(results.next().is_none());
         assert_eq!(
@@ -2714,20 +2581,10 @@ mod tests {
             storage_engine.create_collection_if_not_exists("test_delete_one_no_match")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &initial_doc)?;
 
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(2)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 2_i32);
         let delete_plan = PhysicalPlan::DeleteOne {
             collection: collection_id,
             query: query_plan,
@@ -2737,12 +2594,7 @@ mod tests {
         let result_doc = result.into_iter().next().unwrap()?;
         assert_eq!(result_doc.get_i32("deleted_count")?, 0);
 
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let final_doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "initial");
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -2760,11 +2612,7 @@ mod tests {
             storage_engine.create_collection_if_not_exists("test_delete_one_retry")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &initial_doc)?;
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)
@@ -2773,13 +2621,7 @@ mod tests {
         storage_engine.fail_next_precondition_checks(1);
 
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
         let delete_plan = PhysicalPlan::DeleteOne {
             collection: collection_id,
             query: query_plan,
@@ -2790,13 +2632,7 @@ mod tests {
         assert_eq!(result_doc.get_i32("deleted_count")?, 1);
 
         let mut verify_params = Parameters::new();
-        let verify_key = verify_params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let verify_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: verify_key,
-            filter: None,
-            projection: None,
-        });
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
         let mut results = executor.execute_cached(verify_plan, &verify_params)?;
         assert!(results.next().is_none());
         assert_eq!(
@@ -2815,23 +2651,11 @@ mod tests {
             storage_engine.create_collection_if_not_exists("test_delete_one_retry_timeout")?;
 
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-
+        insert_one(&executor, collection_id, &initial_doc)?;
         storage_engine.fail_next_precondition_checks(20);
 
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
         let delete_plan = PhysicalPlan::DeleteOne {
             collection: collection_id,
             query: query_plan,
@@ -2845,11 +2669,7 @@ mod tests {
             Ok(_) => panic!("Expected an error, but the delete succeeded"),
         }
 
-        let final_doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "initial");
         assert_eq!(final_doc.get_i32("_id")?, 1);
         assert_eq!(
@@ -2869,13 +2689,7 @@ mod tests {
 
         // 2. Execute UpdateOne with upsert=true on empty collection
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let update_expr = update([set([field_name("value")], "created")]);
 
@@ -2894,12 +2708,7 @@ mod tests {
         assert_eq!(result_doc.get_i32("upserted_id")?, 1);
 
         // 3. Verify the document was inserted
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(doc.get_i32("_id")?, 1);
         assert_eq!(doc.get_str("value")?, "created");
 
@@ -2915,21 +2724,11 @@ mod tests {
 
         // Insert initial doc
         let initial_doc = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: initial_doc.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &initial_doc)?;
 
         // 2. Execute UpdateOne with upsert=true
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let update_expr = update([set([field_name("value")], "updated")]);
 
@@ -2948,12 +2747,7 @@ mod tests {
         assert!(result_doc.get("upserted_id").is_none());
 
         // 3. Verify the document was updated
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(doc.get_str("value")?, "updated");
 
         Ok(())
@@ -2971,13 +2765,7 @@ mod tests {
         let p_val = params.collect_parameter(BsonValue(Bson::String("target".to_string())));
 
         let query_plan = Arc::new(PhysicalPlan::Filter {
-            input: Arc::new(PhysicalPlan::CollectionScan {
-                collection: collection_id,
-                range: Interval::all(),
-                direction: Direction::Forward,
-                filter: None,
-                projection: None,
-            }),
+            input: full_scan_plan(collection_id),
             predicate: field_filters(field(["name"]), [interval(point(&p_val))]),
         });
 
@@ -2998,13 +2786,7 @@ mod tests {
         assert!(result_doc.get("upserted_id").is_some());
 
         // 3. Verify document was created with equality condition from query
-        let scan_plan = Arc::new(PhysicalPlan::CollectionScan {
-            collection: collection_id,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        });
+        let scan_plan = full_scan_plan(collection_id);
         let results = executor.execute_cached(scan_plan, &Parameters::new())?;
         let docs: Vec<Document> = results.collect::<Result<_>>()?;
         assert_eq!(docs.len(), 1);
@@ -3050,12 +2832,7 @@ mod tests {
         assert_eq!(result_doc.get_i32("upserted_id")?, 42);
 
         // 3. Verify the nested structure was created
-        let user_key = BsonValue(Bson::Int32(42)).try_into_key()?;
-        let doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let doc = Document::from_reader(Cursor::new(doc_bytes))?;
+        let doc = read_stored_doc(&storage_engine, collection_id, 42)?;
         assert_eq!(doc.get_i32("_id")?, 42);
         assert_eq!(doc.get_str("extra")?, "added");
         let data = doc.get_document("data")?;
@@ -3072,24 +2849,14 @@ mod tests {
         let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
         let doc1 = doc! { "_id": 1, "value": "initial" };
-        let insert_plan = PhysicalPlan::InsertOne {
-            collection: collection_id,
-            document: doc1.to_vec()?,
-        };
-        executor.execute_direct(insert_plan, None)?.count();
+        insert_one(&executor, collection_id, &doc1)?;
 
         // 2. Arrange to fail the next precondition check
         storage_engine.fail_next_precondition_checks(1);
 
         // 3. Act: prepare and execute UpdateMany
         let mut params = Parameters::new();
-        let key_expr = params.collect_parameter(BsonValue(Bson::Int32(1)));
-        let query_plan = Arc::new(PhysicalPlan::PointSearch {
-            collection: collection_id,
-            key: key_expr,
-            filter: None,
-            projection: None,
-        });
+        let query_plan = point_search_query(collection_id, &mut params, 1_i32);
 
         let update_expr = update([set([field_name("value")], "updated")]);
 
@@ -3112,12 +2879,7 @@ mod tests {
         }
 
         // 5. Assert that the document was not changed
-        let user_key = BsonValue(Bson::Int32(1)).try_into_key()?;
-        let final_doc_bytes = storage_engine
-            .read(collection_id, 0, &user_key, None)?
-            .unwrap()
-            .1;
-        let final_doc = Document::from_reader(Cursor::new(final_doc_bytes))?;
+        let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
         assert_eq!(final_doc.get_str("value")?, "initial");
 
         Ok(())
