@@ -303,6 +303,47 @@ fn manual_strategy_insert_many_succeeds_with_all_ids() {
 }
 
 #[test]
+fn test_insert_many_manual_id_succeeds_after_delete_same_key() {
+    let (_dir, db) = setup();
+
+    db.create_collection_with_options(
+        "manual_ids",
+        CreateCollectionOptions::builder()
+            .id_creation_strategy(IdCreationStrategy::Manual)
+            .build(),
+    )
+    .unwrap();
+
+    let collection = db.collection("manual_ids");
+
+    collection.insert_one(doc! {"_id": 1, "x": 1}).unwrap();
+
+    let delete_result = collection.delete_one(doc! {"_id": 1}).unwrap();
+    assert_eq!(delete_result.deleted_count, 1);
+    assert_eq!(collection.estimated_document_count().unwrap(), 0);
+
+    let result = collection
+        .insert_many(vec![doc! {"_id": 1, "x": 2}, doc! {"_id": 2, "x": 3}])
+        .unwrap();
+
+    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+
+    let inserted_ids = &result.inserted_ids;
+    assert_eq!(inserted_ids.len(), 2);
+    assert_eq!(inserted_ids[0].as_i32().unwrap(), 1);
+    assert_eq!(inserted_ids[1].as_i32().unwrap(), 2);
+
+    let docs: Vec<_> = collection
+        .find(doc! {"_id": {"$in": [1, 2]}})
+        .sort(doc! {"_id": 1})
+        .execute()
+        .unwrap()
+        .map(|doc| doc.unwrap())
+        .collect();
+    assert_eq!(docs, vec![doc! {"_id": 1, "x": 2}, doc! {"_id": 2, "x": 3}]);
+}
+
+#[test]
 fn manual_strategy_detects_duplicate_ids() {
     let (_dir, db) = setup();
 

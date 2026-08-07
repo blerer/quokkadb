@@ -1331,6 +1331,26 @@ mod tests {
         Ok(())
     }
 
+    fn insert_many(
+        executor: &QueryExecutor,
+        collection_id: u32,
+        docs: &[Document],
+    ) -> Result<Document> {
+        let mut result = executor.execute_direct(
+            PhysicalPlan::InsertMany {
+                collection: collection_id,
+                documents: docs
+                    .iter()
+                    .map(|doc| doc.to_vec())
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            },
+            None,
+        )?;
+        let result_doc = result.next().unwrap()?;
+        assert!(result.next().is_none());
+        Ok(result_doc)
+    }
+
     fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
         Arc::new(PhysicalPlan::CollectionScan {
             collection: collection_id,
@@ -3479,6 +3499,146 @@ mod tests {
         assert_eq!(
             storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
             Some(1)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let executor = QueryExecutor::new(storage_engine.clone());
+        let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
+
+        let inserted_doc = insert_one(
+            &executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "initial" },
+        )?;
+        assert_eq!(inserted_doc, doc! { "inserted_id": 1 });
+
+        let delete_doc = execute_delete_one(&executor, collection_id, 1)?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut verify_result = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(verify_result.next().is_none());
+
+        let docs = vec![
+            doc! { "_id": 1, "value": "replacement" },
+            doc! { "_id": 2, "value": "second" },
+        ];
+        let reinserted_doc = insert_many(&executor, collection_id, &docs)?;
+        assert_eq!(reinserted_doc, doc! { "inserted_ids": [1, 2] });
+
+        let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(final_doc1, doc! { "_id": 1, "value": "replacement" });
+        let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+        assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            Some(2)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        match insert_one(
+            &concurrent_executor,
+            collection_id,
+            &doc! { "_id": 1, "value": "replacement" },
+        ) {
+            Err(Error::InvalidRequest(message)) => {
+                assert_eq!(message, "Duplicate key error. dup key: { _id: 1 }");
+            }
+            Err(err) => panic!("Expected duplicate key InvalidRequest, got {:?}", err),
+            Ok(doc) => panic!("Expected duplicate key error, got success {:?}", doc),
+        }
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
+
+        hook.release();
+
+        let delete_doc = delete_handle.join().unwrap()?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut verify_result = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(verify_result.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
+        let (storage_engine, _dir) = storage_engine()?;
+        let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+        let executor = Arc::new(QueryExecutor::with_test_hook(
+            storage_engine.clone(),
+            hook.clone(),
+        ));
+        let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
+
+        let initial_doc = doc! { "_id": 1, "value": "initial" };
+        insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+        let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+        hook.wait_until_hit();
+
+        let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+        let docs = vec![
+            doc! { "_id": 1, "value": "replacement" },
+            doc! { "_id": 2, "value": "second" },
+        ];
+        match insert_many(&concurrent_executor, collection_id, &docs) {
+            Err(Error::InvalidRequest(message)) => {
+                assert_eq!(message, "Duplicate key error. dup key: { _id: 1 }");
+            }
+            Err(err) => panic!("Expected duplicate key InvalidRequest, got {:?}", err),
+            Ok(doc) => panic!("Expected duplicate key error, got success {:?}", doc),
+        }
+
+        let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+        assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
+        let user_key_2 = BsonValue::from(2_i32).try_into_key()?;
+        assert!(storage_engine.read(collection_id, 0, &user_key_2, None)?.is_none());
+
+        hook.release();
+
+        let delete_doc = delete_handle.join().unwrap()?;
+        assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+        let mut verify_result = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(verify_result.next().is_none());
+        assert_eq!(
+            storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+            None
         );
 
         Ok(())
