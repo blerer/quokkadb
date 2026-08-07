@@ -1,12 +1,14 @@
 use crate::query::PathComponent;
 use bson::{Bson, Document};
 
-pub(crate) mod executor;
+mod executor;
 mod filters;
 mod indexes;
 mod projections;
+pub(crate) mod query_executor;
 pub(crate) mod sorts;
 mod updates;
+pub use query_executor::QueryExecutor;
 
 /// Inserts `value` at `path` inside `doc`, creating intermediate documents as needed.
 /// Array-element path components are skipped since upsert base documents are plain documents.

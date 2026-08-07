@@ -23,7 +23,7 @@ use crate::storage::catalog::CollectionMetadata;
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::storage_engine::StorageEngine;
 use bson::Document;
-use query::execution::executor::QueryExecutor;
+use query::execution::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use std::path::Path;
 use std::sync::Arc;

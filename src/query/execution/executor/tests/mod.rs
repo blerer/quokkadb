@@ -6,6 +6,7 @@ use crate::query::expr_fn::{
     proj_fields, proj_slice, size, within,
 };
 use crate::query::physical_plan::IndexScanRangeExpr;
+use crate::query::update::UpdateExpr;
 use crate::query::update_fn::{field_name, set, update};
 use crate::query::{make_sort_field, SortOrder};
 use crate::query::{BsonValue, Expr, Parameters, Projection};
@@ -15,7 +16,10 @@ use crate::storage::operation::Operation;
 use crate::storage::test_utils::storage_engine;
 use crate::storage::write_batch::WriteBatch;
 use crate::storage::Direction;
+use crate::util::bson_utils::BsonKey;
+use crate::util::interval::Interval;
 use bson::{Bson, Document};
+use std::io::Cursor;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
