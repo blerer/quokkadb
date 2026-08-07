@@ -1,8 +1,8 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::storage::operation::Operation;
 use crate::storage::count_stats::CountStats;
+use crate::storage::operation::Operation;
 use std::collections::BTreeSet;
 use std::io::Result;
 
@@ -45,8 +45,7 @@ pub struct WriteBatch {
 
 impl WriteBatch {
     pub fn new(operations: Vec<Operation>, count_stats: CountStats) -> WriteBatch {
-        let precomputed_wal_record =
-            Some(Self::precompute_wal_record(&operations, &count_stats));
+        let precomputed_wal_record = Some(Self::precompute_wal_record(&operations, &count_stats));
         let required_collections = Self::extract_required_collections(&operations);
         WriteBatch {
             operations,
@@ -62,8 +61,7 @@ impl WriteBatch {
         preconditions: Preconditions,
         count_stats: CountStats,
     ) -> Self {
-        let precomputed_wal_record =
-            Some(Self::precompute_wal_record(&operations, &count_stats));
+        let precomputed_wal_record = Some(Self::precompute_wal_record(&operations, &count_stats));
         let required_collections = Self::extract_required_collections(&operations);
         WriteBatch {
             operations,
@@ -152,16 +150,19 @@ impl PartialEq for WriteBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::operation::Operation;
     use crate::storage::count_stats::CountStatsKey;
+    use crate::storage::operation::Operation;
     use std::collections::BTreeMap;
 
     #[test]
     fn test_write_batch_wal_round_trip() {
-        let batch = WriteBatch::new(vec![
-            Operation::new_put(10, 5, b"key1".to_vec(), b"value1".to_vec()),
-            Operation::new_delete(20, 6, b"key2".to_vec()),
-        ], CountStats::default());
+        let batch = WriteBatch::new(
+            vec![
+                Operation::new_put(10, 5, b"key1".to_vec(), b"value1".to_vec()),
+                Operation::new_delete(20, 6, b"key2".to_vec()),
+            ],
+            CountStats::default(),
+        );
 
         let seq = 12345;
         let wal = batch.to_wal_record(seq);
@@ -187,7 +188,12 @@ mod tests {
     #[test]
     fn test_write_batch_wal_round_trip_preserves_count_stats() {
         let batch = WriteBatch::new(
-            vec![Operation::new_put(10, 0, b"key".to_vec(), b"value".to_vec())],
+            vec![Operation::new_put(
+                10,
+                0,
+                b"key".to_vec(),
+                b"value".to_vec(),
+            )],
             CountStats::new(BTreeMap::from([
                 (CountStatsKey::Collection(10), 1),
                 (

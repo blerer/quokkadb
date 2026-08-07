@@ -379,8 +379,7 @@ impl Optimizer {
         let mut child_bests: Vec<Arc<Best>> = Vec::with_capacity(child_nodes.len());
         for child_node in child_nodes.into_iter() {
             let child_group = memo.add_group(child_node);
-            let child_best =
-                self.best_expr(catalog, count_stats, memo, child_group, &child_reqs);
+            let child_best = self.best_expr(catalog, count_stats, memo, child_group, &child_reqs);
             child_bests.push(child_best);
         }
 
@@ -428,13 +427,7 @@ impl Optimizer {
                 collection, filter, ..
             } => {
                 assert!(child_bests.is_empty());
-                self.implement_collection_scan_node(
-                    catalog,
-                    count_stats,
-                    *collection,
-                    filter,
-                    req,
-                )
+                self.implement_collection_scan_node(catalog, count_stats, *collection, filter, req)
             }
             LogicalPlan::Filter { condition, .. } => {
                 assert_eq!(child_bests.len(), 1);
@@ -628,13 +621,12 @@ impl Optimizer {
                         if interval.is_point() {
                             // Point search
                             let key = interval.start_bound_value().unwrap().clone();
-                            let candidate =
-                                self.create_point_search_candidate(
-                                    count_stats,
-                                    collection,
-                                    key,
-                                    residual,
-                                );
+                            let candidate = self.create_point_search_candidate(
+                                count_stats,
+                                collection,
+                                key,
+                                residual,
+                            );
                             // If we can answer to the query with a point search, we know that it is
                             // the fastest that we can use. So, instead of exploring other alternative
                             // we can directly return it
@@ -1031,10 +1023,7 @@ fn index_fields_as_sort_fields(index_fields: &[OrderedIndexField]) -> Vec<SortFi
         .collect()
 }
 
-fn index_provides_order(
-    provided_order: &[SortField],
-    requested_order: &[SortField],
-) -> bool {
+fn index_provides_order(provided_order: &[SortField], requested_order: &[SortField]) -> bool {
     requested_order.len() <= provided_order.len()
         && requested_order == &provided_order[..requested_order.len()]
 }
@@ -1235,7 +1224,6 @@ mod parametrize_test {
 
 #[cfg(test)]
 mod optimizer_tests {
-    use std::collections::BTreeMap;
     use super::*;
     use crate::obs::logger::test_instance;
     use crate::query::expr_fn::{
@@ -1246,6 +1234,7 @@ mod optimizer_tests {
     use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use crate::storage::count_stats::{CountStats, CountStatsKey};
     use bson::Bson;
+    use std::collections::BTreeMap;
 
     const COLLECTION: u32 = 10;
 

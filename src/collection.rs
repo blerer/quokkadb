@@ -257,10 +257,12 @@ impl Collection {
     pub fn estimated_document_count(&self) -> Result<u64> {
         let collection_id = match self.policy {
             CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => match self.db_impl.get_collection(&self.collection) {
-                Some(collection) => collection.id,
-                None => return Ok(0),
-            },
+            CollectionPolicy::CreateIfMissing => {
+                match self.db_impl.get_collection(&self.collection) {
+                    Some(collection) => collection.id,
+                    None => return Ok(0),
+                }
+            }
         };
 
         self.db_impl.estimated_document_count(collection_id)
@@ -374,10 +376,12 @@ impl Collection {
     pub fn delete_one(&self, filter: Document) -> Result<DeleteResult> {
         let collection_id = match self.policy {
             CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => match self.db_impl.get_collection(&self.collection) {
-                Some(collection) => collection.id,
-                None => return Ok(DeleteResult { deleted_count: 0 }),
-            },
+            CollectionPolicy::CreateIfMissing => {
+                match self.db_impl.get_collection(&self.collection) {
+                    Some(collection) => collection.id,
+                    None => return Ok(DeleteResult { deleted_count: 0 }),
+                }
+            }
         };
 
         let conditions = parser::parse_conditions(&filter)?;

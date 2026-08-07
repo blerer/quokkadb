@@ -1,8 +1,8 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::invalid_data;
-use crate::storage::internal_key::{encode_internal_key, encode_record_key};
 use crate::io::byte_writer::ByteWriter;
+use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
+use crate::storage::internal_key::{encode_internal_key, encode_record_key};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum OperationType {
@@ -96,11 +96,10 @@ impl Operation {
 }
 
 impl Serializable for Operation {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
-    {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
         let op_byte = reader.read_u8()?;
-        let operation_type = OperationType::try_from(op_byte)
-            .map_err(|_| invalid_data("Invalid operation type"))?;
+        let operation_type =
+            OperationType::try_from(op_byte).map_err(|_| invalid_data("Invalid operation type"))?;
 
         let collection = reader.read_varint_u32()?;
         let index = reader.read_varint_u32()?;

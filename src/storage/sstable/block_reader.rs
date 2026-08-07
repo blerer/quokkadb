@@ -613,25 +613,33 @@ mod tests {
         builder
             .add(
                 &put(1, 1),
-                doc! {"id": 1, "name": "Iron Man", "year": 2008}.to_vec().unwrap(),
+                doc! {"id": 1, "name": "Iron Man", "year": 2008}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(2, 2),
-                doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}.to_vec().unwrap(),
+                doc! {"id": 2, "name": "The Incredible Hulk", "year": 2008}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(3, 3),
-                doc! {"id": 3, "name": "Iron Man 2", "year": 2010}.to_vec().unwrap(),
+                doc! {"id": 3, "name": "Iron Man 2", "year": 2010}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(4, 4),
-                doc! {"id": 4, "name": "Thor", "year": 2011}.to_vec().unwrap(),
+                doc! {"id": 4, "name": "Thor", "year": 2011}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
         builder.add(&delete(5, 9), vec![]).unwrap();
@@ -671,13 +679,17 @@ mod tests {
         builder
             .add(
                 &put(7, 11),
-                doc! {"id": 7, "name": "The Avengers", "year": 2013}.to_vec().unwrap(),
+                doc! {"id": 7, "name": "The Avengers", "year": 2013}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
         builder
             .add(
                 &put(7, 10),
-                doc! {"id": 7, "name": "The Avengers", "year": 2012}.to_vec().unwrap(),
+                doc! {"id": 7, "name": "The Avengers", "year": 2012}
+                    .to_vec()
+                    .unwrap(),
             )
             .unwrap();
 

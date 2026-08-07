@@ -240,7 +240,10 @@ impl DbImpl {
             }
             LogicalPlan::DeleteOne { collection, query } => {
                 let (parameters, query) = self.optimize_query(query);
-                (PhysicalPlan::DeleteOne { collection, query }, Some(parameters))
+                (
+                    PhysicalPlan::DeleteOne { collection, query },
+                    Some(parameters),
+                )
             }
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
@@ -270,9 +273,9 @@ impl DbImpl {
 
         // If the plan is not cached, optimize it
         let catalog = self.storage_engine.catalog();
-        let physical_plan = self
-            .optimizer
-            .optimize(logical_plan, catalog, self.storage_engine.as_ref());
+        let physical_plan =
+            self.optimizer
+                .optimize(logical_plan, catalog, self.storage_engine.as_ref());
         (parameters, physical_plan)
     }
 }

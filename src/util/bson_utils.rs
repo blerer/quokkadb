@@ -1805,9 +1805,9 @@ mod tests {
 
     mod bson_key {
         use crate::util::bson_utils::BsonKey;
+        use bson::raw::CString;
         use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
         use std::str::FromStr;
-        use bson::raw::CString;
 
         fn assert_ordering(a: &Bson, b: &Bson) {
             let key_a = a.try_into_key().expect("Failed to encode BSON A");
@@ -3225,8 +3225,8 @@ mod tests {
 
     mod bson_eq {
         use crate::util::bson_utils::bson_eq;
-        use bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime};
         use bson::raw::CString;
+        use bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime};
 
         #[test]
         fn nan_equality() {
@@ -3344,9 +3344,9 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher;
 
-        use bson::{doc, Bson};
-        use bson::raw::CString;
         use crate::util::bson_utils::{bson_eq, bson_hash};
+        use bson::raw::CString;
+        use bson::{doc, Bson};
 
         fn hash(value: &Bson) -> u64 {
             let mut hasher = DefaultHasher::new();

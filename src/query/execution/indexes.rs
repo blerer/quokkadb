@@ -7,8 +7,8 @@ use crate::query::{
 use crate::storage::catalog::{
     CollectionMetadata, IndexDefinition, IndexDirection, IndexMetadata, OrderedIndexField,
 };
-use crate::storage::operation::Operation;
 use crate::storage::count_stats::CountStatsBuilder;
+use crate::storage::operation::Operation;
 use crate::util::bson_utils::{decode_bson_from_key_readers, BsonKey, TypedKey};
 use crate::util::interval::Interval;
 use bson::{Bson, Document, RawDocument};
@@ -390,7 +390,8 @@ impl Index {
 
         // Decode the _id from the key suffix using the stored key_type bytes.
         let id_key_bytes = ByteReader::new(id_key_bytes);
-        let id_bson = decode_bson_from_key_readers(&id_key_bytes, &ByteReader::new(&id_key_type_bytes))?;
+        let id_bson =
+            decode_bson_from_key_readers(&id_key_bytes, &ByteReader::new(&id_key_type_bytes))?;
         doc.insert("_id", id_bson);
 
         Ok(doc)
@@ -543,11 +544,7 @@ fn encode_index_range_key(
     if let Some(tail) = tail {
         key.extend_from_slice(&tail.key);
     }
-    append_open_range_suffix(
-        &mut key,
-        remaining_field_codecs,
-        suffix_extremum,
-    )?;
+    append_open_range_suffix(&mut key, remaining_field_codecs, suffix_extremum)?;
     Ok(key)
 }
 
@@ -587,7 +584,10 @@ fn resolve_bound_expr(expr: &Arc<Expr>, parameters: &Parameters) -> BsonValue {
     match expr.as_ref() {
         Expr::Placeholder(idx) => parameters.get(*idx).clone(),
         Expr::Literal(value) => value.clone(),
-        _ => unreachable!("Index scan bounds only support placeholders and literals: {:?}", expr),
+        _ => unreachable!(
+            "Index scan bounds only support placeholders and literals: {:?}",
+            expr
+        ),
     }
 }
 
@@ -629,19 +629,19 @@ mod tests {
     use super::{DocumentKeySource, Index, IndexKeyValue, Indexes};
     use crate::io::varint;
     use crate::query::physical_plan::IndexScanRangeExpr;
+    use crate::query::{BsonValue, Expr, Parameters};
     use crate::storage::catalog::{
         CollectionMetadata, CollectionOptions, IndexDefinition, IndexDirection, IndexMetadata,
         IndexPath, OrderedIndexField,
     };
-    use crate::storage::operation::OperationType;
     use crate::storage::count_stats::{CountStatsBuilder, CountStatsKey};
-    use crate::util::interval::Interval;
+    use crate::storage::operation::OperationType;
     use crate::util::bson_utils::BsonKey;
+    use crate::util::interval::Interval;
     use bson::{
         doc, oid::ObjectId, raw::RawDocumentBuf, spec::BinarySubtype, Binary, Bson, DateTime,
         Decimal128, Document, Timestamp,
     };
-    use crate::query::{BsonValue, Expr, Parameters};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -1294,8 +1294,7 @@ mod tests {
 
         let lower_included = extract_key(&index, &doc! { "_id": 1_i64, "a": 10_i32, "b": 5_i32 });
         let middle = extract_key(&index, &doc! { "_id": 2_i64, "a": 10_i32, "b": 7_i32 });
-        let upper_excluded =
-            extract_key(&index, &doc! { "_id": 3_i64, "a": 10_i32, "b": 8_i32 });
+        let upper_excluded = extract_key(&index, &doc! { "_id": 3_i64, "a": 10_i32, "b": 8_i32 });
 
         assert!(range.contains(&lower_included));
         assert!(range.contains(&middle));
@@ -1347,12 +1346,18 @@ mod tests {
             )
             .unwrap();
 
-        let matching_1 =
-            extract_key(&index, &doc! { "_id": 1_i64, "a": 10_i32, "b": 0_i32, "c": 9_i32 });
-        let matching_2 =
-            extract_key(&index, &doc! { "_id": 2_i64, "a": 10_i32, "b": 99_i32, "c": -1_i32 });
-        let wrong_prefix =
-            extract_key(&index, &doc! { "_id": 3_i64, "a": 11_i32, "b": 0_i32, "c": 9_i32 });
+        let matching_1 = extract_key(
+            &index,
+            &doc! { "_id": 1_i64, "a": 10_i32, "b": 0_i32, "c": 9_i32 },
+        );
+        let matching_2 = extract_key(
+            &index,
+            &doc! { "_id": 2_i64, "a": 10_i32, "b": 99_i32, "c": -1_i32 },
+        );
+        let wrong_prefix = extract_key(
+            &index,
+            &doc! { "_id": 3_i64, "a": 11_i32, "b": 0_i32, "c": 9_i32 },
+        );
 
         assert!(range.contains(&matching_1));
         assert!(range.contains(&matching_2));

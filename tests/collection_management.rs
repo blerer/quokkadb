@@ -520,8 +520,12 @@ fn test_estimated_document_count_returns_collection_count() {
     let db = QuokkaDB::open(dir.path()).unwrap();
 
     let collection = db.collection("users").create_if_missing();
-    collection.insert_one(doc! { "_id": 1, "name": "Alice" }).unwrap();
-    collection.insert_one(doc! { "_id": 2, "name": "Bob" }).unwrap();
+    collection
+        .insert_one(doc! { "_id": 1, "name": "Alice" })
+        .unwrap();
+    collection
+        .insert_one(doc! { "_id": 2, "name": "Bob" })
+        .unwrap();
 
     assert_eq!(collection.estimated_document_count().unwrap(), 2);
 }
@@ -531,7 +535,10 @@ fn test_estimated_document_count_is_strict_by_default() {
     let dir = tempdir().unwrap();
     let db = QuokkaDB::open(dir.path()).unwrap();
 
-    let err = db.collection("missing").estimated_document_count().unwrap_err();
+    let err = db
+        .collection("missing")
+        .estimated_document_count()
+        .unwrap_err();
     assert!(matches!(err, Error::CollectionNotFound { .. }));
 }
 

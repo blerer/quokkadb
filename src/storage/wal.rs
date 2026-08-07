@@ -343,8 +343,8 @@ mod tests {
     use crate::obs::logger;
     use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
-    use crate::storage::operation::Operation;
     use crate::storage::count_stats::{CountStats, CountStatsKey};
+    use crate::storage::operation::Operation;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 

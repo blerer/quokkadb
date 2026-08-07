@@ -4,7 +4,6 @@ use crate::io::serializable::Serializable;
 use std::collections::BTreeMap;
 use std::io::Result;
 
-
 mod code {
     pub const COLLECTION: u8 = 0;
     pub const INDEX: u8 = 1;
@@ -31,7 +30,9 @@ impl Serializable for CountStatsKey {
     fn write_to(&self, writer: &mut ByteWriter) {
         match self {
             CountStatsKey::Collection(collection) => {
-                writer.write_u8(code::COLLECTION).write_varint_u32(*collection);
+                writer
+                    .write_u8(code::COLLECTION)
+                    .write_varint_u32(*collection);
             }
             CountStatsKey::Index { collection, index } => {
                 writer
@@ -175,5 +176,4 @@ mod tests {
 
         assert_eq!(builder.build(), CountStats::default());
     }
-
 }

@@ -862,7 +862,6 @@ pub struct IndexKeyField {
 }
 
 impl IndexKeyField {
-
     pub fn asc(path: Vec<PathComponent>) -> Self {
         Self {
             path,
@@ -1316,8 +1315,8 @@ mod tests {
     use crate::io::byte_writer::ByteWriter;
     use crate::io::serializable::check_serialization_round_trip;
     use crate::query::expr_fn::*;
-    use bson::{doc, Bson, Regex};
     use bson::raw::CString;
+    use bson::{doc, Bson, Regex};
 
     #[test]
     fn test_get_path_value() {

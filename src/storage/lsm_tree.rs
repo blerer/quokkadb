@@ -9,9 +9,9 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::internal_key::encode_internal_key_range;
 
 use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator};
-use crate::storage::lsm_version::Levels;
 #[cfg(test)]
 use crate::storage::lsm_version::DropMetadata;
+use crate::storage::lsm_version::Levels;
 use crate::storage::Direction;
 use std::collections::VecDeque;
 use std::io::Result;
@@ -312,20 +312,14 @@ mod tests {
         let tree = LsmTree::from(ManifestState {
             lsm: Arc::new(LsmVersion::new(1, 10, 4)),
             catalog: Arc::new(Catalog::new()),
-            count_stats: CountStats::new(BTreeMap::from([(
-                CountStatsKey::Collection(10),
-                5,
-            )])),
+            count_stats: CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 5)])),
         });
 
         tree.memtable.write(
             1,
             &WriteBatch::new(
                 vec![],
-                CountStats::new(BTreeMap::from([(
-                    CountStatsKey::Collection(10),
-                    2,
-                )])),
+                CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 2)])),
             ),
         );
 
@@ -338,10 +332,7 @@ mod tests {
             2,
             &WriteBatch::new(
                 vec![],
-                CountStats::new(BTreeMap::from([(
-                    CountStatsKey::Collection(10),
-                    -1,
-                )])),
+                CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), -1)])),
             ),
         );
 

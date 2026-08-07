@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Memtable {
-    skiplist: SkipMap<Vec<u8>, Vec<u8>>, // Binary values
-    size: AtomicUsize,                   // Current size of the memtable
+    skiplist: SkipMap<Vec<u8>, Vec<u8>>,      // Binary values
+    size: AtomicUsize,                        // Current size of the memtable
     count_stats: SkipMap<CountStatsKey, i64>, // Aggregated logical count deltas
     pub log_number: u64, // The number of the write-ahead log file associated to this memtable
     pub min_seq: u64,    // The minimum sequence number of the operations in this memtable
@@ -665,6 +665,9 @@ mod tests {
     }
 
     fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-        WriteBatch::new(operations, crate::storage::count_stats::CountStats::default())
+        WriteBatch::new(
+            operations,
+            crate::storage::count_stats::CountStats::default(),
+        )
     }
 }

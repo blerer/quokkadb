@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
+use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::lsm_version::{DropMetadata, LsmVersion, SSTableMetadata};
 use crate::util::interval::Interval;
 use std::fmt::Debug;
@@ -991,10 +991,7 @@ mod tests {
 
         assert_eq!(
             state.count_stats,
-            CountStats::new(BTreeMap::from([(
-                CountStatsKey::Collection(10),
-                5,
-            )]))
+            CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 5,)]))
         );
     }
 

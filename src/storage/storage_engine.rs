@@ -1938,7 +1938,6 @@ pub type StorageResult<T> = std::result::Result<T, StorageError>;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use super::*;
     use crate::obs::logger::{test_instance, NoOpLogger};
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
@@ -1947,15 +1946,16 @@ mod tests {
     use crate::storage::catalog::{
         IndexDefinition, IndexDirection, IndexOptions, IndexPath, OrderedIndexField,
     };
+    use crate::storage::count_stats::{CountStats, CountStatsKey};
     use crate::storage::internal_key::encode_record_key;
     use crate::storage::lsm_version::DropKind;
     use crate::storage::operation::Operation;
-    use crate::storage::count_stats::{CountStats, CountStatsKey};
     use crate::storage::test_utils::{
         assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key,
     };
     use crate::storage::write_batch::{Precondition, Preconditions};
     use bson::doc;
+    use std::collections::BTreeMap;
     use std::fs::{self, OpenOptions};
     use std::io::{ErrorKind, Seek, SeekFrom, Write};
     use std::path::Path;
@@ -2079,9 +2079,7 @@ mod tests {
 
         let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
 
-        let _ = &engine
-            .write(write_batch(vec![delete_op(col, 4)]))
-            .unwrap();
+        let _ = &engine.write(write_batch(vec![delete_op(col, 4)])).unwrap();
 
         assert_gauge_eq(registry, "sstable_count", 0);
         assert_gauge_eq(registry, "sstable_count_level_0", 0);
@@ -2663,9 +2661,7 @@ mod tests {
         assert!(wal_path_1.exists());
 
         // Write some data, which goes into the first WAL.
-        engine
-            .write(write_batch(vec![put_op(col, 1, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
 
         // Flush will rotate the WAL, flush the memtable, and then delete the old WAL.
         engine.flush().unwrap();
@@ -2678,9 +2674,7 @@ mod tests {
         assert!(wal_path_2.exists());
 
         // Write more data, which goes into the second WAL.
-        engine
-            .write(write_batch(vec![put_op(col, 2, 2)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap();
 
         // Flush again.
         engine.flush().unwrap();
@@ -2719,9 +2713,7 @@ mod tests {
             .create_collection_if_not_exists("test_obsolete_sst_deletion_after_compaction")
             .unwrap();
 
-        engine
-            .write(write_batch(vec![put_op(col, 1, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
         engine.flush().unwrap();
 
         let l0_before = engine
@@ -2737,9 +2729,7 @@ mod tests {
         let first_sst_path = path.join(DbFile::new_sst(l0_before[0]).filename());
         assert!(first_sst_path.exists());
 
-        engine
-            .write(write_batch(vec![put_op(col, 2, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
         engine.flush().unwrap();
 
         engine.compact().unwrap();
@@ -2773,9 +2763,7 @@ mod tests {
                 .create_collection_if_not_exists("test_orphaned_sst_cleanup_on_startup")
                 .unwrap();
 
-            engine
-                .write(write_batch(vec![put_op(col, 1, 1)]))
-                .unwrap();
+            engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
             engine.flush().unwrap();
 
             let live_sst_numbers = engine.lsm_tree().levels().live_sst_numbers();
@@ -2919,21 +2907,13 @@ mod tests {
                 .unwrap();
 
             // Write some data and flush it to an SSTable.
-            engine
-                .write(write_batch(vec![put_op(col, 1, 1)]))
-                .unwrap();
-            engine
-                .write(write_batch(vec![put_op(col, 2, 1)]))
-                .unwrap();
+            engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+            engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
             engine.flush().unwrap();
 
             // Write more data that will remain in the memtable.
-            engine
-                .write(write_batch(vec![put_op(col, 3, 1)]))
-                .unwrap();
-            engine
-                .write(write_batch(vec![put_op(col, 2, 2)]))
-                .unwrap(); // Update flushed key
+            engine.write(write_batch(vec![put_op(col, 3, 1)])).unwrap();
+            engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap(); // Update flushed key
 
             // Gracefully shut down the engine. This should flush the memtable.
             engine.shutdown().unwrap();
@@ -3001,23 +2981,15 @@ mod tests {
                 .unwrap();
 
             // Write some data and flush it to an SSTable.
-            engine
-                .write(write_batch(vec![put_op(col, 1, 1)]))
-                .unwrap(); // seq 1
-            engine
-                .write(write_batch(vec![put_op(col, 2, 1)]))
-                .unwrap(); // seq 2
+            engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap(); // seq 1
+            engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap(); // seq 2
             engine.flush().unwrap(); // Flushes memtable, rotates WAL.
 
             // Data in SSTable: {1:1, 2:1}
 
             // Write more data that will remain in the memtable and WAL.
-            engine
-                .write(write_batch(vec![put_op(col, 3, 1)]))
-                .unwrap(); // seq 3
-            engine
-                .write(write_batch(vec![put_op(col, 2, 2)]))
-                .unwrap(); // seq 4, updates a flushed key
+            engine.write(write_batch(vec![put_op(col, 3, 1)])).unwrap(); // seq 3
+            engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap(); // seq 4, updates a flushed key
 
             // Simulate a crash by just dropping the engine without calling shutdown.
             // The memtable content is lost, but the WAL records should persist.
@@ -3109,7 +3081,12 @@ mod tests {
             engine
                 .write(write_batch_with_count_stats(
                     vec![
-                        Operation::new_put(collection_id, 0, user_key(1), document(1, 1).to_vec().unwrap()),
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(1),
+                            document(1, 1).to_vec().unwrap(),
+                        ),
                         Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
                     ],
                     CountStats::new(BTreeMap::from([
@@ -3129,7 +3106,12 @@ mod tests {
             engine
                 .write(write_batch_with_count_stats(
                     vec![
-                        Operation::new_put(collection_id, 0, user_key(2), document(2, 1).to_vec().unwrap()),
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(2),
+                            document(2, 1).to_vec().unwrap(),
+                        ),
                         Operation::new_put(collection_id, index_id, b"bob".to_vec(), user_key(2)),
                     ],
                     CountStats::new(BTreeMap::from([
@@ -3212,7 +3194,12 @@ mod tests {
             engine
                 .write(write_batch_with_count_stats(
                     vec![
-                        Operation::new_put(collection_id, 0, user_key(1), document(1, 1).to_vec().unwrap()),
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(1),
+                            document(1, 1).to_vec().unwrap(),
+                        ),
                         Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
                     ],
                     CountStats::new(std::collections::BTreeMap::from([
@@ -3297,12 +3284,8 @@ mod tests {
                 .create_collection_if_not_exists("test_wal_replay_with_partial_log")
                 .unwrap();
 
-            engine
-                .write(write_batch(vec![put_op(col, 1, 1)]))
-                .unwrap();
-            engine
-                .write(write_batch(vec![put_op(col, 2, 1)]))
-                .unwrap();
+            engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+            engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
 
             wal_path = db_path.join("000002.log");
             drop(engine);
@@ -3381,9 +3364,7 @@ mod tests {
                 .create_collection_if_not_exists("test_wal_replay_with_header_corruption")
                 .unwrap();
 
-            engine
-                .write(write_batch(vec![put_op(col, 1, 1)]))
-                .unwrap();
+            engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
             original_wal_path = db_path.join("000002.log");
             drop(engine);
             col
@@ -4424,9 +4405,7 @@ mod tests {
 
         let name = "existing_collection";
         let col = engine.create_collection_if_not_exists(name).unwrap();
-        engine
-            .write(write_batch(vec![put_op(col, 1, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
 
         engine.drop_collection(name).unwrap();
 
@@ -5042,17 +5021,13 @@ mod tests {
         let idx = 0;
 
         // 1. Write key1.
-        engine
-            .write(write_batch(vec![put_op(col, 1, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
 
         // 2. Take a snapshot after key1 is written.
         let snapshot1 = engine.last_visible_sequence();
 
         // 3. Write key2.
-        engine
-            .write(write_batch(vec![put_op(col, 2, 1)]))
-            .unwrap();
+        engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
 
         // 4. Try to write key2 again with a precondition based on the old snapshot.
         // This should fail because key2 was created *after* snapshot1.
@@ -5079,8 +5054,7 @@ mod tests {
             user_key: user_key(3),
         };
         let preconditions_ok = Preconditions::new(snapshot2, vec![precondition_ok]);
-        let batch_ok =
-            write_batch_with_preconditions(vec![put_op(col, 3, 1)], preconditions_ok);
+        let batch_ok = write_batch_with_preconditions(vec![put_op(col, 3, 1)], preconditions_ok);
         engine.write(batch_ok).unwrap();
 
         // 6. Try to write an existing key (key1) again. This should fail because the key
