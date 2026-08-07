@@ -18,6 +18,7 @@ Lightweight embedded document database in Rust with a Mongo-like API and a simpl
 - Avoid large rewrites unless requested.
 - For broad or structural changes, propose the design before editing.
 - Add focused tests that match the risk of the change.
+- Run formatting after code changes before finishing the task.
 - Explain trade-offs, not just implementation steps.
 
 When proposing a structural change, call out future costs explicitly:
