@@ -1,9 +1,29 @@
 use crate::error::Result;
+use bson::Bson;
 use bson::Document;
 use sonyflake::Sonyflake;
 use std::sync::Mutex;
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WriteResult {
+    InsertOne {
+        inserted_id: Bson,
+    },
+    InsertMany {
+        inserted_ids: Vec<Bson>,
+    },
+    Update {
+        matched_count: u64,
+        modified_count: u64,
+        upserted_id: Option<Bson>,
+    },
+    Delete {
+        deleted_count: u64,
+    },
+}
+
 #[cfg(test)]
 pub(crate) use super::query_executor::QueryExecutor;
 pub(crate) use read::ReadExecutor;

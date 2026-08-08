@@ -12,8 +12,7 @@ fn test_execution_roundtrip() -> Result<()> {
 
     // 2. InsertOne
     let doc1 = doc! { "name": "doc1", "value": 1 };
-    let result_doc = insert_one(&executor, collection_id, &doc1)?;
-    let inserted_id1 = result_doc.get("inserted_id").unwrap().clone();
+    let inserted_id1 = inserted_id(insert_one(&executor, collection_id, &doc1)?);
 
     // 3. PointSearch for the inserted doc
     let mut params = Parameters::new();
@@ -36,10 +35,7 @@ fn test_execution_roundtrip() -> Result<()> {
         documents: vec![doc2.to_vec()?, doc3.to_vec()?],
     };
 
-    let mut insert_many_result = executor.execute_direct(insert_many_plan, None)?;
-    let result_doc_many = insert_many_result.next().unwrap()?;
-    assert!(insert_many_result.next().is_none());
-    let inserted_ids = result_doc_many.get_array("inserted_ids")?;
+    let inserted_ids = inserted_ids(executor.execute_direct(insert_many_plan, None)?);
     assert_eq!(inserted_ids.len(), 2);
     let inserted_id2 = inserted_ids[0].clone();
     let inserted_id3 = inserted_ids[1].clone();
@@ -96,10 +92,9 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     let doc_to_delete = doc! { "_id": 40i32, "name": "doc40_to_delete" };
 
     for doc in [&doc1, &doc2, &doc3, &doc_to_delete] {
-        let result_doc = insert_one(&executor, collection_id, doc)?;
-        assert_eq!(
-            doc.get("_id").unwrap(),
-            result_doc.get("inserted_id").unwrap()
+        assert_insert_one_result(
+            insert_one(&executor, collection_id, doc)?,
+            doc.get("_id").unwrap().clone(),
         );
     }
 

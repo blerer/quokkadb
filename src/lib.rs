@@ -9,13 +9,13 @@ mod query;
 mod storage;
 mod util;
 
-use crate::collection::{
-    Collection, CreateCollectionOptions, CreateIndexOptions, IdCreationStrategy,
-};
+use crate::collection::CreateIndexOptions;
+use crate::collection::{Collection, CreateCollectionOptions, IdCreationStrategy};
 use crate::error::Error;
 use crate::obs::logger::{LogLevel, LoggerAndTracer, NoOpLogger};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
+use crate::query::execution::WriteResult;
 use crate::query::optimizer::optimizer::Optimizer;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::{IndexKeySpec, Parameters};
@@ -94,15 +94,9 @@ impl QuokkaDB {
         Ok(())
     }
 
-    /// Creates a new collection with the given name and options.
-    /// Returns an error if a collection with the same name already exists.
-    pub fn create_collection_with_options(
-        &self,
-        name: &str,
-        options: CreateCollectionOptions,
-    ) -> error::Result<()> {
-        self.db_impl.create_collection(name, options)?;
-        Ok(())
+    /// Creates a collection builder for a new collection with the given name.
+    pub fn create_collection_with(&self, name: &str) -> CreateCollection<'_> {
+        CreateCollection::new(self, name)
     }
 
     /// Returns typed metadata for all collections in the database.
@@ -117,6 +111,36 @@ impl QuokkaDB {
                 id_creation_strategy: c.options.id_creation_strategy.clone().into(),
             })
             .collect()
+    }
+}
+
+pub struct CreateCollection<'a> {
+    db: &'a QuokkaDB,
+    name: String,
+    options: CreateCollectionOptions,
+}
+
+impl<'a> CreateCollection<'a> {
+    fn new(db: &'a QuokkaDB, name: &str) -> Self {
+        Self {
+            db,
+            name: name.to_string(),
+            options: CreateCollectionOptions::default(),
+        }
+    }
+
+    /// Sets the ID creation strategy for the collection.
+    pub fn id_creation_strategy(mut self, strategy: IdCreationStrategy) -> Self {
+        self.options.id_creation_strategy = strategy;
+        self
+    }
+
+    /// Executes the collection creation operation.
+    pub fn execute(self) -> error::Result<()> {
+        self.db
+            .db_impl
+            .create_collection(&self.name, self.options)?;
+        Ok(())
     }
 }
 
@@ -182,7 +206,7 @@ impl DbImpl {
         Ok(count as u64)
     }
 
-    pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<Document> {
+    pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<WriteResult> {
         let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne {
                 collection,
@@ -248,10 +272,7 @@ impl DbImpl {
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
 
-        self.executor
-            .execute_direct(physical_plan, parameters)?
-            .next()
-            .unwrap()
+        self.executor.execute_direct(physical_plan, parameters)
     }
 
     pub fn execute_query(

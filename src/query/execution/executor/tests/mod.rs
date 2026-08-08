@@ -79,17 +79,57 @@ fn write_batch(operations: Vec<Operation>) -> WriteBatch {
     WriteBatch::new(operations, CountStats::default())
 }
 
-fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<Document> {
-    let mut result = executor.execute_direct(
+fn assert_insert_one_result(result: WriteResult, inserted_id: impl Into<Bson>) {
+    assert_eq!(
+        result,
+        WriteResult::InsertOne {
+            inserted_id: inserted_id.into(),
+        }
+    );
+}
+
+fn inserted_id(result: WriteResult) -> Bson {
+    match result {
+        WriteResult::InsertOne { inserted_id } => inserted_id,
+        other => panic!("expected InsertOne write result, got {other:?}"),
+    }
+}
+
+fn inserted_ids(result: WriteResult) -> Vec<Bson> {
+    match result {
+        WriteResult::InsertMany { inserted_ids } => inserted_ids,
+        other => panic!("expected InsertMany write result, got {other:?}"),
+    }
+}
+
+fn assert_update_result(
+    result: WriteResult,
+    matched_count: u64,
+    modified_count: u64,
+    upserted_id: Option<impl Into<Bson>>,
+) {
+    assert_eq!(
+        result,
+        WriteResult::Update {
+            matched_count,
+            modified_count,
+            upserted_id: upserted_id.map(Into::into),
+        }
+    );
+}
+
+fn assert_delete_result(result: WriteResult, deleted_count: u64) {
+    assert_eq!(result, WriteResult::Delete { deleted_count });
+}
+
+fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
+    executor.execute_direct(
         PhysicalPlan::InsertOne {
             collection: collection_id,
             document: doc.to_vec()?,
         },
         None,
-    )?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    )
 }
 
 fn insert_docs<'a>(
@@ -107,8 +147,8 @@ fn insert_many(
     executor: &QueryExecutor,
     collection_id: u32,
     docs: &[Document],
-) -> Result<Document> {
-    let mut result = executor.execute_direct(
+) -> Result<WriteResult> {
+    executor.execute_direct(
         PhysicalPlan::InsertMany {
             collection: collection_id,
             documents: docs
@@ -117,10 +157,7 @@ fn insert_many(
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         },
         None,
-    )?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    )
 }
 
 fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
@@ -165,7 +202,7 @@ fn execute_update_one(
     collection_id: u32,
     id: i32,
     value: &str,
-) -> Result<Document> {
+) -> Result<WriteResult> {
     let mut params = Parameters::new();
     let query_plan = point_search_query(collection_id, &mut params, id);
     let update_expr = update([set([field_name("value")], value)]);
@@ -176,10 +213,7 @@ fn execute_update_one(
         upsert: false,
     };
 
-    let mut result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    executor.execute_direct(update_plan, Some(params))
 }
 
 fn execute_update_one_with_expr(
@@ -187,7 +221,7 @@ fn execute_update_one_with_expr(
     collection_id: u32,
     id: i32,
     update_expr: UpdateExpr,
-) -> Result<Document> {
+) -> Result<WriteResult> {
     let mut params = Parameters::new();
     let query_plan = point_search_query(collection_id, &mut params, id);
     let update_plan = PhysicalPlan::UpdateOne {
@@ -197,13 +231,14 @@ fn execute_update_one_with_expr(
         upsert: false,
     };
 
-    let mut result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    executor.execute_direct(update_plan, Some(params))
 }
 
-fn execute_delete_one(executor: &QueryExecutor, collection_id: u32, id: i32) -> Result<Document> {
+fn execute_delete_one(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    id: i32,
+) -> Result<WriteResult> {
     let mut params = Parameters::new();
     let query_plan = point_search_query(collection_id, &mut params, id);
     let delete_plan = PhysicalPlan::DeleteOne {
@@ -211,10 +246,7 @@ fn execute_delete_one(executor: &QueryExecutor, collection_id: u32, id: i32) -> 
         query: query_plan,
     };
 
-    let mut result = executor.execute_direct(delete_plan, Some(params))?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    executor.execute_direct(delete_plan, Some(params))
 }
 
 fn spawn_paused_update_one(
@@ -222,7 +254,7 @@ fn spawn_paused_update_one(
     collection_id: u32,
     id: i32,
     value: &'static str,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || execute_update_one(executor.as_ref(), collection_id, id, value))
 }
 
@@ -230,7 +262,7 @@ fn spawn_paused_delete_one(
     executor: Arc<QueryExecutor>,
     collection_id: u32,
     id: i32,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || execute_delete_one(executor.as_ref(), collection_id, id))
 }
 
@@ -239,7 +271,7 @@ fn spawn_paused_update_one_with_expr(
     collection_id: u32,
     id: i32,
     update_expr: UpdateExpr,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
         execute_update_one_with_expr(executor.as_ref(), collection_id, id, update_expr)
     })
@@ -251,7 +283,7 @@ fn execute_update_one_with_expr_and_upsert(
     id: i32,
     update_expr: UpdateExpr,
     upsert: bool,
-) -> Result<Document> {
+) -> Result<WriteResult> {
     let mut params = Parameters::new();
     let query_plan = point_search_query(collection_id, &mut params, id);
     let update_plan = PhysicalPlan::UpdateOne {
@@ -261,10 +293,7 @@ fn execute_update_one_with_expr_and_upsert(
         upsert,
     };
 
-    let mut result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    executor.execute_direct(update_plan, Some(params))
 }
 
 fn execute_update_many(
@@ -273,7 +302,7 @@ fn execute_update_many(
     query: Arc<PhysicalPlan>,
     update_expr: UpdateExpr,
     upsert: bool,
-) -> Result<Document> {
+) -> Result<WriteResult> {
     let params = Parameters::new();
     let update_plan = PhysicalPlan::UpdateMany {
         collection: collection_id,
@@ -282,10 +311,7 @@ fn execute_update_many(
         upsert,
     };
 
-    let mut result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.next().unwrap()?;
-    assert!(result.next().is_none());
-    Ok(result_doc)
+    executor.execute_direct(update_plan, Some(params))
 }
 
 fn spawn_paused_update_many(
@@ -294,7 +320,7 @@ fn spawn_paused_update_many(
     query: Arc<PhysicalPlan>,
     update_expr: UpdateExpr,
     upsert: bool,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
         execute_update_many(executor.as_ref(), collection_id, query, update_expr, upsert)
     })
@@ -304,7 +330,7 @@ fn spawn_paused_insert_one(
     executor: Arc<QueryExecutor>,
     collection_id: u32,
     doc: Document,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || insert_one(executor.as_ref(), collection_id, &doc))
 }
 
@@ -314,7 +340,7 @@ fn spawn_paused_update_one_with_expr_and_upsert(
     id: i32,
     update_expr: UpdateExpr,
     upsert: bool,
-) -> JoinHandle<Result<Document>> {
+) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
         execute_update_one_with_expr_and_upsert(
             executor.as_ref(),

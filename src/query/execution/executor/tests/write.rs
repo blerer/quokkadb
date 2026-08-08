@@ -106,9 +106,7 @@ fn test_update_one_succeeds_on_retry() -> Result<()> {
 
     // The executor will attempt the update, fail, retry, and then succeed.
     let result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-    assert_eq!(result_doc.get_i32("matched_count")?, 1);
-    assert_eq!(result_doc.get_i32("modified_count")?, 1);
+    assert_update_result(result, 1, 1, Option::<Bson>::None);
 
     // 4. Assert final state
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
@@ -184,12 +182,12 @@ fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
 
     let delete_executor = QueryExecutor::new(storage_engine.clone());
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     hook.release();
 
     let update_doc = update_handle.join().unwrap()?;
-    assert_eq!(update_doc, doc! { "matched_count": 0, "modified_count": 0 });
+    assert_update_result(update_doc, 0, 0, Option::<Bson>::None);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -224,8 +222,7 @@ fn test_delete_one_deletes_matching_document() -> Result<()> {
     };
 
     let result = executor.execute_direct(delete_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-    assert_eq!(result_doc.get_i32("deleted_count")?, 1);
+    assert_delete_result(result, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -257,8 +254,7 @@ fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
     };
 
     let result = executor.execute_direct(delete_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-    assert_eq!(result_doc.get_i32("deleted_count")?, 0);
+    assert_delete_result(result, 0);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc.get_str("value")?, "initial");
@@ -293,8 +289,7 @@ fn test_delete_one_succeeds_on_retry() -> Result<()> {
     };
 
     let result = executor.execute_direct(delete_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-    assert_eq!(result_doc.get_i32("deleted_count")?, 1);
+    assert_delete_result(result, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -364,7 +359,7 @@ fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
 
     let update_executor = QueryExecutor::new(storage_engine.clone());
     let update_doc = execute_update_one(&update_executor, collection_id, 1, "updated")?;
-    assert_eq!(update_doc, doc! { "matched_count": 1, "modified_count": 1 });
+    assert_update_result(update_doc, 1, 1, Option::<Bson>::None);
 
     let updated_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(updated_doc, doc! { "_id": 1, "value": "updated" });
@@ -372,7 +367,7 @@ fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
     hook.release();
 
     let delete_doc = delete_handle.join().unwrap()?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -405,12 +400,12 @@ fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
 
     let second_delete_executor = QueryExecutor::new(storage_engine.clone());
     let second_delete_doc = execute_delete_one(&second_delete_executor, collection_id, 1)?;
-    assert_eq!(second_delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(second_delete_doc, 1);
 
     hook.release();
 
     let delete_doc = delete_handle.join().unwrap()?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 0 });
+    assert_delete_result(delete_doc, 0);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -444,10 +439,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
 
     let concurrent_executor = QueryExecutor::new(storage_engine.clone());
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "concurrent")?;
-    assert_eq!(
-        concurrent_doc,
-        doc! { "matched_count": 1, "modified_count": 1 }
-    );
+    assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
@@ -455,7 +447,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
     hook.release();
 
     let paused_doc = paused_update_handle.join().unwrap()?;
-    assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+    assert_update_result(paused_doc, 1, 1, Option::<Bson>::None);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
@@ -490,10 +482,7 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
     let concurrent_expr = update([set([field_name("concurrent_field")], "concurrent")]);
     let concurrent_doc =
         execute_update_one_with_expr(&concurrent_executor, collection_id, 1, concurrent_expr)?;
-    assert_eq!(
-        concurrent_doc,
-        doc! { "matched_count": 1, "modified_count": 1 }
-    );
+    assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(
@@ -508,7 +497,7 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
     hook.release();
 
     let paused_doc = paused_update_handle.join().unwrap()?;
-    assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+    assert_update_result(paused_doc, 1, 1, Option::<Bson>::None);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(
@@ -557,7 +546,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
 
     let delete_executor = QueryExecutor::new(storage_engine.clone());
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     hook.release();
 
@@ -610,10 +599,7 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
 
     let concurrent_executor = QueryExecutor::new(storage_engine.clone());
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "changed")?;
-    assert_eq!(
-        concurrent_doc,
-        doc! { "matched_count": 1, "modified_count": 1 }
-    );
+    assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
     let mid_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc1, doc! { "_id": 1, "value": "changed" });
@@ -665,7 +651,7 @@ fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<
         collection_id,
         &doc! { "_id": 1, "value": "concurrent" },
     )?;
-    assert_eq!(concurrent_doc, doc! { "inserted_id": 1 });
+    assert_insert_one_result(concurrent_doc, 1);
 
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
@@ -701,10 +687,10 @@ fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
         collection_id,
         &doc! { "_id": 1, "value": "initial" },
     )?;
-    assert_eq!(inserted_doc, doc! { "inserted_id": 1 });
+    assert_insert_one_result(inserted_doc, 1);
 
     let delete_doc = execute_delete_one(&executor, collection_id, 1)?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
     let mut verify_result = executor.execute_cached(verify_plan, &verify_params)?;
@@ -715,7 +701,7 @@ fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
         collection_id,
         &doc! { "_id": 1, "value": "replacement" },
     )?;
-    assert_eq!(reinserted_doc, doc! { "inserted_id": 1 });
+    assert_insert_one_result(reinserted_doc, 1);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
@@ -738,10 +724,10 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
         collection_id,
         &doc! { "_id": 1, "value": "initial" },
     )?;
-    assert_eq!(inserted_doc, doc! { "inserted_id": 1 });
+    assert_insert_one_result(inserted_doc, 1);
 
     let delete_doc = execute_delete_one(&executor, collection_id, 1)?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -753,7 +739,12 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
         doc! { "_id": 2, "value": "second" },
     ];
     let reinserted_doc = insert_many(&executor, collection_id, &docs)?;
-    assert_eq!(reinserted_doc, doc! { "inserted_ids": [1, 2] });
+    assert_eq!(
+        reinserted_doc,
+        WriteResult::InsertMany {
+            inserted_ids: vec![Bson::Int32(1), Bson::Int32(2)],
+        }
+    );
 
     let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc1, doc! { "_id": 1, "value": "replacement" });
@@ -802,7 +793,7 @@ fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending()
     hook.release();
 
     let delete_doc = delete_handle.join().unwrap()?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
@@ -855,7 +846,7 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     hook.release();
 
     let delete_doc = delete_handle.join().unwrap()?;
-    assert_eq!(delete_doc, doc! { "deleted_count": 1 });
+    assert_delete_result(delete_doc, 1);
 
     let mut verify_params = Parameters::new();
     let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);

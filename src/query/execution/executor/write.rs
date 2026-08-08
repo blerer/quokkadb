@@ -1,5 +1,5 @@
 use super::read::ReadExecutor;
-use super::QueryOutput;
+use super::WriteResult;
 #[cfg(test)]
 use super::{ExecutorFailpoint, ExecutorTestHook};
 use crate::error::Error;
@@ -19,7 +19,7 @@ use crate::storage::storage_engine::StorageError;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::{doc, serialize_to_vec, Bson, Document, RawDocument};
+use bson::{serialize_to_vec, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -57,7 +57,7 @@ impl WriteExecutor {
         &self,
         plan: PhysicalPlan,
         parameters: Option<Parameters>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         match plan {
             PhysicalPlan::InsertMany {
                 collection,
@@ -173,7 +173,7 @@ impl WriteExecutor {
         update: &UpdateExpr,
         upsert: bool,
         parameters: &Parameters,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
         let mut iter = self.read_executor.execute_cached_at_snapshot(
             query.clone(),
@@ -239,8 +239,11 @@ impl WriteExecutor {
                 user_key,
             });
         } else {
-            let result = doc! { "matched_count": matched_count, "modified_count": 0 };
-            return Ok(Box::new(std::iter::once(Ok(result))));
+            return Ok(WriteResult::Update {
+                matched_count,
+                modified_count: 0,
+                upserted_id: None,
+            });
         }
 
         let batch = WriteBatch::new_with_preconditions(
@@ -252,12 +255,11 @@ impl WriteExecutor {
         self.invoke_test_hook(ExecutorFailpoint::UpdateManyBeforeCommit);
         self.storage_engine.write(batch)?;
 
-        let result = if let Some(id) = upserted_id {
-            doc! { "matched_count": matched_count, "modified_count": modified_count, "upserted_id": id }
-        } else {
-            doc! { "matched_count": matched_count, "modified_count": modified_count }
-        };
-        Ok(Box::new(std::iter::once(Ok(result))))
+        Ok(WriteResult::Update {
+            matched_count,
+            modified_count,
+            upserted_id,
+        })
     }
 
     pub(super) fn perform_update_one(
@@ -267,7 +269,7 @@ impl WriteExecutor {
         update: &UpdateExpr,
         upsert: bool,
         parameters: &Parameters,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         let start_time = Instant::now();
         let mut attempt = 0;
 
@@ -279,7 +281,7 @@ impl WriteExecutor {
                 Some(snapshot),
             )?;
 
-            let result_doc = if let Some(doc_result) = iter.next() {
+            let result = if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
                 let updater = updates::to_updater(update, false)?;
                 let new_doc = updater(old_doc.clone())?;
@@ -297,7 +299,11 @@ impl WriteExecutor {
                     new_doc.clone(),
                     new_doc_bytes,
                 ) {
-                    Ok(_) => doc! { "matched_count": 1, "modified_count": 1 },
+                    Ok(_) => WriteResult::Update {
+                        matched_count: 1,
+                        modified_count: 1,
+                        upserted_id: None,
+                    },
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
@@ -318,19 +324,25 @@ impl WriteExecutor {
                     new_doc.clone(),
                     new_doc_bytes,
                 ) {
-                    Ok(_) => {
-                        doc! { "matched_count": 0, "modified_count": 0, "upserted_id": upserted_id }
-                    }
+                    Ok(_) => WriteResult::Update {
+                        matched_count: 0,
+                        modified_count: 0,
+                        upserted_id: Some(upserted_id),
+                    },
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
                     }
                 }
             } else {
-                doc! { "matched_count": 0, "modified_count": 0 }
+                WriteResult::Update {
+                    matched_count: 0,
+                    modified_count: 0,
+                    upserted_id: None,
+                }
             };
 
-            return Ok(Box::new(std::iter::once(Ok(result_doc))));
+            return Ok(result);
         }
     }
 
@@ -339,7 +351,7 @@ impl WriteExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         let start_time = Instant::now();
         let mut attempt = 0;
 
@@ -351,24 +363,24 @@ impl WriteExecutor {
                 Some(snapshot),
             )?;
 
-            let result_doc = if let Some(doc_result) = iter.next() {
+            let result = if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
                 let user_key = old_doc.get("_id").unwrap().try_into_key()?;
 
                 #[cfg(test)]
                 self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
                 match self.delete_document(collection, snapshot, user_key, &old_doc) {
-                    Ok(_) => doc! { "deleted_count": 1 },
+                    Ok(_) => WriteResult::Delete { deleted_count: 1 },
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
                         continue;
                     }
                 }
             } else {
-                doc! { "deleted_count": 0 }
+                WriteResult::Delete { deleted_count: 0 }
             };
 
-            return Ok(Box::new(std::iter::once(Ok(result_doc))));
+            return Ok(result);
         }
     }
 
@@ -376,7 +388,7 @@ impl WriteExecutor {
         &self,
         collection: u32,
         document: Vec<u8>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         let mut doc = document;
         let id_strategy = self.get_id_creation_strategy(collection);
         let id = self.ensure_id(&mut doc, &id_strategy)?;
@@ -424,18 +436,18 @@ impl WriteExecutor {
             _ => e.into(),
         })?;
 
-        Ok(Box::new(std::iter::once(Ok(doc! { "inserted_id": id }))))
+        Ok(WriteResult::InsertOne { inserted_id: id })
     }
 
     pub(super) fn perform_insert_many(
         &self,
         collection: u32,
         documents: Vec<Vec<u8>>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         if documents.is_empty() {
-            return Ok(Box::new(std::iter::once(Ok(
-                doc! { "inserted_ids": Bson::Array(vec![]) },
-            ))));
+            return Ok(WriteResult::InsertMany {
+                inserted_ids: Vec::new(),
+            });
         }
 
         let id_strategy = self.get_id_creation_strategy(collection);
@@ -535,9 +547,7 @@ impl WriteExecutor {
                 _ => Err(e.into()),
             }
         } else {
-            let result =
-                doc! { "inserted_ids": ids.into_iter().map(Bson::from).collect::<Vec<_>>() };
-            Ok(Box::new(std::iter::once(Ok(result))))
+            Ok(WriteResult::InsertMany { inserted_ids: ids })
         }
     }
 

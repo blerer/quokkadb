@@ -1,7 +1,7 @@
 use crate::error::Result;
 #[cfg(test)]
 use crate::query::execution::executor::ExecutorTestHook;
-use crate::query::execution::executor::{QueryOutput, ReadExecutor, WriteExecutor};
+use crate::query::execution::executor::{QueryOutput, ReadExecutor, WriteExecutor, WriteResult};
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::Parameters;
 use crate::storage::storage_engine::StorageEngine;
@@ -66,7 +66,7 @@ impl QueryExecutor {
         &self,
         plan: PhysicalPlan,
         parameters: Option<Parameters>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<WriteResult> {
         self.write_executor.execute_direct(plan, parameters)
     }
 

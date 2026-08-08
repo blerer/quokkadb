@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::parser;
 use crate::storage::catalog::{
@@ -78,9 +79,27 @@ pub struct InsertOneResult {
     pub inserted_id: Bson,
 }
 
+impl InsertOneResult {
+    fn from_write_result(result: WriteResult) -> Self {
+        match result {
+            WriteResult::InsertOne { inserted_id } => Self { inserted_id },
+            other => panic!("expected InsertOne write result, got {other:?}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertManyResult {
     pub inserted_ids: Vec<Bson>,
+}
+
+impl InsertManyResult {
+    fn from_write_result(result: WriteResult) -> Self {
+        match result {
+            WriteResult::InsertMany { inserted_ids } => Self { inserted_ids },
+            other => panic!("expected InsertMany write result, got {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,9 +109,35 @@ pub struct UpdateResult {
     pub upserted_id: Option<Bson>,
 }
 
+impl UpdateResult {
+    fn from_write_result(result: WriteResult) -> Self {
+        match result {
+            WriteResult::Update {
+                matched_count,
+                modified_count,
+                upserted_id,
+            } => Self {
+                matched_count,
+                modified_count,
+                upserted_id,
+            },
+            other => panic!("expected Update write result, got {other:?}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteResult {
     pub deleted_count: u64,
+}
+
+impl DeleteResult {
+    fn from_write_result(result: WriteResult) -> Self {
+        match result {
+            WriteResult::Delete { deleted_count } => Self { deleted_count },
+            other => panic!("expected Delete write result, got {other:?}"),
+        }
+    }
 }
 
 impl Collection {
@@ -129,75 +174,20 @@ impl Collection {
         }
     }
 
-    fn extract_u64_field(result: &Document, field: &str) -> Result<u64> {
-        let value = result.get(field).ok_or_else(|| {
-            Error::UnexpectedError(format!(
-                "Write result did not contain expected field '{}'",
-                field
-            ))
-        })?;
-
-        match value {
-            Bson::Int32(value) if *value >= 0 => Ok(*value as u64),
-            Bson::Int64(value) if *value >= 0 => Ok(*value as u64),
-            _ => Err(Error::UnexpectedError(format!(
-                "Write result field '{}' had unexpected value {:?}",
-                field, value
-            ))),
-        }
-    }
-
-    fn parse_insert_one_result(result: Document) -> Result<InsertOneResult> {
-        let inserted_id = result.get("inserted_id").cloned().ok_or_else(|| {
-            Error::UnexpectedError(
-                "InsertOne result did not contain expected field 'inserted_id'".to_string(),
-            )
-        })?;
-
-        Ok(InsertOneResult { inserted_id })
-    }
-
-    fn parse_insert_many_result(result: Document) -> Result<InsertManyResult> {
-        let inserted_ids = result
-            .get_array("inserted_ids")
-            .map_err(|_| {
-                Error::UnexpectedError(
-                    "InsertMany result did not contain expected field 'inserted_ids'".to_string(),
-                )
-            })?
-            .to_vec();
-
-        Ok(InsertManyResult { inserted_ids })
-    }
-
-    fn parse_update_result(result: Document) -> Result<UpdateResult> {
-        let matched_count = Self::extract_u64_field(&result, "matched_count")?;
-        let modified_count = Self::extract_u64_field(&result, "modified_count")?;
-        let upserted_id = result.get("upserted_id").cloned();
-
-        Ok(UpdateResult {
-            matched_count,
-            modified_count,
-            upserted_id,
-        })
-    }
-
-    fn parse_delete_result(result: Document) -> Result<DeleteResult> {
-        let deleted_count = Self::extract_u64_field(&result, "deleted_count")?;
-
-        Ok(DeleteResult { deleted_count })
-    }
-
-    /// Creates an index on the collection with the specified keys and options.
+    /// Creates an index on the collection with the specified keys.
     /// # Arguments
     /// * `keys` - The keys for the index, specified as a BSON document.
-    /// * `options` - Options for creating the index, such as the index name.
     /// Returns a `Result` containing the name of the created index or an error.
-    pub fn create_index_with_options(
-        &self,
-        keys: Document,
-        options: CreateIndexOptions,
-    ) -> Result<String> {
+    pub fn create_index(&self, keys: Document) -> Result<String> {
+        self.execute_create_index(keys, CreateIndexOptions::default())
+    }
+
+    /// Creates an index builder for the collection with the specified keys.
+    pub fn create_index_with(&self, keys: Document) -> CreateIndex<'_> {
+        CreateIndex::new(self, keys)
+    }
+
+    fn execute_create_index(&self, keys: Document, options: CreateIndexOptions) -> Result<String> {
         let collection_id = self.collection_id_for_write()?;
         let spec = parser::parse_index_keys(&keys)?;
         self.db_impl.create_index(collection_id, spec, options)
@@ -283,7 +273,9 @@ impl Collection {
             document: serialize_to_vec(&document)?,
         };
 
-        Self::parse_insert_one_result(self.db_impl.execute_write(plan)?)
+        Ok(InsertOneResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
     }
 
     /// Inserts multiple documents into the collection.
@@ -306,16 +298,40 @@ impl Collection {
             documents: serialized,
         };
 
-        Self::parse_insert_many_result(self.db_impl.execute_write(plan)?)
+        Ok(InsertManyResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
     }
 
     /// Updates a single document in the collection that matches the filter.
     /// # Arguments
     /// * `filter` - The filter document to match the document to update.
     /// * `update` - The update document specifying the modifications to apply.
-    /// * `options` - Options for the update operation.
     /// Returns a `Result` containing update metadata or an error.
-    pub fn update_one(
+    pub fn update_one(&self, filter: Document, update: Document) -> Result<UpdateResult> {
+        self.execute_update_one(filter, update, UpdateOptions::default())
+    }
+
+    /// Creates an update operation builder for updating a single matching document.
+    pub fn update_one_with(&self, filter: Document, update: Document) -> UpdateOne<'_> {
+        UpdateOne::new(self, filter, update)
+    }
+
+    /// Updates multiple documents in the collection that match the filter.
+    /// # Arguments
+    /// * `filter` - The filter document to match the documents to update.
+    /// * `update` - The update document specifying the modifications to apply.
+    /// Returns a `Result` containing update metadata or an error.
+    pub fn update_many(&self, filter: Document, update: Document) -> Result<UpdateResult> {
+        self.execute_update_many(filter, update, UpdateOptions::default())
+    }
+
+    /// Creates an update operation builder for updating all matching documents.
+    pub fn update_many_with(&self, filter: Document, update: Document) -> UpdateMany<'_> {
+        UpdateMany::new(self, filter, update)
+    }
+
+    fn execute_update_one(
         &self,
         filter: Document,
         update: Document,
@@ -336,16 +352,12 @@ impl Collection {
             upsert: options.upsert,
         };
 
-        Self::parse_update_result(self.db_impl.execute_write(plan)?)
+        Ok(UpdateResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
     }
 
-    /// Updates multiple documents in the collection that match the filter.
-    /// # Arguments
-    /// * `filter` - The filter document to match the documents to update.
-    /// * `update` - The update document specifying the modifications to apply.
-    /// * `options` - Options for the update operation.
-    /// Returns a `Result` containing update metadata or an error.
-    pub fn update_many(
+    fn execute_update_many(
         &self,
         filter: Document,
         update: Document,
@@ -366,7 +378,9 @@ impl Collection {
             upsert: options.upsert,
         };
 
-        Self::parse_update_result(self.db_impl.execute_write(plan)?)
+        Ok(UpdateResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
     }
 
     /// Deletes a single document in the collection that matches the filter.
@@ -394,7 +408,9 @@ impl Collection {
             query,
         };
 
-        Self::parse_delete_result(self.db_impl.execute_write(plan)?)
+        Ok(DeleteResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
     }
 
     /// Creates a query to find documents in the collection that match the filter.
@@ -411,55 +427,83 @@ impl Collection {
     }
 }
 
-/// Options for update operations.
 #[derive(Default)]
-pub struct UpdateOptions {
-    /// Optional array filters for updating elements in arrays.
-    pub array_filters: Option<Vec<Document>>,
-    /// Whether to perform an upsert if no documents match the query.
-    pub upsert: bool,
-}
-
-/// Builder for UpdateOptions.
-pub struct UpdateOptionsBuilder {
+struct UpdateOptions {
     array_filters: Option<Vec<Document>>,
     upsert: bool,
 }
 
-impl UpdateOptionsBuilder {
-    pub fn new() -> Self {
-        UpdateOptionsBuilder {
-            array_filters: None,
-            upsert: false,
+pub struct UpdateOne<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    update: Document,
+    options: UpdateOptions,
+}
+
+impl<'a> UpdateOne<'a> {
+    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            update,
+            options: UpdateOptions::default(),
         }
     }
 
     /// Sets the array filters for the update operation.
     /// These filters specify which elements in an array should be updated.
-    /// # Arguments
-    /// * `filters` - A vector of documents representing the array filters.
-    /// Returns the builder instance for chaining.
     pub fn array_filters(mut self, filters: Vec<Document>) -> Self {
-        self.array_filters = Some(filters);
+        self.options.array_filters = Some(filters);
         self
     }
 
     /// Sets whether to perform an upsert if no documents match the query.
-    /// # Arguments
-    /// * `upsert` - A boolean indicating whether to perform an upsert.
-    /// Returns the builder instance for chaining.
     pub fn upsert(mut self, upsert: bool) -> Self {
-        self.upsert = upsert;
+        self.options.upsert = upsert;
         self
     }
 
-    /// Builds the UpdateOptions instance.
-    /// Returns the constructed UpdateOptions.
-    pub fn build(self) -> UpdateOptions {
-        UpdateOptions {
-            array_filters: self.array_filters,
-            upsert: self.upsert,
+    /// Executes the update operation.
+    pub fn execute(self) -> Result<UpdateResult> {
+        self.collection
+            .execute_update_one(self.filter, self.update, self.options)
+    }
+}
+
+pub struct UpdateMany<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    update: Document,
+    options: UpdateOptions,
+}
+
+impl<'a> UpdateMany<'a> {
+    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            update,
+            options: UpdateOptions::default(),
         }
+    }
+
+    /// Sets the array filters for the update operation.
+    /// These filters specify which elements in an array should be updated.
+    pub fn array_filters(mut self, filters: Vec<Document>) -> Self {
+        self.options.array_filters = Some(filters);
+        self
+    }
+
+    /// Sets whether to perform an upsert if no documents match the query.
+    pub fn upsert(mut self, upsert: bool) -> Self {
+        self.options.upsert = upsert;
+        self
+    }
+
+    /// Executes the update operation.
+    pub fn execute(self) -> Result<UpdateResult> {
+        self.collection
+            .execute_update_many(self.filter, self.update, self.options)
     }
 }
 
@@ -610,16 +654,8 @@ impl From<InternalIdCreationStrategy> for IdCreationStrategy {
 
 /// Options for creating a collection.
 #[derive(Debug, Clone, Default)]
-pub struct CreateCollectionOptions {
-    /// Strategy for creating document `_id` fields.
-    pub id_creation_strategy: IdCreationStrategy,
-}
-
-impl CreateCollectionOptions {
-    /// Creates a new builder for `CreateCollectionOptions`.
-    pub fn builder() -> CreateCollectionOptionsBuilder {
-        CreateCollectionOptionsBuilder::new()
-    }
+pub(crate) struct CreateCollectionOptions {
+    pub(crate) id_creation_strategy: IdCreationStrategy,
 }
 
 impl From<CreateCollectionOptions> for InternalCollectionOptions {
@@ -630,51 +666,10 @@ impl From<CreateCollectionOptions> for InternalCollectionOptions {
     }
 }
 
-/// Builder for `CreateCollectionOptions`.
-pub struct CreateCollectionOptionsBuilder {
-    id_creation_strategy: IdCreationStrategy,
-}
-
-impl CreateCollectionOptionsBuilder {
-    /// Creates a new builder with default options.
-    pub fn new() -> Self {
-        Self {
-            id_creation_strategy: IdCreationStrategy::default(),
-        }
-    }
-
-    /// Sets the ID creation strategy for the collection.
-    pub fn id_creation_strategy(mut self, strategy: IdCreationStrategy) -> Self {
-        self.id_creation_strategy = strategy;
-        self
-    }
-
-    /// Builds the `CreateCollectionOptions`.
-    pub fn build(self) -> CreateCollectionOptions {
-        CreateCollectionOptions {
-            id_creation_strategy: self.id_creation_strategy,
-        }
-    }
-}
-
-impl Default for CreateCollectionOptionsBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Options for creating an index.
 #[derive(Debug, Clone, Default)]
-pub struct CreateIndexOptions {
-    /// The name of the index
-    pub name: Option<String>,
-}
-
-impl CreateIndexOptions {
-    /// Creates a new builder for `CreateIndexOptions`.
-    pub fn builder() -> CreateIndexOptionsBuilder {
-        CreateIndexOptionsBuilder::new()
-    }
+pub(crate) struct CreateIndexOptions {
+    name: Option<String>,
 }
 
 impl From<CreateIndexOptions> for IndexOptions {
@@ -683,32 +678,31 @@ impl From<CreateIndexOptions> for IndexOptions {
     }
 }
 
-/// Builder for `CreateIndexOptions`.
-pub struct CreateIndexOptionsBuilder {
-    name: Option<String>,
+pub struct CreateIndex<'a> {
+    collection: &'a Collection,
+    keys: Document,
+    options: CreateIndexOptions,
 }
 
-impl CreateIndexOptionsBuilder {
-    /// Creates a new builder with default options.
-    pub fn new() -> Self {
-        Self { name: None }
+impl<'a> CreateIndex<'a> {
+    fn new(collection: &'a Collection, keys: Document) -> Self {
+        Self {
+            collection,
+            keys,
+            options: CreateIndexOptions::default(),
+        }
     }
 
     /// Sets the name of the index.
     pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
+        self.options.name = Some(name.into());
         self
     }
 
-    /// Builds the `CreateIndexOptions`.
-    pub fn build(self) -> CreateIndexOptions {
-        CreateIndexOptions { name: self.name }
-    }
-}
-
-impl Default for CreateIndexOptionsBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Executes the index creation operation.
+    pub fn execute(self) -> Result<String> {
+        self.collection
+            .execute_create_index(self.keys, self.options)
     }
 }
 

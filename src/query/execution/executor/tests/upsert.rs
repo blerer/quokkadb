@@ -33,10 +33,7 @@ fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<(
         concurrent_expr,
         true,
     )?;
-    assert_eq!(
-        concurrent_doc,
-        doc! { "matched_count": 0, "modified_count": 0, "upserted_id": 1 }
-    );
+    assert_update_result(concurrent_doc, 0, 0, Some(1));
 
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
@@ -44,7 +41,7 @@ fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<(
     hook.release();
 
     let paused_doc = paused_handle.join().unwrap()?;
-    assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+    assert_update_result(paused_doc, 1, 1, Option::<Bson>::None);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
@@ -85,7 +82,7 @@ fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<(
         collection_id,
         &doc! { "_id": 1, "value": "inserted" },
     )?;
-    assert_eq!(insert_doc, doc! { "inserted_id": 1 });
+    assert_insert_one_result(insert_doc, 1);
 
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "inserted" });
@@ -93,7 +90,7 @@ fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<(
     hook.release();
 
     let paused_doc = paused_handle.join().unwrap()?;
-    assert_eq!(paused_doc, doc! { "matched_count": 1, "modified_count": 1 });
+    assert_update_result(paused_doc, 1, 1, Option::<Bson>::None);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc, doc! { "_id": 1, "value": "paused" });
@@ -126,11 +123,7 @@ fn test_update_one_upsert_inserts_when_no_match() -> Result<()> {
     };
 
     let result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-
-    assert_eq!(result_doc.get_i32("matched_count")?, 0);
-    assert_eq!(result_doc.get_i32("modified_count")?, 0);
-    assert_eq!(result_doc.get_i32("upserted_id")?, 1);
+    assert_update_result(result, 0, 0, Some(1));
 
     // 3. Verify the document was inserted
     let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
@@ -165,11 +158,7 @@ fn test_update_one_upsert_updates_when_match_exists() -> Result<()> {
     };
 
     let result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-
-    assert_eq!(result_doc.get_i32("matched_count")?, 1);
-    assert_eq!(result_doc.get_i32("modified_count")?, 1);
-    assert!(result_doc.get("upserted_id").is_none());
+    assert_update_result(result, 1, 1, Option::<Bson>::None);
 
     // 3. Verify the document was updated
     let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
@@ -204,11 +193,17 @@ fn test_update_many_upsert_inserts_when_no_match() -> Result<()> {
     };
 
     let result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-
-    assert_eq!(result_doc.get_i32("matched_count")?, 0);
-    assert_eq!(result_doc.get_i32("modified_count")?, 0);
-    assert!(result_doc.get("upserted_id").is_some());
+    match result {
+        WriteResult::Update {
+            matched_count,
+            modified_count,
+            upserted_id: Some(_),
+        } => {
+            assert_eq!(matched_count, 0);
+            assert_eq!(modified_count, 0);
+        }
+        other => panic!("expected Update write result with upserted_id, got {other:?}"),
+    }
 
     // 3. Verify document was created with equality condition from query
     let scan_plan = full_scan_plan(collection_id);
@@ -252,9 +247,7 @@ fn test_upsert_with_nested_equality_conditions() -> Result<()> {
     };
 
     let result = executor.execute_direct(update_plan, Some(params))?;
-    let result_doc = result.into_iter().next().unwrap()?;
-
-    assert_eq!(result_doc.get_i32("upserted_id")?, 42);
+    assert_update_result(result, 0, 0, Some(42));
 
     // 3. Verify the nested structure was created
     let doc = read_stored_doc(&storage_engine, collection_id, 42)?;

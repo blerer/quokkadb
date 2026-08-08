@@ -1,5 +1,5 @@
 use bson::doc;
-use quokkadb::collection::{CreateCollectionOptions, IdCreationStrategy, IndexDirection};
+use quokkadb::collection::{IdCreationStrategy, IndexDirection};
 use quokkadb::error::Error;
 use quokkadb::{CollectionInfo, QuokkaDB};
 use tempfile::tempdir;
@@ -38,10 +38,10 @@ fn test_create_collection_with_options() {
     let dir = tempdir().unwrap();
     let db = QuokkaDB::open(dir.path()).unwrap();
 
-    let options = CreateCollectionOptions::builder()
+    db.create_collection_with("users")
         .id_creation_strategy(IdCreationStrategy::Generated)
-        .build();
-    db.create_collection_with_options("users", options).unwrap();
+        .execute()
+        .unwrap();
 
     let collections = db.list_collections();
     assert_eq!(collections.len(), 1);
@@ -251,16 +251,11 @@ fn test_get_indexes_returns_active_indexes() {
     db.create_collection("users").unwrap();
     let collection = db.collection("users");
 
-    let default_name = collection
-        .create_index_with_options(doc! { "name": 1 }, Default::default())
-        .unwrap();
+    let default_name = collection.create_index(doc! { "name": 1 }).unwrap();
     let custom_name = collection
-        .create_index_with_options(
-            doc! { "age": -1, "email": 1 },
-            quokkadb::collection::CreateIndexOptions::builder()
-                .name("by_age_email")
-                .build(),
-        )
+        .create_index_with(doc! { "age": -1, "email": 1 })
+        .name("by_age_email")
+        .execute()
         .unwrap();
 
     let indexes = collection.list_indexes().unwrap();
@@ -321,9 +316,7 @@ fn test_drop_index_removes_existing_index() {
     db.create_collection("users").unwrap();
     let collection = db.collection("users");
 
-    let index_name = collection
-        .create_index_with_options(doc! { "name": 1 }, Default::default())
-        .unwrap();
+    let index_name = collection.create_index(doc! { "name": 1 }).unwrap();
 
     assert_eq!(collection.list_indexes().unwrap().len(), 1);
     collection.drop_index(&index_name).unwrap();

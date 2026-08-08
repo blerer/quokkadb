@@ -1,5 +1,5 @@
 use bson::{doc, Bson};
-use quokkadb::collection::{CreateCollectionOptions, IdCreationStrategy};
+use quokkadb::collection::IdCreationStrategy;
 use quokkadb::{error::Error, QuokkaDB};
 use tempfile::tempdir;
 
@@ -103,13 +103,10 @@ fn mixed_strategy_insert_many_generates_ids_when_missing() {
 fn generated_strategy_creates_id_automatically() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "generated_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Generated)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("generated_ids")
+        .id_creation_strategy(IdCreationStrategy::Generated)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("generated_ids");
 
@@ -137,13 +134,10 @@ fn generated_strategy_creates_id_automatically() {
 fn generated_strategy_rejects_user_provided_id() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "generated_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Generated)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("generated_ids")
+        .id_creation_strategy(IdCreationStrategy::Generated)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("generated_ids");
 
@@ -164,13 +158,10 @@ fn generated_strategy_rejects_user_provided_id() {
 fn generated_strategy_insert_many_rejects_any_user_provided_id() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "generated_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Generated)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("generated_ids")
+        .id_creation_strategy(IdCreationStrategy::Generated)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("generated_ids");
 
@@ -199,13 +190,10 @@ fn generated_strategy_insert_many_rejects_any_user_provided_id() {
 fn manual_strategy_requires_user_provided_id() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 
@@ -226,13 +214,10 @@ fn manual_strategy_requires_user_provided_id() {
 fn manual_strategy_accepts_user_provided_id() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 
@@ -246,13 +231,10 @@ fn manual_strategy_accepts_user_provided_id() {
 fn manual_strategy_insert_many_rejects_missing_id() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 
@@ -276,13 +258,10 @@ fn manual_strategy_insert_many_rejects_missing_id() {
 fn manual_strategy_insert_many_succeeds_with_all_ids() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 
@@ -306,13 +285,10 @@ fn manual_strategy_insert_many_succeeds_with_all_ids() {
 fn test_insert_many_manual_id_succeeds_after_delete_same_key() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 
@@ -347,13 +323,10 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() {
 fn manual_strategy_detects_duplicate_ids() {
     let (_dir, db) = setup();
 
-    db.create_collection_with_options(
-        "manual_ids",
-        CreateCollectionOptions::builder()
-            .id_creation_strategy(IdCreationStrategy::Manual)
-            .build(),
-    )
-    .unwrap();
+    db.create_collection_with("manual_ids")
+        .id_creation_strategy(IdCreationStrategy::Manual)
+        .execute()
+        .unwrap();
 
     let collection = db.collection("manual_ids");
 

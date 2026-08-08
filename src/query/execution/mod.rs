@@ -8,6 +8,7 @@ mod projections;
 pub(crate) mod query_executor;
 pub(crate) mod sorts;
 mod updates;
+pub(crate) use executor::WriteResult;
 pub use query_executor::QueryExecutor;
 
 /// Inserts `value` at `path` inside `doc`, creating intermediate documents as needed.
