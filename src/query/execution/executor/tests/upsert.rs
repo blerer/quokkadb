@@ -134,6 +134,52 @@ fn test_update_one_upsert_inserts_when_no_match() -> Result<()> {
 }
 
 #[test]
+fn test_find_one_and_update_upsert_before_returns_none() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+    let update_expr = update([set([field_name("value")], "created")]);
+    let result = execute_find_one_and_update_with_expr_and_upsert(
+        &executor,
+        collection_id,
+        1,
+        update_expr,
+        true,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_update_result(result, None);
+
+    let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(doc, doc! { "_id": 1, "value": "created" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_update_upsert_after_returns_inserted_document() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+
+    let update_expr = update([set([field_name("value")], "created")]);
+    let result = execute_find_one_and_update_with_expr_and_upsert(
+        &executor,
+        collection_id,
+        1,
+        update_expr,
+        true,
+        ReturnDocument::After,
+    )?;
+    assert_find_one_and_update_result(result, Some(doc! { "_id": 1, "value": "created" }));
+
+    let doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(doc, doc! { "_id": 1, "value": "created" });
+
+    Ok(())
+}
+
+#[test]
 fn test_update_one_upsert_updates_when_match_exists() -> Result<()> {
     // 1. Setup
     let (storage_engine, _dir) = storage_engine()?;

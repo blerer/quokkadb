@@ -256,7 +256,8 @@ pub fn to_value_filter(
         Expr::Type { bson_type, negated } => {
             let type_spec = match bson_type.as_ref() {
                 Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-                _ => unreachable!("$type value must be a placeholder"),
+                Expr::Literal(val) => val.clone(),
+                _ => unreachable!("$type value must be a placeholder or literal"),
             };
             let negated = *negated;
             // Precompute the type filter function
@@ -282,7 +283,9 @@ pub fn to_value_filter(
                     Bson::Int64(i) => *i as usize,
                     _ => unreachable!("$size must be an integer"),
                 },
-                _ => unreachable!("$size value must be a placeholder"),
+                Expr::Literal(BsonValue(Bson::Int32(i))) => *i as usize,
+                Expr::Literal(BsonValue(Bson::Int64(i))) => *i as usize,
+                _ => unreachable!("$size value must be a placeholder or integer literal"),
             };
             let negated = *negated;
             Box::new(move |field_value| {
@@ -303,7 +306,8 @@ pub fn to_value_filter(
                     Bson::Array(arr) => arr.clone(),
                     _ => unreachable!("$all value must be an array placeholder"),
                 },
-                _ => unreachable!("$all value must be a placeholder"),
+                Expr::Literal(BsonValue(Bson::Array(arr))) => arr.clone(),
+                _ => unreachable!("$all value must be a placeholder or array literal"),
             };
 
             Box::new(move |field_value| {
@@ -352,7 +356,8 @@ fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool {
 fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) -> Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
         Expr::Placeholder(idx) => parameters.get(*idx).clone(),
-        _ => unreachable!("Interval bound must be a placeholder"),
+        Expr::Literal(val) => val.clone(),
+        _ => unreachable!("Interval bound must be a placeholder or literal"),
     };
     match bound {
         Bound::Included(expr) => Bound::Included(get_value(expr)),

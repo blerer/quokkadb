@@ -29,6 +29,13 @@ pub(crate) mod update;
 #[cfg(test)]
 mod update_fn;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReturnDocument {
+    #[default]
+    Before,
+    After,
+}
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Expr {
     /// Field reference

@@ -19,6 +19,9 @@ pub(crate) enum WriteResult {
         modified_count: u64,
         upserted_id: Option<Bson>,
     },
+    FindOneAndUpdate {
+        document: Option<Document>,
+    },
     Delete {
         deleted_count: u64,
     },

@@ -12,6 +12,8 @@ use bson::{serialize_to_vec, Bson, Document};
 use serde::Serialize;
 use std::sync::Arc;
 
+pub use crate::query::ReturnDocument;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum CollectionPolicy {
     #[default]
@@ -136,6 +138,15 @@ impl DeleteResult {
         match result {
             WriteResult::Delete { deleted_count } => Self { deleted_count },
             other => panic!("expected Delete write result, got {other:?}"),
+        }
+    }
+}
+
+impl Collection {
+    fn document_from_write_result(result: WriteResult) -> Option<Document> {
+        match result {
+            WriteResult::FindOneAndUpdate { document } => document,
+            other => panic!("expected FindOneAndUpdate write result, got {other:?}"),
         }
     }
 }
@@ -450,6 +461,59 @@ impl Collection {
     pub fn find_one_with(&self, filter: Document) -> FindOne<'_> {
         FindOne::new(self, filter)
     }
+
+    /// Finds a single document, updates it, and returns either the previous or updated document.
+    pub fn find_one_and_update(
+        &self,
+        filter: Document,
+        update: Document,
+    ) -> Result<Option<Document>> {
+        self.find_one_and_update_with(filter, update).execute()
+    }
+
+    /// Creates a find-one-and-update operation builder.
+    pub fn find_one_and_update_with(
+        &self,
+        filter: Document,
+        update: Document,
+    ) -> FindOneAndUpdate<'_> {
+        FindOneAndUpdate::new(self, filter, update)
+    }
+
+    fn execute_find_one_and_update(
+        &self,
+        filter: Document,
+        update: Document,
+        options: FindOneAndUpdateOptions,
+    ) -> Result<Option<Document>> {
+        let collection_id = self.collection_id_for_write()?;
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+        if let Some(sort) = &options.sort {
+            let sort = parser::parse_sort(sort)?;
+            builder = builder.sort(Arc::new(sort));
+        }
+        let query = builder.limit(None, Some(1)).build();
+        let update = parser::parse_update(&update, None)?;
+        let projection = match options.projection {
+            Some(projection) => Some(Arc::new(parser::parse_projection(&projection)?)),
+            None => None,
+        };
+
+        let plan = LogicalPlan::FindOneAndUpdate {
+            collection: collection_id,
+            query,
+            update,
+            projection,
+            upsert: options.upsert,
+            return_document: options.return_document,
+        };
+
+        Ok(Self::document_from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -462,6 +526,14 @@ struct UpdateOptions {
 #[derive(Default)]
 struct DeleteOptions {
     sort: Option<Document>,
+}
+
+#[derive(Default)]
+struct FindOneAndUpdateOptions {
+    projection: Option<Document>,
+    sort: Option<Document>,
+    upsert: bool,
+    return_document: ReturnDocument,
 }
 
 pub struct UpdateOne<'a> {
@@ -611,6 +683,54 @@ impl<'a> FindOne<'a> {
             query = query.sort(sort);
         }
         query.execute_one()
+    }
+}
+
+pub struct FindOneAndUpdate<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    update: Document,
+    options: FindOneAndUpdateOptions,
+}
+
+impl<'a> FindOneAndUpdate<'a> {
+    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            update,
+            options: FindOneAndUpdateOptions::default(),
+        }
+    }
+
+    /// Sets the projection for the returned document.
+    pub fn projection(mut self, projection: Document) -> Self {
+        self.options.projection = Some(projection);
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to update.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
+        self
+    }
+
+    /// Sets whether to perform an upsert if no documents match the query.
+    pub fn upsert(mut self, upsert: bool) -> Self {
+        self.options.upsert = upsert;
+        self
+    }
+
+    /// Sets whether to return the document before or after the update.
+    pub fn return_document(mut self, return_document: ReturnDocument) -> Self {
+        self.options.return_document = return_document;
+        self
+    }
+
+    /// Executes the operation.
+    pub fn execute(self) -> Result<Option<Document>> {
+        self.collection
+            .execute_find_one_and_update(self.filter, self.update, self.options)
     }
 }
 

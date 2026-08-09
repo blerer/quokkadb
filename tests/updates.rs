@@ -1,5 +1,5 @@
 use bson::{doc, Bson, Document};
-use quokkadb::collection::Collection;
+use quokkadb::collection::{Collection, ReturnDocument};
 use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
@@ -533,6 +533,125 @@ fn test_update_one_no_match_after_delete() {
     assert_eq!(result.upserted_id, None);
 
     assert!(find_one(&collection, doc! { "_id": 1 }).is_none());
+}
+
+#[test]
+fn test_find_one_and_update_returns_previous_document_by_default() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_update(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 25,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+        })
+    );
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 })
+            .unwrap()
+            .get_i32("qty")
+            .unwrap(),
+        30
+    );
+}
+
+#[test]
+fn test_find_one_and_update_returns_new_document_when_requested() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_update_with(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
+        .return_document(ReturnDocument::After)
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 30,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+        })
+    );
+}
+
+#[test]
+fn test_find_one_and_update_with_sort_and_projection() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_update_with(
+            doc! { "status": "A" },
+            doc! { "$set": { "selected": true } },
+        )
+        .sort(doc! { "qty": -1 })
+        .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
+        .return_document(ReturnDocument::After)
+        .execute()
+        .unwrap();
+
+    assert_eq!(result, Some(doc! { "item": "mat", "qty": 85 }));
+
+    let updated = find_one(&collection, doc! { "_id": 7 }).unwrap();
+    assert!(updated.get_bool("selected").unwrap());
+}
+
+#[test]
+fn test_find_one_and_update_upsert_before_returns_none() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_update_with(
+            doc! { "_id": 5000 },
+            doc! { "$set": { "item": "new_item", "qty": 10 } },
+        )
+        .upsert(true)
+        .execute()
+        .unwrap();
+
+    assert_eq!(result, None);
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 5000 }).unwrap(),
+        doc! { "_id": 5000, "item": "new_item", "qty": 10 }
+    );
+}
+
+#[test]
+fn test_find_one_and_update_upsert_after_returns_inserted_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_update_with(
+            doc! { "_id": 5001 },
+            doc! { "$set": { "item": "new_item", "qty": 10 } },
+        )
+        .upsert(true)
+        .return_document(ReturnDocument::After)
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! { "_id": 5001, "item": "new_item", "qty": 10 })
+    );
 }
 
 #[test]

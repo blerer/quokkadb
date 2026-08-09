@@ -5,10 +5,11 @@ use super::{ExecutorFailpoint, ExecutorTestHook};
 use crate::error::Error;
 use crate::error::Result;
 use crate::query::execution::indexes::Indexes;
+use crate::query::execution::projections;
 use crate::query::execution::updates;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::update::UpdateExpr;
-use crate::query::Parameters;
+use crate::query::{Parameters, Projection, ReturnDocument};
 use crate::storage::catalog::IdCreationStrategy;
 use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::internal_key::extract_operation_type;
@@ -84,6 +85,26 @@ impl WriteExecutor {
             } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateMany");
                 self.perform_update_many(collection, query, &update, upsert, &parameters)
+            }
+            PhysicalPlan::FindOneAndUpdate {
+                collection,
+                query,
+                update,
+                projection,
+                upsert,
+                return_document,
+            } => {
+                let parameters =
+                    parameters.expect("Parameters must be provided for FindOneAndUpdate");
+                self.perform_find_one_and_update(
+                    collection,
+                    query,
+                    &update,
+                    projection,
+                    upsert,
+                    return_document,
+                    &parameters,
+                )
             }
             PhysicalPlan::DeleteOne { collection, query } => {
                 let parameters = parameters.expect("Parameters must be provided for DeleteOne");
@@ -270,79 +291,63 @@ impl WriteExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let start_time = Instant::now();
-        let mut attempt = 0;
+        match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
+            SingleDocumentUpdateResult::Updated { .. } => Ok(WriteResult::Update {
+                matched_count: 1,
+                modified_count: 1,
+                upserted_id: None,
+            }),
+            SingleDocumentUpdateResult::Upserted { upserted_id, .. } => Ok(WriteResult::Update {
+                matched_count: 0,
+                modified_count: 0,
+                upserted_id: Some(upserted_id),
+            }),
+            SingleDocumentUpdateResult::NoMatch => Ok(WriteResult::Update {
+                matched_count: 0,
+                modified_count: 0,
+                upserted_id: None,
+            }),
+        }
+    }
 
-        loop {
-            let snapshot = self.storage_engine.last_visible_sequence();
-            let mut iter = self.read_executor.execute_cached_at_snapshot(
-                query.clone(),
-                parameters,
-                Some(snapshot),
-            )?;
-
-            let result = if let Some(doc_result) = iter.next() {
-                let old_doc = doc_result?;
-                let updater = updates::to_updater(update, false)?;
-                let new_doc = updater(old_doc.clone())?;
-
-                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
-
-                let new_doc_bytes = serialize_to_vec(&new_doc)?;
-                #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
-                match self.write_document(
-                    collection,
-                    snapshot,
-                    user_key,
-                    Some(old_doc.clone()),
-                    new_doc.clone(),
-                    new_doc_bytes,
-                ) {
-                    Ok(_) => WriteResult::Update {
-                        matched_count: 1,
-                        modified_count: 1,
-                        upserted_id: None,
-                    },
-                    Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
-                        continue;
-                    }
-                }
-            } else if upsert {
-                let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
-                let user_key = upserted_id.clone().try_into_key()?;
-
-                let new_doc_bytes = serialize_to_vec(&new_doc)?;
-                #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::UpdateOneUpsertAfterNoMatch);
-                match self.write_document(
-                    collection,
-                    snapshot,
-                    user_key,
-                    None,
-                    new_doc.clone(),
-                    new_doc_bytes,
-                ) {
-                    Ok(_) => WriteResult::Update {
-                        matched_count: 0,
-                        modified_count: 0,
-                        upserted_id: Some(upserted_id),
-                    },
-                    Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
-                        continue;
-                    }
-                }
-            } else {
-                WriteResult::Update {
-                    matched_count: 0,
-                    modified_count: 0,
-                    upserted_id: None,
-                }
-            };
-
-            return Ok(result);
+    pub(super) fn perform_find_one_and_update(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        update: &UpdateExpr,
+        projection: Option<Arc<Projection>>,
+        upsert: bool,
+        return_document: ReturnDocument,
+        parameters: &Parameters,
+    ) -> Result<WriteResult> {
+        match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
+            SingleDocumentUpdateResult::Updated { old_doc, new_doc } => {
+                let returned = match return_document {
+                    ReturnDocument::Before => old_doc,
+                    ReturnDocument::After => new_doc,
+                };
+                Ok(WriteResult::FindOneAndUpdate {
+                    document: Some(self.apply_return_projection(
+                        returned,
+                        projection.as_ref(),
+                        parameters,
+                    )?),
+                })
+            }
+            SingleDocumentUpdateResult::Upserted { new_doc, .. } => {
+                let document = match return_document {
+                    ReturnDocument::Before => None,
+                    ReturnDocument::After => Some(self.apply_return_projection(
+                        new_doc,
+                        projection.as_ref(),
+                        parameters,
+                    )?),
+                };
+                Ok(WriteResult::FindOneAndUpdate { document })
+            }
+            SingleDocumentUpdateResult::NoMatch => {
+                Ok(WriteResult::FindOneAndUpdate { document: None })
+            }
         }
     }
 
@@ -381,6 +386,96 @@ impl WriteExecutor {
             };
 
             return Ok(result);
+        }
+    }
+
+    fn apply_return_projection(
+        &self,
+        doc: Document,
+        projection: Option<&Arc<Projection>>,
+        parameters: &Parameters,
+    ) -> Result<Document> {
+        let Some(projection) = projection else {
+            return Ok(doc);
+        };
+        let projector = projections::to_projector(projection, parameters)?;
+        projector(doc)
+    }
+
+    fn perform_single_document_update(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        update: &UpdateExpr,
+        upsert: bool,
+        parameters: &Parameters,
+    ) -> Result<SingleDocumentUpdateResult> {
+        let start_time = Instant::now();
+        let mut attempt = 0;
+
+        loop {
+            let snapshot = self.storage_engine.last_visible_sequence();
+            let mut iter = self.read_executor.execute_cached_at_snapshot(
+                query.clone(),
+                parameters,
+                Some(snapshot),
+            )?;
+
+            if let Some(doc_result) = iter.next() {
+                let old_doc = doc_result?;
+                let updater = updates::to_updater(update, false)?;
+                let new_doc = updater(old_doc.clone())?;
+                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+                let new_doc_bytes = serialize_to_vec(&new_doc)?;
+
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
+                match self.write_document(
+                    collection,
+                    snapshot,
+                    user_key,
+                    Some(old_doc.clone()),
+                    new_doc.clone(),
+                    new_doc_bytes,
+                ) {
+                    Ok(_) => {
+                        return Ok(SingleDocumentUpdateResult::Updated { old_doc, new_doc });
+                    }
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        continue;
+                    }
+                }
+            }
+
+            if !upsert {
+                return Ok(SingleDocumentUpdateResult::NoMatch);
+            }
+
+            let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
+            let user_key = upserted_id.clone().try_into_key()?;
+            let new_doc_bytes = serialize_to_vec(&new_doc)?;
+
+            #[cfg(test)]
+            self.invoke_test_hook(ExecutorFailpoint::UpdateOneUpsertAfterNoMatch);
+            match self.write_document(
+                collection,
+                snapshot,
+                user_key,
+                None,
+                new_doc.clone(),
+                new_doc_bytes,
+            ) {
+                Ok(_) => {
+                    return Ok(SingleDocumentUpdateResult::Upserted {
+                        new_doc,
+                        upserted_id,
+                    });
+                }
+                Err(e) => {
+                    on_version_conflict(e, &start_time, &mut attempt)?;
+                }
+            }
         }
     }
 
@@ -628,6 +723,18 @@ impl WriteExecutor {
             test_hook.hit(point);
         }
     }
+}
+
+enum SingleDocumentUpdateResult {
+    Updated {
+        old_doc: Document,
+        new_doc: Document,
+    },
+    Upserted {
+        new_doc: Document,
+        upserted_id: Bson,
+    },
+    NoMatch,
 }
 
 /// Handles a storage write error inside a retry loop.

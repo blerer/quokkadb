@@ -3,7 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::query::tree_node::TreeNode;
 use crate::query::update::UpdateExpr;
-use crate::query::{Expr, Limit, Projection, ProjectionExpr, SortField};
+use crate::query::{Expr, Limit, Projection, ProjectionExpr, ReturnDocument, SortField};
 use crate::util::murmur_hash64::murmur_hash64a;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
@@ -36,6 +36,15 @@ pub enum LogicalPlan {
         query: Arc<LogicalPlan>, // Filter to match documents to update
         update: UpdateExpr,      // Update operations
         upsert: bool,            // Whether to perform an upsert if no documents match the query
+    },
+    /// Represents an update operation for a single document that returns a document image.
+    FindOneAndUpdate {
+        collection: u32,                     // Collection identifier
+        query: Arc<LogicalPlan>,             // Filter to match the document to update
+        update: UpdateExpr,                  // Update operations
+        projection: Option<Arc<Projection>>, // Optional projection for the returned document
+        upsert: bool, // Whether to perform an upsert if no documents match the query
+        return_document: ReturnDocument, // Whether to return the document before or after the update
     },
     /// Represents a delete operation for a single document. This is a terminal operator.
     DeleteOne {
@@ -83,6 +92,7 @@ impl TreeNode for LogicalPlan {
         match self {
             LogicalPlan::UpdateOne { query, .. } => vec![query.clone()],
             LogicalPlan::UpdateMany { query, .. } => vec![query.clone()],
+            LogicalPlan::FindOneAndUpdate { query, .. } => vec![query.clone()],
             LogicalPlan::DeleteOne { query, .. } => vec![query.clone()],
             LogicalPlan::Filter { input, .. } => vec![input.clone()],
             LogicalPlan::Projection { input, .. } => vec![input.clone()],
@@ -116,6 +126,21 @@ impl TreeNode for LogicalPlan {
                 query: Self::get_first(children),
                 update: update.clone(),
                 upsert: *upsert,
+            }),
+            LogicalPlan::FindOneAndUpdate {
+                collection,
+                update,
+                projection,
+                upsert,
+                return_document,
+                ..
+            } => Arc::new(LogicalPlan::FindOneAndUpdate {
+                collection: *collection,
+                query: Self::get_first(children),
+                update: update.clone(),
+                projection: projection.clone(),
+                upsert: *upsert,
+                return_document: *return_document,
             }),
             LogicalPlan::DeleteOne { collection, .. } => Arc::new(LogicalPlan::DeleteOne {
                 collection: *collection,
@@ -491,9 +516,12 @@ where
     })
 }
 
-fn transform_down_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc<Projection>
+pub(crate) fn transform_down_projection<F>(
+    projection: &Arc<Projection>,
+    function: &F,
+) -> Arc<Projection>
 where
-    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+    F: Fn(Arc<Expr>) -> Arc<Expr>,
 {
     let projection = Arc::new(match projection.as_ref() {
         Projection::Include(proj_exprs) => {
@@ -513,7 +541,7 @@ fn transform_down_proj_expr_filters<F>(
     proj_exprs: &Arc<ProjectionExpr>,
 ) -> Arc<ProjectionExpr>
 where
-    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+    F: Fn(Arc<Expr>) -> Arc<Expr>,
 {
     proj_exprs
         .clone()
@@ -525,7 +553,7 @@ fn transform_down_proj_elem_match_filter<F>(
     function: &F,
 ) -> Arc<ProjectionExpr>
 where
-    F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
+    F: Fn(Arc<Expr>) -> Arc<Expr>,
 {
     match proj_expr.as_ref() {
         ProjectionExpr::ElemMatch { filter } => {

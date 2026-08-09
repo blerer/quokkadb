@@ -202,6 +202,60 @@ fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
 }
 
 #[test]
+fn test_find_one_and_update_returns_previous_document_by_default() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(&executor, collection_id, &initial_doc)?;
+
+    let update_expr = update([set([field_name("value")], "updated")]);
+    let result = execute_find_one_and_update_with_expr_and_upsert(
+        &executor,
+        collection_id,
+        1,
+        update_expr,
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_update_result(result, Some(doc! { "_id": 1, "value": "initial" }));
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "updated" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_update_returns_new_document_when_requested() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(&executor, collection_id, &initial_doc)?;
+
+    let update_expr = update([set([field_name("value")], "updated")]);
+    let result = execute_find_one_and_update_with_expr_and_upsert(
+        &executor,
+        collection_id,
+        1,
+        update_expr,
+        false,
+        ReturnDocument::After,
+    )?;
+    assert_find_one_and_update_result(result, Some(doc! { "_id": 1, "value": "updated" }));
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "updated" });
+
+    Ok(())
+}
+
+#[test]
 fn test_delete_one_deletes_matching_document() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let executor = QueryExecutor::new(storage_engine.clone());

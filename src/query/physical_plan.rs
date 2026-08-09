@@ -1,7 +1,5 @@
 use crate::query::update::UpdateExpr;
-use crate::query::Expr;
-use crate::query::Projection;
-use crate::query::SortField;
+use crate::query::{Expr, Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
 use crate::util::interval::Interval;
 use std::sync::Arc;
@@ -127,6 +125,22 @@ pub enum PhysicalPlan {
         update: UpdateExpr,
         /// Whether to perform an upsert if no documents match the query.
         upsert: bool,
+    },
+
+    /// Updates a single document in a collection and returns a document image.
+    FindOneAndUpdate {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to update.
+        query: Arc<PhysicalPlan>,
+        /// The update expression defining the modifications.
+        update: UpdateExpr,
+        /// An optional projection to apply to the returned document.
+        projection: Option<Arc<Projection>>,
+        /// Whether to perform an upsert if no documents match the query.
+        upsert: bool,
+        /// Whether to return the document before or after the update.
+        return_document: ReturnDocument,
     },
 
     /// Deletes a single document from a collection.

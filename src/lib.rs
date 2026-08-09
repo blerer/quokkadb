@@ -262,6 +262,27 @@ impl DbImpl {
                     Some(parameters),
                 )
             }
+            LogicalPlan::FindOneAndUpdate {
+                collection,
+                query,
+                update,
+                projection,
+                upsert,
+                return_document,
+            } => {
+                let (parameters, query) = self.optimize_query(query);
+                (
+                    PhysicalPlan::FindOneAndUpdate {
+                        collection,
+                        query,
+                        update,
+                        projection,
+                        upsert,
+                        return_document,
+                    },
+                    Some(parameters),
+                )
+            }
             LogicalPlan::DeleteOne { collection, query } => {
                 let (parameters, query) = self.optimize_query(query);
                 (

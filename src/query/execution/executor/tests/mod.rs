@@ -8,7 +8,7 @@ use crate::query::expr_fn::{
 use crate::query::physical_plan::IndexScanRangeExpr;
 use crate::query::update::UpdateExpr;
 use crate::query::update_fn::{field_name, set, update};
-use crate::query::{make_sort_field, SortOrder};
+use crate::query::{make_sort_field, ReturnDocument, SortOrder};
 use crate::query::{BsonValue, Expr, Parameters, Projection};
 use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
 use crate::storage::count_stats::{CountStats, CountStatsKey};
@@ -120,6 +120,10 @@ fn assert_update_result(
 
 fn assert_delete_result(result: WriteResult, deleted_count: u64) {
     assert_eq!(result, WriteResult::Delete { deleted_count });
+}
+
+fn assert_find_one_and_update_result(result: WriteResult, expected: Option<Document>) {
+    assert_eq!(result, WriteResult::FindOneAndUpdate { document: expected });
 }
 
 fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
@@ -291,6 +295,28 @@ fn execute_update_one_with_expr_and_upsert(
         query: query_plan,
         update: update_expr,
         upsert,
+    };
+
+    executor.execute_direct(update_plan, Some(params))
+}
+
+fn execute_find_one_and_update_with_expr_and_upsert(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    id: i32,
+    update_expr: UpdateExpr,
+    upsert: bool,
+    return_document: ReturnDocument,
+) -> Result<WriteResult> {
+    let mut params = Parameters::new();
+    let query_plan = point_search_query(collection_id, &mut params, id);
+    let update_plan = PhysicalPlan::FindOneAndUpdate {
+        collection: collection_id,
+        query: query_plan,
+        update: update_expr,
+        projection: None,
+        upsert,
+        return_document,
     };
 
     executor.execute_direct(update_plan, Some(params))
