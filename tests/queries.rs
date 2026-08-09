@@ -334,6 +334,95 @@ fn test_sort() {
 }
 
 #[test]
+fn test_find_one_returns_matching_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection.find_one(doc! { "_id": 1 }).unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 25,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+        })
+    );
+}
+
+#[test]
+fn test_find_one_returns_none_when_no_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection.find_one(doc! { "_id": 999 }).unwrap();
+
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_find_one_with_sort_returns_selected_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_with(doc! { "status": "A" })
+        .sort(doc! { "qty": -1 })
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! {
+            "_id": 7,
+            "item": "mat",
+            "qty": 85,
+            "size": { "h": 27.9, "w": 35.5, "uom": "cm" },
+            "status": "A",
+            "tags": ["gray"],
+            "dim_cm": [27.9, 35.5],
+            "ratings": [
+                { "user": "C", "score": 9 },
+                { "user": "D", "score": 5 },
+            ],
+        })
+    );
+}
+
+#[test]
+fn test_find_one_with_projection_returns_projected_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_with(doc! { "_id": 1 })
+        .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
+        .execute()
+        .unwrap();
+
+    assert_eq!(result, Some(doc! { "item": "journal", "qty": 25 }));
+}
+
+#[test]
+fn test_find_one_create_if_missing_returns_none_for_missing_collection() {
+    let dir = TempDir::new().unwrap();
+    let db =
+        QuokkaDB::open_with_logger(dir.path(), StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+
+    let result = db
+        .collection("missing")
+        .create_if_missing()
+        .find_one(doc! { "_id": 1 })
+        .unwrap();
+
+    assert_eq!(result, None);
+}
+
+#[test]
 fn test_skip_limit() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

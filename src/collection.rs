@@ -431,14 +431,24 @@ impl Collection {
     /// Creates a query to find documents in the collection that match the filter.
     /// # Arguments
     /// * `filter` - The filter document to match the documents.
-    /// Returns a `Query` object that can be further modified and executed.
-    pub fn find(&self, filter: Document) -> Query {
-        Query::new(
+    /// Returns a `Find` object that can be further modified and executed.
+    pub fn find(&self, filter: Document) -> Find {
+        Find::new(
             self.db_impl.clone(),
             self.collection.clone(),
             self.policy,
             filter,
         )
+    }
+
+    /// Finds a single document in the collection that matches the filter.
+    pub fn find_one(&self, filter: Document) -> Result<Option<Document>> {
+        self.find_one_with(filter).execute()
+    }
+
+    /// Creates a find-one operation builder for finding a single matching document.
+    pub fn find_one_with(&self, filter: Document) -> FindOne<'_> {
+        FindOne::new(self, filter)
     }
 }
 
@@ -562,9 +572,52 @@ impl<'a> DeleteOne<'a> {
     }
 }
 
+pub struct FindOne<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    projection: Option<Document>,
+    sort: Option<Document>,
+}
+
+impl<'a> FindOne<'a> {
+    fn new(collection: &'a Collection, filter: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            projection: None,
+            sort: None,
+        }
+    }
+
+    /// Sets the projection for the query.
+    pub fn projection(mut self, projection: Document) -> Self {
+        self.projection = Some(projection);
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to return.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// Executes the query and returns the first matching document, if any.
+    pub fn execute(self) -> Result<Option<Document>> {
+        let mut query = self.collection.find(self.filter);
+        if let Some(projection) = self.projection {
+            query = query.projection(projection);
+        }
+        if let Some(sort) = self.sort {
+            query = query.sort(sort);
+        }
+        query.execute_one()
+    }
+}
+
 /// Represents a query on a collection.
 /// Provides methods to set query parameters and execute the query.
-pub struct Query {
+#[derive(Clone)]
+pub struct Find {
     db_impl: Arc<DbImpl>,
     collection: String,
     policy: CollectionPolicy,
@@ -575,14 +628,14 @@ pub struct Query {
     skip: Option<usize>,
 }
 
-impl Query {
+impl Find {
     fn new(
         db_impl: Arc<DbImpl>,
         collection: String,
         policy: CollectionPolicy,
         filter: Document,
-    ) -> Query {
-        Query {
+    ) -> Find {
+        Find {
             db_impl,
             collection,
             policy,
@@ -597,7 +650,7 @@ impl Query {
     /// Sets the projection for the query.
     /// # Arguments
     /// * `projection` - The projection document specifying which fields to include or exclude.
-    /// Returns the modified Query instance for chaining.
+    /// Returns the modified Find instance for chaining.
     pub fn projection(mut self, projection: Document) -> Self {
         self.projection = Some(projection);
         self
@@ -606,7 +659,7 @@ impl Query {
     /// Sets the sort order for the query.
     /// # Arguments
     /// * `sort` - The sort document specifying the fields and their sort order.
-    /// Returns the modified Query instance for chaining.
+    /// Returns the modified Find instance for chaining.
     pub fn sort(mut self, sort: Document) -> Self {
         self.sort = Some(sort);
         self
@@ -615,7 +668,7 @@ impl Query {
     /// Sets the limit for the number of documents to return.
     /// # Arguments
     /// * `limit` - The maximum number of documents to return.
-    /// Returns the modified Query instance for chaining.
+    /// Returns the modified Find instance for chaining.
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
@@ -624,16 +677,32 @@ impl Query {
     /// Sets the number of documents to skip.
     /// # Arguments
     /// * `value` - The number of documents to skip.
-    /// Returns the modified Query instance for chaining.
+    /// Returns the modified Find instance for chaining.
     pub fn skip(mut self, value: usize) -> Self {
         self.skip = Some(value);
         self
     }
 
+    /// Executes the query and returns the first resulting document, if any.
+    pub fn execute_one(&self) -> Result<Option<Document>> {
+        let mut query = self.clone();
+        query.limit = Some(1);
+        let mut iter = query.execute()?;
+        iter.next().transpose()
+    }
+
     /// Executes the query and returns an iterator over the resulting documents.
     /// Returns a `Result` containing an iterator of documents or an error.
     pub fn execute(&self) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
-        let collection_id = match self.policy {
+        let Some(collection_id) = self.collection_id_for_query()? else {
+            return Ok(Box::new(std::iter::empty()));
+        };
+        let plan = self.build_logical_plan(collection_id)?;
+        self.db_impl.execute_query(plan)
+    }
+
+    fn collection_id_for_query(&self) -> Result<Option<u32>> {
+        match self.policy {
             CollectionPolicy::Strict => {
                 let collection =
                     self.db_impl
@@ -642,17 +711,19 @@ impl Query {
                             name: self.collection.clone(),
                             id: None,
                         })?;
-                collection.id
+                Ok(Some(collection.id))
             }
             CollectionPolicy::CreateIfMissing => {
                 let collection = self.db_impl.get_collection(&self.collection);
                 match collection {
-                    Some(collection) => collection.id,
-                    None => return Ok(Box::new(std::iter::empty())),
+                    Some(collection) => Ok(Some(collection.id)),
+                    None => Ok(None),
                 }
             }
-        };
+        }
+    }
 
+    fn build_logical_plan(&self, collection_id: u32) -> Result<Arc<LogicalPlan>> {
         let conditions = parser::parse_conditions(&self.filter)?;
 
         let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
@@ -671,7 +742,7 @@ impl Query {
             builder = builder.limit(self.skip, self.limit);
         }
 
-        self.db_impl.execute_query(builder.build())
+        Ok(builder.build())
     }
 }
 
