@@ -391,6 +391,15 @@ impl Collection {
     /// * `filter` - The filter document to match the document to delete.
     /// Returns a `Result` containing delete metadata or an error.
     pub fn delete_one(&self, filter: Document) -> Result<DeleteResult> {
+        self.execute_delete_one(filter, DeleteOptions::default())
+    }
+
+    /// Creates a delete operation builder for deleting a single matching document.
+    pub fn delete_one_with(&self, filter: Document) -> DeleteOne<'_> {
+        DeleteOne::new(self, filter)
+    }
+
+    fn execute_delete_one(&self, filter: Document, options: DeleteOptions) -> Result<DeleteResult> {
         let collection_id = match self.policy {
             CollectionPolicy::Strict => self.get_collection_metadata()?.id,
             CollectionPolicy::CreateIfMissing => {
@@ -402,9 +411,12 @@ impl Collection {
         };
 
         let conditions = parser::parse_conditions(&filter)?;
-        let query = LogicalPlanBuilder::scan(collection_id)
-            .filter(conditions)
-            .build();
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+        if let Some(sort) = &options.sort {
+            let sort = parser::parse_sort(sort)?;
+            builder = builder.sort(Arc::new(sort));
+        }
+        let query = builder.limit(None, Some(1)).build();
 
         let plan = LogicalPlan::DeleteOne {
             collection: collection_id,
@@ -434,6 +446,11 @@ impl Collection {
 struct UpdateOptions {
     array_filters: Option<Vec<Document>>,
     upsert: bool,
+    sort: Option<Document>,
+}
+
+#[derive(Default)]
+struct DeleteOptions {
     sort: Option<Document>,
 }
 
@@ -514,6 +531,34 @@ impl<'a> UpdateMany<'a> {
     pub fn execute(self) -> Result<UpdateResult> {
         self.collection
             .execute_update_many(self.filter, self.update, self.options)
+    }
+}
+
+pub struct DeleteOne<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    options: DeleteOptions,
+}
+
+impl<'a> DeleteOne<'a> {
+    fn new(collection: &'a Collection, filter: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            options: DeleteOptions::default(),
+        }
+    }
+
+    /// Sets the sort order used to choose which matching document to delete.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
+        self
+    }
+
+    /// Executes the delete operation.
+    pub fn execute(self) -> Result<DeleteResult> {
+        self.collection
+            .execute_delete_one(self.filter, self.options)
     }
 }
 

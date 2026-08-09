@@ -63,3 +63,63 @@ fn test_delete_one_returns_zero_when_no_match() {
         .collect();
     assert_eq!(remaining, get_sample_data());
 }
+
+#[test]
+fn test_delete_one_with_sort_deletes_lowest_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .delete_one_with(doc! { "status": "A" })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.deleted_count, 1);
+    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+
+    let remaining: Vec<_> = collection
+        .find(doc! {})
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(|doc| doc.unwrap())
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![
+            doc! { "_id": 2, "item": "notebook", "status": "A" },
+            doc! { "_id": 3, "item": "paper", "status": "D" },
+        ]
+    );
+}
+
+#[test]
+fn test_delete_one_with_sort_deletes_highest_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .delete_one_with(doc! { "status": "A" })
+        .sort(doc! { "_id": -1 })
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.deleted_count, 1);
+    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+
+    let remaining: Vec<_> = collection
+        .find(doc! {})
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(|doc| doc.unwrap())
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![
+            doc! { "_id": 1, "item": "journal", "status": "A" },
+            doc! { "_id": 3, "item": "paper", "status": "D" },
+        ]
+    );
+}
