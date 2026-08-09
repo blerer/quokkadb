@@ -428,6 +428,96 @@ fn test_update_many_no_match() {
 }
 
 #[test]
+fn test_update_one_with_sort_updates_lowest_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .update_one_with(
+            doc! { "status": "A" },
+            doc! { "$set": { "selected": "lowest" } },
+        )
+        .sort(doc! { "qty": 1 })
+        .execute()
+        .unwrap();
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+    assert_eq!(result.upserted_id, None);
+
+    let updated = find_one(&collection, doc! { "selected": "lowest" }).unwrap();
+    assert_eq!(
+        updated,
+        doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 25,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+            "selected": "lowest",
+        }
+    );
+
+    let highest = find_one(&collection, doc! { "_id": 7 }).unwrap();
+    assert!(!highest.contains_key("selected"));
+
+    let remaining = collection
+        .find(doc! { "status": "A", "selected": { "$exists": false } })
+        .execute()
+        .unwrap()
+        .count();
+    assert_eq!(remaining, 3);
+}
+
+#[test]
+fn test_update_one_with_sort_updates_highest_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .update_one_with(
+            doc! { "status": "A" },
+            doc! { "$set": { "selected": "highest" } },
+        )
+        .sort(doc! { "qty": -1 })
+        .execute()
+        .unwrap();
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+    assert_eq!(result.upserted_id, None);
+
+    let updated = find_one(&collection, doc! { "selected": "highest" }).unwrap();
+    assert_eq!(
+        updated,
+        doc! {
+            "_id": 7,
+            "item": "mat",
+            "qty": 85,
+            "size": { "h": 27.9, "w": 35.5, "uom": "cm" },
+            "status": "A",
+            "tags": ["gray"],
+            "dim_cm": [27.9, 35.5],
+            "ratings": [
+                { "user": "C", "score": 9 },
+                { "user": "D", "score": 5 },
+            ],
+            "selected": "highest",
+        }
+    );
+
+    let lowest = find_one(&collection, doc! { "_id": 1 }).unwrap();
+    assert!(!lowest.contains_key("selected"));
+
+    let remaining = collection
+        .find(doc! { "status": "A", "selected": { "$exists": false } })
+        .execute()
+        .unwrap()
+        .count();
+    assert_eq!(remaining, 3);
+}
+
+#[test]
 fn test_update_one_no_match_after_delete() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

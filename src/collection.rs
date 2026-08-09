@@ -340,9 +340,12 @@ impl Collection {
         let collection_id = self.collection_id_for_write()?;
 
         let conditions = parser::parse_conditions(&filter)?;
-        let query = LogicalPlanBuilder::scan(collection_id)
-            .filter(conditions)
-            .build();
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+        if let Some(sort) = &options.sort {
+            let sort = parser::parse_sort(sort)?;
+            builder = builder.sort(Arc::new(sort));
+        }
+        let query = builder.limit(None, Some(1)).build();
         let update = parser::parse_update(&update, options.array_filters)?;
 
         let plan = LogicalPlan::UpdateOne {
@@ -431,6 +434,7 @@ impl Collection {
 struct UpdateOptions {
     array_filters: Option<Vec<Document>>,
     upsert: bool,
+    sort: Option<Document>,
 }
 
 pub struct UpdateOne<'a> {
@@ -460,6 +464,12 @@ impl<'a> UpdateOne<'a> {
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to update.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
         self
     }
 
