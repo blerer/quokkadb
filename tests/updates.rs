@@ -591,6 +591,22 @@ fn test_find_one_and_update_returns_new_document_when_requested() {
 }
 
 #[test]
+fn test_find_one_and_update_returns_none_after_delete() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let delete_result = collection.delete_one(doc! { "_id": 1 }).unwrap();
+    assert_eq!(delete_result.deleted_count, 1);
+
+    let result = collection
+        .find_one_and_update(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
+        .unwrap();
+
+    assert_eq!(result, None);
+    assert!(find_one(&collection, doc! { "_id": 1 }).is_none());
+}
+
+#[test]
 fn test_find_one_and_update_with_sort_and_projection() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

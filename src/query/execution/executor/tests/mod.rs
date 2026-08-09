@@ -322,6 +322,26 @@ fn execute_find_one_and_update_with_expr_and_upsert(
     executor.execute_direct(update_plan, Some(params))
 }
 
+fn spawn_paused_find_one_and_update_with_expr_and_upsert(
+    executor: Arc<QueryExecutor>,
+    collection_id: u32,
+    id: i32,
+    update_expr: UpdateExpr,
+    upsert: bool,
+    return_document: ReturnDocument,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || {
+        execute_find_one_and_update_with_expr_and_upsert(
+            executor.as_ref(),
+            collection_id,
+            id,
+            update_expr,
+            upsert,
+            return_document,
+        )
+    })
+}
+
 fn execute_update_many(
     executor: &QueryExecutor,
     collection_id: u32,
