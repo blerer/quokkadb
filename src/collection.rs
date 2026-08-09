@@ -145,8 +145,8 @@ impl DeleteResult {
 impl Collection {
     fn document_from_write_result(result: WriteResult) -> Option<Document> {
         match result {
-            WriteResult::FindOneAndUpdate { document } => document,
-            other => panic!("expected FindOneAndUpdate write result, got {other:?}"),
+            WriteResult::SingleDocument { document } => document,
+            other => panic!("expected SingleDocument write result, got {other:?}"),
         }
     }
 }
@@ -410,6 +410,16 @@ impl Collection {
         DeleteOne::new(self, filter)
     }
 
+    /// Finds a single document, deletes it, and returns the deleted document.
+    pub fn find_one_and_delete(&self, filter: Document) -> Result<Option<Document>> {
+        self.find_one_and_delete_with(filter).execute()
+    }
+
+    /// Creates a find-one-and-delete operation builder.
+    pub fn find_one_and_delete_with(&self, filter: Document) -> FindOneAndDelete<'_> {
+        FindOneAndDelete::new(self, filter)
+    }
+
     fn execute_delete_one(&self, filter: Document, options: DeleteOptions) -> Result<DeleteResult> {
         let collection_id = match self.policy {
             CollectionPolicy::Strict => self.get_collection_metadata()?.id,
@@ -435,6 +445,44 @@ impl Collection {
         };
 
         Ok(DeleteResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
+    }
+
+    fn execute_find_one_and_delete(
+        &self,
+        filter: Document,
+        options: FindOneAndDeleteOptions,
+    ) -> Result<Option<Document>> {
+        let collection_id = match self.policy {
+            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
+            CollectionPolicy::CreateIfMissing => {
+                match self.db_impl.get_collection(&self.collection) {
+                    Some(collection) => collection.id,
+                    None => return Ok(None),
+                }
+            }
+        };
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+        if let Some(sort) = &options.sort {
+            let sort = parser::parse_sort(sort)?;
+            builder = builder.sort(Arc::new(sort));
+        }
+        let query = builder.limit(None, Some(1)).build();
+        let projection = match options.projection {
+            Some(projection) => Some(Arc::new(parser::parse_projection(&projection)?)),
+            None => None,
+        };
+
+        let plan = LogicalPlan::FindOneAndDelete {
+            collection: collection_id,
+            query,
+            projection,
+        };
+
+        Ok(Self::document_from_write_result(
             self.db_impl.execute_write(plan)?,
         ))
     }
@@ -534,6 +582,12 @@ struct FindOneAndUpdateOptions {
     sort: Option<Document>,
     upsert: bool,
     return_document: ReturnDocument,
+}
+
+#[derive(Default)]
+struct FindOneAndDeleteOptions {
+    projection: Option<Document>,
+    sort: Option<Document>,
 }
 
 pub struct UpdateOne<'a> {
@@ -641,6 +695,40 @@ impl<'a> DeleteOne<'a> {
     pub fn execute(self) -> Result<DeleteResult> {
         self.collection
             .execute_delete_one(self.filter, self.options)
+    }
+}
+
+pub struct FindOneAndDelete<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    options: FindOneAndDeleteOptions,
+}
+
+impl<'a> FindOneAndDelete<'a> {
+    fn new(collection: &'a Collection, filter: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            options: FindOneAndDeleteOptions::default(),
+        }
+    }
+
+    /// Sets the projection for the returned document.
+    pub fn projection(mut self, projection: Document) -> Self {
+        self.options.projection = Some(projection);
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to delete.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
+        self
+    }
+
+    /// Executes the operation.
+    pub fn execute(self) -> Result<Option<Document>> {
+        self.collection
+            .execute_find_one_and_delete(self.filter, self.options)
     }
 }
 

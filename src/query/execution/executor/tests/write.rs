@@ -455,6 +455,104 @@ fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() ->
 }
 
 #[test]
+fn test_find_one_and_delete_returns_deleted_document() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(&executor, collection_id, &initial_doc)?;
+
+    let result = execute_find_one_and_delete(&executor, collection_id, 1)?;
+    assert_find_one_and_delete_result(result, Some(doc! { "_id": 1, "value": "initial" }));
+
+    let mut verify_params = Parameters::new();
+    let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+    let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+    assert!(results.next().is_none());
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        None
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let executor = Arc::new(QueryExecutor::with_test_hook(
+        storage_engine.clone(),
+        hook.clone(),
+    ));
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+    let delete_handle = spawn_paused_find_one_and_delete(executor.clone(), collection_id, 1);
+
+    hook.wait_until_hit();
+
+    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "updated")?;
+    assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
+
+    hook.release();
+
+    let deleted_doc = delete_handle.join().unwrap()?;
+    assert_find_one_and_delete_result(deleted_doc, Some(doc! { "_id": 1, "value": "updated" }));
+
+    let mut verify_params = Parameters::new();
+    let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+    let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+    assert!(results.next().is_none());
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        None
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_delete_retries_after_concurrent_delete() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let executor = Arc::new(QueryExecutor::with_test_hook(
+        storage_engine.clone(),
+        hook.clone(),
+    ));
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(executor.as_ref(), collection_id, &initial_doc)?;
+
+    let delete_handle = spawn_paused_find_one_and_delete(executor.clone(), collection_id, 1);
+
+    hook.wait_until_hit();
+
+    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_delete = execute_delete_one(&concurrent_executor, collection_id, 1)?;
+    assert_delete_result(concurrent_delete, 1);
+
+    hook.release();
+
+    let deleted_doc = delete_handle.join().unwrap()?;
+    assert_find_one_and_delete_result(deleted_doc, None);
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        None
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_delete_one_deletes_matching_document() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let executor = QueryExecutor::new(storage_engine.clone());

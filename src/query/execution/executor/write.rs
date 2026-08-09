@@ -106,6 +106,15 @@ impl WriteExecutor {
                     &parameters,
                 )
             }
+            PhysicalPlan::FindOneAndDelete {
+                collection,
+                query,
+                projection,
+            } => {
+                let parameters =
+                    parameters.expect("Parameters must be provided for FindOneAndDelete");
+                self.perform_find_one_and_delete(collection, query, projection, &parameters)
+            }
             PhysicalPlan::DeleteOne { collection, query } => {
                 let parameters = parameters.expect("Parameters must be provided for DeleteOne");
                 self.perform_delete_one(collection, query, &parameters)
@@ -326,7 +335,7 @@ impl WriteExecutor {
                     ReturnDocument::Before => old_doc,
                     ReturnDocument::After => new_doc,
                 };
-                Ok(WriteResult::FindOneAndUpdate {
+                Ok(WriteResult::SingleDocument {
                     document: Some(self.apply_return_projection(
                         returned,
                         projection.as_ref(),
@@ -343,10 +352,10 @@ impl WriteExecutor {
                         parameters,
                     )?),
                 };
-                Ok(WriteResult::FindOneAndUpdate { document })
+                Ok(WriteResult::SingleDocument { document })
             }
             SingleDocumentUpdateResult::NoMatch => {
-                Ok(WriteResult::FindOneAndUpdate { document: None })
+                Ok(WriteResult::SingleDocument { document: None })
             }
         }
     }
@@ -357,35 +366,32 @@ impl WriteExecutor {
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let start_time = Instant::now();
-        let mut attempt = 0;
+        match self.perform_single_document_delete(collection, query, parameters)? {
+            SingleDocumentDeleteResult::Deleted { .. } => {
+                Ok(WriteResult::Delete { deleted_count: 1 })
+            }
+            SingleDocumentDeleteResult::NoMatch => Ok(WriteResult::Delete { deleted_count: 0 }),
+        }
+    }
 
-        loop {
-            let snapshot = self.storage_engine.last_visible_sequence();
-            let mut iter = self.read_executor.execute_cached_at_snapshot(
-                query.clone(),
-                parameters,
-                Some(snapshot),
-            )?;
-
-            let result = if let Some(doc_result) = iter.next() {
-                let old_doc = doc_result?;
-                let user_key = old_doc.get("_id").unwrap().try_into_key()?;
-
-                #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
-                match self.delete_document(collection, snapshot, user_key, &old_doc) {
-                    Ok(_) => WriteResult::Delete { deleted_count: 1 },
-                    Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
-                        continue;
-                    }
-                }
-            } else {
-                WriteResult::Delete { deleted_count: 0 }
-            };
-
-            return Ok(result);
+    pub(super) fn perform_find_one_and_delete(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        projection: Option<Arc<Projection>>,
+        parameters: &Parameters,
+    ) -> Result<WriteResult> {
+        match self.perform_single_document_delete(collection, query, parameters)? {
+            SingleDocumentDeleteResult::Deleted { old_doc } => Ok(WriteResult::SingleDocument {
+                document: Some(self.apply_return_projection(
+                    old_doc,
+                    projection.as_ref(),
+                    parameters,
+                )?),
+            }),
+            SingleDocumentDeleteResult::NoMatch => {
+                Ok(WriteResult::SingleDocument { document: None })
+            }
         }
     }
 
@@ -476,6 +482,42 @@ impl WriteExecutor {
                     on_version_conflict(e, &start_time, &mut attempt)?;
                 }
             }
+        }
+    }
+
+    fn perform_single_document_delete(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+    ) -> Result<SingleDocumentDeleteResult> {
+        let start_time = Instant::now();
+        let mut attempt = 0;
+
+        loop {
+            let snapshot = self.storage_engine.last_visible_sequence();
+            let mut iter = self.read_executor.execute_cached_at_snapshot(
+                query.clone(),
+                parameters,
+                Some(snapshot),
+            )?;
+
+            if let Some(doc_result) = iter.next() {
+                let old_doc = doc_result?;
+                let user_key = old_doc.get("_id").unwrap().try_into_key()?;
+
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
+                match self.delete_document(collection, snapshot, user_key, &old_doc) {
+                    Ok(_) => return Ok(SingleDocumentDeleteResult::Deleted { old_doc }),
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        continue;
+                    }
+                }
+            }
+
+            return Ok(SingleDocumentDeleteResult::NoMatch);
         }
     }
 
@@ -734,6 +776,11 @@ enum SingleDocumentUpdateResult {
         new_doc: Document,
         upserted_id: Bson,
     },
+    NoMatch,
+}
+
+enum SingleDocumentDeleteResult {
+    Deleted { old_doc: Document },
     NoMatch,
 }
 

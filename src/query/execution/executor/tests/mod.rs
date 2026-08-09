@@ -123,7 +123,11 @@ fn assert_delete_result(result: WriteResult, deleted_count: u64) {
 }
 
 fn assert_find_one_and_update_result(result: WriteResult, expected: Option<Document>) {
-    assert_eq!(result, WriteResult::FindOneAndUpdate { document: expected });
+    assert_eq!(result, WriteResult::SingleDocument { document: expected });
+}
+
+fn assert_find_one_and_delete_result(result: WriteResult, expected: Option<Document>) {
+    assert_eq!(result, WriteResult::SingleDocument { document: expected });
 }
 
 fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
@@ -253,6 +257,22 @@ fn execute_delete_one(
     executor.execute_direct(delete_plan, Some(params))
 }
 
+fn execute_find_one_and_delete(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    id: i32,
+) -> Result<WriteResult> {
+    let mut params = Parameters::new();
+    let query_plan = point_search_query(collection_id, &mut params, id);
+    let delete_plan = PhysicalPlan::FindOneAndDelete {
+        collection: collection_id,
+        query: query_plan,
+        projection: None,
+    };
+
+    executor.execute_direct(delete_plan, Some(params))
+}
+
 fn spawn_paused_update_one(
     executor: Arc<QueryExecutor>,
     collection_id: u32,
@@ -268,6 +288,14 @@ fn spawn_paused_delete_one(
     id: i32,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || execute_delete_one(executor.as_ref(), collection_id, id))
+}
+
+fn spawn_paused_find_one_and_delete(
+    executor: Arc<QueryExecutor>,
+    collection_id: u32,
+    id: i32,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || execute_find_one_and_delete(executor.as_ref(), collection_id, id))
 }
 
 fn spawn_paused_update_one_with_expr(

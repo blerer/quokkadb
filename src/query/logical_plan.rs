@@ -46,6 +46,12 @@ pub enum LogicalPlan {
         upsert: bool, // Whether to perform an upsert if no documents match the query
         return_document: ReturnDocument, // Whether to return the document before or after the update
     },
+    /// Represents a delete operation for a single document that returns the deleted document.
+    FindOneAndDelete {
+        collection: u32,                     // Collection identifier
+        query: Arc<LogicalPlan>,             // Filter to match the document to delete
+        projection: Option<Arc<Projection>>, // Optional projection for the returned document
+    },
     /// Represents a delete operation for a single document. This is a terminal operator.
     DeleteOne {
         collection: u32,         // Collection identifier
@@ -93,6 +99,7 @@ impl TreeNode for LogicalPlan {
             LogicalPlan::UpdateOne { query, .. } => vec![query.clone()],
             LogicalPlan::UpdateMany { query, .. } => vec![query.clone()],
             LogicalPlan::FindOneAndUpdate { query, .. } => vec![query.clone()],
+            LogicalPlan::FindOneAndDelete { query, .. } => vec![query.clone()],
             LogicalPlan::DeleteOne { query, .. } => vec![query.clone()],
             LogicalPlan::Filter { input, .. } => vec![input.clone()],
             LogicalPlan::Projection { input, .. } => vec![input.clone()],
@@ -141,6 +148,15 @@ impl TreeNode for LogicalPlan {
                 projection: projection.clone(),
                 upsert: *upsert,
                 return_document: *return_document,
+            }),
+            LogicalPlan::FindOneAndDelete {
+                collection,
+                projection,
+                ..
+            } => Arc::new(LogicalPlan::FindOneAndDelete {
+                collection: *collection,
+                query: Self::get_first(children),
+                projection: projection.clone(),
             }),
             LogicalPlan::DeleteOne { collection, .. } => Arc::new(LogicalPlan::DeleteOne {
                 collection: *collection,

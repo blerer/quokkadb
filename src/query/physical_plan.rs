@@ -143,6 +143,16 @@ pub enum PhysicalPlan {
         return_document: ReturnDocument,
     },
 
+    /// Deletes a single document from a collection and returns the deleted document.
+    FindOneAndDelete {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to delete.
+        query: Arc<PhysicalPlan>,
+        /// An optional projection to apply to the returned document.
+        projection: Option<Arc<Projection>>,
+    },
+
     /// Deletes a single document from a collection.
     DeleteOne {
         /// The identifier for the collection.

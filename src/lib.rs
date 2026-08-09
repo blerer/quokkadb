@@ -283,6 +283,21 @@ impl DbImpl {
                     Some(parameters),
                 )
             }
+            LogicalPlan::FindOneAndDelete {
+                collection,
+                query,
+                projection,
+            } => {
+                let (parameters, query) = self.optimize_query(query);
+                (
+                    PhysicalPlan::FindOneAndDelete {
+                        collection,
+                        query,
+                        projection,
+                    },
+                    Some(parameters),
+                )
+            }
             LogicalPlan::DeleteOne { collection, query } => {
                 let (parameters, query) = self.optimize_query(query);
                 (
