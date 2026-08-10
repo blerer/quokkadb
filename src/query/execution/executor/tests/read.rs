@@ -222,12 +222,12 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let executor = QueryExecutor::new(storage_engine.clone());
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_eq")?;
-    let index_name = storage_engine.create_index(
+    let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
         IndexOptions::default(),
     )?;
-    let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+    let index_id = index.id;
 
     for doc in [
         doc! { "_id": 1_i32, "a": 10_i32, "tag": "x" },
@@ -264,7 +264,7 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let executor = QueryExecutor::new(storage_engine.clone());
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_compound")?;
-    let index_name = storage_engine.create_index(
+    let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![
             OrderedIndexField::asc("a"),
@@ -272,7 +272,7 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
         ]),
         IndexOptions::default(),
     )?;
-    let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+    let index_id = index.id;
 
     for doc in [
         doc! { "_id": 1_i32, "a": 10_i32, "b": 30_i32 },
@@ -306,32 +306,17 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     Ok(())
 }
 
-fn get_index_id(
-    storage_engine: Arc<StorageEngine>,
-    collection_id: &u32,
-    index_name: &String,
-) -> u32 {
-    let index_id = storage_engine
-        .catalog()
-        .get_collection_by_id(&collection_id)
-        .unwrap()
-        .get_index_by_name(&index_name)
-        .unwrap()
-        .id;
-    index_id
-}
-
 #[test]
 fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let executor = QueryExecutor::new(storage_engine.clone());
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_reverse")?;
-    let index_name = storage_engine.create_index(
+    let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
         IndexOptions::default(),
     )?;
-    let index_id = get_index_id(storage_engine, &collection_id, &index_name);
+    let index_id = index.id;
 
     for doc in [
         doc! { "_id": 1_i32, "a": 10_i32, "kind": "keep" },

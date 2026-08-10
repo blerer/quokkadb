@@ -59,6 +59,12 @@ pub(crate) struct StorageEngine {
     disable_auto_compaction: AtomicBool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedIndex {
+    pub id: u32,
+    pub name: String,
+}
+
 impl StorageEngine {
     pub fn new(
         logger: Arc<dyn LoggerAndTracer>,
@@ -614,7 +620,7 @@ impl StorageEngine {
         collection_id: u32,
         definition: IndexDefinition,
         options: IndexOptions,
-    ) -> StorageResult<String> {
+    ) -> StorageResult<CreatedIndex> {
         self.check_error_mode()?;
 
         let snapshot = self.next_seq_number.load(Ordering::Relaxed);
@@ -639,7 +645,10 @@ impl StorageEngine {
 
         if let Some(existing_index) = collection.get_index_by_name(&resolved_name) {
             if existing_index.is_equivalent_to(&definition, &options) {
-                return Ok(existing_index.name());
+                return Ok(CreatedIndex {
+                    id: existing_index.id,
+                    name: existing_index.name(),
+                });
             }
 
             return Err(StorageError::IndexOptionsConflict {
@@ -676,7 +685,10 @@ impl StorageEngine {
             "Creating index '{}.{}' with id {}", collection.name, resolved_name, index_id
         );
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
-        Ok(resolved_name)
+        Ok(CreatedIndex {
+            id: index_id,
+            name: resolved_name,
+        })
     }
 
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> StorageResult<()> {
@@ -3061,7 +3073,7 @@ mod tests {
             let collection_id = engine
                 .create_collection_if_not_exists("test_count_stats_restart")
                 .unwrap();
-            let index_name = engine
+            let created_index = engine
                 .create_index(
                     collection_id,
                     simple_index_definition(),
@@ -3070,13 +3082,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let index_id = engine
-                .catalog()
-                .get_collection_by_id(&collection_id)
-                .unwrap()
-                .get_index_by_name(&index_name)
-                .unwrap()
-                .id;
+            let index_id = created_index.id;
 
             engine
                 .write(write_batch_with_count_stats(
@@ -3174,7 +3180,7 @@ mod tests {
             let collection_id = engine
                 .create_collection_if_not_exists("test_count_stats_delete_restart")
                 .unwrap();
-            let index_name = engine
+            let created_index = engine
                 .create_index(
                     collection_id,
                     simple_index_definition(),
@@ -3183,13 +3189,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let index_id = engine
-                .catalog()
-                .get_collection_by_id(&collection_id)
-                .unwrap()
-                .get_index_by_name(&index_name)
-                .unwrap()
-                .id;
+            let index_id = created_index.id;
 
             engine
                 .write(write_batch_with_count_stats(
@@ -3925,7 +3925,7 @@ mod tests {
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
-        let index_name = engine
+        let created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -3935,14 +3935,15 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(index_name, "by_name".to_string());
+        assert_eq!(created_index.name, "by_name".to_string());
 
         let collection = engine
             .catalog()
             .get_collection_by_id(&collection_id)
             .unwrap();
         let index = collection.get_index_by_name("by_name").unwrap();
-        assert_eq!(index.name(), index_name);
+        assert_eq!(index.id, created_index.id);
+        assert_eq!(index.name(), created_index.name);
         assert_eq!(index.definition, simple_index_definition());
     }
 
@@ -3963,7 +3964,7 @@ mod tests {
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
 
-        let index_id = engine
+        let created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -3973,7 +3974,7 @@ mod tests {
             )
             .unwrap();
 
-        let second_index_id = engine
+        let second_created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -3983,7 +3984,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(second_index_id, index_id);
+        assert_eq!(second_created_index, created_index);
 
         let collection = engine
             .catalog()
@@ -4094,7 +4095,7 @@ mod tests {
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
-        let index_name = engine
+        let created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -4104,13 +4105,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(index_name, "by_name");
-
-        let collection = engine
-            .catalog()
-            .get_collection_by_id(&collection_id)
-            .unwrap();
-        let index_id = collection.get_index_by_name(&index_name).unwrap().id;
+        assert_eq!(created_index.name, "by_name");
+        let index_id = created_index.id;
 
         assert!(engine
             .lsm_tree()
@@ -4124,7 +4120,7 @@ mod tests {
             .catalog()
             .get_collection_by_id(&collection_id)
             .unwrap();
-        assert!(collection.get_index_by_name(&index_name).is_none());
+        assert!(collection.get_index_by_name(&created_index.name).is_none());
 
         let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
         assert_eq!(pending_drops.len(), 1);
@@ -4174,7 +4170,7 @@ mod tests {
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
-        let index_name = engine
+        let created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -4184,13 +4180,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(index_name, "by_name");
-
-        let collection = engine
-            .catalog()
-            .get_collection_by_id(&collection_id)
-            .unwrap();
-        let index_id = collection.get_index_by_name(&index_name).unwrap().id;
+        assert_eq!(created_index.name, "by_name");
+        let index_id = created_index.id;
 
         engine.drop_index(collection_id, index_id).unwrap();
         let drops_before = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
@@ -4218,7 +4209,7 @@ mod tests {
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
-        let index_name = engine
+        let created_index = engine
             .create_index(
                 collection_id,
                 simple_index_definition(),
@@ -4228,13 +4219,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(index_name, "by_name");
-
-        let collection = engine
-            .catalog()
-            .get_collection_by_id(&collection_id)
-            .unwrap();
-        let index_id = collection.get_index_by_name(&index_name).unwrap().id;
+        assert_eq!(created_index.name, "by_name");
+        let index_id = created_index.id;
 
         engine.drop_collection("test_collection").unwrap();
         let drops_before = engine.lsm_tree().get_drops_before_or_at(u64::MAX);

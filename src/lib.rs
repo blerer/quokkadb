@@ -190,7 +190,8 @@ impl DbImpl {
     ) -> error::Result<String> {
         Ok(self
             .storage_engine
-            .create_index(collection_id, spec.into(), options.into())?)
+            .create_index(collection_id, spec.into(), options.into())?
+            .name)
     }
 
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {

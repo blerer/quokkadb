@@ -2,6 +2,31 @@ use super::*;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
 
+fn index_scan_eq(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    index_id: u32,
+    value: impl Into<BsonValue>,
+) -> Result<Vec<Document>> {
+    let mut params = Parameters::new();
+    let eq = params.collect_parameter(value.into());
+    let plan = Arc::new(PhysicalPlan::IndexScan {
+        collection: collection_id,
+        index: index_id,
+        range: IndexScanRangeExpr {
+            equal_prefix: vec![eq],
+            tail: None,
+        },
+        direction: Direction::Forward,
+        filter: None,
+        projection: None,
+    });
+
+    executor
+        .execute_cached(plan, &params)?
+        .collect::<Result<_>>()
+}
+
 #[test]
 fn test_insert_duplicate_key_preflight_check() -> Result<()> {
     // 1. Setup
@@ -70,6 +95,145 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
         search_result.next().is_none(),
         "Document with _id: 3 should not have been inserted"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_delete_one_removes_index_entries() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_delete_one_indexes")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    let index_id = index.id;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "alpha" },
+            &doc! { "_id": 2, "value": "beta" },
+        ],
+    )?;
+
+    let deleted = execute_delete_one(&executor, collection_id, 1)?;
+    assert_delete_result(deleted, 1);
+
+    assert!(index_scan_eq(&executor, collection_id, index_id, "alpha")?.is_empty());
+    let remaining = index_scan_eq(&executor, collection_id, index_id, "beta")?;
+    assert_eq!(remaining, vec![doc! { "_id": 2, "value": "beta" }]);
+
+    Ok(())
+}
+
+#[test]
+fn test_delete_many_removes_index_entries() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_delete_many_indexes")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    let index_id = index.id;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "alpha" },
+            &doc! { "_id": 2, "value": "beta" },
+            &doc! { "_id": 3, "value": "gamma" },
+        ],
+    )?;
+
+    let deleted = execute_delete_many(&executor, collection_id, full_scan_plan(collection_id))?;
+    assert_delete_result(deleted, 3);
+
+    assert!(index_scan_eq(&executor, collection_id, index_id, "alpha")?.is_empty());
+    assert!(index_scan_eq(&executor, collection_id, index_id, "beta")?.is_empty());
+    assert!(index_scan_eq(&executor, collection_id, index_id, "gamma")?.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_delete_removes_index_entries() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_delete_indexes")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    let index_id = index.id;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "alpha" },
+            &doc! { "_id": 2, "value": "beta" },
+        ],
+    )?;
+
+    let deleted = execute_find_one_and_delete(&executor, collection_id, 1)?;
+    assert_find_one_and_delete_result(deleted, Some(doc! { "_id": 1, "value": "alpha" }));
+
+    assert!(index_scan_eq(&executor, collection_id, index_id, "alpha")?.is_empty());
+    let remaining = index_scan_eq(&executor, collection_id, index_id, "beta")?;
+    assert_eq!(remaining, vec![doc! { "_id": 2, "value": "beta" }]);
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_update_indexes")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    let index_id = index.id;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "alpha" },
+            &doc! { "_id": 2, "value": "beta" },
+        ],
+    )?;
+
+    let update_expr = update([set([field_name("value")], "updated")]);
+    let updated = execute_find_one_and_update_with_expr_and_upsert(
+        &executor,
+        collection_id,
+        1,
+        update_expr,
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_update_result(updated, Some(doc! { "_id": 1, "value": "alpha" }));
+
+    assert!(index_scan_eq(&executor, collection_id, index_id, "alpha")?.is_empty());
+    let updated_docs = index_scan_eq(&executor, collection_id, index_id, "updated")?;
+    assert_eq!(updated_docs, vec![doc! { "_id": 1, "value": "updated" }]);
+    let unchanged = index_scan_eq(&executor, collection_id, index_id, "beta")?;
+    assert_eq!(unchanged, vec![doc! { "_id": 2, "value": "beta" }]);
 
     Ok(())
 }
