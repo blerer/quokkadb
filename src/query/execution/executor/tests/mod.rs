@@ -257,6 +257,20 @@ fn execute_delete_one(
     executor.execute_direct(delete_plan, Some(params))
 }
 
+fn execute_delete_many(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    query: Arc<PhysicalPlan>,
+) -> Result<WriteResult> {
+    let params = Parameters::new();
+    let delete_plan = PhysicalPlan::DeleteMany {
+        collection: collection_id,
+        query,
+    };
+
+    executor.execute_direct(delete_plan, Some(params))
+}
+
 fn execute_find_one_and_delete(
     executor: &QueryExecutor,
     collection_id: u32,

@@ -410,6 +410,19 @@ impl Collection {
         DeleteOne::new(self, filter)
     }
 
+    /// Deletes all documents in the collection that match the filter.
+    /// # Arguments
+    /// * `filter` - The filter document to match the documents to delete.
+    /// Returns a `Result` containing delete metadata or an error.
+    pub fn delete_many(&self, filter: Document) -> Result<DeleteResult> {
+        self.execute_delete_many(filter)
+    }
+
+    /// Creates a delete operation builder for deleting all matching documents.
+    pub fn delete_many_with(&self, filter: Document) -> DeleteMany<'_> {
+        DeleteMany::new(self, filter)
+    }
+
     /// Finds a single document, deletes it, and returns the deleted document.
     pub fn find_one_and_delete(&self, filter: Document) -> Result<Option<Document>> {
         self.find_one_and_delete_with(filter).execute()
@@ -440,6 +453,32 @@ impl Collection {
         let query = builder.limit(None, Some(1)).build();
 
         let plan = LogicalPlan::DeleteOne {
+            collection: collection_id,
+            query,
+        };
+
+        Ok(DeleteResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
+    }
+
+    fn execute_delete_many(&self, filter: Document) -> Result<DeleteResult> {
+        let collection_id = match self.policy {
+            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
+            CollectionPolicy::CreateIfMissing => {
+                match self.db_impl.get_collection(&self.collection) {
+                    Some(collection) => collection.id,
+                    None => return Ok(DeleteResult { deleted_count: 0 }),
+                }
+            }
+        };
+
+        let conditions = parser::parse_conditions(&filter)?;
+        let query = LogicalPlanBuilder::scan(collection_id)
+            .filter(conditions)
+            .build();
+
+        let plan = LogicalPlan::DeleteMany {
             collection: collection_id,
             query,
         };
@@ -695,6 +734,22 @@ impl<'a> DeleteOne<'a> {
     pub fn execute(self) -> Result<DeleteResult> {
         self.collection
             .execute_delete_one(self.filter, self.options)
+    }
+}
+
+pub struct DeleteMany<'a> {
+    collection: &'a Collection,
+    filter: Document,
+}
+
+impl<'a> DeleteMany<'a> {
+    fn new(collection: &'a Collection, filter: Document) -> Self {
+        Self { collection, filter }
+    }
+
+    /// Executes the delete operation.
+    pub fn execute(self) -> Result<DeleteResult> {
+        self.collection.execute_delete_many(self.filter)
     }
 }
 

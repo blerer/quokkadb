@@ -305,6 +305,13 @@ impl DbImpl {
                     Some(parameters),
                 )
             }
+            LogicalPlan::DeleteMany { collection, query } => {
+                let (parameters, query) = self.optimize_query(query);
+                (
+                    PhysicalPlan::DeleteMany { collection, query },
+                    Some(parameters),
+                )
+            }
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
 

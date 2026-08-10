@@ -119,6 +119,10 @@ impl WriteExecutor {
                 let parameters = parameters.expect("Parameters must be provided for DeleteOne");
                 self.perform_delete_one(collection, query, &parameters)
             }
+            PhysicalPlan::DeleteMany { collection, query } => {
+                let parameters = parameters.expect("Parameters must be provided for DeleteMany");
+                self.perform_delete_many(collection, query, &parameters)
+            }
             _ => unreachable!("Direct execution not supported for plan: {:?}", plan),
         }
     }
@@ -372,6 +376,52 @@ impl WriteExecutor {
             }
             SingleDocumentDeleteResult::NoMatch => Ok(WriteResult::Delete { deleted_count: 0 }),
         }
+    }
+
+    pub(super) fn perform_delete_many(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+    ) -> Result<WriteResult> {
+        let snapshot = self.storage_engine.last_visible_sequence();
+        let mut iter =
+            self.read_executor
+                .execute_cached_at_snapshot(query, parameters, Some(snapshot))?;
+
+        let mut operations = Vec::new();
+        let mut preconditions = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
+        let mut deleted_count = 0;
+        let indices = self.indices(collection);
+
+        while let Some(doc_result) = iter.next() {
+            let old_doc = doc_result?;
+            let user_key = old_doc.get("_id").unwrap().try_into_key()?;
+
+            indices.append_delete_ops(&mut operations, &old_doc, &mut count_stats)?;
+            operations.push(Operation::new_delete(collection, 0, user_key.clone()));
+            count_stats.inc_collection(collection, -1);
+            preconditions.push(Precondition::VersionMatch {
+                collection,
+                index: 0,
+                user_key,
+            });
+            deleted_count += 1;
+        }
+
+        if deleted_count == 0 {
+            return Ok(WriteResult::Delete { deleted_count: 0 });
+        }
+
+        let batch = WriteBatch::new_with_preconditions(
+            operations,
+            Preconditions::new(snapshot, preconditions),
+            count_stats.build(),
+        );
+        self.storage_engine.write(batch)?;
+
+        Ok(WriteResult::Delete { deleted_count })
     }
 
     pub(super) fn perform_find_one_and_delete(

@@ -126,6 +126,49 @@ fn test_delete_one_with_sort_deletes_highest_match() {
 }
 
 #[test]
+fn test_delete_many_deletes_all_matching_documents() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection.delete_many(doc! { "status": "A" }).unwrap();
+
+    assert_eq!(result.deleted_count, 2);
+    assert_eq!(collection.estimated_document_count().unwrap(), 1);
+
+    let remaining: Vec<_> = collection
+        .find(doc! {})
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(|doc| doc.unwrap())
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![doc! { "_id": 3, "item": "paper", "status": "D" },]
+    );
+}
+
+#[test]
+fn test_delete_many_returns_zero_when_no_match() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection.delete_many(doc! { "_id": 99 }).unwrap();
+
+    assert_eq!(result.deleted_count, 0);
+    assert_eq!(collection.estimated_document_count().unwrap(), 3);
+
+    let remaining: Vec<_> = collection
+        .find(doc! {})
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(|doc| doc.unwrap())
+        .collect();
+    assert_eq!(remaining, get_sample_data());
+}
+
+#[test]
 fn test_find_one_and_delete_returns_none_when_no_match() -> Result<()> {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
@@ -199,6 +242,22 @@ fn test_find_one_and_delete_create_if_missing_returns_none_without_creating_coll
         .find_one_and_delete(doc! { "_id": 1 })?;
 
     assert_eq!(result, None);
+    assert!(db.list_collections().is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_delete_many_create_if_missing_returns_zero_without_creating_collection() -> Result<()> {
+    let dir = TempDir::new()?;
+    let db = QuokkaDB::open(dir.path())?;
+
+    let result = db
+        .collection("missing")
+        .create_if_missing()
+        .delete_many(doc! { "_id": 1 })?;
+
+    assert_eq!(result.deleted_count, 0);
     assert!(db.list_collections().is_empty());
 
     Ok(())

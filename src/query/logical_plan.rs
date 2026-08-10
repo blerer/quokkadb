@@ -57,6 +57,11 @@ pub enum LogicalPlan {
         collection: u32,         // Collection identifier
         query: Arc<LogicalPlan>, // Filter to match the document to delete
     },
+    /// Represents a delete operation for multiple documents. This is a terminal operator.
+    DeleteMany {
+        collection: u32,         // Collection identifier
+        query: Arc<LogicalPlan>, // Filter to match the documents to delete
+    },
     /// Represents a collection scan with optional projection, filtering, and sorting. This is a terminal operator.
     CollectionScan {
         collection: u32,                     // Collection identifier
@@ -101,6 +106,7 @@ impl TreeNode for LogicalPlan {
             LogicalPlan::FindOneAndUpdate { query, .. } => vec![query.clone()],
             LogicalPlan::FindOneAndDelete { query, .. } => vec![query.clone()],
             LogicalPlan::DeleteOne { query, .. } => vec![query.clone()],
+            LogicalPlan::DeleteMany { query, .. } => vec![query.clone()],
             LogicalPlan::Filter { input, .. } => vec![input.clone()],
             LogicalPlan::Projection { input, .. } => vec![input.clone()],
             LogicalPlan::Sort { input, .. } => vec![input.clone()],
@@ -159,6 +165,10 @@ impl TreeNode for LogicalPlan {
                 projection: projection.clone(),
             }),
             LogicalPlan::DeleteOne { collection, .. } => Arc::new(LogicalPlan::DeleteOne {
+                collection: *collection,
+                query: Self::get_first(children),
+            }),
+            LogicalPlan::DeleteMany { collection, .. } => Arc::new(LogicalPlan::DeleteMany {
                 collection: *collection,
                 query: Self::get_first(children),
             }),

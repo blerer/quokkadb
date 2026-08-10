@@ -692,6 +692,101 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
 }
 
 #[test]
+fn test_delete_many_deletes_matching_documents() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many")?;
+
+    let doc1 = doc! { "_id": 1, "value": "first" };
+    let doc2 = doc! { "_id": 2, "value": "second" };
+    let doc3 = doc! { "_id": 3, "value": "third" };
+    insert_docs(&executor, collection_id, [&doc1, &doc2, &doc3])?;
+
+    let delete_plan = full_scan_plan(collection_id);
+    let result = execute_delete_many(&executor, collection_id, delete_plan)?;
+    assert_delete_result(result, 3);
+
+    for id in [1_i32, 2, 3] {
+        let mut verify_params = Parameters::new();
+        let verify_plan = point_search_query(collection_id, &mut verify_params, id);
+        let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+        assert!(results.next().is_none());
+    }
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        None
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_delete_many_no_match")?;
+
+    let doc1 = doc! { "_id": 1, "value": "first" };
+    let doc2 = doc! { "_id": 2, "value": "second" };
+    insert_docs(&executor, collection_id, [&doc1, &doc2])?;
+
+    let mut params = Parameters::new();
+    let query_plan = point_search_query(collection_id, &mut params, 99_i32);
+    let delete_plan = PhysicalPlan::DeleteMany {
+        collection: collection_id,
+        query: query_plan,
+    };
+
+    let result = executor.execute_direct(delete_plan, Some(params))?;
+    assert_delete_result(result, 0);
+
+    let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc1, doc! { "_id": 1, "value": "first" });
+    let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+    assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        Some(2)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many_retry")?;
+
+    let doc1 = doc! { "_id": 1, "value": "first" };
+    let doc2 = doc! { "_id": 2, "value": "second" };
+    insert_docs(&executor, collection_id, [&doc1, &doc2])?;
+
+    storage_engine.fail_next_precondition_checks(1);
+
+    let delete_plan = full_scan_plan(collection_id);
+    let result = execute_delete_many(&executor, collection_id, delete_plan);
+
+    match result {
+        Err(Error::VersionConflict { .. }) => {}
+        Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+        Ok(doc) => panic!("Expected VersionConflict, got success {:?}", doc),
+    }
+
+    let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc1, doc! { "_id": 1, "value": "first" });
+    let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+    assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        Some(2)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
     let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
