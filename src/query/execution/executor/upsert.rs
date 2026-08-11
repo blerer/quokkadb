@@ -30,6 +30,83 @@ impl WriteExecutor {
         Ok((new_doc, id))
     }
 
+    pub(super) fn perform_replacement_upsert(
+        &self,
+        query: &Arc<PhysicalPlan>,
+        replacement: &Document,
+        parameters: &Parameters,
+    ) -> Result<(Document, Bson)> {
+        let id = replacement
+            .get("_id")
+            .cloned()
+            .or_else(|| self.extract_upsert_id_from_query(query, parameters))
+            .unwrap_or_else(|| self.generate_id());
+
+        let new_doc = if replacement.contains_key("_id") {
+            replacement.clone()
+        } else {
+            super::write::prepend_id_to_document(id.clone(), replacement)
+        };
+
+        Ok((new_doc, id))
+    }
+
+    fn extract_upsert_id_from_query(
+        &self,
+        query: &PhysicalPlan,
+        parameters: &Parameters,
+    ) -> Option<Bson> {
+        match query {
+            PhysicalPlan::PointSearch { key, filter, .. } => {
+                let BsonValue(id) = bind::bind_parameter(key, parameters);
+                Some(id).or_else(|| {
+                    filter
+                        .as_ref()
+                        .and_then(|expr| self.extract_upsert_id_from_expr(expr, parameters))
+                })
+            }
+            PhysicalPlan::IndexScan { filter, .. }
+            | PhysicalPlan::CollectionScan { filter, .. } => filter
+                .as_ref()
+                .and_then(|expr| self.extract_upsert_id_from_expr(expr, parameters)),
+            PhysicalPlan::MultiPointSearch { filter, .. } => filter
+                .as_ref()
+                .and_then(|expr| self.extract_upsert_id_from_expr(expr, parameters)),
+            PhysicalPlan::Filter { input, predicate } => self
+                .extract_upsert_id_from_query(input, parameters)
+                .or_else(|| self.extract_upsert_id_from_expr(predicate, parameters)),
+            PhysicalPlan::Projection { input, .. }
+            | PhysicalPlan::InMemorySort { input, .. }
+            | PhysicalPlan::ExternalMergeSort { input, .. }
+            | PhysicalPlan::TopKHeapSort { input, .. }
+            | PhysicalPlan::Limit { input, .. } => {
+                self.extract_upsert_id_from_query(input, parameters)
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_upsert_id_from_expr(&self, expr: &Expr, parameters: &Parameters) -> Option<Bson> {
+        match expr {
+            Expr::And(exprs) => exprs
+                .iter()
+                .find_map(|expr| self.extract_upsert_id_from_expr(expr, parameters)),
+            Expr::FieldFilters { field, filters } => {
+                let Expr::Field(path) = field.as_ref() else {
+                    return None;
+                };
+                if path.len() != 1 || path[0] != "_id".into() {
+                    return None;
+                }
+                filters
+                    .iter()
+                    .find_map(|filter| self.extract_point_value(filter, parameters))
+                    .map(|value| value.0)
+            }
+            _ => None,
+        }
+    }
+
     fn create_base_document_from_query(
         &self,
         query: &PhysicalPlan,
@@ -54,7 +131,13 @@ impl WriteExecutor {
                     self.extract_equality_from_expr(filter_expr, parameters, doc);
                 }
             }
-            PhysicalPlan::CollectionScan { filter, .. } => {
+            PhysicalPlan::IndexScan { filter, .. }
+            | PhysicalPlan::CollectionScan { filter, .. } => {
+                if let Some(filter_expr) = filter {
+                    self.extract_equality_from_expr(filter_expr, parameters, doc);
+                }
+            }
+            PhysicalPlan::MultiPointSearch { filter, .. } => {
                 if let Some(filter_expr) = filter {
                     self.extract_equality_from_expr(filter_expr, parameters, doc);
                 }
@@ -63,7 +146,11 @@ impl WriteExecutor {
                 self.extract_equality_conditions(input, parameters, doc);
                 self.extract_equality_from_expr(predicate, parameters, doc);
             }
-            PhysicalPlan::Limit { input, .. } => {
+            PhysicalPlan::Projection { input, .. }
+            | PhysicalPlan::InMemorySort { input, .. }
+            | PhysicalPlan::ExternalMergeSort { input, .. }
+            | PhysicalPlan::TopKHeapSort { input, .. }
+            | PhysicalPlan::Limit { input, .. } => {
                 self.extract_equality_conditions(input, parameters, doc);
             }
             _ => {}

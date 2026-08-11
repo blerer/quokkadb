@@ -130,6 +130,10 @@ fn assert_find_one_and_delete_result(result: WriteResult, expected: Option<Docum
     assert_eq!(result, WriteResult::SingleDocument { document: expected });
 }
 
+fn assert_find_one_and_replace_result(result: WriteResult, expected: Option<Document>) {
+    assert_eq!(result, WriteResult::SingleDocument { document: expected });
+}
+
 fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
     executor.execute_direct(
         PhysicalPlan::InsertOne {
@@ -287,6 +291,47 @@ fn execute_find_one_and_delete(
     executor.execute_direct(delete_plan, Some(params))
 }
 
+fn execute_replace_one(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    id: i32,
+    replacement: Document,
+    upsert: bool,
+) -> Result<WriteResult> {
+    let mut params = Parameters::new();
+    let query_plan = point_search_query(collection_id, &mut params, id);
+    let replace_plan = PhysicalPlan::ReplaceOne {
+        collection: collection_id,
+        query: query_plan,
+        replacement,
+        upsert,
+    };
+
+    executor.execute_direct(replace_plan, Some(params))
+}
+
+fn execute_find_one_and_replace(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    id: i32,
+    replacement: Document,
+    upsert: bool,
+    return_document: ReturnDocument,
+) -> Result<WriteResult> {
+    let mut params = Parameters::new();
+    let query_plan = point_search_query(collection_id, &mut params, id);
+    let replace_plan = PhysicalPlan::FindOneAndReplace {
+        collection: collection_id,
+        query: query_plan,
+        replacement,
+        projection: None,
+        upsert,
+        return_document,
+    };
+
+    executor.execute_direct(replace_plan, Some(params))
+}
+
 fn spawn_paused_update_one(
     executor: Arc<QueryExecutor>,
     collection_id: u32,
@@ -310,6 +355,38 @@ fn spawn_paused_find_one_and_delete(
     id: i32,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || execute_find_one_and_delete(executor.as_ref(), collection_id, id))
+}
+
+fn spawn_paused_replace_one(
+    executor: Arc<QueryExecutor>,
+    collection_id: u32,
+    id: i32,
+    replacement: Document,
+    upsert: bool,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || {
+        execute_replace_one(executor.as_ref(), collection_id, id, replacement, upsert)
+    })
+}
+
+fn spawn_paused_find_one_and_replace(
+    executor: Arc<QueryExecutor>,
+    collection_id: u32,
+    id: i32,
+    replacement: Document,
+    upsert: bool,
+    return_document: ReturnDocument,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || {
+        execute_find_one_and_replace(
+            executor.as_ref(),
+            collection_id,
+            id,
+            replacement,
+            upsert,
+            return_document,
+        )
+    })
 }
 
 fn spawn_paused_update_one_with_expr(

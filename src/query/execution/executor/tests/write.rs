@@ -239,6 +239,284 @@ fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
 }
 
 #[test]
+fn test_replace_one_preserves_existing_id_when_replacement_omits_id() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one")?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial", "extra": true },
+    )?;
+
+    let result = execute_replace_one(
+        &executor,
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+    )?;
+    assert_update_result(result, 1, 1, Option::<Bson>::None);
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
+
+    Ok(())
+}
+
+#[test]
+fn test_replace_one_rejects_changing_id() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_id")?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let result = execute_replace_one(
+        &executor,
+        collection_id,
+        1,
+        doc! { "_id": 2, "value": "replacement" },
+        false,
+    );
+
+    match result {
+        Err(Error::InvalidRequest(message)) => {
+            assert_eq!(
+                message,
+                "The _id field cannot be changed in a replacement document"
+            );
+        }
+        Err(err) => panic!("Expected InvalidRequest, got {:?}", err),
+        Ok(result) => panic!("Expected error, got success {:?}", result),
+    }
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "initial" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_replace_returns_previous_document_by_default() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let result = execute_find_one_and_replace(
+        &executor,
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_replace_result(result, Some(doc! { "_id": 1, "value": "initial" }));
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_replace_returns_new_document_when_requested() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let result = execute_find_one_and_replace(
+        &executor,
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+        ReturnDocument::After,
+    )?;
+    assert_find_one_and_replace_result(result, Some(doc! { "_id": 1, "value": "replacement" }));
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_replace_returns_none_when_no_match() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let result = execute_find_one_and_replace(
+        &executor,
+        collection_id,
+        2,
+        doc! { "value": "replacement" },
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_replace_result(result, None);
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "initial" });
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_replace_indexes")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    let index_id = index.id;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "alpha" },
+            &doc! { "_id": 2, "value": "beta" },
+        ],
+    )?;
+
+    let result = execute_find_one_and_replace(
+        &executor,
+        collection_id,
+        1,
+        doc! { "value": "updated" },
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert_find_one_and_replace_result(result, Some(doc! { "_id": 1, "value": "alpha" }));
+
+    assert!(index_scan_eq(&executor, collection_id, index_id, "alpha")?.is_empty());
+    let updated_docs = index_scan_eq(&executor, collection_id, index_id, "updated")?;
+    assert_eq!(updated_docs, vec![doc! { "_id": 1, "value": "updated" }]);
+    let unchanged = index_scan_eq(&executor, collection_id, index_id, "beta")?;
+    assert_eq!(unchanged, vec![doc! { "_id": 2, "value": "beta" }]);
+
+    Ok(())
+}
+
+#[test]
+fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let executor = Arc::new(QueryExecutor::with_test_hook(
+        storage_engine.clone(),
+        hook.clone(),
+    ));
+    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_retry")?;
+
+    insert_one(
+        executor.as_ref(),
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let replace_handle = spawn_paused_replace_one(
+        executor.clone(),
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+    );
+
+    hook.wait_until_hit();
+
+    let delete_executor = QueryExecutor::new(storage_engine.clone());
+    let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
+    assert_delete_result(delete_doc, 1);
+
+    hook.release();
+
+    let replace_result = replace_handle.join().unwrap()?;
+    assert_update_result(replace_result, 0, 0, Option::<Bson>::None);
+
+    let mut verify_params = Parameters::new();
+    let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+    let mut results = executor.execute_cached(verify_plan, &verify_params)?;
+    assert!(results.next().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let executor = Arc::new(QueryExecutor::with_test_hook(
+        storage_engine.clone(),
+        hook.clone(),
+    ));
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_find_one_and_replace_retry")?;
+
+    insert_one(
+        executor.as_ref(),
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+
+    let replace_handle = spawn_paused_find_one_and_replace(
+        executor.clone(),
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+        ReturnDocument::Before,
+    );
+
+    hook.wait_until_hit();
+
+    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "updated")?;
+    assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
+
+    hook.release();
+
+    let replace_result = replace_handle.join().unwrap()?;
+    assert_find_one_and_replace_result(replace_result, Some(doc! { "_id": 1, "value": "updated" }));
+
+    let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(final_doc, doc! { "_id": 1, "value": "replacement" });
+
+    Ok(())
+}
+
+#[test]
 fn test_update_one_succeeds_on_retry() -> Result<()> {
     // 1. Setup
     let (storage_engine, _dir) = storage_engine()?;

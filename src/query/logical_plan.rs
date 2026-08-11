@@ -5,6 +5,7 @@ use crate::query::tree_node::TreeNode;
 use crate::query::update::UpdateExpr;
 use crate::query::{Expr, Limit, Projection, ProjectionExpr, ReturnDocument, SortField};
 use crate::util::murmur_hash64::murmur_hash64a;
+use bson::Document;
 use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 
@@ -45,6 +46,22 @@ pub enum LogicalPlan {
         projection: Option<Arc<Projection>>, // Optional projection for the returned document
         upsert: bool, // Whether to perform an upsert if no documents match the query
         return_document: ReturnDocument, // Whether to return the document before or after the update
+    },
+    /// Represents a replacement operation for a single document. This is a terminal operator.
+    ReplaceOne {
+        collection: u32,         // Collection identifier
+        query: Arc<LogicalPlan>, // Filter to match the document to replace
+        replacement: Document,   // Replacement document
+        upsert: bool,            // Whether to perform an upsert if no documents match the query
+    },
+    /// Represents a replacement operation for a single document that returns a document image.
+    FindOneAndReplace {
+        collection: u32,                     // Collection identifier
+        query: Arc<LogicalPlan>,             // Filter to match the document to replace
+        replacement: Document,               // Replacement document
+        projection: Option<Arc<Projection>>, // Optional projection for the returned document
+        upsert: bool, // Whether to perform an upsert if no documents match the query
+        return_document: ReturnDocument, // Whether to return the document before or after the replacement
     },
     /// Represents a delete operation for a single document that returns the deleted document.
     FindOneAndDelete {
@@ -104,6 +121,8 @@ impl TreeNode for LogicalPlan {
             LogicalPlan::UpdateOne { query, .. } => vec![query.clone()],
             LogicalPlan::UpdateMany { query, .. } => vec![query.clone()],
             LogicalPlan::FindOneAndUpdate { query, .. } => vec![query.clone()],
+            LogicalPlan::ReplaceOne { query, .. } => vec![query.clone()],
+            LogicalPlan::FindOneAndReplace { query, .. } => vec![query.clone()],
             LogicalPlan::FindOneAndDelete { query, .. } => vec![query.clone()],
             LogicalPlan::DeleteOne { query, .. } => vec![query.clone()],
             LogicalPlan::DeleteMany { query, .. } => vec![query.clone()],
@@ -151,6 +170,32 @@ impl TreeNode for LogicalPlan {
                 collection: *collection,
                 query: Self::get_first(children),
                 update: update.clone(),
+                projection: projection.clone(),
+                upsert: *upsert,
+                return_document: *return_document,
+            }),
+            LogicalPlan::ReplaceOne {
+                collection,
+                replacement,
+                upsert,
+                ..
+            } => Arc::new(LogicalPlan::ReplaceOne {
+                collection: *collection,
+                query: Self::get_first(children),
+                replacement: replacement.clone(),
+                upsert: *upsert,
+            }),
+            LogicalPlan::FindOneAndReplace {
+                collection,
+                replacement,
+                projection,
+                upsert,
+                return_document,
+                ..
+            } => Arc::new(LogicalPlan::FindOneAndReplace {
+                collection: *collection,
+                query: Self::get_first(children),
+                replacement: replacement.clone(),
                 projection: projection.clone(),
                 upsert: *upsert,
                 return_document: *return_document,

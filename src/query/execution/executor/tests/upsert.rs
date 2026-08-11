@@ -304,3 +304,202 @@ fn test_upsert_with_nested_equality_conditions() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_update_one_upsert_extracts_residual_filter_through_index_scan() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_upsert_index_scan")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
+        IndexOptions::default(),
+    )?;
+
+    let mut params = Parameters::new();
+    let name_eq = params.collect_parameter(BsonValue(Bson::String("target".to_string())));
+    let category_eq = params.collect_parameter(BsonValue(Bson::String("books".to_string())));
+
+    let query_plan = Arc::new(PhysicalPlan::IndexScan {
+        collection: collection_id,
+        index: index.id,
+        range: IndexScanRangeExpr {
+            equal_prefix: vec![name_eq],
+            tail: None,
+        },
+        direction: Direction::Forward,
+        filter: Some(field_filters(
+            field(["category"]),
+            [interval(point(&category_eq))],
+        )),
+        projection: None,
+    });
+
+    let update_expr = update([set([field_name("status")], "processed")]);
+    let update_plan = PhysicalPlan::UpdateOne {
+        collection: collection_id,
+        query: query_plan,
+        update: update_expr,
+        upsert: true,
+    };
+
+    let result = executor.execute_direct(update_plan, Some(params))?;
+    match result {
+        WriteResult::Update {
+            matched_count,
+            modified_count,
+            upserted_id: Some(_),
+        } => {
+            assert_eq!(matched_count, 0);
+            assert_eq!(modified_count, 0);
+        }
+        other => panic!("expected Update write result with upserted_id, got {other:?}"),
+    }
+
+    let docs: Vec<Document> = executor
+        .execute_cached(full_scan_plan(collection_id), &Parameters::new())?
+        .collect::<Result<_>>()?;
+    assert_eq!(docs.len(), 1);
+    let inserted_id = docs[0].get("_id").unwrap().clone();
+    let doc = read_stored_doc(&storage_engine, collection_id, inserted_id.clone())?;
+    assert_eq!(doc, docs[0]);
+    assert_eq!(
+        doc,
+        doc! { "_id": inserted_id, "category": "books", "status": "processed" }
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_update_one_upsert_extracts_query_fields_through_topk_wrapper() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_upsert_topk")?;
+
+    let mut params = Parameters::new();
+    let category_eq = params.collect_parameter(BsonValue(Bson::String("books".to_string())));
+
+    let query_plan = Arc::new(PhysicalPlan::TopKHeapSort {
+        input: Arc::new(PhysicalPlan::Filter {
+            input: full_scan_plan(collection_id),
+            predicate: field_filters(field(["category"]), [interval(point(&category_eq))]),
+        }),
+        sort_fields: Arc::new(vec![make_sort_field(
+            vec!["category".into()],
+            SortOrder::Ascending,
+        )]),
+        k: 1,
+    });
+
+    let update_expr = update([set([field_name("status")], "processed")]);
+    let update_plan = PhysicalPlan::UpdateOne {
+        collection: collection_id,
+        query: query_plan,
+        update: update_expr,
+        upsert: true,
+    };
+
+    let result = executor.execute_direct(update_plan, Some(params))?;
+    match result {
+        WriteResult::Update {
+            matched_count,
+            modified_count,
+            upserted_id: Some(_),
+        } => {
+            assert_eq!(matched_count, 0);
+            assert_eq!(modified_count, 0);
+        }
+        other => panic!("expected Update write result with upserted_id, got {other:?}"),
+    }
+
+    let docs: Vec<Document> = executor
+        .execute_cached(full_scan_plan(collection_id), &Parameters::new())?
+        .collect::<Result<_>>()?;
+    assert_eq!(docs.len(), 1);
+    let inserted_id = docs[0].get("_id").unwrap().clone();
+    let doc = read_stored_doc(&storage_engine, collection_id, inserted_id.clone())?;
+    assert_eq!(doc, docs[0]);
+    assert_eq!(
+        doc,
+        doc! { "_id": inserted_id, "category": "books", "status": "processed" }
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_replace_one_upsert_extracts_id_through_topk_wrapper() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_topk")?;
+
+    let mut params = Parameters::new();
+    let query_plan = Arc::new(PhysicalPlan::TopKHeapSort {
+        input: point_search_query(collection_id, &mut params, 42_i32),
+        sort_fields: Arc::new(vec![make_sort_field(
+            vec!["_id".into()],
+            SortOrder::Ascending,
+        )]),
+        k: 1,
+    });
+
+    let replace_plan = PhysicalPlan::ReplaceOne {
+        collection: collection_id,
+        query: query_plan,
+        replacement: doc! { "value": "created" },
+        upsert: true,
+    };
+
+    let result = executor.execute_direct(replace_plan, Some(params))?;
+    assert_update_result(result, 0, 0, Some(42));
+
+    let doc = read_stored_doc(&storage_engine, collection_id, 42)?;
+    assert_eq!(doc, doc! { "_id": 42, "value": "created" });
+
+    Ok(())
+}
+
+#[test]
+fn test_replace_one_upsert_extracts_id_from_index_scan_filter() -> Result<()> {
+    let (storage_engine, _dir) = storage_engine()?;
+    let executor = QueryExecutor::new(storage_engine.clone());
+    let collection_id =
+        storage_engine.create_collection_if_not_exists("test_replace_index_scan")?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
+        IndexOptions::default(),
+    )?;
+
+    let mut params = Parameters::new();
+    let name_eq = params.collect_parameter(BsonValue(Bson::String("target".to_string())));
+    let id_eq = params.collect_parameter(BsonValue(Bson::Int32(7)));
+
+    let query_plan = Arc::new(PhysicalPlan::IndexScan {
+        collection: collection_id,
+        index: index.id,
+        range: IndexScanRangeExpr {
+            equal_prefix: vec![name_eq],
+            tail: None,
+        },
+        direction: Direction::Forward,
+        filter: Some(field_filters(field(["_id"]), [interval(point(&id_eq))])),
+        projection: None,
+    });
+
+    let replace_plan = PhysicalPlan::ReplaceOne {
+        collection: collection_id,
+        query: query_plan,
+        replacement: doc! { "value": "created" },
+        upsert: true,
+    };
+
+    let result = executor.execute_direct(replace_plan, Some(params))?;
+    assert_update_result(result, 0, 0, Some(7));
+
+    let doc = read_stored_doc(&storage_engine, collection_id, 7)?;
+    assert_eq!(doc, doc! { "_id": 7, "value": "created" });
+
+    Ok(())
+}

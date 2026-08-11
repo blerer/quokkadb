@@ -149,9 +149,38 @@ impl Collection {
             other => panic!("expected SingleDocument write result, got {other:?}"),
         }
     }
-}
 
-impl Collection {
+    fn build_filtered_write_query(
+        &self,
+        collection_id: u32,
+        filter: &Document,
+        sort: Option<&Document>,
+        single_match: bool,
+    ) -> Result<Arc<LogicalPlan>> {
+        let conditions = parser::parse_conditions(filter)?;
+        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
+
+        if let Some(sort) = sort {
+            let sort = parser::parse_sort(sort)?;
+            builder = builder.sort(Arc::new(sort));
+        }
+
+        if single_match {
+            builder = builder.limit(None, Some(1));
+        }
+
+        Ok(builder.build())
+    }
+
+    fn parse_optional_projection(
+        projection: Option<Document>,
+    ) -> Result<Option<Arc<crate::query::Projection>>> {
+        match projection {
+            Some(projection) => Ok(Some(Arc::new(parser::parse_projection(&projection)?))),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
         Collection {
             db_impl,
@@ -350,13 +379,8 @@ impl Collection {
     ) -> Result<UpdateResult> {
         let collection_id = self.collection_id_for_write()?;
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-        if let Some(sort) = &options.sort {
-            let sort = parser::parse_sort(sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-        let query = builder.limit(None, Some(1)).build();
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
         let update = parser::parse_update(&update, options.array_filters)?;
 
         let plan = LogicalPlan::UpdateOne {
@@ -379,10 +403,7 @@ impl Collection {
     ) -> Result<UpdateResult> {
         let collection_id = self.collection_id_for_write()?;
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let query = LogicalPlanBuilder::scan(collection_id)
-            .filter(conditions)
-            .build();
+        let query = self.build_filtered_write_query(collection_id, &filter, None, false)?;
         let update = parser::parse_update(&update, options.array_filters)?;
 
         let plan = LogicalPlan::UpdateMany {
@@ -444,13 +465,8 @@ impl Collection {
             }
         };
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-        if let Some(sort) = &options.sort {
-            let sort = parser::parse_sort(sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-        let query = builder.limit(None, Some(1)).build();
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
 
         let plan = LogicalPlan::DeleteOne {
             collection: collection_id,
@@ -473,10 +489,7 @@ impl Collection {
             }
         };
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let query = LogicalPlanBuilder::scan(collection_id)
-            .filter(conditions)
-            .build();
+        let query = self.build_filtered_write_query(collection_id, &filter, None, false)?;
 
         let plan = LogicalPlan::DeleteMany {
             collection: collection_id,
@@ -503,17 +516,9 @@ impl Collection {
             }
         };
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-        if let Some(sort) = &options.sort {
-            let sort = parser::parse_sort(sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-        let query = builder.limit(None, Some(1)).build();
-        let projection = match options.projection {
-            Some(projection) => Some(Arc::new(parser::parse_projection(&projection)?)),
-            None => None,
-        };
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
+        let projection = Self::parse_optional_projection(options.projection)?;
 
         let plan = LogicalPlan::FindOneAndDelete {
             collection: collection_id,
@@ -575,23 +580,99 @@ impl Collection {
     ) -> Result<Option<Document>> {
         let collection_id = self.collection_id_for_write()?;
 
-        let conditions = parser::parse_conditions(&filter)?;
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-        if let Some(sort) = &options.sort {
-            let sort = parser::parse_sort(sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-        let query = builder.limit(None, Some(1)).build();
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
         let update = parser::parse_update(&update, None)?;
-        let projection = match options.projection {
-            Some(projection) => Some(Arc::new(parser::parse_projection(&projection)?)),
-            None => None,
-        };
+        let projection = Self::parse_optional_projection(options.projection)?;
 
         let plan = LogicalPlan::FindOneAndUpdate {
             collection: collection_id,
             query,
             update,
+            projection,
+            upsert: options.upsert,
+            return_document: options.return_document,
+        };
+
+        Ok(Self::document_from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
+    }
+
+    /// Replaces a single document in the collection that matches the filter.
+    /// # Arguments
+    /// * `filter` - The filter document to match the document to replace.
+    /// * `replacement` - The replacement document.
+    /// Returns a `Result` containing update metadata or an error.
+    pub fn replace_one(&self, filter: Document, replacement: Document) -> Result<UpdateResult> {
+        self.execute_replace_one(filter, replacement, ReplaceOneOptions::default())
+    }
+
+    /// Creates a replace operation builder for replacing a single matching document.
+    pub fn replace_one_with(&self, filter: Document, replacement: Document) -> ReplaceOne<'_> {
+        ReplaceOne::new(self, filter, replacement)
+    }
+
+    fn execute_replace_one(
+        &self,
+        filter: Document,
+        replacement: Document,
+        options: ReplaceOneOptions,
+    ) -> Result<UpdateResult> {
+        let collection_id = self.collection_id_for_write()?;
+
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
+        let replacement = parser::parse_replacement(&replacement)?;
+
+        let plan = LogicalPlan::ReplaceOne {
+            collection: collection_id,
+            query,
+            replacement,
+            upsert: options.upsert,
+        };
+
+        Ok(UpdateResult::from_write_result(
+            self.db_impl.execute_write(plan)?,
+        ))
+    }
+
+    /// Finds a single document, replaces it, and returns either the previous or replacement document.
+    pub fn find_one_and_replace(
+        &self,
+        filter: Document,
+        replacement: Document,
+    ) -> Result<Option<Document>> {
+        self.find_one_and_replace_with(filter, replacement)
+            .execute()
+    }
+
+    /// Creates a find-one-and-replace operation builder.
+    pub fn find_one_and_replace_with(
+        &self,
+        filter: Document,
+        replacement: Document,
+    ) -> FindOneAndReplace<'_> {
+        FindOneAndReplace::new(self, filter, replacement)
+    }
+
+    fn execute_find_one_and_replace(
+        &self,
+        filter: Document,
+        replacement: Document,
+        options: FindOneAndReplaceOptions,
+    ) -> Result<Option<Document>> {
+        let collection_id = self.collection_id_for_write()?;
+
+        let query =
+            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
+        let replacement = parser::parse_replacement(&replacement)?;
+        let projection = Self::parse_optional_projection(options.projection)?;
+
+        let plan = LogicalPlan::FindOneAndReplace {
+            collection: collection_id,
+            query,
+            replacement,
             projection,
             upsert: options.upsert,
             return_document: options.return_document,
@@ -627,6 +708,20 @@ struct FindOneAndUpdateOptions {
 struct FindOneAndDeleteOptions {
     projection: Option<Document>,
     sort: Option<Document>,
+}
+
+#[derive(Default)]
+struct ReplaceOneOptions {
+    upsert: bool,
+    sort: Option<Document>,
+}
+
+#[derive(Default)]
+struct FindOneAndReplaceOptions {
+    projection: Option<Document>,
+    sort: Option<Document>,
+    upsert: bool,
+    return_document: ReturnDocument,
 }
 
 pub struct UpdateOne<'a> {
@@ -874,6 +969,90 @@ impl<'a> FindOneAndUpdate<'a> {
     pub fn execute(self) -> Result<Option<Document>> {
         self.collection
             .execute_find_one_and_update(self.filter, self.update, self.options)
+    }
+}
+
+pub struct ReplaceOne<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    replacement: Document,
+    options: ReplaceOneOptions,
+}
+
+impl<'a> ReplaceOne<'a> {
+    fn new(collection: &'a Collection, filter: Document, replacement: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            replacement,
+            options: ReplaceOneOptions::default(),
+        }
+    }
+
+    /// Sets whether to perform an upsert if no documents match the query.
+    pub fn upsert(mut self, upsert: bool) -> Self {
+        self.options.upsert = upsert;
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to replace.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
+        self
+    }
+
+    /// Executes the replace operation.
+    pub fn execute(self) -> Result<UpdateResult> {
+        self.collection
+            .execute_replace_one(self.filter, self.replacement, self.options)
+    }
+}
+
+pub struct FindOneAndReplace<'a> {
+    collection: &'a Collection,
+    filter: Document,
+    replacement: Document,
+    options: FindOneAndReplaceOptions,
+}
+
+impl<'a> FindOneAndReplace<'a> {
+    fn new(collection: &'a Collection, filter: Document, replacement: Document) -> Self {
+        Self {
+            collection,
+            filter,
+            replacement,
+            options: FindOneAndReplaceOptions::default(),
+        }
+    }
+
+    /// Sets the projection for the returned document.
+    pub fn projection(mut self, projection: Document) -> Self {
+        self.options.projection = Some(projection);
+        self
+    }
+
+    /// Sets the sort order used to choose which matching document to replace.
+    pub fn sort(mut self, sort: Document) -> Self {
+        self.options.sort = Some(sort);
+        self
+    }
+
+    /// Sets whether to perform an upsert if no documents match the query.
+    pub fn upsert(mut self, upsert: bool) -> Self {
+        self.options.upsert = upsert;
+        self
+    }
+
+    /// Sets whether to return the document before or after the replacement.
+    pub fn return_document(mut self, return_document: ReturnDocument) -> Self {
+        self.options.return_document = return_document;
+        self
+    }
+
+    /// Executes the operation.
+    pub fn execute(self) -> Result<Option<Document>> {
+        self.collection
+            .execute_find_one_and_replace(self.filter, self.replacement, self.options)
     }
 }
 

@@ -671,6 +671,131 @@ fn test_find_one_and_update_upsert_after_returns_inserted_document() {
 }
 
 #[test]
+fn test_replace_one_replaces_document_and_preserves_id() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .replace_one(
+            doc! { "_id": 1 },
+            doc! { "item": "replacement", "qty": 999 },
+        )
+        .unwrap();
+
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+    assert_eq!(result.upserted_id, None);
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 }).unwrap(),
+        doc! { "_id": 1, "item": "replacement", "qty": 999 }
+    );
+}
+
+#[test]
+fn test_replace_one_rejects_changing_id() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let err = collection
+        .replace_one(
+            doc! { "_id": 1 },
+            doc! { "_id": 2, "item": "replacement", "qty": 999 },
+        )
+        .unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("The _id field cannot be changed in a replacement document"));
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 }).unwrap(),
+        doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 25,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+        }
+    );
+}
+
+#[test]
+fn test_find_one_and_replace_returns_previous_document_by_default() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_replace(
+            doc! { "_id": 1 },
+            doc! { "item": "replacement", "qty": 999 },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! {
+            "_id": 1,
+            "item": "journal",
+            "qty": 25,
+            "size": { "h": 14, "w": 21, "uom": "cm" },
+            "status": "A",
+            "tags": ["blank", "red"],
+            "dim_cm": [14, 21],
+        })
+    );
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 }).unwrap(),
+        doc! { "_id": 1, "item": "replacement", "qty": 999 }
+    );
+}
+
+#[test]
+fn test_find_one_and_replace_returns_new_document_when_requested() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_replace_with(
+            doc! { "_id": 1 },
+            doc! { "item": "replacement", "qty": 999 },
+        )
+        .return_document(ReturnDocument::After)
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! { "_id": 1, "item": "replacement", "qty": 999 })
+    );
+}
+
+#[test]
+fn test_find_one_and_replace_upsert_after_returns_inserted_document() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .find_one_and_replace_with(
+            doc! { "_id": 5002 },
+            doc! { "item": "replacement", "qty": 999 },
+        )
+        .upsert(true)
+        .return_document(ReturnDocument::After)
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(doc! { "_id": 5002, "item": "replacement", "qty": 999 })
+    );
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 5002 }).unwrap(),
+        doc! { "_id": 5002, "item": "replacement", "qty": 999 }
+    );
+}
+
+#[test]
 fn test_push_with_each_and_slice() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

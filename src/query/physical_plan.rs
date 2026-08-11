@@ -2,6 +2,7 @@ use crate::query::update::UpdateExpr;
 use crate::query::{Expr, Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
 use crate::util::interval::Interval;
+use bson::Document;
 use std::sync::Arc;
 
 /// A storage-facing description of the bounds for a secondary index scan.
@@ -140,6 +141,34 @@ pub enum PhysicalPlan {
         /// Whether to perform an upsert if no documents match the query.
         upsert: bool,
         /// Whether to return the document before or after the update.
+        return_document: ReturnDocument,
+    },
+
+    /// Replaces a single document in a collection.
+    ReplaceOne {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to replace.
+        query: Arc<PhysicalPlan>,
+        /// The replacement document.
+        replacement: Document,
+        /// Whether to perform an upsert if no documents match the query.
+        upsert: bool,
+    },
+
+    /// Replaces a single document in a collection and returns a document image.
+    FindOneAndReplace {
+        /// The identifier for the collection.
+        collection: u32,
+        /// The query to find the document to replace.
+        query: Arc<PhysicalPlan>,
+        /// The replacement document.
+        replacement: Document,
+        /// An optional projection to apply to the returned document.
+        projection: Option<Arc<Projection>>,
+        /// Whether to perform an upsert if no documents match the query.
+        upsert: bool,
+        /// Whether to return the document before or after the replacement.
         return_document: ReturnDocument,
     },
 

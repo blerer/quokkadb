@@ -865,6 +865,22 @@ pub fn parse_update(
     Ok(update_expr)
 }
 
+/// Parses a BSON document representing a full-document replacement.
+///
+/// Replacement documents are validated separately from modifier-style updates:
+/// - top-level fields must be valid stored field names
+/// - operator-style documents such as `{ "$set": ... }` are rejected
+///
+/// `_id` semantics that depend on an existing matched document are enforced later
+/// by the write executor.
+pub fn parse_replacement(replacement: &Document) -> Result<Document, Error> {
+    for key in replacement.keys() {
+        crate::query::update::validate_field_name(key)?;
+    }
+
+    Ok(replacement.clone())
+}
+
 fn parse_update_path(path: &str) -> Result<Vec<UpdatePathComponent>, Error> {
     path.split('.').map(parse_update_path_component).collect()
 }
@@ -1961,6 +1977,53 @@ mod tests {
                     "Array filter identifier must be a field name"
                 );
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod replacement_parsing {
+        use super::*;
+
+        #[test]
+        fn test_parse_replacement_accepts_regular_document() {
+            let replacement = doc! {
+                "_id": 1,
+                "name": "Alice",
+                "profile": { "active": true }
+            };
+
+            let parsed = parse_replacement(&replacement).unwrap();
+            assert_eq!(parsed, replacement);
+        }
+
+        #[test]
+        fn test_parse_replacement_rejects_operator_document() {
+            let replacement = doc! { "$set": { "name": "Alice" } };
+
+            let err = parse_replacement(&replacement).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "Field name cannot start with '$'. This is reserved for operators."
+            );
+        }
+
+        #[test]
+        fn test_parse_replacement_rejects_dotted_top_level_field() {
+            let replacement = doc! { "a.b": 1 };
+
+            let err = parse_replacement(&replacement).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "Field name cannot contain '.'. Nested paths should use dot-separated keys."
+            );
+        }
+
+        #[test]
+        fn test_parse_replacement_rejects_empty_field_name() {
+            let replacement = Document::from_iter([(String::new(), Bson::Int32(1))]);
+
+            let err = parse_replacement(&replacement).unwrap_err();
+            assert_eq!(err.to_string(), "Field name cannot be empty.");
         }
     }
 

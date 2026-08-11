@@ -284,6 +284,44 @@ impl DbImpl {
                     Some(parameters),
                 )
             }
+            LogicalPlan::ReplaceOne {
+                collection,
+                query,
+                replacement,
+                upsert,
+            } => {
+                let (parameters, query) = self.optimize_query(query);
+                (
+                    PhysicalPlan::ReplaceOne {
+                        collection,
+                        query,
+                        replacement,
+                        upsert,
+                    },
+                    Some(parameters),
+                )
+            }
+            LogicalPlan::FindOneAndReplace {
+                collection,
+                query,
+                replacement,
+                projection,
+                upsert,
+                return_document,
+            } => {
+                let (parameters, query) = self.optimize_query(query);
+                (
+                    PhysicalPlan::FindOneAndReplace {
+                        collection,
+                        query,
+                        replacement,
+                        projection,
+                        upsert,
+                        return_document,
+                    },
+                    Some(parameters),
+                )
+            }
             LogicalPlan::FindOneAndDelete {
                 collection,
                 query,

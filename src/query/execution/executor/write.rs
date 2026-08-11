@@ -106,6 +106,35 @@ impl WriteExecutor {
                     &parameters,
                 )
             }
+            PhysicalPlan::ReplaceOne {
+                collection,
+                query,
+                replacement,
+                upsert,
+            } => {
+                let parameters = parameters.expect("Parameters must be provided for ReplaceOne");
+                self.perform_replace_one(collection, query, replacement, upsert, &parameters)
+            }
+            PhysicalPlan::FindOneAndReplace {
+                collection,
+                query,
+                replacement,
+                projection,
+                upsert,
+                return_document,
+            } => {
+                let parameters =
+                    parameters.expect("Parameters must be provided for FindOneAndReplace");
+                self.perform_find_one_and_replace(
+                    collection,
+                    query,
+                    replacement,
+                    projection,
+                    upsert,
+                    return_document,
+                    &parameters,
+                )
+            }
             PhysicalPlan::FindOneAndDelete {
                 collection,
                 query,
@@ -364,6 +393,86 @@ impl WriteExecutor {
         }
     }
 
+    pub(super) fn perform_replace_one(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        replacement: Document,
+        upsert: bool,
+        parameters: &Parameters,
+    ) -> Result<WriteResult> {
+        match self.perform_single_document_replace(
+            collection,
+            query,
+            replacement,
+            upsert,
+            parameters,
+        )? {
+            SingleDocumentReplaceResult::Replaced { .. } => Ok(WriteResult::Update {
+                matched_count: 1,
+                modified_count: 1,
+                upserted_id: None,
+            }),
+            SingleDocumentReplaceResult::Upserted { upserted_id, .. } => Ok(WriteResult::Update {
+                matched_count: 0,
+                modified_count: 0,
+                upserted_id: Some(upserted_id),
+            }),
+            SingleDocumentReplaceResult::NoMatch => Ok(WriteResult::Update {
+                matched_count: 0,
+                modified_count: 0,
+                upserted_id: None,
+            }),
+        }
+    }
+
+    pub(super) fn perform_find_one_and_replace(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        replacement: Document,
+        projection: Option<Arc<Projection>>,
+        upsert: bool,
+        return_document: ReturnDocument,
+        parameters: &Parameters,
+    ) -> Result<WriteResult> {
+        match self.perform_single_document_replace(
+            collection,
+            query,
+            replacement,
+            upsert,
+            parameters,
+        )? {
+            SingleDocumentReplaceResult::Replaced { old_doc, new_doc } => {
+                let returned = match return_document {
+                    ReturnDocument::Before => old_doc,
+                    ReturnDocument::After => new_doc,
+                };
+                Ok(WriteResult::SingleDocument {
+                    document: Some(self.apply_return_projection(
+                        returned,
+                        projection.as_ref(),
+                        parameters,
+                    )?),
+                })
+            }
+            SingleDocumentReplaceResult::Upserted { new_doc, .. } => {
+                let document = match return_document {
+                    ReturnDocument::Before => None,
+                    ReturnDocument::After => Some(self.apply_return_projection(
+                        new_doc,
+                        projection.as_ref(),
+                        parameters,
+                    )?),
+                };
+                Ok(WriteResult::SingleDocument { document })
+            }
+            SingleDocumentReplaceResult::NoMatch => {
+                Ok(WriteResult::SingleDocument { document: None })
+            }
+        }
+    }
+
     pub(super) fn perform_delete_one(
         &self,
         collection: u32,
@@ -524,6 +633,81 @@ impl WriteExecutor {
             ) {
                 Ok(_) => {
                     return Ok(SingleDocumentUpdateResult::Upserted {
+                        new_doc,
+                        upserted_id,
+                    });
+                }
+                Err(e) => {
+                    on_version_conflict(e, &start_time, &mut attempt)?;
+                }
+            }
+        }
+    }
+
+    fn perform_single_document_replace(
+        &self,
+        collection: u32,
+        query: Arc<PhysicalPlan>,
+        replacement: Document,
+        upsert: bool,
+        parameters: &Parameters,
+    ) -> Result<SingleDocumentReplaceResult> {
+        let start_time = Instant::now();
+        let mut attempt = 0;
+
+        loop {
+            let snapshot = self.storage_engine.last_visible_sequence();
+            let mut iter = self.read_executor.execute_cached_at_snapshot(
+                query.clone(),
+                parameters,
+                Some(snapshot),
+            )?;
+
+            if let Some(doc_result) = iter.next() {
+                let old_doc = doc_result?;
+                let new_doc = self.prepare_replacement_document(&old_doc, &replacement)?;
+                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+                let new_doc_bytes = serialize_to_vec(&new_doc)?;
+
+                #[cfg(test)]
+                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
+                match self.write_document(
+                    collection,
+                    snapshot,
+                    user_key,
+                    Some(old_doc.clone()),
+                    new_doc.clone(),
+                    new_doc_bytes,
+                ) {
+                    Ok(_) => {
+                        return Ok(SingleDocumentReplaceResult::Replaced { old_doc, new_doc });
+                    }
+                    Err(e) => {
+                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        continue;
+                    }
+                }
+            }
+
+            if !upsert {
+                return Ok(SingleDocumentReplaceResult::NoMatch);
+            }
+
+            let (new_doc, upserted_id) =
+                self.perform_replacement_upsert(&query, &replacement, parameters)?;
+            let user_key = upserted_id.clone().try_into_key()?;
+            let new_doc_bytes = serialize_to_vec(&new_doc)?;
+
+            match self.write_document(
+                collection,
+                snapshot,
+                user_key,
+                None,
+                new_doc.clone(),
+                new_doc_bytes,
+            ) {
+                Ok(_) => {
+                    return Ok(SingleDocumentReplaceResult::Upserted {
                         new_doc,
                         upserted_id,
                     });
@@ -809,6 +993,22 @@ impl WriteExecutor {
         self.storage_engine.write(batch)
     }
 
+    fn prepare_replacement_document(
+        &self,
+        old_doc: &Document,
+        replacement: &Document,
+    ) -> Result<Document> {
+        let old_id = old_doc.get("_id").unwrap().clone();
+
+        match replacement.get("_id") {
+            Some(new_id) if *new_id != old_id => Err(Error::InvalidRequest(
+                "The _id field cannot be changed in a replacement document".to_string(),
+            )),
+            Some(_) => Ok(replacement.clone()),
+            None => Ok(prepend_id_to_document(old_id, replacement)),
+        }
+    }
+
     #[cfg(test)]
     fn invoke_test_hook(&self, point: ExecutorFailpoint) {
         if let Some(test_hook) = &self.test_hook {
@@ -829,9 +1029,32 @@ enum SingleDocumentUpdateResult {
     NoMatch,
 }
 
+enum SingleDocumentReplaceResult {
+    Replaced {
+        old_doc: Document,
+        new_doc: Document,
+    },
+    Upserted {
+        new_doc: Document,
+        upserted_id: Bson,
+    },
+    NoMatch,
+}
+
 enum SingleDocumentDeleteResult {
     Deleted { old_doc: Document },
     NoMatch,
+}
+
+pub(super) fn prepend_id_to_document(id: Bson, doc: &Document) -> Document {
+    let mut new_doc = Document::new();
+    new_doc.insert("_id", id);
+    for (key, value) in doc {
+        if key != "_id" {
+            new_doc.insert(key.clone(), value.clone());
+        }
+    }
+    new_doc
 }
 
 /// Handles a storage write error inside a retry loop.
