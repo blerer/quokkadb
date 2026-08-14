@@ -33,7 +33,7 @@
 //! A level needs compaction when its score exceeds 1.0.
 
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{AtomicGauge, Counter, Histogram, MetricRegistry};
+use crate::obs::metrics::{self, AtomicGauge, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::storage::lsm_version::{span, DropMetadata, Level, LevelItem, Levels, SSTableMetadata};
@@ -671,35 +671,50 @@ impl Metrics {
 
     fn register_to(&self, registry: &mut MetricRegistry) {
         registry
-            .register_counter("compaction.jobs.picked", self.jobs_picked.clone())
-            .register_counter("compaction.jobs.picked.full", self.jobs_picked_full.clone())
             .register_counter(
-                "compaction.jobs.picked.partial",
+                metrics::names::compaction::JOBS_PICKED,
+                self.jobs_picked.clone(),
+            )
+            .register_counter(
+                metrics::names::compaction::JOBS_PICKED_FULL,
+                self.jobs_picked_full.clone(),
+            )
+            .register_counter(
+                metrics::names::compaction::JOBS_PICKED_PARTIAL,
                 self.jobs_picked_partial.clone(),
             )
             .register_counter(
-                "compaction.jobs.skipped.level_compacting",
+                metrics::names::compaction::JOBS_SKIPPED_LEVEL_COMPACTING,
                 self.jobs_skipped_level_compacting.clone(),
             )
             .register_counter(
-                "compaction.jobs.skipped.range_overlap",
+                metrics::names::compaction::JOBS_SKIPPED_RANGE_OVERLAP,
                 self.jobs_skipped_range_overlap.clone(),
             )
             .register_histogram(
-                "compaction.input_files.count",
+                metrics::names::compaction::INPUT_FILES_COUNT,
                 self.input_files_count.clone(),
             );
 
         for (level, counter) in self.picked_from_level.iter().enumerate() {
-            registry.register_counter(&format!("compaction.picked.l{}", level), counter.clone());
+            registry.register_counter(
+                metrics::names::compaction::picked_level(level),
+                counter.clone(),
+            );
         }
 
         for (level, gauge) in self.score_per_level.iter().enumerate() {
-            registry.register_gauge(&format!("compaction.score.l{}", level), gauge.clone());
+            registry.register_gauge(
+                metrics::names::compaction::score_level(level),
+                gauge.clone(),
+            );
         }
 
         for (level, gauge) in self.active_per_level.iter().enumerate() {
-            registry.register_gauge(&format!("compaction.active.l{}", level), gauge.clone());
+            registry.register_gauge(
+                metrics::names::compaction::active_level(level),
+                gauge.clone(),
+            );
         }
     }
 

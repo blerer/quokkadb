@@ -3,6 +3,7 @@ extern crate core;
 pub mod collection;
 pub mod error;
 mod io;
+pub mod metrics;
 pub mod obs;
 pub mod options;
 mod query;
@@ -12,6 +13,7 @@ mod util;
 use crate::collection::CreateIndexOptions;
 use crate::collection::{Collection, CreateCollectionOptions, IdCreationStrategy};
 use crate::error::Error;
+use crate::metrics::Metrics;
 use crate::obs::logger::{LogLevel, LoggerAndTracer, NoOpLogger};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
@@ -70,6 +72,7 @@ impl QuokkaDB {
         let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
         let db_impl = Arc::new(DbImpl {
             logger,
+            metrics: metric_registry.clone(),
             optimizer,
             executor,
             storage_engine,
@@ -84,6 +87,12 @@ impl QuokkaDB {
 
     pub fn collection(&self, name: &str) -> Collection {
         Collection::new(self.db_impl.clone(), name.to_string())
+    }
+
+    pub fn metrics(&self) -> Metrics<'_> {
+        Metrics {
+            registry: &self.db_impl.metrics,
+        }
     }
 
     /// Creates a new collection with the given name and default options.
@@ -146,6 +155,7 @@ impl<'a> CreateCollection<'a> {
 
 struct DbImpl {
     logger: Arc<dyn LoggerAndTracer>,
+    metrics: MetricRegistry,
     optimizer: Arc<Optimizer>,
     executor: Arc<QueryExecutor>,
     storage_engine: Arc<StorageEngine>,

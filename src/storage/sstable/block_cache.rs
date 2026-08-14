@@ -1,7 +1,7 @@
 use crate::io::checksum::ChecksumStrategy;
 use crate::io::compressor::Compressor;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
+use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
@@ -174,10 +174,16 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_gauge("block_cache_size", self.size.clone())
-            .register_counter("block_cache_hit", self.hits.clone())
-            .register_counter("block_cache_miss", self.misses.clone())
-            .register_computed("block_cache_hit_ratio", self.hit_ratio.clone())
-            .register_counter("block_cache_evictions", self.evictions.clone());
+            .register_gauge(metrics::names::block_cache::SIZE, self.size.clone())
+            .register_counter(metrics::names::block_cache::HITS, self.hits.clone())
+            .register_counter(metrics::names::block_cache::MISSES, self.misses.clone())
+            .register_computed(
+                metrics::names::block_cache::HIT_RATIO,
+                self.hit_ratio.clone(),
+            )
+            .register_counter(
+                metrics::names::block_cache::EVICTIONS,
+                self.evictions.clone(),
+            );
     }
 }

@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::{file_name_as_str, sync_dir};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
+use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
@@ -306,11 +306,17 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_counter("manifest_rewrite", self.manifest_rewrite.clone())
-            .register_counter("manifest_writes", self.manifest_writes.clone())
-            .register_gauge("manifest_size", self.manifest_size.clone())
             .register_counter(
-                "manifest_bytes_written",
+                metrics::names::manifest::REWRITE,
+                self.manifest_rewrite.clone(),
+            )
+            .register_counter(
+                metrics::names::manifest::WRITES,
+                self.manifest_writes.clone(),
+            )
+            .register_gauge(metrics::names::manifest::SIZE, self.manifest_size.clone())
+            .register_counter(
+                metrics::names::manifest::BYTES_WRITTEN,
                 self.manifest_bytes_written.clone(),
             );
     }

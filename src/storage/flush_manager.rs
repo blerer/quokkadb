@@ -1,5 +1,5 @@
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{Counter, Histogram, MetricRegistry};
+use crate::obs::metrics::{self, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
 use crate::storage::files::DbFile;
@@ -249,9 +249,15 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_counter("flush_count", self.count.clone())
-            .register_histogram("flush_duration", self.duration.clone())
-            .register_histogram("flush_write_throughput", self.write_throughput.clone())
-            .register_histogram("flush_memtable_size", self.memtable_size.clone());
+            .register_counter(metrics::names::flush::COUNT, self.count.clone())
+            .register_histogram(metrics::names::flush::DURATION, self.duration.clone())
+            .register_histogram(
+                metrics::names::flush::WRITE_THROUGHPUT,
+                self.write_throughput.clone(),
+            )
+            .register_histogram(
+                metrics::names::flush::MEMTABLE_SIZE,
+                self.memtable_size.clone(),
+            );
     }
 }

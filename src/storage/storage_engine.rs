@@ -1,6 +1,6 @@
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{DerivedGauge, MetricRegistry};
+use crate::obs::metrics::{self, DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
@@ -1478,11 +1478,9 @@ impl StorageEngine {
         lsm_tree: Arc<ArcSwap<LsmTree>>,
     ) {
         for level in 0..options.max_levels() {
-            let level_name = format!("level_{}", level);
-
             let lsm = lsm_tree.clone();
             metric_registry.register_gauge(
-                &format!("sstable_count_{}", level_name),
+                metrics::names::storage::sstable_count_level(level),
                 DerivedGauge::new(Arc::new(move || {
                     let levels = lsm.load().levels();
                     let may_be_level = levels.level(level as usize);
@@ -1492,7 +1490,7 @@ impl StorageEngine {
 
             let lsm = lsm_tree.clone();
             metric_registry.register_gauge(
-                &format!("sstable_size_{}", level_name),
+                metrics::names::storage::sstable_size_level(level),
                 DerivedGauge::new(Arc::new(move || {
                     let levels = lsm.load().levels();
                     let may_be_level = levels.level(level as usize);
@@ -1503,25 +1501,25 @@ impl StorageEngine {
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge(
-            "sstable_count",
+            metrics::names::storage::SSTABLE_COUNT,
             DerivedGauge::new(Arc::new(move || lsm.load().levels().sst_count() as u64)),
         );
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge(
-            "stable_size",
+            metrics::names::storage::TOTAL_SSTABLE_SIZE,
             DerivedGauge::new(Arc::new(move || lsm.load().levels().total_bytes())),
         );
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge(
-            "memtable_size",
+            metrics::names::storage::MEMTABLE_SIZE,
             DerivedGauge::new(Arc::new(move || lsm.load().memtable.size() as u64)),
         );
 
         let lsm = lsm_tree.clone();
         metric_registry.register_gauge(
-            "memtable_total_size",
+            metrics::names::storage::MEMTABLE_TOTAL_SIZE,
             DerivedGauge::new(Arc::new(move || {
                 let lsm_tree = lsm.load();
                 (lsm_tree.memtable.size()
@@ -1535,7 +1533,7 @@ impl StorageEngine {
 
         let lsm_tree = lsm_tree.clone();
         metric_registry.register_gauge(
-            "memtable_count",
+            metrics::names::storage::MEMTABLE_COUNT,
             DerivedGauge::new(Arc::new(move || {
                 (lsm_tree.load().imm_memtables.len() + 1) as u64
             })),

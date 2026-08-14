@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
+use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
@@ -329,11 +329,17 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_gauge("wal_files", self.files.clone())
-            .register_gauge("wal_total_bytes", self.total_bytes.clone())
-            .register_counter("wal_syncs", self.syncs.clone())
-            .register_gauge("wal_bytes_buffered", self.bytes_buffered.clone())
-            .register_counter("wal_bytes_written", self.bytes_written.clone());
+            .register_gauge(metrics::names::wal::FILES, self.files.clone())
+            .register_gauge(metrics::names::wal::TOTAL_BYTES, self.total_bytes.clone())
+            .register_counter(metrics::names::wal::SYNCS, self.syncs.clone())
+            .register_gauge(
+                metrics::names::wal::BYTES_BUFFERED,
+                self.bytes_buffered.clone(),
+            )
+            .register_counter(
+                metrics::names::wal::BYTES_WRITTEN,
+                self.bytes_written.clone(),
+            );
     }
 }
 

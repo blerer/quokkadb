@@ -14,23 +14,35 @@ impl MetricRegistry {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn register_counter(&mut self, name: &str, counter: Arc<Counter>) -> &mut Self {
-        self.counters.insert(name.to_string(), counter);
+    pub fn register_counter(
+        &mut self,
+        name: impl Into<String>,
+        counter: Arc<Counter>,
+    ) -> &mut Self {
+        self.counters.insert(name.into(), counter);
         self
     }
 
-    pub fn register_gauge(&mut self, name: &str, gauge: Arc<dyn Gauge>) -> &mut Self {
-        self.gauges.insert(name.to_string(), gauge);
+    pub fn register_gauge(&mut self, name: impl Into<String>, gauge: Arc<dyn Gauge>) -> &mut Self {
+        self.gauges.insert(name.into(), gauge);
         self
     }
 
-    pub fn register_computed(&mut self, name: &str, computed: Arc<dyn Computed>) -> &mut Self {
-        self.computed.insert(name.to_string(), computed);
+    pub fn register_computed(
+        &mut self,
+        name: impl Into<String>,
+        computed: Arc<dyn Computed>,
+    ) -> &mut Self {
+        self.computed.insert(name.into(), computed);
         self
     }
 
-    pub fn register_histogram(&mut self, name: &str, histogram: Arc<Histogram>) -> &mut Self {
-        self.histograms.insert(name.to_string(), histogram);
+    pub fn register_histogram(
+        &mut self,
+        name: impl Into<String>,
+        histogram: Arc<Histogram>,
+    ) -> &mut Self {
+        self.histograms.insert(name.into(), histogram);
         self
     }
 
@@ -48,6 +60,105 @@ impl MetricRegistry {
 
     pub fn get_histogram(&self, name: &str) -> Option<Arc<Histogram>> {
         self.histograms.get(name).cloned()
+    }
+
+    pub(crate) fn counter_value(&self, name: &str) -> u64 {
+        self.get_counter(name)
+            .unwrap_or_else(|| panic!("Counter '{}' not found in registry", name))
+            .get()
+    }
+
+    pub(crate) fn gauge_value(&self, name: &str) -> u64 {
+        self.get_gauge(name)
+            .unwrap_or_else(|| panic!("Gauge '{}' not found in registry", name))
+            .get()
+    }
+
+    pub(crate) fn computed_value(&self, name: &str) -> f64 {
+        self.get_computed(name)
+            .unwrap_or_else(|| panic!("Computed metric '{}' not found in registry", name))
+            .get()
+    }
+
+    pub(crate) fn histogram(&self, name: &str) -> Arc<Histogram> {
+        self.get_histogram(name)
+            .unwrap_or_else(|| panic!("Histogram '{}' not found in registry", name))
+    }
+}
+
+pub mod names {
+    pub mod flush {
+        pub const COUNT: &str = "flush_count";
+        pub const DURATION: &str = "flush_duration";
+        pub const WRITE_THROUGHPUT: &str = "flush_write_throughput";
+        pub const MEMTABLE_SIZE: &str = "flush_memtable_size";
+    }
+
+    pub mod wal {
+        pub const FILES: &str = "wal_files";
+        pub const TOTAL_BYTES: &str = "wal_total_bytes";
+        pub const SYNCS: &str = "wal_syncs";
+        pub const BYTES_BUFFERED: &str = "wal_bytes_buffered";
+        pub const BYTES_WRITTEN: &str = "wal_bytes_written";
+    }
+
+    pub mod manifest {
+        pub const REWRITE: &str = "manifest_rewrite";
+        pub const WRITES: &str = "manifest_writes";
+        pub const SIZE: &str = "manifest_size";
+        pub const BYTES_WRITTEN: &str = "manifest_bytes_written";
+    }
+
+    pub mod block_cache {
+        pub const SIZE: &str = "block_cache_size";
+        pub const HITS: &str = "block_cache_hit";
+        pub const MISSES: &str = "block_cache_miss";
+        pub const HIT_RATIO: &str = "block_cache_hit_ratio";
+        pub const EVICTIONS: &str = "block_cache_evictions";
+    }
+
+    pub mod sstable_cache {
+        pub const OPEN_COUNT: &str = "sstables_open_count";
+        pub const HITS: &str = "sstable_cache_hit";
+        pub const MISSES: &str = "sstable_cache_miss";
+        pub const HIT_RATIO: &str = "sstable_cache_hit_ratio";
+    }
+
+    pub mod storage {
+        pub fn sstable_count_level(level: usize) -> String {
+            format!("sstable_count_level_{}", level)
+        }
+
+        pub fn sstable_size_level(level: usize) -> String {
+            format!("sstable_size_level_{}", level)
+        }
+
+        pub const SSTABLE_COUNT: &str = "sstable_count";
+        pub const TOTAL_SSTABLE_SIZE: &str = "stable_size";
+        pub const MEMTABLE_SIZE: &str = "memtable_size";
+        pub const MEMTABLE_TOTAL_SIZE: &str = "memtable_total_size";
+        pub const MEMTABLE_COUNT: &str = "memtable_count";
+    }
+
+    pub mod compaction {
+        pub const JOBS_PICKED: &str = "compaction.jobs.picked";
+        pub const JOBS_PICKED_FULL: &str = "compaction.jobs.picked.full";
+        pub const JOBS_PICKED_PARTIAL: &str = "compaction.jobs.picked.partial";
+        pub const JOBS_SKIPPED_LEVEL_COMPACTING: &str = "compaction.jobs.skipped.level_compacting";
+        pub const JOBS_SKIPPED_RANGE_OVERLAP: &str = "compaction.jobs.skipped.range_overlap";
+        pub const INPUT_FILES_COUNT: &str = "compaction.input_files.count";
+
+        pub fn picked_level(level: usize) -> String {
+            format!("compaction.picked.l{}", level)
+        }
+
+        pub fn score_level(level: usize) -> String {
+            format!("compaction.score.l{}", level)
+        }
+
+        pub fn active_level(level: usize) -> String {
+            format!("compaction.active.l{}", level)
+        }
     }
 }
 
@@ -322,6 +433,7 @@ impl Histogram {
 }
 
 /// Represents an immutable snapshot of a histogram's state for reporting or display.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistogramSnapshot {
     /// Number of recorded values.
     pub count: u64,
@@ -412,7 +524,6 @@ pub fn assert_gauge_eq(registry: &MetricRegistry, name: &str, expected: u64) {
 
 #[cfg(test)]
 mod tests {
-
     mod hit_ratio {
         use crate::obs::metrics::HitRatio;
         use crate::obs::metrics::{Computed, Counter};

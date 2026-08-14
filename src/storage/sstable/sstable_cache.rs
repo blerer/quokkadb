@@ -1,5 +1,5 @@
 use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::obs::metrics::{Counter, DerivedGauge, HitRatio, MetricRegistry};
+use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
@@ -127,9 +127,15 @@ impl Metrics {
 
     fn register_to(&self, metric_registry: &mut MetricRegistry) {
         metric_registry
-            .register_gauge("sstables_open_count", self.sstables_open_count.clone())
-            .register_counter("sstable_cache_hit", self.hits.clone())
-            .register_counter("sstable_cache_miss", self.misses.clone())
-            .register_computed("sstable_cache_hit_ratio", self.hit_ratio.clone());
+            .register_gauge(
+                metrics::names::sstable_cache::OPEN_COUNT,
+                self.sstables_open_count.clone(),
+            )
+            .register_counter(metrics::names::sstable_cache::HITS, self.hits.clone())
+            .register_counter(metrics::names::sstable_cache::MISSES, self.misses.clone())
+            .register_computed(
+                metrics::names::sstable_cache::HIT_RATIO,
+                self.hit_ratio.clone(),
+            );
     }
 }
