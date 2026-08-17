@@ -1,7 +1,23 @@
 use super::*;
+use crate::query::execution::executor::test_utils::{
+    assert_insert_one_result, executor_test_runtime, full_scan_plan, insert_docs, insert_one,
+    inserted_id, inserted_ids, point_search_query, write_batch,
+};
+use crate::query::execution::QueryExecutor;
+use crate::query::expr_fn::{
+    all, and, at_least, at_most, elem_match, exists, field, field_filters, greater_than, has_type,
+    interval, less_than, ne, nor, not, or, point, proj_array_elements, proj_elem_match, proj_field,
+    proj_fields, proj_slice, size, within,
+};
+use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
+use crate::query::{make_sort_field, BsonValue, Parameters, Projection, SortOrder};
+use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
+use crate::storage::operation::Operation;
+use crate::storage::Direction;
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::doc;
+use bson::{doc, Bson, Document};
+use std::sync::Arc;
 
 #[test]
 fn test_execution_roundtrip() -> Result<()> {

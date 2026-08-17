@@ -185,6 +185,5 @@ pub(super) fn generate_bson_id(id_generator: &Mutex<Sonyflake>) -> bson::Bson {
         i64::try_from(new_id.to_u64()).expect("Sonyflake IDs must fit into signed 64-bit BSON"),
     )
 }
-
 #[cfg(test)]
-mod tests;
+mod test_utils;

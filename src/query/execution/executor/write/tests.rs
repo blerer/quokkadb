@@ -1,6 +1,17 @@
 use super::*;
+use crate::error::{Error, Result};
+use crate::query::execution::executor::test_utils::*;
+use crate::query::execution::QueryExecutor;
+use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
+use crate::query::update_fn::*;
+use crate::query::*;
+use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
+use crate::storage::count_stats::CountStatsKey;
+use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
+use bson::{Bson, Document};
+use std::sync::Arc;
 
 fn index_scan_eq(
     executor: &QueryExecutor,
@@ -1800,4 +1811,43 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
     assert_eq!(final_doc.get_str("value")?, "initial");
 
     Ok(())
+}
+
+#[test]
+fn count_written_documents_handles_single_document_edge_cases() {
+    assert_eq!(
+        count_written_documents(&WriteResult::SingleDocument {
+            affected_count: 1,
+            document: None,
+        },),
+        1
+    );
+    assert_eq!(
+        count_written_documents(&WriteResult::SingleDocument {
+            affected_count: 1,
+            document: Some(doc! { "_id": 1 }),
+        },),
+        1
+    );
+    assert_eq!(
+        count_written_documents(&WriteResult::SingleDocument {
+            affected_count: 0,
+            document: None,
+        },),
+        0
+    );
+    assert_eq!(
+        count_written_documents(&WriteResult::SingleDocument {
+            affected_count: 1,
+            document: Some(doc! { "_id": 1 }),
+        },),
+        1
+    );
+    assert_eq!(
+        count_written_documents(&WriteResult::SingleDocument {
+            affected_count: 0,
+            document: None,
+        },),
+        0
+    );
 }

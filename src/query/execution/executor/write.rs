@@ -1120,46 +1120,4 @@ fn calculate_backoff(attempt: u32) -> Duration {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bson::doc;
-
-    #[test]
-    fn count_written_documents_handles_single_document_edge_cases() {
-        assert_eq!(
-            count_written_documents(&WriteResult::SingleDocument {
-                affected_count: 1,
-                document: None,
-            },),
-            1
-        );
-        assert_eq!(
-            count_written_documents(&WriteResult::SingleDocument {
-                affected_count: 1,
-                document: Some(doc! { "_id": 1 }),
-            },),
-            1
-        );
-        assert_eq!(
-            count_written_documents(&WriteResult::SingleDocument {
-                affected_count: 0,
-                document: None,
-            },),
-            0
-        );
-        assert_eq!(
-            count_written_documents(&WriteResult::SingleDocument {
-                affected_count: 1,
-                document: Some(doc! { "_id": 1 }),
-            },),
-            1
-        );
-        assert_eq!(
-            count_written_documents(&WriteResult::SingleDocument {
-                affected_count: 0,
-                document: None,
-            },),
-            0
-        );
-    }
-}
+mod tests;

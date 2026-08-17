@@ -1,21 +1,14 @@
 use super::*;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::obs::logger::test_instance;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::query::execution::executor::with_executor_test_hook;
-use crate::query::expr_fn::{
-    all, and, at_least, at_most, elem_match, exists, field, field_filters, greater_than, has_type,
-    interval, less_than, ne, nor, not, or, point, proj_array_elements, proj_elem_match, proj_field,
-    proj_fields, proj_slice, size, within,
-};
-use crate::query::physical_plan::IndexScanRangeExpr;
 use crate::query::update::UpdateExpr;
 use crate::query::update_fn::{field_name, set, update};
-use crate::query::{make_sort_field, ReturnDocument, SortOrder};
-use crate::query::{BsonValue, Expr, Parameters, Projection};
-use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
-use crate::storage::count_stats::{CountStats, CountStatsKey};
+use crate::query::ReturnDocument;
+use crate::query::{BsonValue, Parameters};
+use crate::storage::count_stats::CountStats;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
@@ -57,25 +50,25 @@ pub(crate) fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
 }
 
 #[derive(Default)]
-struct PauseState {
+pub(crate) struct PauseState {
     hit: bool,
     released: bool,
 }
 
-struct PausingHook {
+pub(crate) struct PausingHook {
     point: ExecutorFailpoint,
     state: Arc<(Mutex<PauseState>, Condvar)>,
 }
 
 impl PausingHook {
-    fn new(point: ExecutorFailpoint) -> Self {
+    pub(crate) fn new(point: ExecutorFailpoint) -> Self {
         Self {
             point,
             state: Arc::new((Mutex::new(PauseState::default()), Condvar::new())),
         }
     }
 
-    fn wait_until_hit(&self) {
+    pub(crate) fn wait_until_hit(&self) {
         let (lock, condvar) = &*self.state;
         let mut state = lock.lock().unwrap();
         while !state.hit {
@@ -83,7 +76,7 @@ impl PausingHook {
         }
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         let (lock, condvar) = &*self.state;
         let mut state = lock.lock().unwrap();
         state.released = true;
@@ -108,11 +101,11 @@ impl ExecutorTestHook for PausingHook {
     }
 }
 
-fn write_batch(operations: Vec<Operation>) -> WriteBatch {
+pub(crate) fn write_batch(operations: Vec<Operation>) -> WriteBatch {
     WriteBatch::new(operations, CountStats::default())
 }
 
-fn assert_insert_one_result(result: WriteResult, inserted_id: impl Into<Bson>) {
+pub(crate) fn assert_insert_one_result(result: WriteResult, inserted_id: impl Into<Bson>) {
     assert_eq!(
         result,
         WriteResult::InsertOne {
@@ -121,21 +114,21 @@ fn assert_insert_one_result(result: WriteResult, inserted_id: impl Into<Bson>) {
     );
 }
 
-fn inserted_id(result: WriteResult) -> Bson {
+pub(crate) fn inserted_id(result: WriteResult) -> Bson {
     match result {
         WriteResult::InsertOne { inserted_id } => inserted_id,
         other => panic!("expected InsertOne write result, got {other:?}"),
     }
 }
 
-fn inserted_ids(result: WriteResult) -> Vec<Bson> {
+pub(crate) fn inserted_ids(result: WriteResult) -> Vec<Bson> {
     match result {
         WriteResult::InsertMany { inserted_ids } => inserted_ids,
         other => panic!("expected InsertMany write result, got {other:?}"),
     }
 }
 
-fn assert_update_result(
+pub(crate) fn assert_update_result(
     result: WriteResult,
     matched_count: u64,
     modified_count: u64,
@@ -151,32 +144,36 @@ fn assert_update_result(
     );
 }
 
-fn assert_delete_result(result: WriteResult, deleted_count: u64) {
+pub(crate) fn assert_delete_result(result: WriteResult, deleted_count: u64) {
     assert_eq!(result, WriteResult::Delete { deleted_count });
 }
 
-fn assert_find_one_and_update_result(result: WriteResult, expected: Option<Document>) {
+pub(crate) fn assert_find_one_and_update_result(result: WriteResult, expected: Option<Document>) {
     match result {
         WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
         other => panic!("expected SingleDocument write result, got {other:?}"),
     }
 }
 
-fn assert_find_one_and_delete_result(result: WriteResult, expected: Option<Document>) {
+pub(crate) fn assert_find_one_and_delete_result(result: WriteResult, expected: Option<Document>) {
     match result {
         WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
         other => panic!("expected SingleDocument write result, got {other:?}"),
     }
 }
 
-fn assert_find_one_and_replace_result(result: WriteResult, expected: Option<Document>) {
+pub(crate) fn assert_find_one_and_replace_result(result: WriteResult, expected: Option<Document>) {
     match result {
         WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
         other => panic!("expected SingleDocument write result, got {other:?}"),
     }
 }
 
-fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
+pub(crate) fn insert_one(
+    executor: &QueryExecutor,
+    collection_id: u32,
+    doc: &Document,
+) -> Result<WriteResult> {
     executor.execute_direct(
         PhysicalPlan::InsertOne {
             collection: collection_id,
@@ -186,7 +183,7 @@ fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> R
     )
 }
 
-fn insert_docs<'a>(
+pub(crate) fn insert_docs<'a>(
     executor: &QueryExecutor,
     collection_id: u32,
     docs: impl IntoIterator<Item = &'a Document>,
@@ -197,7 +194,7 @@ fn insert_docs<'a>(
     Ok(())
 }
 
-fn insert_many(
+pub(crate) fn insert_many(
     executor: &QueryExecutor,
     collection_id: u32,
     docs: &[Document],
@@ -214,7 +211,7 @@ fn insert_many(
     )
 }
 
-fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
+pub(crate) fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
     Arc::new(PhysicalPlan::CollectionScan {
         collection: collection_id,
         range: Interval::all(),
@@ -224,7 +221,7 @@ fn full_scan_plan(collection_id: u32) -> Arc<PhysicalPlan> {
     })
 }
 
-fn read_stored_doc(
+pub(crate) fn read_stored_doc(
     storage_engine: &StorageEngine,
     collection_id: u32,
     id: impl Into<BsonValue>,
@@ -237,7 +234,7 @@ fn read_stored_doc(
     Ok(Document::from_reader(Cursor::new(doc_bytes))?)
 }
 
-fn point_search_query(
+pub(crate) fn point_search_query(
     collection_id: u32,
     params: &mut Parameters,
     id: impl Into<BsonValue>,
@@ -251,7 +248,7 @@ fn point_search_query(
     })
 }
 
-fn execute_update_one(
+pub(crate) fn execute_update_one(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -270,7 +267,7 @@ fn execute_update_one(
     executor.execute_direct(update_plan, Some(params))
 }
 
-fn execute_update_one_with_expr(
+pub(crate) fn execute_update_one_with_expr(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -288,7 +285,7 @@ fn execute_update_one_with_expr(
     executor.execute_direct(update_plan, Some(params))
 }
 
-fn execute_delete_one(
+pub(crate) fn execute_delete_one(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -303,7 +300,7 @@ fn execute_delete_one(
     executor.execute_direct(delete_plan, Some(params))
 }
 
-fn execute_delete_many(
+pub(crate) fn execute_delete_many(
     executor: &QueryExecutor,
     collection_id: u32,
     query: Arc<PhysicalPlan>,
@@ -317,7 +314,7 @@ fn execute_delete_many(
     executor.execute_direct(delete_plan, Some(params))
 }
 
-fn execute_find_one_and_delete(
+pub(crate) fn execute_find_one_and_delete(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -333,7 +330,7 @@ fn execute_find_one_and_delete(
     executor.execute_direct(delete_plan, Some(params))
 }
 
-fn execute_replace_one(
+pub(crate) fn execute_replace_one(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -352,7 +349,7 @@ fn execute_replace_one(
     executor.execute_direct(replace_plan, Some(params))
 }
 
-fn execute_find_one_and_replace(
+pub(crate) fn execute_find_one_and_replace(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -374,7 +371,7 @@ fn execute_find_one_and_replace(
     executor.execute_direct(replace_plan, Some(params))
 }
 
-fn spawn_paused_update_one(
+pub(crate) fn spawn_paused_update_one(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -388,7 +385,7 @@ fn spawn_paused_update_one(
     })
 }
 
-fn spawn_paused_delete_one(
+pub(crate) fn spawn_paused_delete_one(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -401,7 +398,7 @@ fn spawn_paused_delete_one(
     })
 }
 
-fn spawn_paused_find_one_and_delete(
+pub(crate) fn spawn_paused_find_one_and_delete(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -414,7 +411,7 @@ fn spawn_paused_find_one_and_delete(
     })
 }
 
-fn spawn_paused_replace_one(
+pub(crate) fn spawn_paused_replace_one(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -429,7 +426,7 @@ fn spawn_paused_replace_one(
     })
 }
 
-fn spawn_paused_find_one_and_replace(
+pub(crate) fn spawn_paused_find_one_and_replace(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -452,7 +449,7 @@ fn spawn_paused_find_one_and_replace(
     })
 }
 
-fn spawn_paused_update_one_with_expr(
+pub(crate) fn spawn_paused_update_one_with_expr(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -466,7 +463,7 @@ fn spawn_paused_update_one_with_expr(
     })
 }
 
-fn execute_update_one_with_expr_and_upsert(
+pub(crate) fn execute_update_one_with_expr_and_upsert(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -485,7 +482,7 @@ fn execute_update_one_with_expr_and_upsert(
     executor.execute_direct(update_plan, Some(params))
 }
 
-fn execute_find_one_and_update_with_expr_and_upsert(
+pub(crate) fn execute_find_one_and_update_with_expr_and_upsert(
     executor: &QueryExecutor,
     collection_id: u32,
     id: i32,
@@ -507,7 +504,7 @@ fn execute_find_one_and_update_with_expr_and_upsert(
     executor.execute_direct(update_plan, Some(params))
 }
 
-fn spawn_paused_find_one_and_update_with_expr_and_upsert(
+pub(crate) fn spawn_paused_find_one_and_update_with_expr_and_upsert(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -530,7 +527,7 @@ fn spawn_paused_find_one_and_update_with_expr_and_upsert(
     })
 }
 
-fn execute_update_many(
+pub(crate) fn execute_update_many(
     executor: &QueryExecutor,
     collection_id: u32,
     query: Arc<PhysicalPlan>,
@@ -548,7 +545,7 @@ fn execute_update_many(
     executor.execute_direct(update_plan, Some(params))
 }
 
-fn spawn_paused_update_many(
+pub(crate) fn spawn_paused_update_many(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -563,7 +560,7 @@ fn spawn_paused_update_many(
     })
 }
 
-fn spawn_paused_insert_one(
+pub(crate) fn spawn_paused_insert_one(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -574,7 +571,7 @@ fn spawn_paused_insert_one(
     })
 }
 
-fn spawn_paused_update_one_with_expr_and_upsert(
+pub(crate) fn spawn_paused_update_one_with_expr_and_upsert(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
@@ -594,6 +591,3 @@ fn spawn_paused_update_one_with_expr_and_upsert(
         })
     })
 }
-mod read;
-mod upsert;
-mod write;
