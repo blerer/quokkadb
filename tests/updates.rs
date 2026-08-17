@@ -2638,3 +2638,21 @@ fn test_upsert_with_unset_on_new_document() {
     assert_eq!(doc.get_i32("value").unwrap(), 42);
     assert!(!doc.contains_key("nonexistent"));
 }
+
+#[test]
+fn update_metrics_are_exposed_via_public_api() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
+        .unwrap();
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+
+    let metrics = db.metrics().executor();
+    assert_eq!(metrics.write_queries(), 2);
+    assert_eq!(metrics.documents_written(), 9);
+    assert_eq!(metrics.point_searches(), 1);
+    assert_eq!(metrics.write_query_duration().count(), 2);
+}

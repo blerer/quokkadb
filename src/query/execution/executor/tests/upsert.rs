@@ -3,19 +3,18 @@ use bson::doc;
 
 #[test]
 fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(
         ExecutorFailpoint::UpdateOneUpsertAfterNoMatch,
     ));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     let paused_expr = update([set([field_name("value")], "paused")]);
     let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         paused_expr,
@@ -24,7 +23,7 @@ fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<(
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_expr = update([set([field_name("value")], "concurrent")]);
     let concurrent_doc = execute_update_one_with_expr_and_upsert(
         &concurrent_executor,
@@ -55,19 +54,18 @@ fn test_update_one_upsert_retries_after_concurrent_upsert_same_key() -> Result<(
 
 #[test]
 fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(
         ExecutorFailpoint::UpdateOneUpsertAfterNoMatch,
     ));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     let paused_expr = update([set([field_name("value")], "paused")]);
     let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         paused_expr,
@@ -76,7 +74,7 @@ fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<(
 
     hook.wait_until_hit();
 
-    let insert_executor = QueryExecutor::new(storage_engine.clone());
+    let insert_executor = executor.clone();
     let insert_doc = insert_one(
         &insert_executor,
         collection_id,
@@ -105,8 +103,9 @@ fn test_update_one_upsert_retries_after_concurrent_insert_same_key() -> Result<(
 #[test]
 fn test_update_one_upsert_inserts_when_no_match() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     // 2. Execute UpdateOne with upsert=true on empty collection
@@ -135,8 +134,9 @@ fn test_update_one_upsert_inserts_when_no_match() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_upsert_before_returns_none() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     let update_expr = update([set([field_name("value")], "created")]);
@@ -158,8 +158,9 @@ fn test_find_one_and_update_upsert_before_returns_none() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_upsert_after_returns_inserted_document() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     let update_expr = update([set([field_name("value")], "created")]);
@@ -182,8 +183,9 @@ fn test_find_one_and_update_upsert_after_returns_inserted_document() -> Result<(
 #[test]
 fn test_update_one_upsert_updates_when_match_exists() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     // Insert initial doc
@@ -216,8 +218,9 @@ fn test_update_one_upsert_updates_when_match_exists() -> Result<()> {
 #[test]
 fn test_update_many_upsert_inserts_when_no_match() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     // 2. Execute UpdateMany with upsert=true on empty collection
@@ -265,8 +268,9 @@ fn test_update_many_upsert_inserts_when_no_match() -> Result<()> {
 #[test]
 fn test_upsert_with_nested_equality_conditions() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
 
     // 2. Execute UpdateOne with upsert=true with nested field equality
@@ -307,8 +311,9 @@ fn test_upsert_with_nested_equality_conditions() -> Result<()> {
 
 #[test]
 fn test_update_one_upsert_extracts_residual_filter_through_index_scan() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert_index_scan")?;
     let index = storage_engine.create_index(
         collection_id,
@@ -373,8 +378,9 @@ fn test_update_one_upsert_extracts_residual_filter_through_index_scan() -> Resul
 
 #[test]
 fn test_update_one_upsert_extracts_query_fields_through_topk_wrapper() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_upsert_topk")?;
 
     let mut params = Parameters::new();
@@ -430,8 +436,9 @@ fn test_update_one_upsert_extracts_query_fields_through_topk_wrapper() -> Result
 
 #[test]
 fn test_replace_one_upsert_extracts_id_through_topk_wrapper() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_replace_topk")?;
 
     let mut params = Parameters::new();
@@ -462,8 +469,9 @@ fn test_replace_one_upsert_extracts_id_through_topk_wrapper() -> Result<()> {
 
 #[test]
 fn test_replace_one_upsert_extracts_id_from_index_scan_filter() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_replace_index_scan")?;
     let index = storage_engine.create_index(

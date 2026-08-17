@@ -46,19 +46,19 @@ impl MetricRegistry {
         self
     }
 
-    pub fn get_counter(&self, name: &str) -> Option<Arc<Counter>> {
+    pub(crate) fn get_counter(&self, name: &str) -> Option<Arc<Counter>> {
         self.counters.get(name).cloned()
     }
 
-    pub fn get_gauge(&self, name: &str) -> Option<Arc<dyn Gauge>> {
+    pub(crate) fn get_gauge(&self, name: &str) -> Option<Arc<dyn Gauge>> {
         self.gauges.get(name).cloned()
     }
 
-    pub fn get_computed(&self, name: &str) -> Option<Arc<dyn Computed>> {
+    pub(crate) fn get_computed(&self, name: &str) -> Option<Arc<dyn Computed>> {
         self.computed.get(name).cloned()
     }
 
-    pub fn get_histogram(&self, name: &str) -> Option<Arc<Histogram>> {
+    pub(crate) fn get_histogram(&self, name: &str) -> Option<Arc<Histogram>> {
         self.histograms.get(name).cloned()
     }
 
@@ -159,6 +159,22 @@ pub mod names {
         pub fn active_level(level: usize) -> String {
             format!("compaction.active.l{}", level)
         }
+    }
+
+    pub mod executor {
+        pub const READ_QUERIES: &str = "executor.read_queries";
+        pub const WRITE_QUERIES: &str = "executor.write_queries";
+        pub const READ_QUERY_DURATION: &str = "executor.read_query_duration";
+        pub const WRITE_QUERY_DURATION: &str = "executor.write_query_duration";
+        pub const ROWS_RETURNED: &str = "executor.rows_returned";
+        pub const DOCUMENTS_WRITTEN: &str = "executor.documents_written";
+        pub const COLLECTION_SCANS: &str = "executor.collection_scans";
+        pub const INDEX_SCANS: &str = "executor.index_scans";
+        pub const POINT_SEARCHES: &str = "executor.point_searches";
+        pub const MULTI_POINT_SEARCHES: &str = "executor.multi_point_searches";
+        pub const IN_MEMORY_SORTS: &str = "executor.in_memory_sorts";
+        pub const EXTERNAL_MERGE_SORTS: &str = "executor.external_merge_sorts";
+        pub const TOP_K_SORTS: &str = "executor.top_k_sorts";
     }
 }
 

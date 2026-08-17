@@ -60,6 +60,11 @@ pub struct CompactionMetrics<'a> {
     registry: &'a MetricRegistry,
 }
 
+/// Metrics for query execution.
+pub struct ExecutorMetrics<'a> {
+    registry: &'a MetricRegistry,
+}
+
 /// Read-only view over a histogram metric.
 pub struct HistogramMetrics {
     histogram: Arc<obs_metrics::Histogram>,
@@ -111,6 +116,13 @@ impl<'a> Metrics<'a> {
     /// Returns compaction metrics.
     pub fn compaction(&self) -> CompactionMetrics<'a> {
         CompactionMetrics {
+            registry: self.registry,
+        }
+    }
+
+    /// Returns executor metrics.
+    pub fn executor(&self) -> ExecutorMetrics<'a> {
+        ExecutorMetrics {
             registry: self.registry,
         }
     }
@@ -368,6 +380,90 @@ impl<'a> CompactionMetrics<'a> {
     }
 }
 
+impl<'a> ExecutorMetrics<'a> {
+    /// Returns the number of read queries executed since the database was opened.
+    pub fn read_queries(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::READ_QUERIES)
+    }
+
+    /// Returns the number of write queries executed since the database was opened.
+    pub fn write_queries(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::WRITE_QUERIES)
+    }
+
+    /// Returns a histogram of end-to-end read query durations measured in microseconds.
+    pub fn read_query_duration(&self) -> HistogramMetrics {
+        HistogramMetrics::new(
+            self.registry
+                .histogram(obs_metrics::names::executor::READ_QUERY_DURATION),
+        )
+    }
+
+    /// Returns a histogram of write query durations measured in microseconds.
+    pub fn write_query_duration(&self) -> HistogramMetrics {
+        HistogramMetrics::new(
+            self.registry
+                .histogram(obs_metrics::names::executor::WRITE_QUERY_DURATION),
+        )
+    }
+
+    /// Returns the total number of documents returned by read queries.
+    pub fn rows_returned(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::ROWS_RETURNED)
+    }
+
+    /// Returns the total number of documents written by inserts, updates, replacements, and deletes.
+    pub fn documents_written(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::DOCUMENTS_WRITTEN)
+    }
+
+    /// Returns the number of executed queries whose physical plans used a collection scan.
+    pub fn collection_scans(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::COLLECTION_SCANS)
+    }
+
+    /// Returns the number of executed queries whose physical plans used an index scan.
+    pub fn index_scans(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::INDEX_SCANS)
+    }
+
+    /// Returns the number of executed queries whose physical plans used a primary-key point search.
+    pub fn point_searches(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::POINT_SEARCHES)
+    }
+
+    /// Returns the number of executed queries whose physical plans used a primary-key multi-point search.
+    pub fn multi_point_searches(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::MULTI_POINT_SEARCHES)
+    }
+
+    /// Returns the number of executed queries whose physical plans used in-memory sorting.
+    pub fn in_memory_sorts(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::IN_MEMORY_SORTS)
+    }
+
+    /// Returns the number of executed queries whose physical plans used external merge sort.
+    pub fn external_merge_sorts(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::EXTERNAL_MERGE_SORTS)
+    }
+
+    /// Returns the number of executed queries whose physical plans used top-k heap sort.
+    pub fn top_k_sorts(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::TOP_K_SORTS)
+    }
+}
+
 impl HistogramMetrics {
     pub(crate) fn new(histogram: Arc<obs_metrics::Histogram>) -> Self {
         Self { histogram }
@@ -420,12 +516,22 @@ impl HistogramMetrics {
 #[cfg(test)]
 mod tests {
     use crate::QuokkaDB;
+    use bson::doc;
     use tempfile::tempdir;
 
     #[test]
     fn metrics_api_exposes_typed_component_accessors() {
         let dir = tempdir().unwrap();
         let db = QuokkaDB::open(dir.path()).unwrap();
+        db.create_collection("items").unwrap();
+        let collection = db.collection("items");
+        collection
+            .insert_one(doc! { "_id": 1, "name": "a" })
+            .unwrap();
+        collection
+            .insert_one(doc! { "_id": 2, "name": "b" })
+            .unwrap();
+        let _ = collection.find_one(doc! { "_id": 1 }).unwrap();
 
         let metrics = db.metrics();
         assert_eq!(metrics.block_cache().hits(), 0);
@@ -434,5 +540,12 @@ mod tests {
         assert_eq!(metrics.flush().duration().count(), 0);
         assert_eq!(metrics.wal().files(), 1);
         assert_eq!(metrics.storage().memtable_count(), 1);
+        assert_eq!(metrics.executor().write_queries(), 2);
+        assert_eq!(metrics.executor().read_queries(), 1);
+        assert_eq!(metrics.executor().documents_written(), 2);
+        assert_eq!(metrics.executor().rows_returned(), 1);
+        assert_eq!(metrics.executor().point_searches(), 1);
+        assert_eq!(metrics.executor().write_query_duration().count(), 2);
+        assert_eq!(metrics.executor().read_query_duration().count(), 1);
     }
 }

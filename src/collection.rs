@@ -145,7 +145,7 @@ impl DeleteResult {
 impl Collection {
     fn document_from_write_result(result: WriteResult) -> Option<Document> {
         match result {
-            WriteResult::SingleDocument { document } => document,
+            WriteResult::SingleDocument { document, .. } => document,
             other => panic!("expected SingleDocument write result, got {other:?}"),
         }
     }

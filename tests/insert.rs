@@ -391,3 +391,21 @@ fn insert_same_id_succeeds_after_delete() {
     assert_eq!(docs.next().unwrap().unwrap(), doc! {"_id": 365, "x": 2});
     assert!(docs.next().is_none());
 }
+
+#[test]
+fn insert_metrics_are_exposed_via_public_api() {
+    let (_dir, db) = setup();
+    let collection = db.collection("test").create_if_missing();
+
+    collection.insert_one(doc! { "_id": 1, "x": 1 }).unwrap();
+    collection
+        .insert_many(vec![doc! { "_id": 2, "x": 2 }, doc! { "_id": 3, "x": 3 }])
+        .unwrap();
+
+    let metrics = db.metrics().executor();
+    assert_eq!(metrics.write_queries(), 2);
+    assert_eq!(metrics.documents_written(), 3);
+    assert_eq!(metrics.write_query_duration().count(), 2);
+    assert_eq!(metrics.read_queries(), 0);
+    assert_eq!(metrics.rows_returned(), 0);
+}

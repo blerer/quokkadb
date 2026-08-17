@@ -6,8 +6,9 @@ use bson::doc;
 #[test]
 fn test_execution_roundtrip() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test")?;
 
     // 2. InsertOne
@@ -81,8 +82,9 @@ fn test_execution_roundtrip() -> Result<()> {
 #[test]
 fn test_search_and_scan_edge_cases() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_edge")?;
 
     // Insert some docs with known integer _id's for predictable range scans
@@ -219,8 +221,9 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
 
 #[test]
 fn test_index_scan_single_field_equality_execution() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_eq")?;
     let index = storage_engine.create_index(
         collection_id,
@@ -261,8 +264,9 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
 
 #[test]
 fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_compound")?;
     let index = storage_engine.create_index(
         collection_id,
@@ -308,8 +312,9 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
 
 #[test]
 fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_index_reverse")?;
     let index = storage_engine.create_index(
         collection_id,
@@ -354,8 +359,9 @@ fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<(
 #[test]
 fn test_limit_plan_execution() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_limit")?;
 
     // 2. Insert 5 documents
@@ -471,8 +477,9 @@ fn assert_sorted_results(
 #[test]
 fn test_sort_plans_execution() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_sorts")?;
 
     // 2. Insert test data
@@ -571,8 +578,9 @@ fn run_filter_test(
 #[test]
 fn test_filter_plan_execution() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_filters")?;
 
     // 2. Insert test data
@@ -750,8 +758,9 @@ fn test_filter_plan_execution() -> Result<()> {
 #[test]
 fn test_projection_plan_execution() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_projections")?;
 
     // 2. Insert test data
@@ -935,8 +944,9 @@ fn test_projection_plan_execution() -> Result<()> {
 #[test]
 fn test_multipoint_search_execution() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_multipoint")?;
 
     // 2. Insert test data
@@ -1031,8 +1041,9 @@ fn test_multipoint_search_execution() -> Result<()> {
 #[test]
 fn test_execute_cached_at_snapshot() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_snapshot")?;
 
     // 2. Insert initial doc

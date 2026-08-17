@@ -1,4 +1,4 @@
-use super::{bind, QueryOutput};
+use super::{bind, Metrics, QueryOutput};
 use crate::error::Result;
 use crate::query::execution::{filters, indexes::Index};
 use crate::query::physical_plan::IndexScanRangeExpr;
@@ -20,11 +20,15 @@ use crate::storage::storage_engine::StorageEngine;
 #[derive(Clone)]
 pub(crate) struct ReadExecutor {
     pub(super) storage_engine: Arc<StorageEngine>,
+    metrics: Metrics,
 }
 
 impl ReadExecutor {
-    pub(crate) fn new(storage_engine: Arc<StorageEngine>) -> Self {
-        Self { storage_engine }
+    pub(crate) fn new(storage_engine: Arc<StorageEngine>, metrics: Metrics) -> Self {
+        Self {
+            storage_engine,
+            metrics,
+        }
     }
 
     pub(crate) fn execute_cached_at_snapshot(
@@ -40,15 +44,21 @@ impl ReadExecutor {
                 direction,
                 filter,
                 projection: _,
-            } => self.perform_collection_scan(
-                parameters, snapshot, collection, range, direction, filter,
-            ),
+            } => {
+                self.metrics.collection_scans.inc();
+                self.perform_collection_scan(
+                    parameters, snapshot, collection, range, direction, filter,
+                )
+            }
             crate::query::physical_plan::PhysicalPlan::PointSearch {
                 collection,
                 key,
                 filter,
                 projection: _,
-            } => self.perform_point_search(parameters, snapshot, collection, key, filter),
+            } => {
+                self.metrics.point_searches.inc();
+                self.perform_point_search(parameters, snapshot, collection, key, filter)
+            }
             crate::query::physical_plan::PhysicalPlan::IndexScan {
                 collection,
                 index,
@@ -56,18 +66,24 @@ impl ReadExecutor {
                 direction,
                 filter,
                 projection: _,
-            } => self.perform_index_scan(
-                parameters, snapshot, collection, index, range, direction, filter,
-            ),
+            } => {
+                self.metrics.index_scans.inc();
+                self.perform_index_scan(
+                    parameters, snapshot, collection, index, range, direction, filter,
+                )
+            }
             crate::query::physical_plan::PhysicalPlan::MultiPointSearch {
                 collection,
                 keys,
                 direction,
                 filter,
                 projection: _,
-            } => self.perform_multi_point_search(
-                parameters, snapshot, collection, keys, direction, filter,
-            ),
+            } => {
+                self.metrics.multi_point_searches.inc();
+                self.perform_multi_point_search(
+                    parameters, snapshot, collection, keys, direction, filter,
+                )
+            }
             crate::query::physical_plan::PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), parameters);
                 let input_iter =
@@ -90,6 +106,7 @@ impl ReadExecutor {
                 ))
             }
             crate::query::physical_plan::PhysicalPlan::InMemorySort { input, sort_fields } => {
+                self.metrics.in_memory_sorts.inc();
                 let input_iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::in_memory_sort(input_iter, sort_fields)
@@ -99,6 +116,7 @@ impl ReadExecutor {
                 sort_fields,
                 max_in_memory_rows,
             } => {
+                self.metrics.external_merge_sorts.inc();
                 let input_iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::external_merge_sort(
@@ -112,6 +130,7 @@ impl ReadExecutor {
                 sort_fields,
                 k,
             } => {
+                self.metrics.top_k_sorts.inc();
                 let input_iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)

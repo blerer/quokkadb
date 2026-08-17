@@ -1,5 +1,9 @@
 use super::*;
 use crate::error::{Error, Result};
+use crate::obs::logger::test_instance;
+use crate::obs::metrics::MetricRegistry;
+use crate::options::options::Options;
+use crate::query::execution::executor::with_executor_test_hook;
 use crate::query::expr_fn::{
     all, and, at_least, at_most, elem_match, exists, field, field_filters, greater_than, has_type,
     interval, less_than, ne, nor, not, or, point, proj_array_elements, proj_elem_match, proj_field,
@@ -13,7 +17,7 @@ use crate::query::{BsonValue, Expr, Parameters, Projection};
 use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
 use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::operation::Operation;
-use crate::storage::test_utils::storage_engine;
+use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
 use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
@@ -22,6 +26,35 @@ use bson::{Bson, Document};
 use std::io::Cursor;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use tempfile::{tempdir, TempDir};
+
+pub(crate) struct ExecutorTestRuntime {
+    #[allow(dead_code)]
+    pub metric_registry: MetricRegistry,
+    pub storage_engine: Arc<StorageEngine>,
+    pub executor: Arc<QueryExecutor>,
+    #[allow(dead_code)]
+    pub dir: TempDir,
+}
+
+pub(crate) fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
+    let dir = tempdir()?;
+    let logger = test_instance();
+    let options = Arc::new(Options::lightweight());
+    let mut metric_registry = MetricRegistry::new();
+    let storage_engine = StorageEngine::new(logger, &mut metric_registry, options, dir.path())?;
+    let executor = Arc::new(QueryExecutor::new_with_metrics(
+        storage_engine.clone(),
+        &mut metric_registry,
+    ));
+
+    Ok(ExecutorTestRuntime {
+        metric_registry,
+        storage_engine,
+        executor,
+        dir,
+    })
+}
 
 #[derive(Default)]
 struct PauseState {
@@ -123,15 +156,24 @@ fn assert_delete_result(result: WriteResult, deleted_count: u64) {
 }
 
 fn assert_find_one_and_update_result(result: WriteResult, expected: Option<Document>) {
-    assert_eq!(result, WriteResult::SingleDocument { document: expected });
+    match result {
+        WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
+        other => panic!("expected SingleDocument write result, got {other:?}"),
+    }
 }
 
 fn assert_find_one_and_delete_result(result: WriteResult, expected: Option<Document>) {
-    assert_eq!(result, WriteResult::SingleDocument { document: expected });
+    match result {
+        WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
+        other => panic!("expected SingleDocument write result, got {other:?}"),
+    }
 }
 
 fn assert_find_one_and_replace_result(result: WriteResult, expected: Option<Document>) {
-    assert_eq!(result, WriteResult::SingleDocument { document: expected });
+    match result {
+        WriteResult::SingleDocument { document, .. } => assert_eq!(document, expected),
+        other => panic!("expected SingleDocument write result, got {other:?}"),
+    }
 }
 
 fn insert_one(executor: &QueryExecutor, collection_id: u32, doc: &Document) -> Result<WriteResult> {
@@ -334,43 +376,62 @@ fn execute_find_one_and_replace(
 
 fn spawn_paused_update_one(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     value: &'static str,
 ) -> JoinHandle<Result<WriteResult>> {
-    thread::spawn(move || execute_update_one(executor.as_ref(), collection_id, id, value))
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || {
+            execute_update_one(executor.as_ref(), collection_id, id, value)
+        })
+    })
 }
 
 fn spawn_paused_delete_one(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
 ) -> JoinHandle<Result<WriteResult>> {
-    thread::spawn(move || execute_delete_one(executor.as_ref(), collection_id, id))
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || {
+            execute_delete_one(executor.as_ref(), collection_id, id)
+        })
+    })
 }
 
 fn spawn_paused_find_one_and_delete(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
 ) -> JoinHandle<Result<WriteResult>> {
-    thread::spawn(move || execute_find_one_and_delete(executor.as_ref(), collection_id, id))
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || {
+            execute_find_one_and_delete(executor.as_ref(), collection_id, id)
+        })
+    })
 }
 
 fn spawn_paused_replace_one(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     replacement: Document,
     upsert: bool,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_replace_one(executor.as_ref(), collection_id, id, replacement, upsert)
+        with_executor_test_hook(hook, || {
+            execute_replace_one(executor.as_ref(), collection_id, id, replacement, upsert)
+        })
     })
 }
 
 fn spawn_paused_find_one_and_replace(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     replacement: Document,
@@ -378,25 +439,30 @@ fn spawn_paused_find_one_and_replace(
     return_document: ReturnDocument,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_find_one_and_replace(
-            executor.as_ref(),
-            collection_id,
-            id,
-            replacement,
-            upsert,
-            return_document,
-        )
+        with_executor_test_hook(hook, || {
+            execute_find_one_and_replace(
+                executor.as_ref(),
+                collection_id,
+                id,
+                replacement,
+                upsert,
+                return_document,
+            )
+        })
     })
 }
 
 fn spawn_paused_update_one_with_expr(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     update_expr: UpdateExpr,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_update_one_with_expr(executor.as_ref(), collection_id, id, update_expr)
+        with_executor_test_hook(hook, || {
+            execute_update_one_with_expr(executor.as_ref(), collection_id, id, update_expr)
+        })
     })
 }
 
@@ -443,6 +509,7 @@ fn execute_find_one_and_update_with_expr_and_upsert(
 
 fn spawn_paused_find_one_and_update_with_expr_and_upsert(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     update_expr: UpdateExpr,
@@ -450,14 +517,16 @@ fn spawn_paused_find_one_and_update_with_expr_and_upsert(
     return_document: ReturnDocument,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_find_one_and_update_with_expr_and_upsert(
-            executor.as_ref(),
-            collection_id,
-            id,
-            update_expr,
-            upsert,
-            return_document,
-        )
+        with_executor_test_hook(hook, || {
+            execute_find_one_and_update_with_expr_and_upsert(
+                executor.as_ref(),
+                collection_id,
+                id,
+                update_expr,
+                upsert,
+                return_document,
+            )
+        })
     })
 }
 
@@ -481,39 +550,48 @@ fn execute_update_many(
 
 fn spawn_paused_update_many(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     query: Arc<PhysicalPlan>,
     update_expr: UpdateExpr,
     upsert: bool,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_update_many(executor.as_ref(), collection_id, query, update_expr, upsert)
+        with_executor_test_hook(hook, || {
+            execute_update_many(executor.as_ref(), collection_id, query, update_expr, upsert)
+        })
     })
 }
 
 fn spawn_paused_insert_one(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     doc: Document,
 ) -> JoinHandle<Result<WriteResult>> {
-    thread::spawn(move || insert_one(executor.as_ref(), collection_id, &doc))
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || insert_one(executor.as_ref(), collection_id, &doc))
+    })
 }
 
 fn spawn_paused_update_one_with_expr_and_upsert(
     executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
     collection_id: u32,
     id: i32,
     update_expr: UpdateExpr,
     upsert: bool,
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
-        execute_update_one_with_expr_and_upsert(
-            executor.as_ref(),
-            collection_id,
-            id,
-            update_expr,
-            upsert,
-        )
+        with_executor_test_hook(hook, || {
+            execute_update_one_with_expr_and_upsert(
+                executor.as_ref(),
+                collection_id,
+                id,
+                update_expr,
+                upsert,
+            )
+        })
     })
 }
 mod read;

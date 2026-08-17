@@ -262,3 +262,17 @@ fn test_delete_many_create_if_missing_returns_zero_without_creating_collection()
 
     Ok(())
 }
+
+#[test]
+fn delete_metrics_are_exposed_via_public_api() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection.delete_many(doc! { "status": "A" }).unwrap();
+    assert_eq!(result.deleted_count, 2);
+
+    let metrics = db.metrics().executor();
+    assert_eq!(metrics.write_queries(), 2);
+    assert_eq!(metrics.documents_written(), 5); // 3 inserts from setup + 2 deletion
+    assert_eq!(metrics.write_query_duration().count(), 2);
+}

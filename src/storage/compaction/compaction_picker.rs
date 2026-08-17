@@ -3221,9 +3221,7 @@ mod tests {
             let job2 = picker.pick_compaction(&levels).unwrap();
             assert_eq!(job2.input_files.len(), 1);
 
-            let histogram = registry
-                .get_histogram("compaction.input_files.count")
-                .unwrap();
+            let histogram = registry.histogram("compaction.input_files.count");
             let snapshot = histogram.snapshot();
             assert_eq!(snapshot.count, 2);
             assert_eq!(snapshot.min, 1);

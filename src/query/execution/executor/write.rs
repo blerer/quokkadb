@@ -1,7 +1,8 @@
 use super::read::ReadExecutor;
+use super::Metrics;
 use super::WriteResult;
 #[cfg(test)]
-use super::{ExecutorFailpoint, ExecutorTestHook};
+use super::{invoke_executor_test_hook, ExecutorFailpoint};
 use crate::error::Error;
 use crate::error::Result;
 use crate::query::execution::indexes::Indexes;
@@ -34,8 +35,7 @@ pub(crate) struct WriteExecutor {
     pub(super) storage_engine: Arc<StorageEngine>,
     pub(super) read_executor: ReadExecutor,
     pub(super) id_generator: Arc<Mutex<Sonyflake>>,
-    #[cfg(test)]
-    pub(super) test_hook: Option<Arc<dyn ExecutorTestHook>>,
+    metrics: Metrics,
 }
 
 impl WriteExecutor {
@@ -43,14 +43,13 @@ impl WriteExecutor {
         storage_engine: Arc<StorageEngine>,
         read_executor: ReadExecutor,
         id_generator: Arc<Mutex<Sonyflake>>,
-        #[cfg(test)] test_hook: Option<Arc<dyn ExecutorTestHook>>,
+        metrics: Metrics,
     ) -> Self {
         Self {
             storage_engine,
             read_executor,
             id_generator,
-            #[cfg(test)]
-            test_hook,
+            metrics,
         }
     }
 
@@ -59,7 +58,7 @@ impl WriteExecutor {
         plan: PhysicalPlan,
         parameters: Option<Parameters>,
     ) -> Result<WriteResult> {
-        match plan {
+        let result = match plan {
             PhysicalPlan::InsertMany {
                 collection,
                 documents,
@@ -153,7 +152,15 @@ impl WriteExecutor {
                 self.perform_delete_many(collection, query, &parameters)
             }
             _ => unreachable!("Direct execution not supported for plan: {:?}", plan),
+        };
+
+        if let Ok(write_result) = &result {
+            self.metrics
+                .documents_written
+                .inc_by(count_written_documents(write_result));
         }
+
+        result
     }
 
     pub(super) fn duplicate_key_error(id: &Bson) -> Error {
@@ -369,6 +376,7 @@ impl WriteExecutor {
                     ReturnDocument::After => new_doc,
                 };
                 Ok(WriteResult::SingleDocument {
+                    affected_count: 1,
                     document: Some(self.apply_return_projection(
                         returned,
                         projection.as_ref(),
@@ -385,11 +393,15 @@ impl WriteExecutor {
                         parameters,
                     )?),
                 };
-                Ok(WriteResult::SingleDocument { document })
+                Ok(WriteResult::SingleDocument {
+                    affected_count: 1,
+                    document,
+                })
             }
-            SingleDocumentUpdateResult::NoMatch => {
-                Ok(WriteResult::SingleDocument { document: None })
-            }
+            SingleDocumentUpdateResult::NoMatch => Ok(WriteResult::SingleDocument {
+                affected_count: 0,
+                document: None,
+            }),
         }
     }
 
@@ -449,6 +461,7 @@ impl WriteExecutor {
                     ReturnDocument::After => new_doc,
                 };
                 Ok(WriteResult::SingleDocument {
+                    affected_count: 1,
                     document: Some(self.apply_return_projection(
                         returned,
                         projection.as_ref(),
@@ -465,11 +478,15 @@ impl WriteExecutor {
                         parameters,
                     )?),
                 };
-                Ok(WriteResult::SingleDocument { document })
+                Ok(WriteResult::SingleDocument {
+                    affected_count: 1,
+                    document,
+                })
             }
-            SingleDocumentReplaceResult::NoMatch => {
-                Ok(WriteResult::SingleDocument { document: None })
-            }
+            SingleDocumentReplaceResult::NoMatch => Ok(WriteResult::SingleDocument {
+                affected_count: 0,
+                document: None,
+            }),
         }
     }
 
@@ -542,15 +559,17 @@ impl WriteExecutor {
     ) -> Result<WriteResult> {
         match self.perform_single_document_delete(collection, query, parameters)? {
             SingleDocumentDeleteResult::Deleted { old_doc } => Ok(WriteResult::SingleDocument {
+                affected_count: 1,
                 document: Some(self.apply_return_projection(
                     old_doc,
                     projection.as_ref(),
                     parameters,
                 )?),
             }),
-            SingleDocumentDeleteResult::NoMatch => {
-                Ok(WriteResult::SingleDocument { document: None })
-            }
+            SingleDocumentDeleteResult::NoMatch => Ok(WriteResult::SingleDocument {
+                affected_count: 0,
+                document: None,
+            }),
         }
     }
 
@@ -1011,9 +1030,21 @@ impl WriteExecutor {
 
     #[cfg(test)]
     fn invoke_test_hook(&self, point: ExecutorFailpoint) {
-        if let Some(test_hook) = &self.test_hook {
-            test_hook.hit(point);
-        }
+        invoke_executor_test_hook(point);
+    }
+}
+
+fn count_written_documents(result: &WriteResult) -> u64 {
+    match result {
+        WriteResult::InsertOne { .. } => 1,
+        WriteResult::InsertMany { inserted_ids } => inserted_ids.len() as u64,
+        WriteResult::Update {
+            modified_count,
+            upserted_id,
+            ..
+        } => modified_count + u64::from(upserted_id.is_some()),
+        WriteResult::Delete { deleted_count } => *deleted_count,
+        WriteResult::SingleDocument { affected_count, .. } => *affected_count,
     }
 }
 
@@ -1086,4 +1117,49 @@ fn calculate_backoff(attempt: u32) -> Duration {
     }
 
     Duration::from_millis(backoff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bson::doc;
+
+    #[test]
+    fn count_written_documents_handles_single_document_edge_cases() {
+        assert_eq!(
+            count_written_documents(&WriteResult::SingleDocument {
+                affected_count: 1,
+                document: None,
+            },),
+            1
+        );
+        assert_eq!(
+            count_written_documents(&WriteResult::SingleDocument {
+                affected_count: 1,
+                document: Some(doc! { "_id": 1 }),
+            },),
+            1
+        );
+        assert_eq!(
+            count_written_documents(&WriteResult::SingleDocument {
+                affected_count: 0,
+                document: None,
+            },),
+            0
+        );
+        assert_eq!(
+            count_written_documents(&WriteResult::SingleDocument {
+                affected_count: 1,
+                document: Some(doc! { "_id": 1 }),
+            },),
+            1
+        );
+        assert_eq!(
+            count_written_documents(&WriteResult::SingleDocument {
+                affected_count: 0,
+                document: None,
+            },),
+            0
+        );
+    }
 }

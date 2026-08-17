@@ -855,3 +855,26 @@ fn test_id_in_with_range_queries() {
         .collect();
     assert_ids(&lte_results, &[5, 2, 1]);
 }
+
+#[test]
+fn query_metrics_are_exposed_via_public_api() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let results: Vec<Document> = collection
+        .find(doc! { "status": "A" })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&results, &[1, 2, 5, 7]);
+
+    let metrics = db.metrics().executor();
+    assert_eq!(metrics.write_queries(), 1);
+    assert_eq!(metrics.documents_written(), 10);
+    assert_eq!(metrics.read_queries(), 1);
+    assert_eq!(metrics.rows_returned(), 4);
+    assert_eq!(metrics.collection_scans(), 1);
+    assert_eq!(metrics.read_query_duration().count(), 1);
+}

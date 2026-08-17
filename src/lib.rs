@@ -69,7 +69,10 @@ impl QuokkaDB {
         let storage_engine =
             StorageEngine::new(logger.clone(), &mut metric_registry, options.clone(), path)?;
         let optimizer = Arc::new(Optimizer::new(logger.clone())); // Add normalization rules as needed
-        let executor = Arc::new(QueryExecutor::new(storage_engine.clone()));
+        let executor = Arc::new(QueryExecutor::new_with_metrics(
+            storage_engine.clone(),
+            &mut metric_registry,
+        ));
         let db_impl = Arc::new(DbImpl {
             logger,
             metrics: metric_registry.clone(),

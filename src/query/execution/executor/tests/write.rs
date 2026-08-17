@@ -30,8 +30,9 @@ fn index_scan_eq(
 #[test]
 fn test_insert_duplicate_key_preflight_check() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_duplicates")?;
 
     // 2. Insert a document with a known ID
@@ -101,8 +102,9 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
 
 #[test]
 fn test_delete_one_removes_index_entries() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_one_indexes")?;
     let index = storage_engine.create_index(
@@ -133,8 +135,9 @@ fn test_delete_one_removes_index_entries() -> Result<()> {
 
 #[test]
 fn test_delete_many_removes_index_entries() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_many_indexes")?;
     let index = storage_engine.create_index(
@@ -166,8 +169,9 @@ fn test_delete_many_removes_index_entries() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_removes_index_entries() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_delete_indexes")?;
     let index = storage_engine.create_index(
@@ -198,8 +202,9 @@ fn test_find_one_and_delete_removes_index_entries() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update_indexes")?;
     let index = storage_engine.create_index(
@@ -240,8 +245,9 @@ fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
 
 #[test]
 fn test_replace_one_preserves_existing_id_when_replacement_omits_id() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one")?;
 
     insert_one(
@@ -267,8 +273,9 @@ fn test_replace_one_preserves_existing_id_when_replacement_omits_id() -> Result<
 
 #[test]
 fn test_replace_one_rejects_changing_id() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_id")?;
 
     insert_one(
@@ -304,8 +311,9 @@ fn test_replace_one_rejects_changing_id() -> Result<()> {
 
 #[test]
 fn test_find_one_and_replace_returns_previous_document_by_default() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
 
@@ -333,8 +341,9 @@ fn test_find_one_and_replace_returns_previous_document_by_default() -> Result<()
 
 #[test]
 fn test_find_one_and_replace_returns_new_document_when_requested() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
 
@@ -362,8 +371,9 @@ fn test_find_one_and_replace_returns_new_document_when_requested() -> Result<()>
 
 #[test]
 fn test_find_one_and_replace_returns_none_when_no_match() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
 
@@ -391,8 +401,9 @@ fn test_find_one_and_replace_returns_none_when_no_match() -> Result<()> {
 
 #[test]
 fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_replace_indexes")?;
     let index = storage_engine.create_index(
@@ -432,12 +443,10 @@ fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
 
 #[test]
 fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_retry")?;
 
     insert_one(
@@ -448,6 +457,7 @@ fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
 
     let replace_handle = spawn_paused_replace_one(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         doc! { "value": "replacement" },
@@ -456,7 +466,7 @@ fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
 
     hook.wait_until_hit();
 
-    let delete_executor = QueryExecutor::new(storage_engine.clone());
+    let delete_executor = executor.clone();
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
     assert_delete_result(delete_doc, 1);
 
@@ -475,12 +485,10 @@ fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_replace_retry")?;
 
@@ -492,6 +500,7 @@ fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
 
     let replace_handle = spawn_paused_find_one_and_replace(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         doc! { "value": "replacement" },
@@ -501,7 +510,7 @@ fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "updated")?;
     assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
@@ -519,8 +528,9 @@ fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
 #[test]
 fn test_update_one_succeeds_on_retry() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
@@ -565,8 +575,9 @@ fn test_update_one_succeeds_on_retry() -> Result<()> {
 #[test]
 fn test_update_one_fails_after_retry_timeout() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
@@ -607,22 +618,21 @@ fn test_update_one_fails_after_retry_timeout() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let update_handle = spawn_paused_update_one(executor.clone(), collection_id, 1, "updated");
+    let update_handle =
+        spawn_paused_update_one(executor.clone(), hook.clone(), collection_id, 1, "updated");
 
     hook.wait_until_hit();
 
-    let delete_executor = QueryExecutor::new(storage_engine.clone());
+    let delete_executor = executor.clone();
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
     assert_delete_result(delete_doc, 1);
 
@@ -645,8 +655,9 @@ fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_returns_previous_document_by_default() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -672,8 +683,9 @@ fn test_find_one_and_update_returns_previous_document_by_default() -> Result<()>
 
 #[test]
 fn test_find_one_and_update_returns_new_document_when_requested() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -699,8 +711,9 @@ fn test_find_one_and_update_returns_new_document_when_requested() -> Result<()> 
 
 #[test]
 fn test_find_one_and_update_returns_none_when_no_match() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -730,12 +743,10 @@ fn test_find_one_and_update_returns_none_when_no_match() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -745,6 +756,7 @@ fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
     let paused_expr = update([set([field_name("value")], "paused")]);
     let update_handle = spawn_paused_find_one_and_update_with_expr_and_upsert(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         paused_expr,
@@ -754,7 +766,7 @@ fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
 
     hook.wait_until_hit();
 
-    let delete_executor = QueryExecutor::new(storage_engine.clone());
+    let delete_executor = executor.clone();
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
     assert_delete_result(delete_doc, 1);
 
@@ -777,12 +789,10 @@ fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -792,6 +802,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Resu
     let paused_expr = update([set([field_name("value")], "paused")]);
     let update_handle = spawn_paused_find_one_and_update_with_expr_and_upsert(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         paused_expr,
@@ -801,7 +812,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Resu
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "concurrent")?;
     assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
@@ -825,12 +836,10 @@ fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Resu
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
 
@@ -840,6 +849,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() ->
     let paused_expr = update([set([field_name("paused_field")], "paused")]);
     let update_handle = spawn_paused_find_one_and_update_with_expr_and_upsert(
         executor.clone(),
+        hook.clone(),
         collection_id,
         1,
         paused_expr,
@@ -849,7 +859,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() ->
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_expr = update([set([field_name("concurrent_field")], "concurrent")]);
     let concurrent_doc =
         execute_update_one_with_expr(&concurrent_executor, collection_id, 1, concurrent_expr)?;
@@ -898,8 +908,9 @@ fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() ->
 
 #[test]
 fn test_find_one_and_delete_returns_deleted_document() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
 
@@ -923,23 +934,22 @@ fn test_find_one_and_delete_returns_deleted_document() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_find_one_and_delete(executor.clone(), collection_id, 1);
+    let delete_handle =
+        spawn_paused_find_one_and_delete(executor.clone(), hook.clone(), collection_id, 1);
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "updated")?;
     assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
@@ -962,23 +972,22 @@ fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_retries_after_concurrent_delete() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_find_one_and_delete(executor.clone(), collection_id, 1);
+    let delete_handle =
+        spawn_paused_find_one_and_delete(executor.clone(), hook.clone(), collection_id, 1);
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_delete = execute_delete_one(&concurrent_executor, collection_id, 1)?;
     assert_delete_result(concurrent_delete, 1);
 
@@ -996,8 +1005,9 @@ fn test_find_one_and_delete_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_delete_one_deletes_matching_document() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
@@ -1031,8 +1041,9 @@ fn test_delete_one_deletes_matching_document() -> Result<()> {
 
 #[test]
 fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_one_no_match")?;
 
@@ -1061,8 +1072,9 @@ fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
 
 #[test]
 fn test_delete_one_succeeds_on_retry() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
@@ -1098,8 +1110,9 @@ fn test_delete_one_succeeds_on_retry() -> Result<()> {
 
 #[test]
 fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_one_retry_timeout")?;
 
@@ -1135,8 +1148,9 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
 
 #[test]
 fn test_delete_many_deletes_matching_documents() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many")?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
@@ -1164,8 +1178,9 @@ fn test_delete_many_deletes_matching_documents() -> Result<()> {
 
 #[test]
 fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_many_no_match")?;
 
@@ -1197,8 +1212,9 @@ fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
 
 #[test]
 fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many_retry")?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
@@ -1230,22 +1246,20 @@ fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
 
 #[test]
 fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+    let delete_handle = spawn_paused_delete_one(executor.clone(), hook.clone(), collection_id, 1);
 
     hook.wait_until_hit();
 
-    let update_executor = QueryExecutor::new(storage_engine.clone());
+    let update_executor = executor.clone();
     let update_doc = execute_update_one(&update_executor, collection_id, 1, "updated")?;
     assert_update_result(update_doc, 1, 1, Option::<Bson>::None);
 
@@ -1271,22 +1285,20 @@ fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
 
 #[test]
 fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+    let delete_handle = spawn_paused_delete_one(executor.clone(), hook.clone(), collection_id, 1);
 
     hook.wait_until_hit();
 
-    let second_delete_executor = QueryExecutor::new(storage_engine.clone());
+    let second_delete_executor = executor.clone();
     let second_delete_doc = execute_delete_one(&second_delete_executor, collection_id, 1)?;
     assert_delete_result(second_delete_doc, 1);
 
@@ -1309,23 +1321,21 @@ fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
     let paused_update_handle =
-        spawn_paused_update_one(executor.clone(), collection_id, 1, "paused");
+        spawn_paused_update_one(executor.clone(), hook.clone(), collection_id, 1, "paused");
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "concurrent")?;
     assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
@@ -1349,24 +1359,27 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
     let paused_expr = update([set([field_name("paused_field")], "paused")]);
-    let paused_update_handle =
-        spawn_paused_update_one_with_expr(executor.clone(), collection_id, 1, paused_expr);
+    let paused_update_handle = spawn_paused_update_one_with_expr(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        1,
+        paused_expr,
+    );
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_expr = update([set([field_name("concurrent_field")], "concurrent")]);
     let concurrent_doc =
         execute_update_one_with_expr(&concurrent_executor, collection_id, 1, concurrent_expr)?;
@@ -1408,12 +1421,10 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
 #[test]
 
 fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
@@ -1424,6 +1435,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
     let paused_expr = update([set([field_name("status")], "updated")]);
     let paused_handle = spawn_paused_update_many(
         executor.clone(),
+        hook.clone(),
         collection_id,
         paused_query,
         paused_expr,
@@ -1432,7 +1444,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
 
     hook.wait_until_hit();
 
-    let delete_executor = QueryExecutor::new(storage_engine.clone());
+    let delete_executor = executor.clone();
     let delete_doc = execute_delete_one(&delete_executor, collection_id, 1)?;
     assert_delete_result(delete_doc, 1);
 
@@ -1461,12 +1473,10 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
 
 #[test]
 fn test_update_many_fails_after_concurrent_update_without_partial_success() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
@@ -1477,6 +1487,7 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
     let paused_expr = update([set([field_name("status")], "updated")]);
     let paused_handle = spawn_paused_update_many(
         executor.clone(),
+        hook.clone(),
         collection_id,
         paused_query,
         paused_expr,
@@ -1485,7 +1496,7 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = execute_update_one(&concurrent_executor, collection_id, 1, "changed")?;
     assert_update_result(concurrent_doc, 1, 1, Option::<Bson>::None);
 
@@ -1515,25 +1526,24 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
 
 #[test]
 fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(
         ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite,
     ));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
 
     let paused_handle = spawn_paused_insert_one(
         executor.clone(),
+        hook.clone(),
         collection_id,
         doc! { "_id": 1, "value": "paused" },
     );
 
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let concurrent_doc = insert_one(
         &concurrent_executor,
         collection_id,
@@ -1566,8 +1576,9 @@ fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<
 
 #[test]
 fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
 
     let inserted_doc = insert_one(
@@ -1603,8 +1614,9 @@ fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
 
 #[test]
 fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
 
     let inserted_doc = insert_one(
@@ -1648,21 +1660,19 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
 
 #[test]
 fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+    let delete_handle = spawn_paused_delete_one(executor.clone(), hook.clone(), collection_id, 1);
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     match insert_one(
         &concurrent_executor,
         collection_id,
@@ -1697,21 +1707,19 @@ fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending()
 
 #[test]
 fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
-    let (storage_engine, _dir) = storage_engine()?;
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
-    let executor = Arc::new(QueryExecutor::with_test_hook(
-        storage_engine.clone(),
-        hook.clone(),
-    ));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
 
-    let delete_handle = spawn_paused_delete_one(executor.clone(), collection_id, 1);
+    let delete_handle = spawn_paused_delete_one(executor.clone(), hook.clone(), collection_id, 1);
     hook.wait_until_hit();
 
-    let concurrent_executor = QueryExecutor::new(storage_engine.clone());
+    let concurrent_executor = executor.clone();
     let docs = vec![
         doc! { "_id": 1, "value": "replacement" },
         doc! { "_id": 2, "value": "second" },
@@ -1752,8 +1760,9 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
 
 fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
     // 1. Setup
-    let (storage_engine, _dir) = storage_engine()?;
-    let executor = QueryExecutor::new(storage_engine.clone());
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
 
     let doc1 = doc! { "_id": 1, "value": "initial" };
