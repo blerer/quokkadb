@@ -116,7 +116,6 @@ fn sst_skippable_due_to_drops(sst: &SSTableMetadata, drops: &[Arc<DropMetadata>]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
@@ -146,11 +145,7 @@ mod tests {
     fn setup_cache() -> Arc<SSTableCache> {
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        Arc::new(SSTableCache::new(
-            test_instance(),
-            &mut metric_registry,
-            &options,
-        ))
+        Arc::new(SSTableCache::new(&mut metric_registry, &options))
     }
 
     #[test]

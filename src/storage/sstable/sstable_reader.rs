@@ -2,7 +2,6 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::{Compressor, CompressorType};
 use crate::io::ZeroCopy;
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{
     encode_internal_key, extract_record_key, extract_sequence_number,
@@ -17,7 +16,6 @@ use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::{MAGIC_NUMBER, SSTABLE_FOOTER_LENGTH};
 use crate::storage::Direction;
 use crate::util::bloom_filter::BloomFilter;
-use crate::{event, info};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
@@ -29,10 +27,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+use tracing::Level;
+use tracing::{info_span, trace_span};
 use ErrorKind::InvalidData;
 
 pub struct SSTableReader {
-    logger: Arc<dyn LoggerAndTracer>,
     block_loader: Arc<BlockLoader>,
     filename: String,
     properties: SSTableProperties,
@@ -41,15 +40,12 @@ pub struct SSTableReader {
 }
 
 impl SSTableReader {
-    pub fn open(
-        logger: Arc<dyn LoggerAndTracer>,
-        block_cache: Arc<BlockCache>,
-        file_path: &Path,
-    ) -> Result<SSTableReader> {
+    pub fn open(block_cache: Arc<BlockCache>, file_path: &Path) -> Result<SSTableReader> {
         let filename = DbFile::new(file_path).unwrap().filename();
+        let _span = info_span!("sstable_reader.open", file = %filename).entered();
 
         let start = Instant::now();
-        info!(logger, "SSTableReader opening file={}", &filename);
+        tracing::info!(file = %filename, "SSTableReader opening");
 
         let file = SharedFile::open(file_path)?;
 
@@ -100,12 +96,11 @@ impl SSTableReader {
             Self::read_properties(&file, &compressor, &checksum_strategy, &properties_handle)?;
 
         let duration = start.elapsed();
-        info!(
-            logger,
-            "SSTableReader opened file={}, properties={:?}, duration={}us",
-            &filename,
-            properties,
-            duration.as_micros()
+        tracing::info!(
+            file = %filename,
+            properties = ?properties,
+            duration_micros = duration.as_micros(),
+            "SSTableReader opened"
         );
 
         let block_loader = Arc::new(BlockLoader::new(
@@ -116,7 +111,6 @@ impl SSTableReader {
         ));
 
         Ok(SSTableReader {
-            logger,
             block_loader,
             filename,
             properties,
@@ -206,20 +200,20 @@ impl SSTableReader {
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        event!(
-            self.logger,
-            "read start file={}, key={:?}, snapshot={}, min_snapshot={}",
-            &self.filename,
-            &record_key,
+        let _span = trace_span!(
+            "sstable_reader.read",
+            file = %self.filename,
+            key = ?record_key,
             snapshot,
-            min_snapshot.map_or("None".to_string(), |s| s.to_string())
-        );
+            min_snapshot = ?min_snapshot
+        )
+        .entered();
 
         let filter_block = self.get_block(&self.filter_handle)?;
 
         let filter = BloomFilter::from_block(&filter_block)?;
         if !filter.contains(record_key) {
-            event!(self.logger, "read filter_miss key={:?}", &record_key);
+            tracing::trace!(key = ?record_key, "read filter miss");
             return Ok(None);
         }
 
@@ -235,7 +229,7 @@ impl SSTableReader {
             let (_key, block_handle) = block_handle?;
             let data_block = self.get_block(&block_handle)?;
             let data_reader = BlockReader::new(data_block, DataEntryReader)?;
-            event!(self.logger, "scanning_data_block key={:?}", &record_key);
+            tracing::trace!(key = ?record_key, "scanning data block");
             let mut iter = data_reader.scan_forward_from(&bound)?;
             while let Some(result) = iter.next() {
                 let (key, value) = result?;
@@ -267,14 +261,14 @@ impl SSTableReader {
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
         // Fetch and parse the index block
-        event!(
-            self.logger,
-            "range_scan start file={}, range={:?}, snapshot={}, direction={:?}",
-            &self.filename,
-            &range,
+        let _span = trace_span!(
+            "sstable_reader.range_scan",
+            file = %self.filename,
+            range = ?range,
             snapshot,
-            direction
-        );
+            direction = ?direction
+        )
+        .entered();
         let index_block = self.get_block(&self.index_handle)?;
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
 
@@ -328,10 +322,9 @@ impl SSTableReader {
                 }
             };
 
-        if self.logger.is_tracing_enabled() {
+        if tracing::enabled!(Level::TRACE) {
             sstable_iter_base = Box::new(TracingIterator::new(
                 sstable_iter_base,
-                self.logger.clone(),
                 format!("range_scan end file={},", self.filename),
             ));
         }
@@ -584,7 +577,6 @@ impl BlockLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
@@ -607,7 +599,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
+        let block_cache = BlockCache::new(&mut metric_registry, &options);
 
         let col = 10;
 
@@ -649,12 +641,7 @@ mod tests {
         );
         assert_eq!(sst, expected);
 
-        let reader = SSTableReader::open(
-            test_instance(),
-            block_cache,
-            &path.join(sst_file.filename()),
-        )
-        .unwrap();
+        let reader = SSTableReader::open(block_cache, &path.join(sst_file.filename())).unwrap();
         let properties = reader.properties();
 
         assert_eq!(properties.num_entries, 4);
@@ -678,7 +665,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
+        let block_cache = BlockCache::new(&mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(12);
 
@@ -708,12 +695,7 @@ mod tests {
 
         let _sst = writer.finish().unwrap();
 
-        let reader = SSTableReader::open(
-            test_instance(),
-            block_cache,
-            &path.join(sst_file.filename()),
-        )
-        .unwrap();
+        let reader = SSTableReader::open(block_cache, &path.join(sst_file.filename())).unwrap();
 
         assert_search_eq(
             &reader,
@@ -784,7 +766,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
+        let block_cache = BlockCache::new(&mut metric_registry, &options);
         let sst_file = DbFile::new_sst(12);
         let col = 32;
 
@@ -806,12 +788,7 @@ mod tests {
         }
         writer.finish().unwrap();
 
-        let reader = SSTableReader::open(
-            test_instance(),
-            block_cache,
-            &path.join(sst_file.filename()),
-        )
-        .unwrap();
+        let reader = SSTableReader::open(block_cache, &path.join(sst_file.filename())).unwrap();
         let key = record_key(col, 5);
 
         // snapshot=10, min_snapshot=Some(8): should find nothing (newest is seq=8, which is not > 8)
@@ -848,7 +825,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
+        let block_cache = BlockCache::new(&mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(12);
 
@@ -866,12 +843,7 @@ mod tests {
 
         let _sst = writer.finish().unwrap();
 
-        let reader = SSTableReader::open(
-            test_instance(),
-            block_cache,
-            &path.join(sst_file.filename()),
-        )
-        .unwrap();
+        let reader = SSTableReader::open(block_cache, &path.join(sst_file.filename())).unwrap();
 
         for i in 0..1000 {
             let entry = put_rec(col, i, i as u32, i as u64);
@@ -891,7 +863,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::lightweight();
         let mut metric_registry = MetricRegistry::new();
-        let block_cache = BlockCache::new(test_instance(), &mut metric_registry, &options);
+        let block_cache = BlockCache::new(&mut metric_registry, &options);
 
         let sst_file = DbFile::new_sst(1);
         let col = 32;
@@ -912,14 +884,8 @@ mod tests {
 
         writer.finish().unwrap();
 
-        let reader = Arc::new(
-            SSTableReader::open(
-                test_instance(),
-                block_cache,
-                &path.join(sst_file.filename()),
-            )
-            .unwrap(),
-        );
+        let reader =
+            Arc::new(SSTableReader::open(block_cache, &path.join(sst_file.filename())).unwrap());
 
         for snapshot in vec![MAX_SEQUENCE_NUMBER, 5000, 2000] {
             for direction in vec![Direction::Forward, Direction::Reverse] {

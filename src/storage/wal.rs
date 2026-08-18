@@ -1,18 +1,17 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
 use crate::storage::write_batch::WriteBatch;
-use crate::{debug, event, info};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::{info_span, trace_span};
 
 /// The current version of the write-ahead log format.
 const WAL_VERSION: u32 = 1;
@@ -20,8 +19,6 @@ const WAL_VERSION: u32 = 1;
 const MAGIC_NUMBER: u32 = 0x51756F6B; //"Quok" in ASCII hex
 
 pub struct WriteAheadLog {
-    /// The logger
-    logger: Arc<dyn LoggerAndTracer>,
     /// The wal metrics
     metrics: Metrics,
     /// Number of bytes that has to be written before the wal will issue a fsync
@@ -36,7 +33,6 @@ pub struct WriteAheadLog {
 
 impl WriteAheadLog {
     pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &Options,
         directory: &Path,
@@ -50,11 +46,10 @@ impl WriteAheadLog {
             WalObserver::new(metrics.clone()),
         )?;
         metrics.register_to(metric_registry);
-        Self::new_internal(logger, metrics, options, append_log, VecDeque::new())
+        Self::new_internal(metrics, options, append_log, VecDeque::new())
     }
 
     pub fn load_from(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &Options,
         file_path: &Path,
@@ -67,11 +62,10 @@ impl WriteAheadLog {
             WalObserver::new(metrics.clone()),
         )?;
         metrics.register_to(metric_registry);
-        Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
+        Self::new_internal(metrics, options, append_log, rotated_log_files)
     }
 
     pub fn new_after_corruption(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &Options,
         directory: &Path,
@@ -86,11 +80,10 @@ impl WriteAheadLog {
             WalObserver::new(metrics.clone()),
         )?;
         metrics.register_to(metric_registry);
-        Self::new_internal(logger, metrics, options, append_log, rotated_log_files)
+        Self::new_internal(metrics, options, append_log, rotated_log_files)
     }
 
     fn new_internal(
-        logger: Arc<dyn LoggerAndTracer>,
         metrics: Metrics,
         options: &Options,
         append_log: AppendLog<WalFileCreator>,
@@ -107,14 +100,12 @@ impl WriteAheadLog {
 
         metrics.total_bytes.inc_by(rotated_files_size);
 
-        info!(
-            logger,
-            "WAL initialized at path: {:?}",
-            append_log.file_path()
+        tracing::info!(
+            path = %append_log.file_path().display(),
+            "WAL initialized"
         );
 
         Ok(WriteAheadLog {
-            logger,
             metrics,
             append_log,
             wal_bytes_per_sync: options.wal_bytes_per_sync().to_bytes(),
@@ -124,7 +115,7 @@ impl WriteAheadLog {
     }
 
     pub fn append(&mut self, seq: u64, batch: &WriteBatch) -> Result<()> {
-        event!(self.logger, "wal append start, batch_size={}", batch.len());
+        let _span = trace_span!("wal.append", seq, batch_size = batch.len()).entered();
 
         let record = batch.to_wal_record(seq);
         let bytes = self.append_log.append(&record)?;
@@ -132,25 +123,34 @@ impl WriteAheadLog {
 
         self.sync_if_needed()?;
 
-        event!(self.logger, "wal append done, bytes={}", bytes);
+        tracing::trace!(seq, batch_size = batch.len(), bytes, "wal append done");
 
         Ok(())
     }
 
     pub fn rotate(&mut self, new_log_number: u64) -> Result<()> {
         let wal_file = DbFile::new_write_ahead_log(new_log_number);
-        event!(self.logger, "wal rotation start");
-        info!(
-            self.logger,
-            "Rotating WAL file from {} to {}",
-            self.append_log.filename().unwrap(),
-            wal_file.filename()
+        let old_filename = self.append_log.filename().unwrap().to_string();
+        let new_filename = wal_file.filename().to_string();
+        let _span = info_span!(
+            "wal.rotate",
+            old_filename = %old_filename,
+            new_filename = %new_filename
+        )
+        .entered();
+        tracing::info!(
+            old_filename = %old_filename,
+            new_filename = %new_filename,
+            "Rotating WAL file"
         );
         let (new_path, old_path) = self.append_log.rotate(wal_file)?;
         self.pending_bytes = 0;
         self.metrics.files.inc();
 
-        event!(self.logger, "wal rotation done, new_path={:?}", new_path);
+        tracing::trace!(
+            new_path = %new_path.display(),
+            "wal rotation done"
+        );
 
         let number = DbFile::new(&old_path).unwrap().number;
         self.rotated_log_files.push_back((number, old_path));
@@ -184,21 +184,26 @@ impl WriteAheadLog {
 
     fn sync_if_needed(&mut self) -> Result<()> {
         if self.pending_bytes >= self.wal_bytes_per_sync {
-            debug!(self.logger, "WAL sync condition met, syncing...");
+            tracing::debug!(
+                pending_bytes = self.pending_bytes,
+                wal_bytes_per_sync = self.wal_bytes_per_sync,
+                "WAL sync condition met"
+            );
             self.sync()?;
         }
         Ok(())
     }
 
     pub fn sync(&mut self) -> Result<()> {
+        let _span =
+            trace_span!("wal.sync", path = %self.append_log.file_path().display()).entered();
         let start = Instant::now();
         self.append_log.sync()?;
         let duration = start.elapsed();
-        event!(
-            self.logger,
-            "wal sync, duration={}µs, path={:?}",
-            duration.as_micros(),
-            self.append_log.file_path()
+        tracing::trace!(
+            duration_micros = duration.as_micros(),
+            path = %self.append_log.file_path().display(),
+            "wal sync done"
         );
         self.pending_bytes = 0;
         Ok(())
@@ -346,7 +351,6 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger;
     use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::count_stats::{CountStats, CountStatsKey};
@@ -363,14 +367,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = Options::default();
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            &path,
-            1,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
         let batches = vec![
             (
@@ -438,14 +436,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let options = Options::default();
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            &path,
-            1,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
         let batch = WriteBatch::new(
             vec![
@@ -484,14 +476,8 @@ mod tests {
         let path = dir.path().to_path_buf();
         let options = Options::default();
 
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            &path,
-            1,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
         // Append and rotate to log 2
         wal.append(
@@ -559,14 +545,8 @@ mod tests {
         let options =
             Options::default().with_wal_bytes_per_sync(StorageQuantity::new(1, StorageUnit::Bytes)); // force sync after any write
 
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            path,
-            1,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 1).unwrap();
 
         let mut batch = Vec::new();
         for i in 0..5 {
@@ -588,14 +568,8 @@ mod tests {
         let path = dir.path();
         let options = Options::default();
 
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            path,
-            7,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 7).unwrap();
         for i in 0..3 {
             wal.append(100 + i as u64, &write_batch(vec![new_operation(i)]))
                 .unwrap();
@@ -629,14 +603,8 @@ mod tests {
         let path = dir.path();
         let options = Options::default();
 
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            path,
-            11,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 11).unwrap();
         wal.rotate(12).unwrap();
 
         let log_file = path.join("000011.log");
@@ -659,14 +627,8 @@ mod tests {
         let path = dir.path();
         let options = Options::default();
 
-        let mut wal = WriteAheadLog::new(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            path,
-            13,
-        )
-        .unwrap();
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 13).unwrap();
         wal.append(
             1,
             &write_batch(vec![Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())]),

@@ -1,4 +1,3 @@
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
@@ -11,13 +10,13 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::storage_engine::SSTableOperation;
 use crate::util::interval::IntervalPosition;
-use crate::{debug, event, info, warn};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use tracing::{trace_span, Span};
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -30,7 +29,7 @@ struct Shared {
 }
 
 pub struct CompactionManager {
-    logger: Arc<dyn LoggerAndTracer>,
+    instance_span: Option<Span>,
     compaction_picker: Mutex<CompactionPicker>,
     shared: Arc<(Mutex<Shared>, Condvar)>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
@@ -38,13 +37,13 @@ pub struct CompactionManager {
 
 impl CompactionManager {
     pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
         sst_cache: Arc<SSTableCache>,
         next_file_number: Arc<AtomicU64>,
     ) -> Result<Self> {
+        let instance_span = Some(Span::current());
         let shared = Arc::new((
             Mutex::new(Shared {
                 queue: VecDeque::new(),
@@ -53,14 +52,9 @@ impl CompactionManager {
             Condvar::new(),
         ));
 
-        let compaction_picker = Mutex::new(CompactionPicker::new(
-            logger.clone(),
-            metric_registry,
-            &options,
-        ));
+        let compaction_picker = Mutex::new(CompactionPicker::new(metric_registry, &options));
 
         let mut workers = Vec::with_capacity(options.compaction_threads());
-        let worker_logger = logger.clone();
 
         for i in 0..options.compaction_threads() {
             let shared_clone = Arc::clone(&shared);
@@ -68,7 +62,7 @@ impl CompactionManager {
             let db_dir = db_dir.to_path_buf();
             let sst_cache = sst_cache.clone();
             let next_file_number = next_file_number.clone();
-            let logger = worker_logger.clone();
+            let instance_span = instance_span.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("compaction_manager-{i}"))
@@ -79,7 +73,7 @@ impl CompactionManager {
                         &db_dir,
                         sst_cache,
                         &next_file_number,
-                        logger,
+                        instance_span,
                     )
                 })?;
 
@@ -89,7 +83,7 @@ impl CompactionManager {
         let workers = Mutex::new(workers);
 
         Ok(Self {
-            logger,
+            instance_span,
             compaction_picker,
             shared,
             workers,
@@ -107,13 +101,13 @@ impl CompactionManager {
             .unwrap()
             .pick_compaction(levels)
         {
-            debug!(
-                self.logger,
-                "compaction job picked, job_id={}, input_level={}, output_level={}, input_files={}",
-                job.id,
-                job.input_level,
-                job.output_level,
-                job.input_files.len()
+            let _instance_span = self.instance_span.as_ref().map(|span| span.enter());
+            tracing::debug!(
+                job_id = job.id,
+                input_level = job.input_level,
+                output_level = job.output_level,
+                input_files = job.input_files.len(),
+                "compaction job picked"
             );
             self.enqueue_compaction_job(job, callback);
         }
@@ -163,7 +157,8 @@ impl CompactionManager {
     }
 
     pub fn shutdown(&self) {
-        info!(self.logger, "compaction manager shutdown started");
+        let _instance_span = self.instance_span.as_ref().map(|span| span.enter());
+        tracing::info!("compaction manager shutdown started");
         let (lock, cvar) = &*self.shared;
         {
             let mut shared = lock.lock().unwrap();
@@ -193,7 +188,7 @@ fn worker_loop(
     db_dir: &PathBuf,
     sst_cache: Arc<SSTableCache>,
     next_file_number: &AtomicU64,
-    logger: Arc<dyn LoggerAndTracer>,
+    instance_span: Option<Span>,
 ) {
     let (lock, cvar) = &*shared;
 
@@ -216,19 +211,18 @@ fn worker_loop(
 
         match task {
             Some(task) => {
+                let _instance_span = instance_span.as_ref().map(|span| span.enter());
                 let CompactionTask {
                     compaction_job,
                     callback,
                 } = task;
-                event!(
-                    logger,
-                    "compaction start, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
-                    compaction_job.id,
-                    compaction_job.input_level,
-                    compaction_job.output_level,
-                    compaction_job.input_files.len(),
-                    compaction_job.output_files.len()
-                );
+                let _span = trace_span!(
+                    "compaction.run",
+                    job_id = compaction_job.id,
+                    input_level = compaction_job.input_level,
+                    output_level = compaction_job.output_level
+                )
+                .entered();
 
                 let rs = perform_compaction(
                     options,
@@ -246,21 +240,21 @@ fn worker_loop(
                             drops,
                         } = &op
                         {
-                            event!(
-                                logger,
-                                "compaction done, job_id={}, input_level={}, output_level={}, added={}, removed={}, drops={}",
+                            tracing::trace!(
+                                job_id = compaction_job.id,
+                                input_level = compaction_job.input_level,
+                                output_level = compaction_job.output_level,
                                 compaction_job.id,
-                                compaction_job.input_level,
-                                compaction_job.output_level,
-                                added_sstables.len(),
-                                removed_sstables.len(),
-                                drops.len()
+                                added = added_sstables.len(),
+                                removed = removed_sstables.len(),
+                                drops = drops.len(),
+                                "compaction done"
                             );
                         }
                         callback.call(Ok(op))
                     }
                     Err(e) => {
-                        warn!(logger, "compaction failed: {}", e);
+                        tracing::warn!(error = %e, "compaction failed");
                         callback.call(Err(e))
                     }
                 }
@@ -411,7 +405,6 @@ fn new_sstable_writer<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
@@ -427,11 +420,7 @@ mod tests {
 
     fn setup_cache(options: &Options) -> Arc<SSTableCache> {
         let mut metric_registry = MetricRegistry::new();
-        Arc::new(SSTableCache::new(
-            test_instance(),
-            &mut metric_registry,
-            &options,
-        ))
+        Arc::new(SSTableCache::new(&mut metric_registry, &options))
     }
 
     fn write_sst(

@@ -1,18 +1,16 @@
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::sstable_reader::SSTableReader;
-use crate::{error, event, info};
 use moka::sync::Cache;
 use std::io::Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::trace_span;
 
 /// SSTable reader cache (an LRU cache).
 pub struct SSTableCache {
-    logger: Arc<dyn LoggerAndTracer>,
     metrics: Metrics,
     block_cache: Arc<BlockCache>,
     cache: Cache<String, Result<Arc<SSTableReader>, Arc<Error>>>, // Key = file_path
@@ -20,24 +18,16 @@ pub struct SSTableCache {
 
 impl SSTableCache {
     /// Create a new SSTableCache
-    pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
-        metric_registry: &mut MetricRegistry,
-        options: &Options,
-    ) -> Self {
+    pub fn new(metric_registry: &mut MetricRegistry, options: &Options) -> Self {
         let cache_size = options.max_open_files() as u64;
         let cache = Cache::new(cache_size);
         let metrics = Metrics::new(cache.clone());
         metrics.register_to(metric_registry);
-        info!(
-            logger,
-            "SSTableCache initialized with capacity={}", cache_size
-        );
+        tracing::info!(capacity = cache_size, "SSTableCache initialized");
 
-        let block_cache = BlockCache::new(logger.clone(), metric_registry, options);
+        let block_cache = BlockCache::new(metric_registry, options);
 
         Self {
-            logger,
             metrics,
             block_cache,
             cache,
@@ -47,43 +37,31 @@ impl SSTableCache {
     /// Retrieve the specified SSTableReader, creating it by reading the file on disk if necessary
     pub fn get(&self, file: &Path) -> Result<Arc<SSTableReader>, Error> {
         let key = file.to_string_lossy().into_owned();
-
-        event!(self.logger, "get start file={}", &key);
+        let _span = trace_span!("sstable_cache.get", file = %key).entered();
 
         let mut miss = false;
 
         // Fetch or insert the sstable reader in a thread-safe manner
         let sstable_reader = self.cache.get_with(key.clone(), || {
-            event!(self.logger, "load start file={}", &key);
-
             let start = Instant::now();
 
-            let reader = SSTableReader::open(self.logger.clone(), self.block_cache.clone(), &file);
+            let reader = SSTableReader::open(self.block_cache.clone(), &file);
 
             let duration = start.elapsed().as_millis();
             miss = true;
 
             if let Err(e) = reader {
-                error!(
-                    self.logger,
-                    "Failed to load SSTable from file={}: {}", &key, e
-                );
-                event!(self.logger, "load error file={} error={}", &key, e);
+                tracing::error!(file = %key, error = %e, "Failed to load SSTable");
                 return Err(Arc::new(e));
             }
-            event!(
-                self.logger,
-                "load finish file={} duration={}ms",
-                &key,
-                duration
-            );
+            tracing::trace!(file = %key, duration_ms = duration, "sstable load done");
             Ok(Arc::new(reader?))
         });
 
         if miss {
             self.metrics.misses.inc();
         } else {
-            event!(self.logger, "hit, file={}", &key);
+            tracing::trace!(file = %key, "sstable cache hit");
             self.metrics.hits.inc();
         }
 
@@ -94,7 +72,7 @@ impl SSTableCache {
     pub fn evict(&self, file: &Path) {
         let key = file.to_string_lossy().into_owned();
         self.cache.invalidate(&key);
-        event!(self.logger, "evict file={}", &key);
+        tracing::trace!(file = %key, "sstable cache evict");
     }
 }
 

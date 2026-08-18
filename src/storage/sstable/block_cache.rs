@@ -1,30 +1,24 @@
 use crate::io::checksum::ChecksumStrategy;
 use crate::io::compressor::Compressor;
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
-use crate::{error, event, info};
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::{trace_span, Span};
 
 /// Block Cache (LRU, retrieves blocks using the shared file provided as a get parameter)
 pub struct BlockCache {
-    logger: Arc<dyn LoggerAndTracer>,
     cache: Cache<(String, u64), Result<Arc<[u8]>, Arc<Error>>>, // Key = (file_path, block_handle)
 }
 
 impl BlockCache {
     /// Create a new Block Cache
-    pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
-        metric_registry: &mut MetricRegistry,
-        options: &Options,
-    ) -> Arc<Self> {
+    pub fn new(metric_registry: &mut MetricRegistry, options: &Options) -> Arc<Self> {
         let cache_size = options.block_cache_size().to_bytes() as u64;
         let evictions_counter = Counter::new();
         let cache = Cache::builder()
@@ -36,8 +30,8 @@ impl BlockCache {
                 }
             })
             .eviction_listener(Self::eviction_listener(
-                logger.clone(),
                 evictions_counter.clone(),
+                Span::current(),
             ))
             .build();
 
@@ -47,9 +41,9 @@ impl BlockCache {
         let metrics = Metrics::new(size_gauge, evictions_counter);
         metrics.register_to(metric_registry);
 
-        info!(logger, "BlockCache initialized with {} bytes", cache_size);
+        tracing::info!(capacity = cache_size, "BlockCache initialized");
 
-        Arc::new(Self { logger, cache })
+        Arc::new(Self { cache })
     }
 
     /// Retrieve the specified block, loading it from disk if necessary
@@ -64,38 +58,38 @@ impl BlockCache {
             file.path.to_string_lossy().into_owned(),
             block_handle.offset,
         );
+        let _span = trace_span!(
+            "block_cache.get",
+            file = %key.0,
+            offset = block_handle.offset,
+            size = block_handle.size
+        )
+        .entered();
 
         // Fetch or insert the block in a thread-safe manner
         let block = self.cache.get_with(key.clone(), || {
-            let path = file.path.to_string_lossy();
             let start = Instant::now();
-            event!(
-                self.logger,
-                "block_load start file={}, offset={}, size={}",
-                path,
-                block_handle.offset,
-                block_handle.size
-            );
 
             // Read, decompress, and validate the block
             let uncompressed_block =
                 self.read_and_decompress(compressor, checksum_strategy, file, block_handle);
 
             if let Err(e) = uncompressed_block {
-                error!(
-                    self.logger,
-                    "Error loading block from {} at offset {}: {}", path, block_handle.offset, e
+                tracing::error!(
+                    file = %file.path.to_string_lossy(),
+                    offset = block_handle.offset,
+                    error = %e,
+                    "Error loading block"
                 );
                 return Err(Arc::new(e));
             }
 
             let uncompressed_block = uncompressed_block?;
             let duration = start.elapsed();
-            event!(
-                self.logger,
-                "block_load end, size={}, duration={}us",
-                uncompressed_block.len(),
-                duration.as_micros()
+            tracing::trace!(
+                size = uncompressed_block.len(),
+                duration_micros = duration.as_micros(),
+                "block load done"
             );
 
             Ok(Arc::from(uncompressed_block))
@@ -124,17 +118,12 @@ impl BlockCache {
     }
 
     fn eviction_listener(
-        logger: Arc<dyn LoggerAndTracer>,
         evictions_counter: Arc<Counter>,
+        span: Span,
     ) -> impl Fn(Arc<(String, u64)>, Result<Arc<[u8]>, Arc<Error>>, RemovalCause) {
         move |key, _value, cause| {
-            event!(
-                logger,
-                "evict_block file={} offset={} cause={:?}",
-                key.0,
-                key.1,
-                cause
-            );
+            let _span = span.enter();
+            tracing::trace!(file = %key.0, offset = key.1, cause = ?cause, "evict block");
             evictions_counter.inc();
         }
     }

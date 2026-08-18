@@ -20,6 +20,7 @@ Lightweight embedded document database in Rust with a Mongo-like API and a simpl
 - Add focused tests that match the risk of the change.
 - Run formatting after code changes before finishing the task.
 - Explain trade-offs, not just implementation steps.
+- Do not delete existing comments, documentation, or similar explanatory text just because they seem unnecessary or low value. Keep them unless they are incorrect, misleading, or the user explicitly asks for their removal.
 
 When proposing a structural change, call out future costs explicitly:
 - what becomes harder after this change
@@ -155,6 +156,9 @@ When proposing a structural change, call out future costs explicitly:
 ## Test style
 
 - Keep tests close to the module they cover. Prefer small semantic tests with concrete BSON documents, exact error messages where relevant, round-trip serialization checks, and focused helper DSLs/utilities.
+- Keep small unit tests inline in the module they cover using `#[cfg(test)] mod tests`.
+- When tests grow large enough to hurt readability, extract them while keeping them as a child of the module under test.
+- For a flat module such as `filters.rs`, extracted tests should live in `filters/tests.rs`, with `#[cfg(test)] mod tests;` declared in `filters.rs`.
 
 ## Sorting strategies
 

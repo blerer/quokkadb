@@ -1,6 +1,5 @@
 use super::*;
 use crate::error::Result;
-use crate::obs::logger::test_instance;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::query::execution::executor::with_executor_test_hook;
@@ -32,10 +31,9 @@ pub(crate) struct ExecutorTestRuntime {
 
 pub(crate) fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
     let dir = tempdir()?;
-    let logger = test_instance();
     let options = Arc::new(Options::lightweight());
     let mut metric_registry = MetricRegistry::new();
-    let storage_engine = StorageEngine::new(logger, &mut metric_registry, options, dir.path())?;
+    let storage_engine = StorageEngine::new(&mut metric_registry, options, dir.path())?;
     let executor = Arc::new(QueryExecutor::new_with_metrics(
         storage_engine.clone(),
         &mut metric_registry,

@@ -7,12 +7,9 @@ pub(crate) mod compressor;
 pub(crate) mod serializable;
 pub(crate) mod varint;
 
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
-use crate::warn;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::{fs, ptr};
 
 /// A trait for reading little-endian integers directly from byte slices
@@ -183,14 +180,13 @@ pub fn sync_dir<P: AsRef<Path>>(dir_path: P) -> Result<()> {
 /// After renaming, the parent directory is synced to ensure that the rename is durable.
 ///
 /// # Arguments
-/// * `logger` - The logger
 /// * `file_path` - The path to the file to mark as corrupted.
 ///
 /// # Behavior
 /// * If the file has an extension (e.g., `000123.log`), it becomes `000123.log.corrupted`.
 /// * If the file has no extension (e.g., `000123`), it becomes `000123.corrupted`.
 /// * If the rename fails or the sync fails, an `io::Error` is returned.
-pub fn mark_file_as_corrupted(logger: Arc<dyn LoggerAndTracer>, file_path: &Path) -> Result<()> {
+pub fn mark_file_as_corrupted(file_path: &Path) -> Result<()> {
     let corrupted_path = compute_corrupted_path(file_path);
 
     fs::rename(file_path, &corrupted_path)?;
@@ -199,9 +195,10 @@ pub fn mark_file_as_corrupted(logger: Arc<dyn LoggerAndTracer>, file_path: &Path
         sync_dir(parent)?;
     }
 
-    warn!(
-        logger,
-        "Marked WAL file as corrupted: {:?} -> {:?}", file_path, corrupted_path
+    tracing::warn!(
+        source = %file_path.display(),
+        destination = %corrupted_path.display(),
+        "marked WAL file as corrupted"
     );
 
     Ok(())
@@ -248,7 +245,6 @@ pub fn invalid_data(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use crate::io::{file_name_as_str, mark_file_as_corrupted, truncate_file};
-    use crate::obs::logger;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
@@ -369,13 +365,12 @@ mod tests {
 
     #[test]
     fn test_mark_file_as_corrupted_with_extension() {
-        let logger = logger::test_instance();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.log");
 
         fs::write(&file_path, b"test data").unwrap();
 
-        mark_file_as_corrupted(logger, &file_path).expect("Failed to mark file as corrupted");
+        mark_file_as_corrupted(&file_path).expect("Failed to mark file as corrupted");
 
         let expected = dir.path().join("test.log.corrupted");
         assert!(expected.exists());
@@ -387,13 +382,12 @@ mod tests {
 
     #[test]
     fn test_mark_file_as_corrupted_without_extension() {
-        let logger = logger::test_instance();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("testfile");
 
         fs::write(&file_path, b"some content").unwrap();
 
-        mark_file_as_corrupted(logger, &file_path).expect("Failed to mark file as corrupted");
+        mark_file_as_corrupted(&file_path).expect("Failed to mark file as corrupted");
 
         let expected = dir.path().join("testfile.corrupted");
         assert!(expected.exists());
@@ -405,11 +399,10 @@ mod tests {
 
     #[test]
     fn test_mark_file_as_corrupted_non_existent_file() {
-        let logger = logger::test_instance();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("does_not_exist.log");
 
-        let result = mark_file_as_corrupted(logger, &file_path);
+        let result = mark_file_as_corrupted(&file_path);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
     }

@@ -1,12 +1,9 @@
-use crate::event;
-use crate::obs::logger::LoggerAndTracer;
 use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use crate::storage::Direction;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::Result;
 use std::iter::Iterator;
-use std::sync::Arc;
 
 pub struct ForwardIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
@@ -115,7 +112,6 @@ impl<'a> Iterator for ReverseIterator<'a> {
 
 pub struct TracingIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
-    logger: Arc<dyn LoggerAndTracer>,
     context: String,
     count: usize,
     exhausted: bool,
@@ -124,12 +120,10 @@ pub struct TracingIterator<'a> {
 impl<'a> TracingIterator<'a> {
     pub fn new(
         iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
-        logger: Arc<dyn LoggerAndTracer>,
         context: String,
     ) -> Self {
         TracingIterator {
             iter,
-            logger,
             context,
             count: 0,
             exhausted: false,
@@ -146,7 +140,7 @@ impl<'a> Iterator for TracingIterator<'a> {
             Some(Ok(_)) => self.count += 1,
             Some(Err(_)) => {}
             None if !self.exhausted => {
-                event!(self.logger, "{} count={}", self.context, self.count);
+                tracing::trace!(context = %self.context, count = self.count, "iterator exhausted");
                 self.exhausted = true;
             }
             None => {}

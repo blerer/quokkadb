@@ -1,8 +1,7 @@
-use crate::error;
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use std::io::{Error, ErrorKind, Result};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
+use tracing::Span;
 
 pub enum Callback<T> {
     Async(AsyncCallback<T>),
@@ -10,12 +9,12 @@ pub enum Callback<T> {
 }
 
 impl<T> Callback<T> {
-    pub fn new_async<F>(logger: Arc<dyn LoggerAndTracer>, f: F) -> Arc<Self>
+    pub fn new_async<F>(f: F) -> Arc<Self>
     where
         F: Fn(T) -> Result<()> + Send + Sync + 'static,
         T: Send + 'static,
     {
-        Arc::new(Callback::Async(AsyncCallback::new(logger, f)))
+        Arc::new(Callback::Async(AsyncCallback::new(f)))
     }
 
     pub fn new_blocking(f: Box<dyn Fn(T) -> Result<()> + Send + Sync>) -> Arc<Self> {
@@ -52,27 +51,25 @@ impl<T> Callback<T> {
 }
 
 pub struct AsyncCallback<T> {
-    logger: Arc<dyn LoggerAndTracer>,
+    span: Span,
     fun: Box<dyn Fn(T) -> Result<()> + Send + Sync>,
 }
 
 impl<T: Send + 'static> AsyncCallback<T> {
-    pub fn new<F>(logger: Arc<dyn LoggerAndTracer>, f: F) -> Self
+    pub fn new<F>(f: F) -> Self
     where
         F: Fn(T) -> Result<()> + Send + Sync + 'static,
     {
         Self {
-            logger,
+            span: Span::current(),
             fun: Box::new(f),
         }
     }
 
     pub fn call(&self, value: T) {
+        let _span = self.span.enter();
         if let Err(err) = execute_function(&self.fun, value) {
-            error!(
-                self.logger,
-                "AsyncCallback function returned an error: {}", err
-            );
+            tracing::error!(error = %err, "async callback function returned an error");
         }
     }
 }

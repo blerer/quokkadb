@@ -1,6 +1,5 @@
 use bson::{doc, Bson, Document};
 use quokkadb::collection::{Collection, ReturnDocument};
-use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
@@ -21,7 +20,7 @@ fn get_sample_data() -> Vec<Document> {
 fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
-    let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+    let db = QuokkaDB::open(path).unwrap();
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)

@@ -1,2 +1,2 @@
-pub mod logger;
 pub(crate) mod metrics;
+pub(crate) mod observability;

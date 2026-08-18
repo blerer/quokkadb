@@ -9,6 +9,7 @@ use crate::storage::storage_engine::StorageEngine;
 use sonyflake::Sonyflake;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::Span;
 
 /// Executes a physical query plan.
 pub struct QueryExecutor {
@@ -64,7 +65,6 @@ impl QueryExecutor {
         result
     }
 
-    /// Executes the given physical plan using the latest visible data.
     pub fn execute_cached(
         &self,
         plan: Arc<PhysicalPlan>,
@@ -73,8 +73,6 @@ impl QueryExecutor {
         self.execute_cached_at_snapshot(plan, parameters, None)
     }
 
-    /// Executes a query plan against a specific data snapshot.
-    /// If `snapshot` is `None`, it uses the latest visible data.
     pub fn execute_cached_at_snapshot(
         &self,
         plan: Arc<PhysicalPlan>,
@@ -91,6 +89,7 @@ impl QueryExecutor {
             output,
             self.metrics.clone(),
             start,
+            Span::current(),
         )))
     }
 }
@@ -99,16 +98,18 @@ struct InstrumentedQueryOutput {
     inner: QueryOutput,
     metrics: Metrics,
     start: Instant,
+    span: Span,
     rows_returned: u64,
     recorded: bool,
 }
 
 impl InstrumentedQueryOutput {
-    fn new(inner: QueryOutput, metrics: Metrics, start: Instant) -> Self {
+    fn new(inner: QueryOutput, metrics: Metrics, start: Instant, span: Span) -> Self {
         Self {
             inner,
             metrics,
             start,
+            span,
             rows_returned: 0,
             recorded: false,
         }
@@ -131,6 +132,8 @@ impl Iterator for InstrumentedQueryOutput {
     type Item = Result<bson::Document>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let span = self.span.clone();
+        let _span = span.enter();
         match self.inner.next() {
             Some(Ok(document)) => {
                 self.rows_returned += 1;
@@ -150,6 +153,8 @@ impl Iterator for InstrumentedQueryOutput {
 
 impl Drop for InstrumentedQueryOutput {
     fn drop(&mut self) {
+        let span = self.span.clone();
+        let _span = span.enter();
         self.record_if_needed();
     }
 }
@@ -157,7 +162,6 @@ impl Drop for InstrumentedQueryOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::obs::metrics::names;
     use crate::options::options::Options;
     use crate::storage::Direction;
@@ -176,7 +180,6 @@ mod tests {
         let dir = tempdir()?;
         let mut metric_registry = MetricRegistry::new();
         let storage_engine = StorageEngine::new(
-            test_instance(),
             &mut metric_registry,
             Arc::new(Options::lightweight()),
             dir.path(),

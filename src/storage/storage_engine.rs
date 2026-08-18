@@ -1,5 +1,4 @@
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::LogReplayError;
@@ -19,7 +18,6 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::storage::Direction;
-use crate::{debug, error, event, info, warn};
 use arc_swap::ArcSwap;
 use std::collections::VecDeque;
 use std::fs::remove_file;
@@ -38,7 +36,6 @@ struct WalAndManifest {
 }
 
 pub(crate) struct StorageEngine {
-    logger: Arc<dyn LoggerAndTracer>,
     db_dir: PathBuf,
     options: Arc<Options>,
     queue: Mutex<VecDeque<Arc<Writer>>>,
@@ -67,18 +64,13 @@ pub struct CreatedIndex {
 
 impl StorageEngine {
     pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
     ) -> StorageResult<Arc<Self>> {
-        let sst_cache = Arc::new(SSTableCache::new(logger.clone(), metric_registry, &options));
+        let sst_cache = Arc::new(SSTableCache::new(metric_registry, &options));
 
-        info!(
-            logger,
-            "Starting storage engine at {}",
-            db_dir.to_string_lossy()
-        );
+        tracing::info!(path = %db_dir.display(), "starting storage engine");
 
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
@@ -98,8 +90,7 @@ impl StorageEngine {
 
             let original_current_log_number = manifest_state.lsm.current_log_number;
 
-            let mut manifest =
-                Manifest::load_from(logger.clone(), metric_registry, &options, manifest_path)?;
+            let mut manifest = Manifest::load_from(metric_registry, &options, manifest_path)?;
 
             let next_file_number = manifest_state.lsm.next_file_number;
 
@@ -109,9 +100,10 @@ impl StorageEngine {
             // the Lsm tree in-memory and on-disk (MANIFEST file)
             let next_file_number = Arc::new(AtomicU64::new(
                 if next_file_number < scan_results.next_file_number {
-                    info!(logger,
-                        "Files with higher numbers have been detected. Updating next_file_number to {}",
-                        scan_results.next_file_number);
+                    tracing::info!(
+                        next_file_number = scan_results.next_file_number,
+                        "files with higher numbers detected during restart"
+                    );
 
                     let edit = ManifestEdit::FilesDetectedOnRestart {
                         next_file_number: scan_results.next_file_number,
@@ -131,11 +123,7 @@ impl StorageEngine {
             let mut previous = None;
 
             while let Some((log_number, wal_path)) = wal_files_iter.next() {
-                info!(
-                    logger,
-                    "Replaying operations from {}",
-                    wal_path.to_string_lossy()
-                );
+                tracing::info!(path = %wal_path.display(), "replaying operations from WAL");
 
                 // The initial memtable will be associated with the oldest_log_number. For
                 // the following , we need to re-associate the wal log number and the memtable
@@ -157,7 +145,6 @@ impl StorageEngine {
                     }
 
                     lsm_tree = Self::flush_replayed_data(
-                        &logger,
                         &options,
                         &db_dir,
                         &mut manifest,
@@ -182,8 +169,12 @@ impl StorageEngine {
                                                 record_offset,
                                                 reason,
                                             } => {
-                                                warn!(logger, "Corruption detected in the {} file for record at offset {}. Truncating the file at this offset. Cause: {}",
-                                                    wal_path.to_string_lossy(), record_offset, reason);
+                                                tracing::warn!(
+                                                    path = %wal_path.display(),
+                                                    record_offset,
+                                                    reason = %reason,
+                                                    "corruption detected in WAL record; truncating file"
+                                                );
                                                 truncate_file(wal_path, record_offset)?;
                                                 reusable_wal = Some(wal_path);
                                             }
@@ -203,11 +194,10 @@ impl StorageEngine {
                             }
                         }
                         previous = Some((*log_number, wal_path.clone()));
-                        info!(
-                            logger,
-                            "{} operations replayed from {}",
-                            count,
-                            wal_path.to_string_lossy()
+                        tracing::info!(
+                            operation_count = count,
+                            path = %wal_path.display(),
+                            "replayed operations from WAL"
                         );
                     }
                     Err(e) => {
@@ -219,25 +209,23 @@ impl StorageEngine {
                         if is_last_wal_file {
                             match e {
                                 LogReplayError::Io(e) => {
-                                    error!(logger, "{}", e);
+                                    tracing::error!(error = %e);
                                     return Err(e.into());
                                 }
                                 LogReplayError::Corruption {
                                     record_offset: _,
                                     reason,
                                 } => {
-                                    mark_file_as_corrupted(logger.clone(), wal_path)?;
-                                    error!(
-                                        logger,
-                                        "Corruption detected in the {} file header. \
-                                    Making the file has corrupted and starting from a new one. {}",
-                                        wal_path.to_string_lossy(),
-                                        reason
+                                    mark_file_as_corrupted(wal_path)?;
+                                    tracing::error!(
+                                        path = %wal_path.display(),
+                                        reason = %reason,
+                                        "corruption detected in WAL header; marked file as corrupted and starting a new WAL"
                                     );
                                 }
                             }
                         } else {
-                            error!(logger, "{}", e);
+                            tracing::error!(error = %e);
                             return Err(e.into());
                         }
                     }
@@ -248,23 +236,16 @@ impl StorageEngine {
             // corrected by truncation, we will reuse it. If not, it should have been marked as corrupted,
             // and we need to create a new one and update the Lsm tree.
             let wal = if let Some(wal_path) = reusable_wal {
-                WriteAheadLog::load_from(
-                    logger.clone(),
-                    metric_registry,
-                    &options,
-                    &wal_path,
-                    rotated_log_files,
-                )?
+                WriteAheadLog::load_from(metric_registry, &options, &wal_path, rotated_log_files)?
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
 
-                info!(
-                    logger,
-                    "Latest wal was corrupted. Starting from a clean wal file: {}", log_number
+                tracing::info!(
+                    log_number,
+                    "latest WAL was corrupted; starting from a clean WAL"
                 );
 
                 let wal = WriteAheadLog::new_after_corruption(
-                    logger.clone(),
                     metric_registry,
                     &options,
                     db_dir,
@@ -282,7 +263,6 @@ impl StorageEngine {
                 // we can just drop the memtable.
                 if lsm_tree.imm_memtables[0].size() > 0 {
                     lsm_tree = Self::flush_replayed_data(
-                        &logger,
                         &options,
                         &db_dir,
                         &mut manifest,
@@ -290,9 +270,9 @@ impl StorageEngine {
                         &next_file_number,
                     )?;
                 } else {
-                    info!(
-                        logger,
-                        "Ignoring empty memtable: {}", lsm_tree.imm_memtables[0].log_number
+                    tracing::info!(
+                        log_number = lsm_tree.imm_memtables[0].log_number,
+                        "ignoring empty memtable"
                     );
 
                     // Drop the empty memtable
@@ -312,11 +292,7 @@ impl StorageEngine {
             let mut deleted_orphaned_ssts = Vec::new();
             for (number, path) in &scan_results.sst_files {
                 if !live_ssts.contains(number) {
-                    info!(
-                        logger,
-                        "Deleting orphaned SST file at startup: {}",
-                        path.to_string_lossy()
-                    );
+                    tracing::info!(path = %path.display(), "deleting orphaned SST file at startup");
                     fs::remove_file(path)?;
                     deleted_orphaned_ssts.push(path.clone());
                 }
@@ -325,16 +301,10 @@ impl StorageEngine {
                 sync_dir(db_dir)?;
             }
 
-            let flush_manager = FlushManager::new(
-                logger.clone(),
-                metric_registry,
-                options.clone(),
-                db_dir,
-                sst_cache.clone(),
-            )?;
+            let flush_manager =
+                FlushManager::new(metric_registry, options.clone(), db_dir, sst_cache.clone())?;
 
             let compaction_manager = CompactionManager::new(
-                logger.clone(),
                 metric_registry,
                 options.clone(),
                 &db_dir,
@@ -346,7 +316,6 @@ impl StorageEngine {
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
             let engine = Arc::new(StorageEngine {
-                logger: logger.clone(),
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
@@ -367,7 +336,7 @@ impl StorageEngine {
                 disable_auto_compaction: AtomicBool::new(false),
             });
 
-            info!(logger, "Storage engine started");
+            tracing::info!("storage engine started");
 
             engine.schedule_compaction_if_needed();
 
@@ -385,30 +354,17 @@ impl StorageEngine {
             ));
             let snapshot = ManifestEdit::Snapshot(lsm_tree.manifest.clone());
             let manifest = Manifest::new(
-                logger.clone(),
                 metric_registry,
                 &options,
                 db_dir,
                 manifest_number,
                 &snapshot,
             )?;
-            let wal = WriteAheadLog::new(
-                logger.clone(),
-                metric_registry,
-                &options,
-                db_dir,
-                log_number,
-            )?;
-            let flush_manager = FlushManager::new(
-                logger.clone(),
-                metric_registry,
-                options.clone(),
-                db_dir,
-                sst_cache.clone(),
-            )?;
+            let wal = WriteAheadLog::new(metric_registry, &options, db_dir, log_number)?;
+            let flush_manager =
+                FlushManager::new(metric_registry, options.clone(), db_dir, sst_cache.clone())?;
 
             let compaction_manager = CompactionManager::new(
-                logger.clone(),
                 metric_registry,
                 options.clone(),
                 &db_dir,
@@ -419,10 +375,9 @@ impl StorageEngine {
             let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
-            info!(logger, "Storage engine started");
+            tracing::info!("storage engine started");
 
             Ok(Arc::new(StorageEngine {
-                logger,
                 db_dir: db_dir.to_path_buf(),
                 options,
                 queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
@@ -446,16 +401,15 @@ impl StorageEngine {
     }
 
     fn flush_replayed_data(
-        logger: &Arc<dyn LoggerAndTracer>,
         options: &Arc<Options>,
         db_dir: &&Path,
         manifest: &mut Manifest,
         lsm_tree: &mut LsmTree,
         next_file_number: &AtomicU64,
     ) -> StorageResult<LsmTree> {
-        info!(
-            logger,
-            "Flushing data from {}", lsm_tree.imm_memtables[0].log_number
+        tracing::info!(
+            log_number = lsm_tree.imm_memtables[0].log_number,
+            "flushing replayed data"
         );
 
         // Flush the current memtable to a sst file before processing the next
@@ -528,7 +482,7 @@ impl StorageEngine {
             };
             // We want to sync to ensure that all the previous sequence numbers are persisted.
             wal_and_manifest.wal.sync()?;
-            info!(self.logger, "Creating collection '{}' with id {}", name, id);
+            tracing::info!(collection = %name, id, "creating collection");
             let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
             Ok(id)
         } else {
@@ -559,7 +513,7 @@ impl StorageEngine {
         };
         // We want to sync to ensure that all the previous sequence numbers are persisted.
         wal_and_manifest.wal.sync()?;
-        info!(self.logger, "Dropping collection '{}' with id {}", name, id);
+        tracing::info!(collection = %name, id, "dropping collection");
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
@@ -607,9 +561,11 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        info!(
-            self.logger,
-            "Renaming collection '{}' to '{}' (id {})", old_name, new_name, id
+        tracing::info!(
+            old_name = %old_name,
+            new_name = %new_name,
+            id,
+            "renaming collection"
         );
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
@@ -680,9 +636,11 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        info!(
-            self.logger,
-            "Creating index '{}.{}' with id {}", collection.name, resolved_name, index_id
+        tracing::info!(
+            collection = %collection.name,
+            index = %resolved_name,
+            id = index_id,
+            "creating index"
         );
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(CreatedIndex {
@@ -740,12 +698,11 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        info!(
-            self.logger,
-            "Dropping index '{}.{}' with id {}",
-            collection.name,
-            index.name(),
-            index.id
+        tracing::info!(
+            collection = %collection.name,
+            index = %index.name(),
+            id = index.id,
+            "dropping index"
         );
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
@@ -784,11 +741,7 @@ impl StorageEngine {
 
         // If no leader is active, this thread becomes leader
         if self.is_leader(&writer) {
-            debug!(
-                self.logger,
-                "Thread {:?} is the leader and will perform the write",
-                std::thread::current().id()
-            );
+            tracing::debug!(thread_id = ?std::thread::current().id(), "thread became write leader");
             self.perform_writes();
             writer.result()
         } else {
@@ -819,13 +772,12 @@ impl StorageEngine {
             writers.push(writer);
         }
 
-        debug!(
-            self.logger,
-            "Thread {:?} will perform the write for {:?} writers",
-            std::thread::current().id(),
-            writers.len(),
+        tracing::debug!(
+            thread_id = ?std::thread::current().id(),
+            writer_count = writers.len(),
+            "performing writes"
         );
-        event!(self.logger, "write start, writers_size={}", writers.len());
+        tracing::trace!(writer_count = writers.len(), "write started");
 
         // We want to acquire the db lock before we release the one on the queue,
         // to avoid a race condition where the next leader thread that just entered
@@ -841,7 +793,7 @@ impl StorageEngine {
         let writers = self.check_preconditions(lsm_tree.catalog(), &mut writers);
 
         if writers.is_empty() {
-            event!(self.logger, "write done (no-op due to preconditions)");
+            tracing::trace!("write finished without applying batches due to preconditions");
             return;
         }
 
@@ -862,12 +814,11 @@ impl StorageEngine {
         let mut with_results = Vec::with_capacity(with_sequence.len());
 
         for (writer, seq) in with_sequence {
-            event!(
-                self.logger,
-                "memtable_write start, seq={}, memtable={}, batch_size={}",
+            tracing::trace!(
                 seq,
-                lsm_tree.memtable.log_number,
-                writer.batch().len()
+                memtable = lsm_tree.memtable.log_number,
+                batch_size = writer.batch().len(),
+                "memtable write started"
             );
 
             lsm_tree.memtable.write(seq, writer.batch());
@@ -881,11 +832,10 @@ impl StorageEngine {
             if compare.is_err() {
                 panic!("Last visible sequence number out of order");
             }
-            event!(
-                self.logger,
-                "memtable_write done, seq={}, memtable={}",
+            tracing::trace!(
                 seq,
-                lsm_tree.memtable.log_number
+                memtable = lsm_tree.memtable.log_number,
+                "memtable write finished"
             );
         }
 
@@ -894,7 +844,7 @@ impl StorageEngine {
         for (writer, result) in with_results {
             writer.done(result);
         }
-        event!(self.logger, "write done");
+        tracing::trace!("write finished");
     }
 
     fn check_preconditions(
@@ -1122,32 +1072,32 @@ impl StorageEngine {
     }
 
     pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
-        info!(self.logger, "Shutting down storage engine");
+        tracing::info!("shutting down storage engine");
         self.flush()?;
-        info!(self.logger, "Storage engine flush completed successfully");
+        tracing::info!("storage engine flush completed successfully");
         self.compaction_manager.shutdown();
         Ok(())
     }
 
     pub fn flush(self: &Arc<Self>) -> StorageResult<()> {
-        info!(self.logger, "Flush requested");
-        event!(self.logger, "requested_flush start");
+        tracing::info!("flush requested");
+        tracing::trace!("requested flush started");
 
         self.check_error_mode()?;
 
         self.perform_wal_and_memtable_rotation(true)?;
-        event!(self.logger, "requested_flush completed");
+        tracing::trace!("requested flush completed");
         Ok(())
     }
 
     fn wait_for_pending_flushes(self: &Arc<Self>) -> Result<()> {
-        event!(self.logger, "flush_sync start");
+        tracing::trace!("flush sync started");
         let callback = Callback::new_blocking(Box::new(|result| result));
         self.flush_manager.enqueue(FlushTask::Sync {
             callback: callback.clone(),
         })?;
         callback.await_blocking()?;
-        event!(self.logger, "flush_sync end");
+        tracing::trace!("flush sync finished");
         Ok(())
     }
 
@@ -1155,16 +1105,14 @@ impl StorageEngine {
         let write_buffer_size = self.options.file_write_buffer_size().to_bytes();
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
-            info!(
-                self.logger,
-                "Memtable size exceeded: size={}, limit={}", memtable_size, write_buffer_size
+            tracing::info!(
+                memtable_size,
+                write_buffer_size,
+                "memtable size exceeded write buffer"
             );
             match self.perform_wal_and_memtable_rotation(false) {
                 Err(error) => {
-                    error!(
-                        self.logger,
-                        "An error occurred during wal and memtable rotation: {}", error
-                    );
+                    tracing::error!(error = %error, "WAL and memtable rotation failed");
                 }
                 Ok(_) => (),
             }
@@ -1174,9 +1122,7 @@ impl StorageEngine {
     fn get_async_callback(self: &Arc<Self>) -> &Arc<Callback<Result<SSTableOperation>>> {
         self.async_callback.get_or_init(|| {
             let engine = self.clone();
-            Callback::new_async(self.logger.clone(), move |result| {
-                engine.update_lsm_tree_sstables(result)
-            })
+            Callback::new_async(move |result| engine.update_lsm_tree_sstables(result))
         })
     }
 
@@ -1205,11 +1151,7 @@ impl StorageEngine {
             let new_log_number = self.next_file_number.fetch_add(1, Ordering::Relaxed);
             let rs = wal_and_manifest.wal.rotate(new_log_number);
             if rs.is_err() {
-                error!(
-                    self.logger,
-                    "An error occurred during wal rotation: {}",
-                    rs.as_ref().err().unwrap()
-                );
+                tracing::error!(error = %rs.as_ref().err().unwrap(), "WAL rotation failed");
                 self.error_mode.store(true, Ordering::Relaxed);
                 rs?;
             }
@@ -1280,11 +1222,10 @@ impl StorageEngine {
                         flushed,
                         count_stats,
                     } => {
-                        event!(
-                            self.logger,
-                            "manifest_update_after_flush started, log_number={}, sst={}",
+                        tracing::trace!(
                             log_number,
-                            flushed,
+                            sst = %flushed,
+                            "manifest update after flush started"
                         );
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
@@ -1327,13 +1268,12 @@ impl StorageEngine {
                         }
 
                         {
-                            event!(
-                                self.logger,
-                                "Marking sst tables {:?} as obsoletes",
-                                removed_sstables
+                            tracing::trace!(
+                                removed_sstables = ?removed_sstables
                                     .iter()
                                     .map(|sst| sst.number)
-                                    .collect::<Vec<u64>>()
+                                    .collect::<Vec<u64>>(),
+                                "marking SSTables as obsolete"
                             );
 
                             let mut obsolete = self.obsolete_sstables.lock().unwrap();
@@ -1377,11 +1317,7 @@ impl StorageEngine {
 
     fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {
         for obsolete in obsolete_log_files {
-            debug!(
-                self.logger,
-                "Deleting obsolete log file: {}",
-                obsolete.to_string_lossy()
-            );
+            tracing::debug!(path = %obsolete.display(), "deleting obsolete log file");
             remove_file(obsolete)?;
         }
         sync_dir(&self.db_dir)?;
@@ -1404,11 +1340,7 @@ impl StorageEngine {
 
         for sst in to_delete {
             let path = self.db_dir.join(DbFile::new_sst(sst.number).filename());
-            debug!(
-                self.logger,
-                "Deleting obsolete sst file: {}",
-                path.to_string_lossy()
-            );
+            tracing::debug!(path = %path.display(), "deleting obsolete SST file");
             remove_file(path)?;
         }
         sync_dir(&self.db_dir)?;
@@ -1425,11 +1357,7 @@ impl StorageEngine {
         let rs = manifest.append_edit(&edit);
 
         if rs.is_err() {
-            error!(
-                self.logger,
-                "An error occurred during manifest update: {}",
-                rs.as_ref().err().unwrap()
-            );
+            tracing::error!(error = %rs.as_ref().err().unwrap(), "manifest update failed");
             self.error_mode.store(true, Ordering::Relaxed);
             rs?;
         }
@@ -1444,11 +1372,7 @@ impl StorageEngine {
             );
 
             if rs.is_err() {
-                error!(
-                    self.logger,
-                    "An error occurred during manifest rotation: {}",
-                    rs.as_ref().err().unwrap()
-                );
+                tracing::error!(error = %rs.as_ref().err().unwrap(), "manifest rotation failed");
                 self.error_mode.store(true, Ordering::Relaxed);
                 rs?;
             }
@@ -1465,11 +1389,11 @@ impl StorageEngine {
 
     fn handle_write_error(&self, error: &StorageError, writers: &Vec<Arc<Writer>>) {
         self.error_mode.store(true, Ordering::Relaxed);
-        error!(self.logger, "A write error occurred: {}", error);
+        tracing::error!(error = %error, "write failed");
         for writer in writers {
             writer.done(Err(error.clone()));
         }
-        event!(self.logger, "write done");
+        tracing::trace!("write finished");
     }
 
     fn add_metrics(
@@ -1949,7 +1873,6 @@ pub type StorageResult<T> = std::result::Result<T, StorageError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger::{test_instance, NoOpLogger};
     use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
     use crate::options::storage_quantity::StorageUnit::Mebibytes;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
@@ -2065,13 +1988,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let col = engine.create_collection_if_not_exists("test_read").unwrap();
         let idx = 0;
@@ -2181,13 +2098,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_range_scan")
@@ -2325,8 +2236,7 @@ mod tests {
         let registry = &mut MetricRegistry::default();
         let options =
             Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes));
-        let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options), &path).unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_immutable_memtables")
@@ -2477,8 +2387,7 @@ mod tests {
         let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
 
         let col = {
-            let old_engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &path).unwrap();
+            let old_engine = StorageEngine::new(registry, options.clone(), &path).unwrap();
 
             // Pause the flush manager to keep immutable memtables around.
             old_engine.flush_manager.pause();
@@ -2511,7 +2420,7 @@ mod tests {
             col
         };
 
-        let engine = StorageEngine::new(test_instance(), registry, options, &path).unwrap();
+        let engine = StorageEngine::new(registry, options, &path).unwrap();
 
         let new_wal_path = path.join("000006.sst");
         assert!(new_wal_path.exists());
@@ -2543,7 +2452,7 @@ mod tests {
                 .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes)),
         );
 
-        let engine = StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
+        let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
 
         engine.disable_auto_compaction();
 
@@ -2585,13 +2494,8 @@ mod tests {
         let db_path = path.to_path_buf();
         drop(engine);
 
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // Verify data is readable after restart.
         for i in 0..25 {
@@ -2616,7 +2520,7 @@ mod tests {
                 .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes)),
         );
 
-        let engine = StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
+        let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_manifest_rotation_error")
@@ -2658,8 +2562,7 @@ mod tests {
         let registry = &mut MetricRegistry::default();
         let options = Options::lightweight();
 
-        let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options.clone()), path).unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(options.clone()), path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_obsolete_wal_deletion")
@@ -2717,7 +2620,7 @@ mod tests {
                 .with_level0_file_num_compaction_trigger(2),
         );
 
-        let engine = StorageEngine::new(test_instance(), registry, options, &path).unwrap();
+        let engine = StorageEngine::new(registry, options, &path).unwrap();
         engine.disable_auto_compaction();
         let col = engine
             .create_collection_if_not_exists("test_obsolete_sst_deletion_after_compaction")
@@ -2761,13 +2664,8 @@ mod tests {
         let options = Arc::new(Options::lightweight());
 
         let (col, real_sst_paths) = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let col = engine
                 .create_collection_if_not_exists("test_orphaned_sst_cleanup_on_startup")
@@ -2796,13 +2694,8 @@ mod tests {
         assert!(orphan_1.exists());
         assert!(orphan_2.exists());
 
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &path).unwrap();
 
         assert!(!orphan_1.exists());
         assert!(!orphan_2.exists());
@@ -2837,13 +2730,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            Arc::new(NoOpLogger::default()), // Disabling traces as RustRover cannot handle this amount of logging when running the tests
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let num_threads = 5;
         let writes_per_thread = 200;
@@ -2909,8 +2796,7 @@ mod tests {
 
         // --- First run ---
         let col = {
-            let engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
             let col = engine
                 .create_collection_if_not_exists("test_shutdown_and_restart")
@@ -2932,13 +2818,8 @@ mod tests {
         };
 
         // --- Second run (restart) ---
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // Verify all data is present and correct after restart.
         let (_key1, val1) = engine_restarted
@@ -2983,8 +2864,7 @@ mod tests {
 
         // --- First run (simulating a crash) ---
         let col = {
-            let engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
             let col = engine
                 .create_collection_if_not_exists("test_wal_replay_on_restart")
@@ -3009,13 +2889,8 @@ mod tests {
         };
 
         // --- Second run (restart and replay) ---
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // The WAL should be replayed, restoring the memtable state.
         // Verify all data is present and correct after restart.
@@ -3060,13 +2935,9 @@ mod tests {
         );
 
         let (collection_id, index_id) = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &db_path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path)
+                    .unwrap();
 
             let collection_id = engine
                 .create_collection_if_not_exists("test_count_stats_restart")
@@ -3136,13 +3007,8 @@ mod tests {
             (collection_id, index_id)
         };
 
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         assert_eq!(
             engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -3167,13 +3033,9 @@ mod tests {
         );
 
         let (collection_id, index_id) = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &db_path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path)
+                    .unwrap();
 
             let collection_id = engine
                 .create_collection_if_not_exists("test_count_stats_delete_restart")
@@ -3238,13 +3100,8 @@ mod tests {
             (collection_id, index_id)
         };
 
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         assert_eq!(
             engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -3275,8 +3132,7 @@ mod tests {
         let wal_path;
         // --- First run (simulating a crash) ---
         let col = {
-            let engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
             let col = engine
                 .create_collection_if_not_exists("test_wal_replay_with_partial_log")
@@ -3298,13 +3154,8 @@ mod tests {
         drop(file);
 
         // --- Second run (restart and replay) ---
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // WAL replay should have truncated the file and recovered the valid records.
         let (_key1, val1) = engine_restarted
@@ -3355,8 +3206,7 @@ mod tests {
         let original_wal_path;
         // --- First run ---
         let col = {
-            let engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
             let col = engine
                 .create_collection_if_not_exists("test_wal_replay_with_header_corruption")
@@ -3379,13 +3229,8 @@ mod tests {
         drop(file);
 
         // --- Second run (restart) ---
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // The corrupted WAL should have been renamed.
         let corrupted_path = db_path.join(format!(
@@ -3432,8 +3277,7 @@ mod tests {
         let old_wal_path;
         // --- First run ---
         {
-            let engine =
-                StorageEngine::new(test_instance(), registry, options.clone(), &db_path).unwrap();
+            let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
             old_wal_path = db_path.join("000002.log");
             assert!(old_wal_path.exists());
@@ -3480,12 +3324,7 @@ mod tests {
         drop(file);
 
         // --- Second run (restart) ---
-        let result = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        );
+        let result = StorageEngine::new(&mut MetricRegistry::default(), options, &db_path);
 
         // Restart should fail because an old (non-terminal) WAL is corrupted.
         assert!(result.is_err());
@@ -3502,13 +3341,9 @@ mod tests {
 
         // --- First run ---
         let col = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &db_path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path)
+                    .unwrap();
 
             // After initialization: MANIFEST-000001, 000002.log are created. Next file is 3.
             let next_file_num_before = engine.next_file_number.load(Ordering::Relaxed);
@@ -3544,13 +3379,8 @@ mod tests {
         fs::File::create(&stale_log_path).unwrap();
 
         // --- Second run (restart) ---
-        let engine_restarted = StorageEngine::new(
-            test_instance(),
-            &mut MetricRegistry::default(),
-            options,
-            &db_path,
-        )
-        .unwrap();
+        let engine_restarted =
+            StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
         // The engine should have detected the "000012.log" file and marked it as corrupted.
         assert!(db_path.join("000012.log.corrupted").exists());
@@ -3588,7 +3418,7 @@ mod tests {
         let registry = &mut MetricRegistry::default();
         let options = Arc::new(Options::lightweight());
 
-        let engine = StorageEngine::new(test_instance(), registry, options.clone(), path).unwrap();
+        let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_error_mode_activation_and_rejection")
@@ -3621,7 +3451,7 @@ mod tests {
         let options = Arc::new(
             Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes)),
         );
-        let engine = StorageEngine::new(test_instance(), registry, options, &path).unwrap();
+        let engine = StorageEngine::new(registry, options, &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_wal_rotation_on_write_error")
@@ -3663,8 +3493,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
         let options = Options::lightweight();
-        let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options), &path).unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_wal_rotation_on_flush_error")
@@ -3703,8 +3532,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
         let options = Options::lightweight();
-        let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options), &path).unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_manifest_write_error")
@@ -3743,8 +3571,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
         let options = Options::lightweight();
-        let engine =
-            StorageEngine::new(test_instance(), registry, Arc::new(options), &path).unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_memtable_flush_error")
@@ -3808,13 +3635,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a new collection
         let col_id = engine
@@ -3847,13 +3668,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection
         engine
@@ -3873,13 +3688,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection
         let col_id_1 = engine
@@ -3912,13 +3721,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -3950,13 +3753,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -3997,13 +3794,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4036,13 +3827,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4082,13 +3867,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4133,13 +3912,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4157,13 +3930,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4196,13 +3963,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4235,13 +3996,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let result = engine.drop_index(999, 1);
         let err = result.err().unwrap();
@@ -4254,13 +4009,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let result = engine.create_index(
             999,
@@ -4280,13 +4029,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let collection_id = engine
             .create_collection("test_collection", CollectionOptions::default())
@@ -4312,13 +4055,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection
         let col_id = engine
@@ -4361,13 +4098,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Drop a non-existent collection - should succeed (no-op)
         let result = engine.drop_collection("non_existent");
@@ -4379,13 +4110,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let name = "existing_collection";
         let col = engine.create_collection_if_not_exists(name).unwrap();
@@ -4405,13 +4130,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create and then drop a collection
         let col_id = engine
@@ -4434,13 +4153,8 @@ mod tests {
 
         // First run - create collections
         let (col_id_1, col_id_2) = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let col_id_1 = engine
                 .create_collection("collection_1", CollectionOptions::default())
@@ -4464,13 +4178,8 @@ mod tests {
 
         // Second run - verify collections persist
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let catalog = engine.catalog();
             assert!(catalog.get_collection_by_name("collection_1").is_some());
@@ -4499,13 +4208,8 @@ mod tests {
 
         // First run - create and drop a collection
         let (col_id, drop_seq) = {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let col_id = engine
                 .create_collection("to_drop", CollectionOptions::default())
@@ -4530,13 +4234,8 @@ mod tests {
 
         // Second run - verify drop persisted
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let catalog = engine.catalog();
             assert!(catalog.get_collection_by_name("to_drop").is_none());
@@ -4559,13 +4258,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection and write data to it
         let col_id_1 = engine
@@ -4641,13 +4334,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection and write data to it
         let col_id_1 = engine
@@ -4760,13 +4447,8 @@ mod tests {
         let col_id_2;
         // First run - create, populate, drop, recreate, repopulate
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             // Create first collection
             let col_id_1 = engine
@@ -4799,13 +4481,8 @@ mod tests {
 
         // Second run - verify only new data is visible after restart
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             // Collection should exist with the new ID
             let catalog = engine.catalog();
@@ -4847,13 +4524,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create a collection and write data
         let col_id = engine
@@ -4887,13 +4558,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let result = engine.rename_collection("non_existent", "new_name");
         assert!(result.is_err());
@@ -4910,13 +4575,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         // Create two collections
         engine
@@ -4943,13 +4602,8 @@ mod tests {
         let col_id;
         // First run - create and rename
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             col_id = engine
                 .create_collection("original", CollectionOptions::default())
@@ -4963,13 +4617,8 @@ mod tests {
 
         // Second run - verify rename persisted
         {
-            let engine = StorageEngine::new(
-                test_instance(),
-                &mut MetricRegistry::default(),
-                options.clone(),
-                &path,
-            )
-            .unwrap();
+            let engine =
+                StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
             let catalog = engine.catalog();
             assert!(catalog.get_collection_by_name("original").is_none());
@@ -4991,13 +4640,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
         let registry = &mut MetricRegistry::default();
-        let engine = StorageEngine::new(
-            test_instance(),
-            registry,
-            Arc::new(Options::lightweight()),
-            &path,
-        )
-        .unwrap();
+        let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
         let col = engine
             .create_collection_if_not_exists("test_optimistic_locking")

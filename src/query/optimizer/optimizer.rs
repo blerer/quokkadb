@@ -1,7 +1,5 @@
-use crate::event;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::obs::logger::LoggerAndTracer;
 use crate::query::logical_plan::{transform_down_filter, LogicalPlan};
 use crate::query::optimizer::normalization_rules;
 use crate::query::optimizer::normalization_rules::NormalisationRule;
@@ -17,6 +15,7 @@ use std::collections::HashMap;
 use std::convert::Into;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::trace_span;
 
 pub type Cost = f64;
 
@@ -84,7 +83,6 @@ impl CostEstimator {
 }
 
 pub struct Optimizer {
-    logger: Arc<dyn LoggerAndTracer>,
     normalization_rules: Arc<dyn NormalisationRule>,
     cost_estimator: CostEstimator,
 }
@@ -256,9 +254,8 @@ struct Provides {
 }
 
 impl Optimizer {
-    pub fn new(logger: Arc<dyn LoggerAndTracer>) -> Self {
+    pub fn new() -> Self {
         Self {
-            logger: logger.clone(),
             normalization_rules: Arc::new(normalization_rules::all_normalization_rules()),
             cost_estimator: CostEstimator {},
         }
@@ -270,7 +267,7 @@ impl Optimizer {
         catalog: Arc<Catalog>,
         count_stats: &dyn CountStatSource,
     ) -> Arc<PhysicalPlan> {
-        event!(self.logger, "optimization start, logical_plan={:?}", plan);
+        let _span = trace_span!("optimization").entered();
         let start = Instant::now();
 
         if matches!(plan.as_ref(), &LogicalPlan::NoOp) {
@@ -294,34 +291,33 @@ impl Optimizer {
             .clone();
 
         let duration = start.elapsed();
-        event!(
-            self.logger,
-            "optimization done, duration={}µs, physical_plan={:?}",
-            duration.as_micros(),
-            physical_plan
+        tracing::trace!(
+            duration_micros = duration.as_micros(),
+            physical_plan = ?physical_plan,
+            "optimization finished"
         );
 
         physical_plan
     }
 
     pub fn normalize(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
-        event!(self.logger, "normalization start, logical_plan={:?}", plan);
+        let _span = trace_span!("normalization").entered();
         let start = Instant::now();
 
         let logical_plan = self.normalization_rules.apply(plan);
 
         let duration = start.elapsed();
-        event!(
-            self.logger,
-            "normalization done,duration={}µs, normalized_plan={:?}",
-            duration.as_micros(),
-            logical_plan
+        tracing::trace!(
+            duration_micros = duration.as_micros(),
+            normalized_plan = ?logical_plan,
+            "normalization finished"
         );
         logical_plan
     }
 
     pub fn parametrize(&self, plan: Arc<LogicalPlan>) -> (Arc<LogicalPlan>, Parameters) {
         use std::cell::RefCell;
+        let _span = trace_span!("parameterization").entered();
 
         let parameters = RefCell::new(Parameters::new());
         let plan = transform_down_filter(plan, &|c| {
@@ -1117,7 +1113,6 @@ fn required_props_for_children(node: &LogicalPlan, req: &ReqProps) -> ReqProps {
 #[cfg(test)]
 mod parametrize_test {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::query::expr_fn::{
         and, eq, exists, field, field_filters, interval, lit, placeholder,
     };
@@ -1126,7 +1121,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_simple_filter() {
-        let optimizer = Optimizer::new(test_instance());
+        let optimizer = Optimizer::new();
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
@@ -1174,7 +1169,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_complex_filter() {
-        let optimizer = Optimizer::new(test_instance());
+        let optimizer = Optimizer::new();
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(and(vec![
@@ -1205,7 +1200,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_no_literals() {
-        let optimizer = Optimizer::new(test_instance());
+        let optimizer = Optimizer::new();
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(field(["a"]), vec![exists(true)]))
@@ -1225,7 +1220,6 @@ mod parametrize_test {
 #[cfg(test)]
 mod optimizer_tests {
     use super::*;
-    use crate::obs::logger::test_instance;
     use crate::query::expr_fn::{
         and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field,
         proj_fields, within,
@@ -1601,7 +1595,7 @@ mod optimizer_tests {
         count_stats: CountStats,
         output: PhysicalPlan,
     ) {
-        let optimizer = Optimizer::new(test_instance());
+        let optimizer = Optimizer::new();
         // First, normalize the logical plan
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters

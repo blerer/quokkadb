@@ -32,15 +32,14 @@
 //!
 //! A level needs compaction when its score exceeds 1.0.
 
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, AtomicGauge, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
 use crate::storage::lsm_version::{span, DropMetadata, Level, LevelItem, Levels, SSTableMetadata};
 use crate::util::interval::{has_overlapping_intervals, Interval};
-use crate::{event, info};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
+use tracing::trace_span;
 
 /// Describes a compaction job to be executed.
 ///
@@ -84,8 +83,6 @@ pub struct CompactionJob {
 /// - **Partial compaction**: Parallel compactions are allowed for different partitions.
 ///   Only overlapping ranges are blocked.
 pub struct CompactionPicker {
-    /// Logger for events and diagnostics.
-    logger: Arc<dyn LoggerAndTracer>,
     /// The database options.
     options: Options,
     /// The largest level index (Lmax) in the LSM tree. Levels are indexed from 0 to Lmax.
@@ -131,11 +128,7 @@ impl CompactionScores {
 
 impl CompactionPicker {
     /// Creates a new compaction picker.
-    pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
-        metric_registry: &mut MetricRegistry,
-        options: &Options,
-    ) -> Self {
+    pub fn new(metric_registry: &mut MetricRegistry, options: &Options) -> Self {
         let nbr_of_threads = options.compaction_threads() as u8;
         let max_levels = options.max_levels();
         let level_l = max_levels - 1;
@@ -147,13 +140,9 @@ impl CompactionPicker {
         let metrics = Metrics::new(max_levels);
         metrics.register_to(metric_registry);
 
-        info!(
-            logger,
-            "CompactionPicker initialized, max_levels={}, level_x={}", max_levels, level_x
-        );
+        tracing::info!(max_levels, level_x, "compaction picker initialized");
 
         CompactionPicker {
-            logger,
             options: options.clone(),
             level_l,
             level_x,
@@ -220,12 +209,15 @@ impl CompactionPicker {
     pub fn pick_compaction(&mut self, levels: &Levels) -> Option<CompactionJob> {
         if self.nbr_of_running_compactions >= self.nbr_of_threads {
             self.metrics.jobs_skipped_level_compacting.inc();
-            event!(self.logger, "compaction_skipped reason=max_parallelism_reached, running_compactions={}, max_threads={}",
-                self.nbr_of_running_compactions, self.nbr_of_threads);
+            tracing::trace!(
+                running_compactions = self.nbr_of_running_compactions,
+                max_threads = self.nbr_of_threads,
+                "compaction skipped: max parallelism reached"
+            );
             return None;
         }
 
-        event!(self.logger, "compaction_picking start");
+        let _span = trace_span!("compaction.picking").entered();
         let scores = self.compute_scores(levels);
 
         // Update score gauges
@@ -269,26 +261,41 @@ impl CompactionPicker {
                         .input_files_count
                         .record(job.input_files.len() as u64);
 
-                    info!(self.logger, "Picked partial compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
-                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
-                    event!(self.logger, "compaction_picking done type=partial, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
-                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
+                    tracing::info!(
+                        job_id = job.id,
+                        input_level,
+                        output_level,
+                        input_files = job.input_files.len(),
+                        output_files = job.output_files.len(),
+                        "picked partial compaction"
+                    );
+                    tracing::trace!(
+                        job_id = job.id,
+                        input_level,
+                        output_level,
+                        input_files = job.input_files.len(),
+                        output_files = job.output_files.len(),
+                        "compaction picking finished"
+                    );
 
                     return Some(job);
                 } else {
                     self.metrics.jobs_skipped_range_overlap.inc();
-                    event!(
-                        self.logger,
-                        "compaction_skipped reason=range_overlap, input_level={}, output_level={}",
+                    tracing::trace!(
                         input_level,
-                        output_level
+                        output_level,
+                        "compaction skipped: range overlap"
                     );
                 }
             } else {
                 // Full compaction: block if any compaction is active on either level
                 if self.is_level_compacting(input_level) || self.is_level_compacting(output_level) {
                     self.metrics.jobs_skipped_level_compacting.inc();
-                    event!(self.logger, "compaction_skipped reason=level_compacting, input_level={}, output_level={}", input_level, output_level);
+                    tracing::trace!(
+                        input_level,
+                        output_level,
+                        "compaction skipped: level compacting"
+                    );
                     continue;
                 }
 
@@ -307,20 +314,29 @@ impl CompactionPicker {
                         .input_files_count
                         .record(job.input_files.len() as u64);
 
-                    info!(self.logger, "Picked full compaction job_id={}, L{}->L{}, input_files={}, output_files={}",
-                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
-                    event!(self.logger, "compaction_picking done type=full, job_id={}, input_level={}, output_level={}, input_files={}, output_files={}",
-                        job.id, input_level, output_level, job.input_files.len(), job.output_files.len());
+                    tracing::info!(
+                        job_id = job.id,
+                        input_level,
+                        output_level,
+                        input_files = job.input_files.len(),
+                        output_files = job.output_files.len(),
+                        "picked full compaction"
+                    );
+                    tracing::trace!(
+                        job_id = job.id,
+                        input_level,
+                        output_level,
+                        input_files = job.input_files.len(),
+                        output_files = job.output_files.len(),
+                        "compaction picking finished"
+                    );
 
                     return Some(job);
                 }
             }
         }
 
-        event!(
-            self.logger,
-            "compaction_skipped reason=no_level_need_compaction"
-        );
+        tracing::trace!("compaction skipped: no level needs compaction");
 
         None
     }
@@ -745,7 +761,6 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::internal_key::encode_record_key;
@@ -770,7 +785,7 @@ mod tests {
     }
 
     fn test_picker(options: &Options) -> CompactionPicker {
-        CompactionPicker::new(logger::test_instance(), &mut MetricRegistry::new(), options)
+        CompactionPicker::new(&mut MetricRegistry::new(), options)
     }
 
     /// Encodes a record key with the specified collection, index, and user key value.
@@ -2959,12 +2974,11 @@ mod tests {
 
     mod metrics_tests {
         use super::*;
-        use crate::obs::logger;
         use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
 
         fn test_picker_with_registry(options: &Options) -> (CompactionPicker, MetricRegistry) {
             let mut registry = MetricRegistry::new();
-            let picker = CompactionPicker::new(logger::test_instance(), &mut registry, options);
+            let picker = CompactionPicker::new(&mut registry, options);
             (picker, registry)
         }
 

@@ -1,4 +1,3 @@
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
@@ -7,7 +6,6 @@ use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::storage_engine::SSTableOperation;
-use crate::{error, event, info};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,6 +17,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tracing::{trace_span, Span};
 
 /// Represents a task to be handled by the `FlushManager`.
 ///
@@ -68,7 +67,6 @@ impl FlushManager {
     /// - `db_dir`: Path to the database directory.
     /// - `sst_cache`: Cache for SSTable files.
     pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
@@ -76,7 +74,6 @@ impl FlushManager {
     ) -> Result<Self> {
         let (sender, receiver): (SyncSender<FlushTask>, Receiver<FlushTask>) = sync_channel(32);
         let db_dir = db_dir.to_path_buf();
-        let log = logger.clone();
         let metrics = Metrics::new();
         metrics.register_to(metric_registry);
 
@@ -86,6 +83,7 @@ impl FlushManager {
         let sync_control: Option<Arc<(Mutex<bool>, Condvar)>> = None;
 
         let sync_control_for_thread = sync_control.clone();
+        let thread_instance_span = Span::current();
 
         let _thread = {
             thread::Builder::new()
@@ -100,21 +98,26 @@ impl FlushManager {
                             }
                         }
 
+                        let _instance_span = thread_instance_span.enter();
                         match task {
                             FlushTask::Sync { callback } => {
-                                event!(log, "flush_sync start");
+                                let _span = trace_span!("flush.sync").entered();
                                 callback.call(Ok(()));
-                                event!(log, "flush_sync done");
+                                tracing::trace!("flush sync done");
                             }
                             FlushTask::Flush {
                                 sst_file,
                                 memtable,
                                 callback,
                             } => {
-                                event!(log, "flush start, memtable={}", memtable.log_number);
+                                let _span = trace_span!(
+                                    "flush.run",
+                                    memtable = memtable.log_number,
+                                    sst = sst_file.number
+                                )
+                                .entered();
 
                                 let result = Self::flush(
-                                    log.clone(),
                                     &metrics,
                                     sst_cache.clone(),
                                     &options,
@@ -133,7 +136,7 @@ impl FlushManager {
                                         callback.call(Ok(operation));
                                     }
                                     Err(e) => {
-                                        error!(log, "Flush failed: {}", e);
+                                        tracing::error!(error = %e, "Flush failed");
                                         callback.call(Err(e));
 
                                         thread::sleep(Duration::from_secs(1));
@@ -144,8 +147,7 @@ impl FlushManager {
                     }
                 })
         }?;
-
-        info!(logger, "FlushManager initialized");
+        tracing::info!("FlushManager initialized");
 
         Ok(Self {
             sender,
@@ -155,7 +157,6 @@ impl FlushManager {
     }
 
     fn flush(
-        logger: Arc<dyn LoggerAndTracer>,
         metrics: &Metrics,
         sst_cache: Arc<SSTableCache>,
         options: &Arc<Options>,
@@ -174,16 +175,16 @@ impl FlushManager {
         let throughput = sst.size as f64 / duration.as_secs_f64();
         metrics.write_throughput.record(throughput as u64);
 
-        info!(
-            logger,
-            "Memtable flushed, memtable={}, sst={}", memtable.log_number, sst_file.number
+        tracing::info!(
+            memtable = memtable.log_number,
+            sst = sst_file.number,
+            "Memtable flushed"
         );
-        event!(
-            logger,
-            "flush done, memtable={}, sst={}, duration={}µs",
+        tracing::trace!(
             memtable.log_number,
-            sst_file.number,
-            duration.as_micros()
+            sst = sst_file.number,
+            duration_micros = duration.as_micros(),
+            "flush done"
         );
 
         // load the new sst in the cache to validate that everything when well and made it available

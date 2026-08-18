@@ -14,8 +14,8 @@ use crate::collection::CreateIndexOptions;
 use crate::collection::{Collection, CreateCollectionOptions, IdCreationStrategy};
 use crate::error::Error;
 use crate::metrics::Metrics;
-use crate::obs::logger::{LogLevel, LoggerAndTracer, NoOpLogger};
 use crate::obs::metrics::MetricRegistry;
+use crate::obs::observability::Observability;
 use crate::options::options::Options;
 use crate::query::execution::WriteResult;
 use crate::query::optimizer::optimizer::Optimizer;
@@ -29,6 +29,8 @@ use query::execution::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use std::path::Path;
 use std::sync::Arc;
+use tracing::info_span;
+use tracing::span::EnteredSpan;
 
 #[derive(Clone)]
 pub struct QuokkaDB {
@@ -50,36 +52,27 @@ impl QuokkaDB {
     }
 
     pub fn open_with_options(path: &Path, options: Options) -> error::Result<Self> {
-        Self::open_with_options_and_logger(path, options, Arc::new(NoOpLogger {}))
-    }
-
-    pub fn open_with_logger(path: &Path, logger: Arc<dyn LoggerAndTracer>) -> error::Result<Self> {
-        Self::open_with_options_and_logger(path, Options::default(), logger)
-    }
-
-    pub fn open_with_options_and_logger(
-        path: &Path,
-        options: Options,
-        logger: Arc<dyn LoggerAndTracer>,
-    ) -> error::Result<Self> {
         options.validate()?;
 
         let options = Arc::new(options);
+        let observability = Observability::new(path);
+        let _instance_span = observability.instance_span().clone().entered();
         let mut metric_registry = MetricRegistry::new();
-        let storage_engine =
-            StorageEngine::new(logger.clone(), &mut metric_registry, options.clone(), path)?;
-        let optimizer = Arc::new(Optimizer::new(logger.clone())); // Add normalization rules as needed
+        let storage_engine = StorageEngine::new(&mut metric_registry, options.clone(), path)?;
+        let optimizer = Arc::new(Optimizer::new()); // Add normalization rules as needed
         let executor = Arc::new(QueryExecutor::new_with_metrics(
             storage_engine.clone(),
             &mut metric_registry,
         ));
         let db_impl = Arc::new(DbImpl {
-            logger,
+            observability,
             metrics: metric_registry.clone(),
             optimizer,
             executor,
             storage_engine,
         });
+
+        tracing::info!(event = "db.opened");
 
         Ok(QuokkaDB { options, db_impl })
     }
@@ -157,15 +150,40 @@ impl<'a> CreateCollection<'a> {
 }
 
 struct DbImpl {
-    logger: Arc<dyn LoggerAndTracer>,
+    observability: Arc<Observability>,
     metrics: MetricRegistry,
     optimizer: Arc<Optimizer>,
     executor: Arc<QueryExecutor>,
     storage_engine: Arc<StorageEngine>,
 }
 
+struct OperationSpans {
+    _instance: EnteredSpan,
+    _operation: EnteredSpan,
+}
+
 impl DbImpl {
+    fn enter_operation_span(&self, operation: &'static str) -> OperationSpans {
+        OperationSpans {
+            _instance: self.observability.instance_span().clone().entered(),
+            _operation: info_span!("db.operation", operation).entered(),
+        }
+    }
+
+    fn enter_collection_operation_span(
+        &self,
+        operation: &'static str,
+        collection: &str,
+    ) -> OperationSpans {
+        OperationSpans {
+            _instance: self.observability.instance_span().clone().entered(),
+            _operation: info_span!("db.collection_operation", operation, collection = %collection)
+                .entered(),
+        }
+    }
+
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> error::Result<u32> {
+        let _spans = self.enter_collection_operation_span("create_collection_if_not_exists", name);
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
     }
 
@@ -174,12 +192,14 @@ impl DbImpl {
         name: &str,
         options: CreateCollectionOptions,
     ) -> error::Result<u32> {
+        let _spans = self.enter_collection_operation_span("create_collection", name);
         Ok(self
             .storage_engine
             .create_collection(name, options.into())?)
     }
 
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
+        let _spans = self.enter_collection_operation_span("drop_collection", name);
         Ok(self.storage_engine.drop_collection(name)?)
     }
 
@@ -188,6 +208,7 @@ impl DbImpl {
         old_name: &str,
         new_name: &str,
     ) -> error::Result<()> {
+        let _spans = self.enter_collection_operation_span("rename_collection", old_name);
         Ok(self.storage_engine.rename_collection(old_name, new_name)?)
     }
 
@@ -201,6 +222,7 @@ impl DbImpl {
         spec: IndexKeySpec,
         options: CreateIndexOptions,
     ) -> error::Result<String> {
+        let _spans = self.enter_operation_span("create_index");
         Ok(self
             .storage_engine
             .create_index(collection_id, spec.into(), options.into())?
@@ -208,10 +230,12 @@ impl DbImpl {
     }
 
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {
+        let _spans = self.enter_operation_span("drop_index");
         Ok(self.storage_engine.drop_index(collection_id, index_id)?)
     }
 
     pub fn estimated_document_count(&self, collection_id: u32) -> error::Result<u64> {
+        let _spans = self.enter_operation_span("estimated_document_count");
         let count = self
             .storage_engine
             .count_stat(&CountStatsKey::Collection(collection_id))
@@ -221,6 +245,7 @@ impl DbImpl {
     }
 
     pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<WriteResult> {
+        let _spans = self.enter_operation_span("execute_write");
         let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne {
                 collection,
@@ -374,6 +399,7 @@ impl DbImpl {
         &self,
         logical_plan: Arc<LogicalPlan>,
     ) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
+        let _spans = self.enter_operation_span("execute_query");
         let (parameters, physical_plan) = self.optimize_query(logical_plan);
 
         self.executor.execute_cached(physical_plan, &parameters)
@@ -398,10 +424,11 @@ impl DbImpl {
 
 impl Drop for DbImpl {
     fn drop(&mut self) {
+        let _instance_span = self.observability.instance_span().clone().entered();
         if let Err(e) = self.storage_engine.shutdown() {
-            error!(self.logger, "An error occurred during shutdown: {}", e);
+            tracing::warn!(event = "db.shutdown_failed", error = %e);
         } else {
-            info!(self.logger, "Quokkadb shutdown completed successfully");
+            tracing::info!(event = "db.shutdown_completed");
         }
     }
 }

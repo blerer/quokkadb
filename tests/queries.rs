@@ -1,5 +1,4 @@
 use bson::{doc, Document};
-use quokkadb::obs::logger::{LogLevel, StdoutLogger};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -23,7 +22,7 @@ fn get_sample_data() -> Vec<Document> {
 fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
-    let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+    let db = QuokkaDB::open(path).unwrap();
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
@@ -410,8 +409,7 @@ fn test_find_one_with_projection_returns_projected_document() {
 #[test]
 fn test_find_one_create_if_missing_returns_none_for_missing_collection() {
     let dir = TempDir::new().unwrap();
-    let db =
-        QuokkaDB::open_with_logger(dir.path(), StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+    let db = QuokkaDB::open(dir.path()).unwrap();
 
     let result = db
         .collection("missing")
@@ -773,7 +771,7 @@ fn test_in_query_cross_numeric_types() {
 fn test_point_query_f64_stored_queried_as_i32() {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
-    let db = QuokkaDB::open_with_logger(path, StdoutLogger::new(LogLevel::Debug, true)).unwrap();
+    let db = QuokkaDB::open(path).unwrap();
     let collection = db.collection("float_ids").create_if_missing();
 
     // Store documents with f64 _id values that are whole numbers.

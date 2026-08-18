@@ -1,23 +1,20 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::{file_name_as_str, sync_dir};
-use crate::obs::logger::{LogLevel, LoggerAndTracer};
 use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
-use crate::{event, info};
 use std::fs;
 use std::fs::{remove_file, File};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::{info_span, trace_span};
 
 const MANIFEST_MAGIC_NUMBER: u32 = 0x516D616E; // "Qman" in ASCII
 
 pub struct Manifest {
-    /// The logger
-    logger: Arc<dyn LoggerAndTracer>,
     /// The manifest metrics
     metrics: Metrics,
     /// The database directory
@@ -30,7 +27,6 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn new(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &Options,
         db_dir: &Path,
@@ -54,7 +50,6 @@ impl Manifest {
             )
         })?;
         let mut manifest = Manifest {
-            logger,
             metrics,
             db_dir: db_dir.to_path_buf(),
             rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
@@ -62,16 +57,14 @@ impl Manifest {
         };
         manifest.append_edit(&snapshot)?;
         Self::update_current_file(db_dir, &log_filename)?;
-        info!(
-            manifest.logger,
-            "Manifest initialized at path: {:?}",
-            manifest.append_log.file_path()
+        tracing::info!(
+            path = %manifest.append_log.file_path().display(),
+            "Manifest initialized"
         );
         Ok(manifest)
     }
 
     pub fn load_from(
-        logger: Arc<dyn LoggerAndTracer>,
         metric_registry: &mut MetricRegistry,
         options: &Options,
         manifest_path: PathBuf,
@@ -89,9 +82,11 @@ impl Manifest {
         )?;
         metrics.register_to(metric_registry);
 
-        info!(logger, "Manifest loaded from: {:?}", append_log.file_path());
+        tracing::info!(
+            path = %append_log.file_path().display(),
+            "Manifest loaded"
+        );
         Ok(Manifest {
-            logger,
             metrics,
             db_dir,
             rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
@@ -101,13 +96,13 @@ impl Manifest {
 
     // Append a version edit to the manifest.
     pub fn append_edit(&mut self, edit: &ManifestEdit) -> Result<()> {
-        event!(self.logger, "append_edit start, edits={}", edit);
+        let _span = trace_span!("manifest.append_edit", edit = %edit).entered();
 
         self.append_log.append(&edit.to_vec())?;
         self.append_log.sync()?;
         self.metrics.manifest_writes.inc();
 
-        event!(self.logger, "append_edit done");
+        tracing::trace!("manifest append_edit done");
         Ok(())
     }
 
@@ -117,7 +112,7 @@ impl Manifest {
 
     // Rotation logic: flush current file, create new manifest, and update CURRENT pointer.
     pub fn rotate(&mut self, new_manifest_number: u64, snapshot: &ManifestEdit) -> Result<()> {
-        event!(self.logger, "rotate start");
+        let _span = info_span!("manifest.rotate", new_manifest_number).entered();
 
         let (new_file, old_file) = self
             .append_log
@@ -138,7 +133,7 @@ impl Manifest {
         remove_file(old_file)?;
         sync_dir(&self.db_dir)?;
 
-        event!(self.logger, "rotate done, new_file={:?}", new_file);
+        tracing::trace!(new_file = %new_file.display(), "manifest rotate done");
 
         Ok(())
     }
@@ -325,7 +320,6 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::logger;
     use crate::obs::metrics::Gauge;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::append_log::BUFFER_SIZE_IN_BYTES;
@@ -345,7 +339,6 @@ mod tests {
         let path = dir.path();
         let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
         let mut manifest = Manifest::new(
-            logger::test_instance(),
             &mut MetricRegistry::default(),
             &Options::default(),
             path,
@@ -425,7 +418,6 @@ mod tests {
         let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
 
         let mut manifest = Manifest::new(
-            logger::test_instance(),
             &mut MetricRegistry::default(),
             &Options::default(),
             path,
@@ -475,7 +467,6 @@ mod tests {
         let options = Options::default()
             .with_max_manifest_file_size(StorageQuantity::new(4130, StorageUnit::Bytes));
         let mut manifest = Manifest::new(
-            logger::test_instance(),
             &mut MetricRegistry::default(),
             &options,
             path,
@@ -542,7 +533,6 @@ mod tests {
 
         let options = Options::default();
         let mut manifest = Manifest::new(
-            logger::test_instance(),
             &mut MetricRegistry::default(),
             &options,
             path,
@@ -563,13 +553,8 @@ mod tests {
         let manifest_path = path.join("MANIFEST-000001");
         let len = manifest_path.metadata().unwrap().len();
 
-        let manifest = Manifest::load_from(
-            logger::test_instance(),
-            &mut MetricRegistry::default(),
-            &options,
-            manifest_path,
-        )
-        .unwrap();
+        let manifest =
+            Manifest::load_from(&mut MetricRegistry::default(), &options, manifest_path).unwrap();
 
         assert_eq!(manifest.metrics.manifest_writes.get(), 0);
         assert_eq!(manifest.metrics.manifest_size.get(), len);

@@ -1,4 +1,3 @@
-use crate::obs::logger::test_instance;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::storage::internal_key::encode_record_key;
@@ -69,7 +68,6 @@ pub fn storage_engine() -> StorageResult<(Arc<StorageEngine>, TempDir)> {
     let dir = tempdir()?;
     let options = Arc::new(Options::lightweight());
     let mut metric_registry = MetricRegistry::new();
-    let logger = test_instance();
-    let storage_engine = StorageEngine::new(logger, &mut metric_registry, options, dir.path())?;
+    let storage_engine = StorageEngine::new(&mut metric_registry, options, dir.path())?;
     Ok((storage_engine, dir))
 }
