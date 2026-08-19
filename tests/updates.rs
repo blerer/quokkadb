@@ -1,3 +1,5 @@
+mod common;
+
 use bson::{doc, Bson, Document};
 use quokkadb::collection::{Collection, ReturnDocument};
 use quokkadb::QuokkaDB;
@@ -20,7 +22,7 @@ fn get_sample_data() -> Vec<Document> {
 fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
-    let db = QuokkaDB::open(path).unwrap();
+    let db = common::open_db(path);
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)

@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::Result;
+use crate::obs;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::query::execution::executor::with_executor_test_hook;

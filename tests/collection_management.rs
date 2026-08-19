@@ -1,13 +1,15 @@
+mod common;
+
 use bson::doc;
 use quokkadb::collection::{IdCreationStrategy, IndexDirection};
 use quokkadb::error::Error;
-use quokkadb::{CollectionInfo, QuokkaDB};
+use quokkadb::CollectionInfo;
 use tempfile::tempdir;
 
 #[test]
 fn test_create_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("users").unwrap();
 
@@ -19,7 +21,7 @@ fn test_create_collection() {
 #[test]
 fn test_create_collection_already_exists() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("users").unwrap();
 
@@ -36,7 +38,7 @@ fn test_create_collection_already_exists() {
 #[test]
 fn test_create_collection_with_options() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection_with("users")
         .id_creation_strategy(IdCreationStrategy::Generated)
@@ -55,7 +57,7 @@ fn test_create_collection_with_options() {
 #[test]
 fn test_drop_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let collection = db.collection("users").create_if_missing();
     collection
@@ -70,7 +72,7 @@ fn test_drop_collection() {
 #[test]
 fn test_drop_collection_not_found() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let result = db.collection("nonexistent").drop_collection();
     assert!(result.is_ok()); // Dropping a non-existent collection is a no-op
@@ -79,7 +81,7 @@ fn test_drop_collection_not_found() {
 #[test]
 fn test_delete_one_create_if_missing_returns_zero_without_creating_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let result = db
         .collection("missing")
@@ -94,7 +96,7 @@ fn test_delete_one_create_if_missing_returns_zero_without_creating_collection() 
 #[test]
 fn test_rename_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("old_name").unwrap();
     let renamed = db.collection("old_name").rename("new_name").unwrap();
@@ -108,7 +110,7 @@ fn test_rename_collection() {
 #[test]
 fn test_rename_collection_preserves_data() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("old_name").unwrap();
     db.collection("old_name")
@@ -158,7 +160,7 @@ fn test_rename_collection_preserves_data() {
 #[test]
 fn test_rename_collection_not_found() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     match db.collection("nonexistent").rename("new_name") {
         Err(Error::CollectionNotFound { name, .. }) => {
@@ -172,7 +174,7 @@ fn test_rename_collection_not_found() {
 #[test]
 fn test_rename_collection_target_exists() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("source").unwrap();
     db.create_collection("target").unwrap();
@@ -189,7 +191,7 @@ fn test_rename_collection_target_exists() {
 #[test]
 fn test_list_collections_empty() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let collections = db.list_collections();
     assert!(collections.is_empty());
@@ -198,7 +200,7 @@ fn test_list_collections_empty() {
 #[test]
 fn test_list_collections_multiple() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("alpha").unwrap();
     db.create_collection("beta").unwrap();
@@ -216,7 +218,7 @@ fn test_list_collections_multiple() {
 #[test]
 fn test_list_collections_excludes_dropped() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("keep").unwrap();
     db.create_collection("drop_me").unwrap();
@@ -230,7 +232,7 @@ fn test_list_collections_excludes_dropped() {
 #[test]
 fn test_list_collections_metadata_shape() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("test_collection").unwrap();
 
@@ -246,7 +248,7 @@ fn test_list_collections_metadata_shape() {
 #[test]
 fn test_get_indexes_returns_active_indexes() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("users").unwrap();
     let collection = db.collection("users");
@@ -283,7 +285,7 @@ fn test_get_indexes_returns_active_indexes() {
 #[test]
 fn test_get_indexes_is_strict_by_default() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let err = db.collection("missing").list_indexes().unwrap_err();
     match err {
@@ -298,7 +300,7 @@ fn test_get_indexes_is_strict_by_default() {
 #[test]
 fn test_get_indexes_create_if_missing_returns_empty_for_missing_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let indexes = db
         .collection("missing")
@@ -311,7 +313,7 @@ fn test_get_indexes_create_if_missing_returns_empty_for_missing_collection() {
 #[test]
 fn test_drop_index_removes_existing_index() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("users").unwrap();
     let collection = db.collection("users");
@@ -329,7 +331,7 @@ fn test_drop_index_removes_existing_index() {
 #[test]
 fn test_drop_index_returns_collection_not_found_for_missing_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let err = db.collection("missing").drop_index("name_1").unwrap_err();
     match err {
@@ -344,7 +346,7 @@ fn test_drop_index_returns_collection_not_found_for_missing_collection() {
 #[test]
 fn test_drop_index_returns_index_not_found_for_missing_index() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     db.create_collection("users").unwrap();
 
@@ -369,7 +371,7 @@ fn test_drop_index_returns_index_not_found_for_missing_index() {
 #[test]
 fn test_collection_data_isolated_after_drop_recreate() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     // Create collection and insert initial data
     db.create_collection("users").unwrap();
@@ -431,7 +433,7 @@ fn test_collection_data_isolated_after_drop_recreate() {
 #[test]
 fn test_drop_recreate_same_id_allowed() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     // Create collection and insert document with specific _id
     db.create_collection("items").unwrap();
@@ -462,7 +464,7 @@ fn test_drop_recreate_same_id_allowed() {
 #[test]
 fn test_collection_insert_is_strict_by_default() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     assert!(db.list_collections().is_empty());
 
@@ -477,7 +479,7 @@ fn test_collection_insert_is_strict_by_default() {
 #[test]
 fn test_create_if_missing_allows_implicit_collection_creation_on_insert() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     assert!(db.list_collections().is_empty());
 
@@ -494,7 +496,7 @@ fn test_create_if_missing_allows_implicit_collection_creation_on_insert() {
 #[test]
 fn test_create_if_missing_query_returns_empty_for_missing_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let results: Vec<_> = db
         .collection("missing")
@@ -510,7 +512,7 @@ fn test_create_if_missing_query_returns_empty_for_missing_collection() {
 #[test]
 fn test_estimated_document_count_returns_collection_count() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let collection = db.collection("users").create_if_missing();
     collection
@@ -526,7 +528,7 @@ fn test_estimated_document_count_returns_collection_count() {
 #[test]
 fn test_estimated_document_count_is_strict_by_default() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let err = db
         .collection("missing")
@@ -538,7 +540,7 @@ fn test_estimated_document_count_is_strict_by_default() {
 #[test]
 fn test_estimated_document_count_create_if_missing_returns_zero_for_missing_collection() {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
 
     let count = db
         .collection("missing")

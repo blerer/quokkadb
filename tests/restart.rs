@@ -1,10 +1,12 @@
+mod common;
+
 use bson::{doc, Document};
 use quokkadb::QuokkaDB;
 use std::path::Path;
 use tempfile::tempdir;
 
 fn get_db(path: &Path) -> QuokkaDB {
-    QuokkaDB::open(path).unwrap()
+    common::open_db(path)
 }
 
 #[test]

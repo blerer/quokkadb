@@ -15,5 +15,6 @@ moka = { version = "0.12", features = ["sync"] }
 arc-swap = "1.7.1"
 sonyflake = "0.5.1"
 tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [dev-dependencies]

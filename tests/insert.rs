@@ -1,3 +1,5 @@
+mod common;
+
 use bson::{doc, Bson};
 use quokkadb::collection::IdCreationStrategy;
 use quokkadb::{error::Error, QuokkaDB};
@@ -5,7 +7,7 @@ use tempfile::tempdir;
 
 fn setup() -> (tempfile::TempDir, QuokkaDB) {
     let dir = tempdir().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
     (dir, db)
 }
 

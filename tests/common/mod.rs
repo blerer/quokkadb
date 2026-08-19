@@ -1,15 +1,9 @@
-#[cfg(test)]
+use quokkadb::QuokkaDB;
+use std::path::Path;
 use std::sync::OnceLock;
-#[cfg(test)]
 use tracing_subscriber::EnvFilter;
 
-pub(crate) mod metrics;
-pub(crate) mod observability;
-
-#[cfg(test)]
-#[allow(dead_code)]
-/// Utility to initialize tracing for tests. When we need if for debugging reasons.
-pub(crate) fn init_tracing() {
+pub fn init_tracing() {
     static TEST_TRACING: OnceLock<()> = OnceLock::new();
 
     TEST_TRACING.get_or_init(|| {
@@ -21,4 +15,9 @@ pub(crate) fn init_tracing() {
             .with_test_writer()
             .try_init();
     });
+}
+
+pub fn open_db(path: &Path) -> QuokkaDB {
+    init_tracing();
+    QuokkaDB::open(path).unwrap()
 }

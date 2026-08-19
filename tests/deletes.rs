@@ -1,3 +1,5 @@
+mod common;
+
 use bson::{doc, Document};
 use quokkadb::error::Result;
 use quokkadb::QuokkaDB;
@@ -13,7 +15,7 @@ fn get_sample_data() -> Vec<Document> {
 
 fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
-    let db = QuokkaDB::open(dir.path()).unwrap();
+    let db = common::open_db(dir.path());
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
@@ -187,7 +189,7 @@ fn test_find_one_and_delete_returns_none_when_no_match() -> Result<()> {
 #[test]
 fn test_find_one_and_delete_applies_projection() -> Result<()> {
     let dir = TempDir::new()?;
-    let db = QuokkaDB::open(dir.path())?;
+    let db = common::open_db(dir.path());
     let collection = db.collection("test").create_if_missing();
 
     collection.insert_one(doc! { "_id": 1, "value": "one", "extra": true })?;
@@ -206,7 +208,7 @@ fn test_find_one_and_delete_applies_projection() -> Result<()> {
 #[test]
 fn test_find_one_and_delete_respects_sort() -> Result<()> {
     let dir = TempDir::new()?;
-    let db = QuokkaDB::open(dir.path())?;
+    let db = common::open_db(dir.path());
     let collection = db.collection("test").create_if_missing();
 
     collection.insert_one(doc! { "_id": 1, "priority": 1, "value": "low" })?;
@@ -234,7 +236,7 @@ fn test_find_one_and_delete_respects_sort() -> Result<()> {
 fn test_find_one_and_delete_create_if_missing_returns_none_without_creating_collection(
 ) -> Result<()> {
     let dir = TempDir::new()?;
-    let db = QuokkaDB::open(dir.path())?;
+    let db = common::open_db(dir.path());
 
     let result = db
         .collection("missing")
@@ -250,7 +252,7 @@ fn test_find_one_and_delete_create_if_missing_returns_none_without_creating_coll
 #[test]
 fn test_delete_many_create_if_missing_returns_zero_without_creating_collection() -> Result<()> {
     let dir = TempDir::new()?;
-    let db = QuokkaDB::open(dir.path())?;
+    let db = common::open_db(dir.path());
 
     let result = db
         .collection("missing")
