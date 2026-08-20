@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{Error, Result};
+use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::executor::test_utils::*;
 use crate::query::execution::QueryExecutor;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
@@ -7,10 +8,13 @@ use crate::query::update_fn::*;
 use crate::query::*;
 use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
 use crate::storage::count_stats::CountStatsKey;
+use crate::storage::operation::Operation;
+use crate::storage::storage_engine::StorageEngine;
 use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
 use bson::{Bson, Document};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 fn index_scan_eq(
@@ -36,6 +40,59 @@ fn index_scan_eq(
     executor
         .execute_cached(plan, &params)?
         .collect::<Result<_>>()
+}
+
+struct ConflictingPrimaryWriteHook {
+    point: ExecutorFailpoint,
+    storage_engine: Arc<StorageEngine>,
+    collection_id: u32,
+    doc_id: i32,
+    conflict_count: AtomicU32,
+}
+
+impl ConflictingPrimaryWriteHook {
+    fn new(
+        point: ExecutorFailpoint,
+        storage_engine: Arc<StorageEngine>,
+        collection_id: u32,
+        doc_id: i32,
+    ) -> Self {
+        Self {
+            point,
+            storage_engine,
+            collection_id,
+            doc_id,
+            conflict_count: AtomicU32::new(0),
+        }
+    }
+
+    fn conflict_count(&self) -> u32 {
+        self.conflict_count.load(Ordering::Relaxed)
+    }
+}
+
+impl ExecutorTestHook for ConflictingPrimaryWriteHook {
+    fn hit(&self, point: ExecutorFailpoint) {
+        if point != self.point {
+            return;
+        }
+
+        let next_conflict = self.conflict_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let doc = doc! {
+            "_id": self.doc_id,
+            "value": format!("conflict-{next_conflict}"),
+        };
+        let operation = Operation::new_put(
+            self.collection_id,
+            0,
+            Bson::Int32(self.doc_id).try_into_key().unwrap(),
+            doc.to_vec().unwrap(),
+        );
+
+        self.storage_engine
+            .write(write_batch(vec![operation]))
+            .unwrap();
+    }
 }
 
 #[test]
@@ -585,44 +642,36 @@ fn test_update_one_succeeds_on_retry() -> Result<()> {
 
 #[test]
 fn test_update_one_fails_after_retry_timeout() -> Result<()> {
-    // 1. Setup
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let hook = Arc::new(ConflictingPrimaryWriteHook::new(
+        ExecutorFailpoint::UpdateOneAfterRead,
+        storage_engine.clone(),
+        collection_id,
+        1,
+    ));
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
-    // 2. Arrange to fail many times to ensure timeout is reached
-    storage_engine.fail_next_precondition_checks(20);
 
-    // 3. Act: prepare UpdateOne
-    let mut params = Parameters::new();
-    let query_plan = point_search_query(collection_id, &mut params, 1_i32);
+    let result =
+        spawn_paused_update_one(executor.clone(), hook.clone(), collection_id, 1, "updated")
+            .join()
+            .unwrap();
 
-    let update_expr = update([set([field_name("value")], "updated")]);
-
-    let update_plan = PhysicalPlan::UpdateOne {
-        collection: collection_id,
-        query: query_plan,
-        update: update_expr,
-        upsert: false,
-    };
-
-    let result = executor.execute_direct(update_plan, Some(params));
-
-    // 4. Assert: Expect a VersionConflict error
     match result {
-        Err(Error::VersionConflict { .. }) => {
-            // This is the expected error after timeout
-        }
+        Err(Error::VersionConflict { .. }) => {}
         Err(e) => panic!("Expected a VersionConflict error, but got {:?}", e),
         Ok(_) => panic!("Expected an error, but the update succeeded"),
     }
 
-    // 5. Assert that the document was not changed
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
-    assert_eq!(final_doc.get_str("value")?, "initial");
+    assert_eq!(
+        final_doc.get_str("value")?,
+        format!("conflict-{}", hook.conflict_count())
+    );
 
     Ok(())
 }
@@ -1126,19 +1175,18 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection_if_not_exists("test_delete_one_retry_timeout")?;
+    let hook = Arc::new(ConflictingPrimaryWriteHook::new(
+        ExecutorFailpoint::DeleteOneAfterRead,
+        storage_engine.clone(),
+        collection_id,
+        1,
+    ));
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
-    storage_engine.fail_next_precondition_checks(20);
-
-    let mut params = Parameters::new();
-    let query_plan = point_search_query(collection_id, &mut params, 1_i32);
-    let delete_plan = PhysicalPlan::DeleteOne {
-        collection: collection_id,
-        query: query_plan,
-    };
-
-    let result = executor.execute_direct(delete_plan, Some(params));
+    let result = spawn_paused_delete_one(executor.clone(), hook.clone(), collection_id, 1)
+        .join()
+        .unwrap();
 
     match result {
         Err(Error::VersionConflict { .. }) => {}
@@ -1147,7 +1195,10 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
     }
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
-    assert_eq!(final_doc.get_str("value")?, "initial");
+    assert_eq!(
+        final_doc.get_str("value")?,
+        format!("conflict-{}", hook.conflict_count())
+    );
     assert_eq!(final_doc.get_i32("_id")?, 1);
     assert_eq!(
         storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -1223,6 +1274,7 @@ fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
 
 #[test]
 fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteManyBeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1232,24 +1284,35 @@ fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
     let doc2 = doc! { "_id": 2, "value": "second" };
     insert_docs(&executor, collection_id, [&doc1, &doc2])?;
 
-    storage_engine.fail_next_precondition_checks(1);
+    let paused_handle = spawn_paused_delete_many(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        full_scan_plan(collection_id),
+    );
 
-    let delete_plan = full_scan_plan(collection_id);
-    let result = execute_delete_many(&executor, collection_id, delete_plan);
+    hook.wait_until_hit();
 
-    match result {
+    execute_delete_one(&executor, collection_id, 1)?;
+
+    hook.release();
+
+    match paused_handle.join().unwrap() {
         Err(Error::VersionConflict { .. }) => {}
         Err(err) => panic!("Expected VersionConflict, got {:?}", err),
         Ok(doc) => panic!("Expected VersionConflict, got success {:?}", doc),
     }
 
-    let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
-    assert_eq!(final_doc1, doc! { "_id": 1, "value": "first" });
+    let mut verify_params = Parameters::new();
+    let verify_plan = point_search_query(collection_id, &mut verify_params, 1_i32);
+    let mut verify_results = executor.execute_cached(verify_plan, &verify_params)?;
+    assert!(verify_results.next().is_none());
+
     let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
     assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
     assert_eq!(
         storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
-        Some(2)
+        Some(1)
     );
 
     Ok(())
@@ -1768,9 +1831,8 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
 }
 
 #[test]
-
 fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
-    // 1. Setup
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1779,36 +1841,29 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
     let doc1 = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &doc1)?;
 
-    // 2. Arrange to fail the next precondition check
-    storage_engine.fail_next_precondition_checks(1);
+    let paused_handle = spawn_paused_update_many(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        full_scan_plan(collection_id),
+        update([set([field_name("value")], "updated")]),
+        false,
+    );
 
-    // 3. Act: prepare and execute UpdateMany
-    let mut params = Parameters::new();
-    let query_plan = point_search_query(collection_id, &mut params, 1_i32);
+    hook.wait_until_hit();
 
-    let update_expr = update([set([field_name("value")], "updated")]);
+    execute_update_one(&executor, collection_id, 1, "concurrent")?;
 
-    let update_plan = PhysicalPlan::UpdateMany {
-        collection: collection_id,
-        query: query_plan,
-        update: update_expr,
-        upsert: false,
-    };
+    hook.release();
 
-    let result = executor.execute_direct(update_plan, Some(params));
-
-    // 4. Assert: Expect an immediate VersionConflict error
-    match result {
-        Err(Error::VersionConflict { .. }) => {
-            // Correct: the operation failed without retrying.
-        }
-        Err(e) => panic!("Expected a VersionConflict error, but got {:?}", e),
-        Ok(_) => panic!("Expected an error, but the update succeeded"),
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(_)) => {}
+        Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+        Ok(doc) => panic!("Expected VersionConflict, got success {:?}", doc),
     }
 
-    // 5. Assert that the document was not changed
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
-    assert_eq!(final_doc.get_str("value")?, "initial");
+    assert_eq!(final_doc.get_str("value")?, "concurrent");
 
     Ok(())
 }

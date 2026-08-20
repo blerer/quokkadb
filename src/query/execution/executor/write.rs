@@ -545,6 +545,8 @@ impl WriteExecutor {
             Preconditions::new(snapshot, preconditions),
             count_stats.build(),
         );
+        #[cfg(test)]
+        self.invoke_test_hook(ExecutorFailpoint::DeleteManyBeforeCommit);
         self.storage_engine.write(batch)?;
 
         Ok(WriteResult::Delete { deleted_count })

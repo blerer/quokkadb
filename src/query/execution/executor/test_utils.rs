@@ -558,6 +558,19 @@ pub(crate) fn spawn_paused_update_many(
     })
 }
 
+pub(crate) fn spawn_paused_delete_many(
+    executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
+    collection_id: u32,
+    query: Arc<PhysicalPlan>,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || {
+            execute_delete_many(executor.as_ref(), collection_id, query)
+        })
+    })
+}
+
 pub(crate) fn spawn_paused_insert_one(
     executor: Arc<QueryExecutor>,
     hook: Arc<dyn ExecutorTestHook>,

@@ -145,6 +145,7 @@ pub(crate) enum ExecutorFailpoint {
     UpdateManyBeforeCommit,
     InsertManualAfterPreflightBeforeWrite,
     DeleteOneAfterRead,
+    DeleteManyBeforeCommit,
 }
 
 #[cfg(test)]

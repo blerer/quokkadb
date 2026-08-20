@@ -166,7 +166,8 @@ impl DbImpl {
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> error::Result<u32> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("create_collection_if_not_exists", collection = %name).entered(),
+            _operation: debug_span!("create_collection_if_not_exists", collection = %name)
+                .entered(),
         };
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
     }
