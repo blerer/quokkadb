@@ -29,7 +29,7 @@ use query::execution::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::info_span;
+use tracing::debug_span;
 use tracing::span::EnteredSpan;
 
 #[derive(Clone)]
@@ -72,7 +72,7 @@ impl QuokkaDB {
             storage_engine,
         });
 
-        tracing::info!(event = "db.opened");
+        tracing::debug!(event = "db.opened");
 
         Ok(QuokkaDB { options, db_impl })
     }
@@ -166,7 +166,7 @@ impl DbImpl {
     pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> error::Result<u32> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("create_collection_if_not_exists", collection = %name).entered(),
+            _operation: debug_span!("create_collection_if_not_exists", collection = %name).entered(),
         };
         Ok(self.storage_engine.create_collection_if_not_exists(name)?)
     }
@@ -178,7 +178,7 @@ impl DbImpl {
     ) -> error::Result<u32> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("create_collection", collection = %name).entered(),
+            _operation: debug_span!("create_collection", collection = %name).entered(),
         };
         Ok(self
             .storage_engine
@@ -188,7 +188,7 @@ impl DbImpl {
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("drop_collection", collection = %name).entered(),
+            _operation: debug_span!("drop_collection", collection = %name).entered(),
         };
         Ok(self.storage_engine.drop_collection(name)?)
     }
@@ -200,7 +200,7 @@ impl DbImpl {
     ) -> error::Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("rename_collection", collection = %old_name).entered(),
+            _operation: debug_span!("rename_collection", collection = %old_name).entered(),
         };
         Ok(self.storage_engine.rename_collection(old_name, new_name)?)
     }
@@ -217,7 +217,7 @@ impl DbImpl {
     ) -> error::Result<String> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("create_index").entered(),
+            _operation: debug_span!("create_index").entered(),
         };
         Ok(self
             .storage_engine
@@ -228,7 +228,7 @@ impl DbImpl {
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("drop_index").entered(),
+            _operation: debug_span!("drop_index").entered(),
         };
         Ok(self.storage_engine.drop_index(collection_id, index_id)?)
     }
@@ -236,7 +236,7 @@ impl DbImpl {
     pub fn estimated_document_count(&self, collection_id: u32) -> error::Result<u64> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("estimated_document_count").entered(),
+            _operation: debug_span!("estimated_document_count").entered(),
         };
         let count = self
             .storage_engine
@@ -249,7 +249,7 @@ impl DbImpl {
     pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<WriteResult> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("execute_write").entered(),
+            _operation: debug_span!("execute_write").entered(),
         };
         let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne {
@@ -406,7 +406,7 @@ impl DbImpl {
     ) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: info_span!("execute_query").entered(),
+            _operation: debug_span!("execute_query").entered(),
         };
         let (parameters, physical_plan) = self.optimize_query(logical_plan);
 
@@ -436,7 +436,7 @@ impl Drop for DbImpl {
         if let Err(e) = self.storage_engine.shutdown() {
             tracing::warn!(event = "db.shutdown_failed", error = %e);
         } else {
-            tracing::info!(event = "db.shutdown_completed");
+            tracing::debug!(event = "db.shutdown_completed");
         }
     }
 }

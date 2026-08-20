@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::Level;
-use tracing::{info_span, trace_span};
+use tracing::{debug_span, trace_span};
 use ErrorKind::InvalidData;
 
 pub struct SSTableReader {
@@ -42,7 +42,7 @@ pub struct SSTableReader {
 impl SSTableReader {
     pub fn open(block_cache: Arc<BlockCache>, file_path: &Path) -> Result<SSTableReader> {
         let filename = DbFile::new(file_path).unwrap().filename();
-        let _span = info_span!("sstable_reader.open", file = %filename).entered();
+        let _span = debug_span!("sstable_reader.open", file = %filename).entered();
 
         let start = Instant::now();
         let file = SharedFile::open(file_path)?;
@@ -94,7 +94,7 @@ impl SSTableReader {
             Self::read_properties(&file, &compressor, &checksum_strategy, &properties_handle)?;
 
         let duration = start.elapsed();
-        tracing::info!(
+        tracing::debug!(
             file = %filename,
             duration_micros = duration.as_micros(),
             "SSTableReader opened"

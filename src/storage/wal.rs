@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info_span, trace_span};
+use tracing::{debug_span, trace_span};
 
 /// The current version of the write-ahead log format.
 const WAL_VERSION: u32 = 1;
@@ -100,7 +100,7 @@ impl WriteAheadLog {
 
         metrics.total_bytes.inc_by(rotated_files_size);
 
-        tracing::info!(
+        tracing::debug!(
             path = %append_log.file_path().display(),
             "WAL initialized"
         );
@@ -132,13 +132,13 @@ impl WriteAheadLog {
         let wal_file = DbFile::new_write_ahead_log(new_log_number);
         let old_filename = self.append_log.filename().unwrap().to_string();
         let new_filename = wal_file.filename().to_string();
-        let _span = info_span!(
+        let _span = debug_span!(
             "wal.rotate",
             old_filename = %old_filename,
             new_filename = %new_filename
         )
         .entered();
-        tracing::info!(
+        tracing::debug!(
             old_filename = %old_filename,
             new_filename = %new_filename,
             "Rotating WAL file"

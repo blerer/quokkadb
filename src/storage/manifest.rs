@@ -10,7 +10,7 @@ use std::fs::{remove_file, File};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{info_span, trace_span};
+use tracing::{debug_span, trace_span};
 
 const MANIFEST_MAGIC_NUMBER: u32 = 0x516D616E; // "Qman" in ASCII
 
@@ -57,7 +57,7 @@ impl Manifest {
         };
         manifest.append_edit(&snapshot)?;
         Self::update_current_file(db_dir, &log_filename)?;
-        tracing::info!(
+        tracing::debug!(
             path = %manifest.append_log.file_path().display(),
             "Manifest initialized"
         );
@@ -82,7 +82,7 @@ impl Manifest {
         )?;
         metrics.register_to(metric_registry);
 
-        tracing::info!(
+        tracing::debug!(
             path = %append_log.file_path().display(),
             "Manifest loaded"
         );
@@ -112,7 +112,7 @@ impl Manifest {
 
     // Rotation logic: flush current file, create new manifest, and update CURRENT pointer.
     pub fn rotate(&mut self, new_manifest_number: u64, snapshot: &ManifestEdit) -> Result<()> {
-        let _span = info_span!("manifest.rotate", new_manifest_number).entered();
+        let _span = debug_span!("manifest.rotate", new_manifest_number).entered();
 
         let (new_file, old_file) = self
             .append_log

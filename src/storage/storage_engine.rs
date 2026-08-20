@@ -69,7 +69,7 @@ impl StorageEngine {
     ) -> StorageResult<Arc<Self>> {
         let sst_cache = Arc::new(SSTableCache::new(metric_registry, &options));
 
-        tracing::info!(path = %db_dir.display(), "starting storage engine");
+        tracing::debug!(path = %db_dir.display(), "starting storage engine");
 
         // Retrieve the latest manifest path.
         let manifest_path = Manifest::read_current_file(db_dir)?;
@@ -99,7 +99,7 @@ impl StorageEngine {
             // the Lsm tree in-memory and on-disk (MANIFEST file)
             let next_file_number = Arc::new(AtomicU64::new(
                 if next_file_number < scan_results.next_file_number {
-                    tracing::info!(
+                    tracing::debug!(
                         next_file_number = scan_results.next_file_number,
                         "files with higher numbers detected during restart"
                     );
@@ -122,7 +122,7 @@ impl StorageEngine {
             let mut previous = None;
 
             while let Some((log_number, wal_path)) = wal_files_iter.next() {
-                tracing::info!(path = %wal_path.display(), "replaying operations from WAL");
+                tracing::debug!(path = %wal_path.display(), "replaying operations from WAL");
 
                 // The initial memtable will be associated with the oldest_log_number. For
                 // the following , we need to re-associate the wal log number and the memtable
@@ -193,7 +193,7 @@ impl StorageEngine {
                             }
                         }
                         previous = Some((*log_number, wal_path.clone()));
-                        tracing::info!(
+                        tracing::debug!(
                             operation_count = count,
                             path = %wal_path.display(),
                             "replayed operations from WAL"
@@ -239,7 +239,7 @@ impl StorageEngine {
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
 
-                tracing::info!(
+                tracing::debug!(
                     log_number,
                     "latest WAL was corrupted; starting from a clean WAL"
                 );
@@ -269,7 +269,7 @@ impl StorageEngine {
                         &next_file_number,
                     )?;
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         log_number = lsm_tree.imm_memtables[0].log_number,
                         "ignoring empty memtable"
                     );
@@ -291,7 +291,7 @@ impl StorageEngine {
             let mut deleted_orphaned_ssts = Vec::new();
             for (number, path) in &scan_results.sst_files {
                 if !live_ssts.contains(number) {
-                    tracing::info!(path = %path.display(), "deleting orphaned SST file at startup");
+                    tracing::debug!(path = %path.display(), "deleting orphaned SST file at startup");
                     fs::remove_file(path)?;
                     deleted_orphaned_ssts.push(path.clone());
                 }
@@ -334,7 +334,7 @@ impl StorageEngine {
                 fail_next_precondition_checks: AtomicU8::new(0),
             });
 
-            tracing::info!("storage engine started");
+            tracing::debug!("storage engine started");
 
             engine.schedule_compaction_if_needed();
 
@@ -373,7 +373,7 @@ impl StorageEngine {
             let lsm_tree = Arc::new(ArcSwap::new(lsm_tree));
             Self::add_metrics(metric_registry, &options, lsm_tree.clone());
 
-            tracing::info!("storage engine started");
+            tracing::debug!("storage engine started");
 
             Ok(Arc::new(StorageEngine {
                 db_dir: db_dir.to_path_buf(),
@@ -404,7 +404,7 @@ impl StorageEngine {
         lsm_tree: &mut LsmTree,
         next_file_number: &AtomicU64,
     ) -> StorageResult<LsmTree> {
-        tracing::info!(
+        tracing::debug!(
             log_number = lsm_tree.imm_memtables[0].log_number,
             "flushing replayed data"
         );
@@ -479,7 +479,7 @@ impl StorageEngine {
             };
             // We want to sync to ensure that all the previous sequence numbers are persisted.
             wal_and_manifest.wal.sync()?;
-            tracing::info!(collection = %name, id, "creating collection");
+            tracing::debug!(collection = %name, id, "creating collection");
             let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
             Ok(id)
         } else {
@@ -510,7 +510,7 @@ impl StorageEngine {
         };
         // We want to sync to ensure that all the previous sequence numbers are persisted.
         wal_and_manifest.wal.sync()?;
-        tracing::info!(collection = %name, id, "dropping collection");
+        tracing::debug!(collection = %name, id, "dropping collection");
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
@@ -558,7 +558,7 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        tracing::info!(
+        tracing::debug!(
             old_name = %old_name,
             new_name = %new_name,
             id,
@@ -633,7 +633,7 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        tracing::info!(
+        tracing::debug!(
             collection = %collection.name,
             index = %resolved_name,
             id = index_id,
@@ -695,7 +695,7 @@ impl StorageEngine {
         };
 
         wal_and_manifest.wal.sync()?;
-        tracing::info!(
+        tracing::debug!(
             collection = %collection.name,
             index = %index.name(),
             id = index.id,
@@ -1075,19 +1075,19 @@ impl StorageEngine {
     pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
         // This code should be only called once when the database instance is dropped.
         self.disable_auto_compaction.store(true, Ordering::Relaxed);
-        tracing::info!("shutting down storage engine");
+        tracing::debug!("shutting down storage engine");
         self.flush()?;
         self.compaction_manager.shutdown();
         Ok(())
     }
 
     pub fn flush(self: &Arc<Self>) -> StorageResult<()> {
-        tracing::info!("requested flush started");
+        tracing::debug!("requested flush started");
 
         self.check_error_mode()?;
 
         self.perform_wal_and_memtable_rotation(true)?;
-        tracing::info!("requested flush completed");
+        tracing::debug!("requested flush completed");
         Ok(())
     }
 
@@ -1106,7 +1106,7 @@ impl StorageEngine {
         let write_buffer_size = self.options.file_write_buffer_size().to_bytes();
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
-            tracing::info!(
+            tracing::debug!(
                 memtable_size,
                 write_buffer_size,
                 "memtable size exceeded write buffer"

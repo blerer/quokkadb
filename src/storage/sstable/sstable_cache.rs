@@ -23,7 +23,7 @@ impl SSTableCache {
         let cache = Cache::new(cache_size);
         let metrics = Metrics::new(cache.clone());
         metrics.register_to(metric_registry);
-        tracing::info!(capacity = cache_size, "SSTableCache initialized");
+        tracing::debug!(capacity = cache_size, "SSTableCache initialized");
 
         let block_cache = BlockCache::new(metric_registry, options);
 

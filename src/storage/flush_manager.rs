@@ -147,7 +147,7 @@ impl FlushManager {
                     }
                 })
         }?;
-        tracing::info!("FlushManager initialized");
+        tracing::debug!("FlushManager initialized");
 
         Ok(Self {
             sender,
@@ -175,7 +175,7 @@ impl FlushManager {
         let throughput = sst.size as f64 / duration.as_secs_f64();
         metrics.write_throughput.record(throughput as u64);
 
-        tracing::info!(duration_micros = duration.as_micros(), "flush done");
+        tracing::debug!(duration_micros = duration.as_micros(), "flush done");
 
         // load the new sst in the cache to validate that everything when well and made it available
         // straightaway when the memtable is dropped

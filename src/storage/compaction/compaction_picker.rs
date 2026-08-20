@@ -140,7 +140,7 @@ impl CompactionPicker {
         let metrics = Metrics::new(max_levels);
         metrics.register_to(metric_registry);
 
-        tracing::info!(max_levels, level_x, "compaction picker initialized");
+        tracing::debug!(max_levels, level_x, "compaction picker initialized");
 
         CompactionPicker {
             options: options.clone(),
@@ -261,7 +261,7 @@ impl CompactionPicker {
                         .input_files_count
                         .record(job.input_files.len() as u64);
 
-                    tracing::info!(
+                    tracing::debug!(
                         job_id = job.id,
                         input_level,
                         output_level,
@@ -314,7 +314,7 @@ impl CompactionPicker {
                         .input_files_count
                         .record(job.input_files.len() as u64);
 
-                    tracing::info!(
+                    tracing::debug!(
                         job_id = job.id,
                         input_level,
                         output_level,

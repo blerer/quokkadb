@@ -158,7 +158,7 @@ impl CompactionManager {
 
     pub fn shutdown(&self) {
         let _instance_span = self.instance_span.as_ref().map(|span| span.enter());
-        tracing::info!("compaction manager shutdown started");
+        tracing::debug!("compaction manager shutdown started");
         let (lock, cvar) = &*self.shared;
         {
             let mut shared = lock.lock().unwrap();

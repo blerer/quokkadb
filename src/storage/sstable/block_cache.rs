@@ -41,7 +41,7 @@ impl BlockCache {
         let metrics = Metrics::new(size_gauge, evictions_counter);
         metrics.register_to(metric_registry);
 
-        tracing::info!(capacity = cache_size, "BlockCache initialized");
+        tracing::debug!(capacity = cache_size, "BlockCache initialized");
 
         Arc::new(Self { cache })
     }
