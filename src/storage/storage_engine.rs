@@ -50,10 +50,9 @@ pub(crate) struct StorageEngine {
     async_callback: OnceLock<Arc<Callback<Result<SSTableOperation>>>>,
     obsolete_sstables: Mutex<VecDeque<Arc<SSTableMetadata>>>,
     error_mode: AtomicBool,
+    disable_auto_compaction: AtomicBool,
     #[cfg(test)]
     fail_next_precondition_checks: AtomicU8,
-    #[cfg(test)]
-    disable_auto_compaction: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,10 +329,9 @@ impl StorageEngine {
                 async_callback: OnceLock::new(),
                 obsolete_sstables: Mutex::new(VecDeque::new()),
                 error_mode: AtomicBool::new(false),
+                disable_auto_compaction: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_precondition_checks: AtomicU8::new(0),
-                #[cfg(test)]
-                disable_auto_compaction: AtomicBool::new(false),
             });
 
             tracing::info!("storage engine started");
@@ -392,10 +390,9 @@ impl StorageEngine {
                 async_callback: OnceLock::new(),
                 obsolete_sstables: Mutex::new(VecDeque::new()),
                 error_mode: AtomicBool::new(false),
+                disable_auto_compaction: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_precondition_checks: AtomicU8::new(0),
-                #[cfg(test)]
-                disable_auto_compaction: AtomicBool::new(false),
             }))
         }
     }
@@ -912,7 +909,7 @@ impl StorageEngine {
         seq: u64,
         preconditions: &Preconditions,
     ) -> StorageResult<()> {
-        if preconditions.since() == seq {
+        if preconditions.since() + 1 == seq {
             return Ok(());
         }
 
@@ -1076,6 +1073,8 @@ impl StorageEngine {
     }
 
     pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
+        // This code should be only called once when the database instance is dropped.
+        self.disable_auto_compaction.store(true, Ordering::Relaxed);
         tracing::info!("shutting down storage engine");
         self.flush()?;
         self.compaction_manager.shutdown();
@@ -1083,13 +1082,12 @@ impl StorageEngine {
     }
 
     pub fn flush(self: &Arc<Self>) -> StorageResult<()> {
-        tracing::info!("flush requested");
-        tracing::trace!("requested flush started");
+        tracing::info!("requested flush started");
 
         self.check_error_mode()?;
 
         self.perform_wal_and_memtable_rotation(true)?;
-        tracing::trace!("requested flush completed");
+        tracing::info!("requested flush completed");
         Ok(())
     }
 
@@ -1225,11 +1223,6 @@ impl StorageEngine {
                         flushed,
                         count_stats,
                     } => {
-                        tracing::trace!(
-                            log_number,
-                            sst = %flushed,
-                            "manifest update after flush started"
-                        );
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
                         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
@@ -1307,7 +1300,6 @@ impl StorageEngine {
     }
 
     fn schedule_compaction_if_needed(self: &Arc<Self>) {
-        #[cfg(test)]
         if self.disable_auto_compaction.load(Ordering::Relaxed) {
             return;
         }

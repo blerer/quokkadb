@@ -143,14 +143,9 @@ impl WriteAheadLog {
             new_filename = %new_filename,
             "Rotating WAL file"
         );
-        let (new_path, old_path) = self.append_log.rotate(wal_file)?;
+        let (_new_path, old_path) = self.append_log.rotate(wal_file)?;
         self.pending_bytes = 0;
         self.metrics.files.inc();
-
-        tracing::trace!(
-            new_path = %new_path.display(),
-            "wal rotation done"
-        );
 
         let number = DbFile::new(&old_path).unwrap().number;
         self.rotated_log_files.push_back((number, old_path));

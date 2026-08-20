@@ -2817,7 +2817,7 @@ fn test_optimistic_locking_must_not_exist() {
 }
 
 #[test]
-fn test_optimistic_locking_skips_precondition_reads_when_since_matches_current_sequence() {
+fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visible_sequence() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
@@ -2827,7 +2827,9 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_current_s
         .create_collection_if_not_exists("test_optimistic_locking_skip_reads")
         .unwrap();
 
-    let since = engine.next_seq_number.load(Ordering::Relaxed);
+    engine.write(write_batch(vec![put_op(col, 0, 1)])).unwrap();
+
+    let since = engine.last_visible_sequence();
     let preconditions = Preconditions::new(
         since,
         vec![Precondition::VersionMatch {
@@ -2847,6 +2849,6 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_current_s
         .unwrap();
 
     let (_, value) = engine.read(col, 0, &user_key(1), None).unwrap().unwrap();
-    let (_, expected) = put_rec(col, 1, 1, since);
+    let (_, expected) = put_rec(col, 1, 1, since + 1);
     assert_eq!(value, expected);
 }
