@@ -17,7 +17,7 @@ impl Observability {
         let instance_span = info_span!(
             target: "quokkadb::instance",
             "quokkadb.instance",
-            instance_id,
+            id = instance_id,
             path = %path.display(),
         );
 

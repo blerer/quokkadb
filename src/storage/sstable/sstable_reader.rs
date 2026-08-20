@@ -45,8 +45,6 @@ impl SSTableReader {
         let _span = info_span!("sstable_reader.open", file = %filename).entered();
 
         let start = Instant::now();
-        tracing::info!(file = %filename, "SSTableReader opening");
-
         let file = SharedFile::open(file_path)?;
 
         // The footer is stored in the last 48 bytes at the end of the file.
@@ -98,7 +96,6 @@ impl SSTableReader {
         let duration = start.elapsed();
         tracing::info!(
             file = %filename,
-            properties = ?properties,
             duration_micros = duration.as_micros(),
             "SSTableReader opened"
         );
@@ -200,6 +197,12 @@ impl SSTableReader {
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        tracing::trace!(
+            file = %self.filename,
+            snapshot,
+            min_snapshot = ?min_snapshot,
+            "sstable read started"
+        );
         let _span = trace_span!(
             "sstable_reader.read",
             file = %self.filename,
@@ -290,7 +293,7 @@ impl SSTableReader {
                     let iter = SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
                         range: range.clone(), // Pass along for boundary checks
-                        direction,
+                        direction: direction.clone(),
                         index_iter,
                         current_data_block_iter: data_iter,
                         count: 0,
@@ -313,7 +316,7 @@ impl SSTableReader {
                     let iter = SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
                         range: range.clone(), // Pass along for boundary checks
-                        direction,
+                        direction: direction.clone(),
                         index_iter,
                         current_data_block_iter: data_iter,
                         count: 0,
@@ -325,7 +328,10 @@ impl SSTableReader {
         if tracing::enabled!(Level::TRACE) {
             sstable_iter_base = Box::new(TracingIterator::new(
                 sstable_iter_base,
-                format!("range_scan end file={},", self.filename),
+                "sstable",
+                self.filename.clone(),
+                direction.clone(),
+                snapshot,
             ));
         }
 

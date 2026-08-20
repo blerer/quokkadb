@@ -2,7 +2,7 @@ use crate::options::options::Options;
 use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{encode_internal_key, InternalKeyRange};
-use crate::storage::iterators::{ForwardIterator, ReverseIterator};
+use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterator};
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
@@ -17,6 +17,7 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::Level;
 
 pub struct Memtable {
     skiplist: SkipMap<Vec<u8>, Vec<u8>>,      // Binary values
@@ -100,6 +101,12 @@ impl Memtable {
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
+        tracing::trace!(
+            memtable = self.log_number,
+            snapshot,
+            min_snapshot = ?min_snapshot,
+            "performing memtable point read"
+        );
         // Create the range bounds for the search:
         // We want to retrieve all the entries for the specified key
         let start_key = encode_internal_key(record_key, snapshot, OperationType::MaxKey);
@@ -137,7 +144,18 @@ impl Memtable {
             Box::new(range)
         };
 
-        let iter = Box::new(RangeScanIterator { iter });
+        let mut iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a> =
+            Box::new(RangeScanIterator { iter });
+
+        if tracing::enabled!(Level::TRACE) {
+            iter = Box::new(TracingIterator::new(
+                iter,
+                "memtable",
+                self.log_number.to_string(),
+                direction.clone(),
+                snapshot,
+            ));
+        }
 
         Ok(if direction == Direction::Reverse {
             Box::new(ReverseIterator::new(iter, snapshot))

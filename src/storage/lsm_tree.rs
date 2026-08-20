@@ -12,6 +12,7 @@ use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator}
 #[cfg(test)]
 use crate::storage::lsm_version::DropMetadata;
 use crate::storage::lsm_version::Levels;
+use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::Direction;
 use std::collections::VecDeque;
 use std::io::Result;
@@ -140,6 +141,28 @@ impl LsmTree {
         }
 
         let record_key = encode_record_key(collection, index, user_key);
+        let sstables: Vec<Arc<SSTableMetadata>> = self
+            .manifest
+            .find_sstables(&record_key, snapshot, min_snapshot)
+            .into_iter()
+            .collect();
+
+        tracing::trace!(
+            collection,
+            index,
+            snapshot,
+            min_snapshot = ?min_snapshot,
+            active_memtable = self.memtable.log_number,
+            immutable_memtables = ?self
+                .imm_memtables
+                .iter()
+                .rev()
+                .map(|memtable| memtable.log_number)
+                .collect::<Vec<_>>(),
+            sstables = ?sstables.iter().map(|sst| sst.number).collect::<Vec<_>>(),
+            "read sources selected"
+        );
+
         let rs = self.memtable.read(&record_key, snapshot, min_snapshot);
         if let Some((internal_key, value)) = rs {
             return Ok(Some((internal_key, value)));
@@ -166,10 +189,7 @@ impl LsmTree {
             }
         }
 
-        for sst in self
-            .manifest
-            .find_sstables(&record_key, snapshot, min_snapshot)
-        {
+        for sst in sstables {
             let file = db_dir.join(DbFile::new_sst(sst.number).filename());
             let sst_reader = sstable_cache.get(&file)?;
             if let Some((internal_key, value)) =
@@ -178,7 +198,6 @@ impl LsmTree {
                 return Ok(Some((internal_key, value)));
             }
         }
-
         Ok(None)
     }
 
@@ -213,6 +232,31 @@ impl LsmTree {
             direction.clone(),
         );
 
+        let sstable_metas: Vec<Arc<SSTableMetadata>> = self
+            .manifest
+            .find_sstables_in_range(
+                &encode_record_key_range(collection, index, user_key_range),
+                snapshot,
+            )
+            .into_iter()
+            .collect();
+
+        tracing::trace!(
+            collection,
+            index,
+            snapshot,
+            direction = ?direction,
+            active_memtable = self.memtable.log_number,
+            immutable_memtables = ?self
+                .imm_memtables
+                .iter()
+                .rev()
+                .map(|memtable| memtable.log_number)
+                .collect::<Vec<_>>(),
+            sstables = ?sstable_metas.iter().map(|sst| sst.number).collect::<Vec<_>>(),
+            "range scan sources selected"
+        );
+
         let mut iterators: Vec<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>> =
             Vec::new();
 
@@ -232,13 +276,8 @@ impl LsmTree {
             )?);
         }
 
-        let record_key_interval = encode_record_key_range(collection, index, user_key_range);
-
         // SSTable iterators
-        for sst_meta in self
-            .manifest
-            .find_sstables_in_range(&record_key_interval, snapshot)
-        {
+        for sst_meta in sstable_metas {
             let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
             let sst_reader = sstable_cache.get(&file_path)?;
             iterators.push(sst_reader.range_scan(

@@ -1,7 +1,7 @@
 use super::{bind, Metrics, QueryOutput};
 use crate::error::Result;
 use crate::query::execution::{filters, indexes::Index};
-use crate::query::physical_plan::IndexScanRangeExpr;
+use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::OperationType;
@@ -11,6 +11,7 @@ use crate::util::interval::Interval;
 use bson::{Bson, Document};
 use std::io::Cursor;
 use std::sync::Arc;
+use tracing::{trace_span, Span};
 
 use crate::storage::storage_engine::StorageEngine;
 
@@ -33,12 +34,12 @@ impl ReadExecutor {
 
     pub(crate) fn execute_cached_at_snapshot(
         &self,
-        plan: Arc<crate::query::physical_plan::PhysicalPlan>,
+        plan: Arc<PhysicalPlan>,
         parameters: &Parameters,
         snapshot: Option<u64>,
     ) -> Result<QueryOutput> {
         match plan.as_ref() {
-            crate::query::physical_plan::PhysicalPlan::CollectionScan {
+            PhysicalPlan::CollectionScan {
                 collection,
                 range,
                 direction,
@@ -50,7 +51,7 @@ impl ReadExecutor {
                     parameters, snapshot, collection, range, direction, filter,
                 )
             }
-            crate::query::physical_plan::PhysicalPlan::PointSearch {
+            PhysicalPlan::PointSearch {
                 collection,
                 key,
                 filter,
@@ -59,7 +60,7 @@ impl ReadExecutor {
                 self.metrics.point_searches.inc();
                 self.perform_point_search(parameters, snapshot, collection, key, filter)
             }
-            crate::query::physical_plan::PhysicalPlan::IndexScan {
+            PhysicalPlan::IndexScan {
                 collection,
                 index,
                 range,
@@ -72,7 +73,7 @@ impl ReadExecutor {
                     parameters, snapshot, collection, index, range, direction, filter,
                 )
             }
-            crate::query::physical_plan::PhysicalPlan::MultiPointSearch {
+            PhysicalPlan::MultiPointSearch {
                 collection,
                 keys,
                 direction,
@@ -84,7 +85,7 @@ impl ReadExecutor {
                     parameters, snapshot, collection, keys, direction, filter,
                 )
             }
-            crate::query::physical_plan::PhysicalPlan::Filter { input, predicate } => {
+            PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), parameters);
                 let input_iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
@@ -96,7 +97,7 @@ impl ReadExecutor {
                     }
                 })))
             }
-            crate::query::physical_plan::PhysicalPlan::Projection { input, projection } => {
+            PhysicalPlan::Projection { input, projection } => {
                 let projector =
                     crate::query::execution::projections::to_projector(projection, parameters)?;
                 let input_iter =
@@ -105,13 +106,13 @@ impl ReadExecutor {
                     input_iter.map(move |res| res.and_then(|doc| projector(doc))),
                 ))
             }
-            crate::query::physical_plan::PhysicalPlan::InMemorySort { input, sort_fields } => {
+            PhysicalPlan::InMemorySort { input, sort_fields } => {
                 self.metrics.in_memory_sorts.inc();
                 let input_iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::in_memory_sort(input_iter, sort_fields)
             }
-            crate::query::physical_plan::PhysicalPlan::ExternalMergeSort {
+            PhysicalPlan::ExternalMergeSort {
                 input,
                 sort_fields,
                 max_in_memory_rows,
@@ -125,7 +126,7 @@ impl ReadExecutor {
                     *max_in_memory_rows,
                 )
             }
-            crate::query::physical_plan::PhysicalPlan::TopKHeapSort {
+            PhysicalPlan::TopKHeapSort {
                 input,
                 sort_fields,
                 k,
@@ -135,7 +136,7 @@ impl ReadExecutor {
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
-            crate::query::physical_plan::PhysicalPlan::Limit { input, skip, limit } => {
+            PhysicalPlan::Limit { input, skip, limit } => {
                 let mut iter =
                     self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
                 if let Some(s) = skip {
@@ -159,6 +160,12 @@ impl ReadExecutor {
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
+        let access_span = trace_span!(
+            "read.multi_point_search",
+            collection = *collection,
+            snapshot = ?snapshot,
+            direction = ?direction
+        );
         let filter = filter
             .clone()
             .and_then(|predicate| Some(filters::to_filter(predicate, parameters)));
@@ -212,7 +219,10 @@ impl ReadExecutor {
             Err(e) => Some(Err(e.into())),
         });
 
-        Ok(Box::new(iter))
+        Ok(Box::new(AccessTrackedQueryOutput::new(
+            Box::new(iter),
+            access_span,
+        )))
     }
 
     pub(super) fn perform_point_search(
@@ -223,44 +233,50 @@ impl ReadExecutor {
         key: &Arc<Expr>,
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
+        let access_span = trace_span!(
+            "read.point_search",
+            collection = *collection,
+            snapshot = ?snapshot
+        );
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
         let filter = filter
             .clone()
             .and_then(|predicate| Some(filters::to_filter(predicate, parameters)));
 
         let key = bind::bind_key_parameter(key, parameters)?;
-        let result = self.storage_engine.read(*collection, 0, &key, snapshot)?;
-        let iter: QueryOutput = match result {
-            Some((k, v)) => {
-                let op = extract_operation_type(&k);
-                match op {
-                    OperationType::Delete => Box::new(std::iter::empty()),
-                    OperationType::Put => {
-                        let result = Document::from_reader(Cursor::new(v));
-
-                        if result.is_err() {
-                            return Ok(Box::new(std::iter::once(result.map_err(|e| e.into()))));
-                        }
-
-                        let doc = result?;
-
-                        match &filter {
-                            Some(filter) => {
-                                if filter(&doc) {
-                                    Box::new(std::iter::once(Ok(doc)))
-                                } else {
-                                    Box::new(std::iter::empty())
-                                }
-                            }
-                            None => Box::new(std::iter::once(Ok(doc))),
-                        }
-                    }
-                    _ => unreachable!("Unexpected operation type: {:?}", op),
-                }
+        let storage_engine = self.storage_engine.clone();
+        let collection = *collection;
+        let mut executed = false;
+        let iter: QueryOutput = Box::new(std::iter::from_fn(move || {
+            if executed {
+                return None;
             }
-            None => Box::new(std::iter::empty()),
-        };
-        Ok(iter)
+            executed = true;
+
+            let result = match storage_engine.read(collection, 0, &key, snapshot) {
+                Ok(result) => result,
+                Err(err) => return Some(Err(err.into())),
+            };
+
+            match result {
+                Some((k, v)) => {
+                    let op = extract_operation_type(&k);
+                    match op {
+                        OperationType::Delete => None,
+                        OperationType::Put => match Document::from_reader(Cursor::new(v)) {
+                            Ok(doc) => match &filter {
+                                Some(filter) if !filter(&doc) => None,
+                                _ => Some(Ok(doc)),
+                            },
+                            Err(err) => Some(Err(err.into())),
+                        },
+                        _ => unreachable!("Unexpected operation type: {:?}", op),
+                    }
+                }
+                None => None,
+            }
+        }));
+        Ok(Box::new(AccessTrackedQueryOutput::new(iter, access_span)))
     }
 
     pub(super) fn perform_collection_scan(
@@ -272,6 +288,12 @@ impl ReadExecutor {
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
+        let access_span = trace_span!(
+            "read.collection_scan",
+            collection = *collection,
+            snapshot = ?snapshot,
+            direction = ?direction
+        );
         let range = bind::bind_key_range_parameters(range, parameters)?;
 
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
@@ -279,40 +301,44 @@ impl ReadExecutor {
             .clone()
             .and_then(|predicate| Some(filters::to_filter(predicate, parameters)));
 
-        Ok(Box::new(
-            self.storage_engine
-                .range_scan(*collection, 0, &range, snapshot, direction.clone())?
-                .filter_map(move |res| {
-                    let doc = match res {
-                        Ok((k, v)) => {
-                            let op = extract_operation_type(&k);
-                            match op {
-                                OperationType::Delete => return None,
-                                OperationType::Put => {
-                                    let doc = Document::from_reader(Cursor::new(v));
-                                    match doc {
-                                        Err(e) => return Some(Err(e.into())),
-                                        Ok(doc) => doc,
-                                    }
+        let iter = self
+            .storage_engine
+            .range_scan(*collection, 0, &range, snapshot, direction.clone())?
+            .filter_map(move |res| {
+                let doc = match res {
+                    Ok((k, v)) => {
+                        let op = extract_operation_type(&k);
+                        match op {
+                            OperationType::Delete => return None,
+                            OperationType::Put => {
+                                let doc = Document::from_reader(Cursor::new(v));
+                                match doc {
+                                    Err(e) => return Some(Err(e.into())),
+                                    Ok(doc) => doc,
                                 }
-                                _ => unreachable!("Unexpected operation type: {:?}", op),
                             }
+                            _ => unreachable!("Unexpected operation type: {:?}", op),
                         }
-                        Err(e) => return Some(Err(e.into())),
-                    };
-
-                    match &filter {
-                        Some(filter) => {
-                            if filter(&doc) {
-                                Some(Ok(doc))
-                            } else {
-                                None
-                            }
-                        }
-                        None => Some(Ok(doc)),
                     }
-                }),
-        ))
+                    Err(e) => return Some(Err(e.into())),
+                };
+
+                match &filter {
+                    Some(filter) => {
+                        if filter(&doc) {
+                            Some(Ok(doc))
+                        } else {
+                            None
+                        }
+                    }
+                    None => Some(Ok(doc)),
+                }
+            });
+
+        Ok(Box::new(AccessTrackedQueryOutput::new(
+            Box::new(iter),
+            access_span,
+        )))
     }
 
     pub(super) fn perform_index_scan(
@@ -325,6 +351,13 @@ impl ReadExecutor {
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
+        let access_span = trace_span!(
+            "read.index_scan",
+            collection = *collection,
+            index = *index,
+            snapshot = ?snapshot,
+            direction = ?direction
+        );
         let index_metadata = self
             .storage_engine
             .catalog()
@@ -342,37 +375,46 @@ impl ReadExecutor {
         let storage_engine = self.storage_engine.clone();
         let collection = *collection;
         let secondary_index = *index;
+        let primary_lookup_span = access_span.clone();
 
-        Ok(Box::new(
-            storage_engine
-                .range_scan(
-                    collection,
-                    secondary_index,
-                    &bound_range,
-                    snapshot,
-                    direction.clone(),
-                )?
-                .filter_map(move |res| {
-                    let primary_key = match res {
-                        Ok((k, v)) => {
-                            let op = extract_operation_type(&k);
-                            match op {
-                                OperationType::Delete => return None,
-                                OperationType::Put => {
-                                    let user_key = extract_record_key(&k);
-                                    match Index::extract_id_from_entry_bytes(user_key, &v) {
-                                        Ok(id) => id.to_vec(),
-                                        Err(e) => return Some(Err(e.into())),
-                                    }
+        let iter = storage_engine
+            .range_scan(
+                collection,
+                secondary_index,
+                &bound_range,
+                snapshot,
+                direction.clone(),
+            )?
+            .filter_map(move |res| {
+                let primary_key = match res {
+                    Ok((k, v)) => {
+                        let op = extract_operation_type(&k);
+                        match op {
+                            OperationType::Delete => return None,
+                            OperationType::Put => {
+                                let user_key = extract_record_key(&k);
+                                match Index::extract_id_from_entry_bytes(user_key, &v) {
+                                    Ok(id) => id.to_vec(),
+                                    Err(e) => return Some(Err(e.into())),
                                 }
-                                _ => unreachable!("Unexpected operation type: {:?}", op),
                             }
+                            _ => unreachable!("Unexpected operation type: {:?}", op),
                         }
-                        Err(e) => return Some(Err(e.into())),
-                    };
+                    }
+                    Err(e) => return Some(Err(e.into())),
+                };
 
-                    let doc_bytes = match storage_engine.read(collection, 0, &primary_key, snapshot)
-                    {
+                let doc_bytes = {
+                    let _lookup_span = trace_span!(
+                        parent: &primary_lookup_span,
+                        "read.primary_lookup",
+                        collection,
+                        source_index = secondary_index,
+                        snapshot = ?snapshot
+                    )
+                    .entered();
+
+                    match storage_engine.read(collection, 0, &primary_key, snapshot) {
                         Ok(Some((k, v))) => {
                             let op = extract_operation_type(&k);
                             match op {
@@ -383,19 +425,83 @@ impl ReadExecutor {
                         }
                         Ok(None) => return None,
                         Err(e) => return Some(Err(e.into())),
-                    };
-
-                    let doc = match Document::from_reader(Cursor::new(doc_bytes)) {
-                        Ok(doc) => doc,
-                        Err(e) => return Some(Err(e.into())),
-                    };
-
-                    match &filter {
-                        Some(filter) if !filter(&doc) => None,
-                        _ => Some(Ok(doc)),
                     }
-                }),
-        ))
+                };
+
+                let doc = match Document::from_reader(Cursor::new(doc_bytes)) {
+                    Ok(doc) => doc,
+                    Err(e) => return Some(Err(e.into())),
+                };
+
+                match &filter {
+                    Some(filter) if !filter(&doc) => None,
+                    _ => Some(Ok(doc)),
+                }
+            });
+
+        Ok(Box::new(AccessTrackedQueryOutput::new(
+            Box::new(iter),
+            access_span,
+        )))
+    }
+}
+
+struct AccessTrackedQueryOutput {
+    inner: QueryOutput,
+    span: Span,
+    started: bool,
+    finished: bool,
+}
+
+impl AccessTrackedQueryOutput {
+    fn new(inner: QueryOutput, span: Span) -> Self {
+        Self {
+            inner,
+            span,
+            started: false,
+            finished: false,
+        }
+    }
+
+    fn start_if_needed(&mut self) {
+        if self.started {
+            return;
+        }
+
+        self.started = true;
+    }
+
+    fn finish_if_needed(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        self.finished = true;
+    }
+}
+
+impl Iterator for AccessTrackedQueryOutput {
+    type Item = Result<Document>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let span = self.span.clone();
+        let _span = span.enter();
+        self.start_if_needed();
+
+        let next = self.inner.next();
+        if next.is_none() {
+            self.finish_if_needed();
+        }
+
+        next
+    }
+}
+
+impl Drop for AccessTrackedQueryOutput {
+    fn drop(&mut self) {
+        let span = self.span.clone();
+        let _span = span.enter();
+        self.finish_if_needed();
     }
 }
 

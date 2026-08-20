@@ -112,22 +112,49 @@ impl<'a> Iterator for ReverseIterator<'a> {
 
 pub struct TracingIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
-    context: String,
+    context: &'static str,
+    source: String,
+    direction: Direction,
+    snapshot: u64,
     count: usize,
-    exhausted: bool,
+    started: bool,
+    finished: bool,
 }
 
 impl<'a> TracingIterator<'a> {
     pub fn new(
         iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
-        context: String,
+        context: &'static str,
+        source: String,
+        direction: Direction,
+        snapshot: u64,
     ) -> Self {
         TracingIterator {
             iter,
             context,
+            source,
+            direction,
+            snapshot,
             count: 0,
-            exhausted: false,
+            started: false,
+            finished: false,
         }
+    }
+
+    fn finish_if_needed(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        tracing::trace!(
+            context = self.context,
+            source = %self.source,
+            direction = ?self.direction,
+            snapshot = self.snapshot,
+            count = self.count,
+            "range scan finished"
+        );
+        self.finished = true;
     }
 }
 
@@ -135,17 +162,29 @@ impl<'a> Iterator for TracingIterator<'a> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if !self.started {
+            tracing::trace!(
+                context = self.context,
+                source = %self.source,
+                direction = ?self.direction,
+                snapshot = self.snapshot,
+                "range scan started"
+            );
+            self.started = true;
+        }
         let item = self.iter.next();
         match &item {
             Some(Ok(_)) => self.count += 1,
             Some(Err(_)) => {}
-            None if !self.exhausted => {
-                tracing::trace!(context = %self.context, count = self.count, "iterator exhausted");
-                self.exhausted = true;
-            }
-            None => {}
+            None => self.finish_if_needed(),
         }
         item
+    }
+}
+
+impl<'a> Drop for TracingIterator<'a> {
+    fn drop(&mut self) {
+        self.finish_if_needed();
     }
 }
 
