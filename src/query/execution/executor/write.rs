@@ -26,6 +26,7 @@ use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::trace_span;
 
 const RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
@@ -245,6 +246,7 @@ impl WriteExecutor {
         parameters: &Parameters,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
+        let _span = trace_span!("update_many", collection, upsert, snapshot,).entered();
         let mut iter = self.read_executor.execute_cached_at_snapshot(
             query.clone(),
             parameters,
@@ -340,6 +342,7 @@ impl WriteExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("update_one", collection, upsert).entered();
         match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
             SingleDocumentUpdateResult::Updated { .. } => Ok(WriteResult::Update {
                 matched_count: 1,
@@ -369,6 +372,13 @@ impl WriteExecutor {
         return_document: ReturnDocument,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!(
+            "find_one_and_update",
+            collection,
+            upsert,
+            return_document = ?return_document
+        )
+        .entered();
         match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
             SingleDocumentUpdateResult::Updated { old_doc, new_doc } => {
                 let returned = match return_document {
@@ -413,6 +423,7 @@ impl WriteExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("replace_one", collection, upsert).entered();
         match self.perform_single_document_replace(
             collection,
             query,
@@ -448,6 +459,13 @@ impl WriteExecutor {
         return_document: ReturnDocument,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!(
+            "find_one_and_replace",
+            collection,
+            upsert,
+            return_document = ?return_document
+        )
+        .entered();
         match self.perform_single_document_replace(
             collection,
             query,
@@ -496,6 +514,7 @@ impl WriteExecutor {
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("delete_one", collection).entered();
         match self.perform_single_document_delete(collection, query, parameters)? {
             SingleDocumentDeleteResult::Deleted { .. } => {
                 Ok(WriteResult::Delete { deleted_count: 1 })
@@ -511,6 +530,7 @@ impl WriteExecutor {
         parameters: &Parameters,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
+        let _span = trace_span!("delete_many", collection, snapshot,).entered();
         let mut iter =
             self.read_executor
                 .execute_cached_at_snapshot(query, parameters, Some(snapshot))?;
@@ -559,6 +579,7 @@ impl WriteExecutor {
         projection: Option<Arc<Projection>>,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("find_one_and_delete", collection).entered();
         match self.perform_single_document_delete(collection, query, parameters)? {
             SingleDocumentDeleteResult::Deleted { old_doc } => Ok(WriteResult::SingleDocument {
                 affected_count: 1,
@@ -781,6 +802,7 @@ impl WriteExecutor {
         collection: u32,
         document: Vec<u8>,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("insert_one", collection).entered();
         let mut doc = document;
         let id_strategy = self.get_id_creation_strategy(collection);
         let id = self.ensure_id(&mut doc, &id_strategy)?;
@@ -836,6 +858,7 @@ impl WriteExecutor {
         collection: u32,
         documents: Vec<Vec<u8>>,
     ) -> Result<WriteResult> {
+        let _span = trace_span!("insert_many", collection).entered();
         if documents.is_empty() {
             return Ok(WriteResult::InsertMany {
                 inserted_ids: Vec::new(),
@@ -1101,9 +1124,21 @@ fn on_version_conflict(e: StorageError, start_time: &Instant, attempt: &mut u32)
     match e {
         StorageError::VersionConflict { .. } => {
             if start_time.elapsed() >= RETRY_TIMEOUT {
+                tracing::debug!(
+                    attempts = *attempt,
+                    elapsed_ms = start_time.elapsed().as_millis(),
+                    "write retry timeout reached after version conflicts"
+                );
                 return Err(e.into());
             }
-            std::thread::sleep(calculate_backoff(*attempt));
+            let backoff = calculate_backoff(*attempt);
+            tracing::trace!(
+                attempt = *attempt,
+                elapsed_ms = start_time.elapsed().as_millis(),
+                backoff_ms = backoff.as_millis(),
+                "retrying write after version conflict"
+            );
+            std::thread::sleep(backoff);
             *attempt += 1;
             Ok(())
         }

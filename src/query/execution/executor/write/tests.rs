@@ -1,7 +1,7 @@
 use super::*;
 use crate::error::{Error, Result};
-use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::executor::test_utils::*;
+use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::QueryExecutor;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::update_fn::*;

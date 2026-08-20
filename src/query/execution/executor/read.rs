@@ -161,7 +161,7 @@ impl ReadExecutor {
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
-            "read.multi_point_search",
+            "multi_point_search",
             collection = *collection,
             snapshot = ?snapshot,
             direction = ?direction
@@ -234,7 +234,7 @@ impl ReadExecutor {
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
-            "read.point_search",
+            "point_search",
             collection = *collection,
             snapshot = ?snapshot
         );
@@ -289,7 +289,7 @@ impl ReadExecutor {
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
-            "read.collection_scan",
+            "collection_scan",
             collection = *collection,
             snapshot = ?snapshot,
             direction = ?direction
@@ -352,7 +352,7 @@ impl ReadExecutor {
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
-            "read.index_scan",
+            "index_scan",
             collection = *collection,
             index = *index,
             snapshot = ?snapshot,
@@ -407,7 +407,7 @@ impl ReadExecutor {
                 let doc_bytes = {
                     let _lookup_span = trace_span!(
                         parent: &primary_lookup_span,
-                        "read.primary_lookup",
+                        "primary_lookup",
                         collection,
                         source_index = secondary_index,
                         snapshot = ?snapshot
