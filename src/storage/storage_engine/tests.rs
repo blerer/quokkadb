@@ -2815,3 +2815,38 @@ fn test_optimistic_locking_must_not_exist() {
         .to_string()
         .contains("Optimistic locking failed: key for collection 10 index 0 user_key"));
 }
+
+#[test]
+fn test_optimistic_locking_skips_precondition_reads_when_since_matches_current_sequence() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let registry = &mut MetricRegistry::default();
+    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+
+    let col = engine
+        .create_collection_if_not_exists("test_optimistic_locking_skip_reads")
+        .unwrap();
+
+    let since = engine.next_seq_number.load(Ordering::Relaxed);
+    let preconditions = Preconditions::new(
+        since,
+        vec![Precondition::VersionMatch {
+            collection: col,
+            index: 0,
+            user_key: user_key(1),
+        }],
+    );
+
+    engine.fail_next_precondition_checks(1);
+
+    engine
+        .write(write_batch_with_preconditions(
+            vec![put_op(col, 1, 1)],
+            preconditions,
+        ))
+        .unwrap();
+
+    let (_, value) = engine.read(col, 0, &user_key(1), None).unwrap().unwrap();
+    let (_, expected) = put_rec(col, 1, 1, since);
+    assert_eq!(value, expected);
+}

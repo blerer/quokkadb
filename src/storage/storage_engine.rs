@@ -912,6 +912,10 @@ impl StorageEngine {
         seq: u64,
         preconditions: &Preconditions,
     ) -> StorageResult<()> {
+        if preconditions.since() == seq {
+            return Ok(());
+        }
+
         for precondition in preconditions.conditions() {
             match precondition {
                 Precondition::VersionMatch {
@@ -1074,7 +1078,6 @@ impl StorageEngine {
     pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
         tracing::info!("shutting down storage engine");
         self.flush()?;
-        tracing::info!("storage engine flush completed successfully");
         self.compaction_manager.shutdown();
         Ok(())
     }
