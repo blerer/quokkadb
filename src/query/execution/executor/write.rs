@@ -246,7 +246,7 @@ impl WriteExecutor {
         parameters: &Parameters,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
-        let _span = trace_span!("update_many", collection, upsert, snapshot,).entered();
+        let _span = trace_span!("update_many", upsert, snapshot,).entered();
         let mut iter = self.read_executor.execute_cached_at_snapshot(
             query.clone(),
             parameters,
@@ -342,7 +342,7 @@ impl WriteExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("update_one", collection, upsert).entered();
+        let _span = trace_span!("update_one", upsert).entered();
         match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
             SingleDocumentUpdateResult::Updated { .. } => Ok(WriteResult::Update {
                 matched_count: 1,
@@ -374,7 +374,6 @@ impl WriteExecutor {
     ) -> Result<WriteResult> {
         let _span = trace_span!(
             "find_one_and_update",
-            collection,
             upsert,
             return_document = ?return_document
         )
@@ -423,7 +422,7 @@ impl WriteExecutor {
         upsert: bool,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("replace_one", collection, upsert).entered();
+        let _span = trace_span!("replace_one", upsert).entered();
         match self.perform_single_document_replace(
             collection,
             query,
@@ -461,7 +460,6 @@ impl WriteExecutor {
     ) -> Result<WriteResult> {
         let _span = trace_span!(
             "find_one_and_replace",
-            collection,
             upsert,
             return_document = ?return_document
         )
@@ -514,7 +512,7 @@ impl WriteExecutor {
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("delete_one", collection).entered();
+        let _span = trace_span!("delete_one").entered();
         match self.perform_single_document_delete(collection, query, parameters)? {
             SingleDocumentDeleteResult::Deleted { .. } => {
                 Ok(WriteResult::Delete { deleted_count: 1 })
@@ -530,7 +528,7 @@ impl WriteExecutor {
         parameters: &Parameters,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
-        let _span = trace_span!("delete_many", collection, snapshot,).entered();
+        let _span = trace_span!("delete_many", snapshot,).entered();
         let mut iter =
             self.read_executor
                 .execute_cached_at_snapshot(query, parameters, Some(snapshot))?;
@@ -579,7 +577,7 @@ impl WriteExecutor {
         projection: Option<Arc<Projection>>,
         parameters: &Parameters,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("find_one_and_delete", collection).entered();
+        let _span = trace_span!("find_one_and_delete").entered();
         match self.perform_single_document_delete(collection, query, parameters)? {
             SingleDocumentDeleteResult::Deleted { old_doc } => Ok(WriteResult::SingleDocument {
                 affected_count: 1,
@@ -802,7 +800,7 @@ impl WriteExecutor {
         collection: u32,
         document: Vec<u8>,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("insert_one", collection).entered();
+        let _span = trace_span!("insert_one").entered();
         let mut doc = document;
         let id_strategy = self.get_id_creation_strategy(collection);
         let id = self.ensure_id(&mut doc, &id_strategy)?;
@@ -858,7 +856,7 @@ impl WriteExecutor {
         collection: u32,
         documents: Vec<Vec<u8>>,
     ) -> Result<WriteResult> {
-        let _span = trace_span!("insert_many", collection).entered();
+        let _span = trace_span!("insert_many").entered();
         if documents.is_empty() {
             return Ok(WriteResult::InsertMany {
                 inserted_ids: Vec::new(),

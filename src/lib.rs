@@ -247,10 +247,14 @@ impl DbImpl {
         Ok(count as u64)
     }
 
-    pub fn execute_write(&self, logical_plan: LogicalPlan) -> error::Result<WriteResult> {
+    pub fn execute_write(
+        &self,
+        collection: u32,
+        logical_plan: LogicalPlan
+    ) -> error::Result<WriteResult> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("execute_write").entered(),
+            _operation: debug_span!("execute_write", collection).entered(),
         };
         let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne {
@@ -403,11 +407,12 @@ impl DbImpl {
 
     pub fn execute_query(
         &self,
+        collection: u32,
         logical_plan: Arc<LogicalPlan>,
     ) -> error::Result<Box<dyn Iterator<Item = error::Result<Document>>>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("execute_query").entered(),
+            _operation: debug_span!("execute_query", collection).entered(),
         };
         let (parameters, physical_plan) = self.optimize_query(logical_plan);
 

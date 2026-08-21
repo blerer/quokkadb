@@ -162,7 +162,6 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "multi_point_search",
-            collection = *collection,
             snapshot = ?snapshot,
             direction = ?direction
         );
@@ -235,7 +234,6 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "point_search",
-            collection = *collection,
             snapshot = ?snapshot
         );
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
@@ -290,7 +288,6 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "collection_scan",
-            collection = *collection,
             snapshot = ?snapshot,
             direction = ?direction
         );
@@ -353,7 +350,6 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "index_scan",
-            collection = *collection,
             index = *index,
             snapshot = ?snapshot,
             direction = ?direction
@@ -408,7 +404,6 @@ impl ReadExecutor {
                     let _lookup_span = trace_span!(
                         parent: &primary_lookup_span,
                         "primary_lookup",
-                        collection,
                         source_index = secondary_index,
                         snapshot = ?snapshot
                     )

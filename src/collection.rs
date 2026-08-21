@@ -314,7 +314,7 @@ impl Collection {
         };
 
         Ok(InsertOneResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -339,7 +339,7 @@ impl Collection {
         };
 
         Ok(InsertManyResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -391,7 +391,7 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -414,7 +414,7 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -474,7 +474,7 @@ impl Collection {
         };
 
         Ok(DeleteResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -497,7 +497,7 @@ impl Collection {
         };
 
         Ok(DeleteResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -527,7 +527,7 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -595,7 +595,7 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -633,7 +633,7 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 
@@ -679,7 +679,7 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(plan)?,
+            self.db_impl.execute_write(collection_id, plan)?,
         ))
     }
 }
@@ -1140,7 +1140,7 @@ impl Find {
             return Ok(Box::new(std::iter::empty()));
         };
         let plan = self.build_logical_plan(collection_id)?;
-        self.db_impl.execute_query(plan)
+        self.db_impl.execute_query(collection_id, plan)
     }
 
     fn collection_id_for_query(&self) -> Result<Option<u32>> {
