@@ -13,6 +13,7 @@ pub struct Options {
     file_write_buffer_size: StorageQuantity,
     max_open_files: u32,
     block_cache_size: StorageQuantity,
+    query_cache_size: StorageQuantity,
     wal_bytes_per_sync: StorageQuantity,
     max_manifest_file_size: StorageQuantity,
 
@@ -38,6 +39,7 @@ impl Default for Options {
             file_write_buffer_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_open_files: 200,
             block_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
+            query_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             wal_bytes_per_sync: StorageQuantity::new(256, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(256, StorageUnit::Kibibytes),
 
@@ -71,6 +73,7 @@ impl Options {
             file_write_buffer_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             max_open_files: 512,
             block_cache_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
+            query_cache_size: StorageQuantity::new(16, StorageUnit::Mebibytes),
             wal_bytes_per_sync: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_manifest_file_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_levels: 4,
@@ -92,6 +95,7 @@ impl Options {
             file_write_buffer_size: StorageQuantity::new(8, StorageUnit::Mebibytes),
             max_open_files: 1024,
             block_cache_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
+            query_cache_size: StorageQuantity::new(64, StorageUnit::Mebibytes),
             wal_bytes_per_sync: StorageQuantity::new(512, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(2, StorageUnit::Mebibytes),
             max_levels: 5,
@@ -125,6 +129,12 @@ impl Options {
     /// Override the block cache size.
     pub fn with_block_cache_size(mut self, size: StorageQuantity) -> Self {
         self.block_cache_size = size;
+        self
+    }
+
+    /// Override the query cache size.
+    pub fn with_query_cache_size(mut self, size: StorageQuantity) -> Self {
+        self.query_cache_size = size;
         self
     }
 
@@ -216,6 +226,10 @@ impl Options {
 
     pub fn block_cache_size(&self) -> StorageQuantity {
         self.block_cache_size
+    }
+
+    pub fn query_cache_size(&self) -> StorageQuantity {
+        self.query_cache_size
     }
 
     pub fn wal_bytes_per_sync(&self) -> StorageQuantity {
@@ -343,6 +357,11 @@ impl Options {
                 "max_open_files must be greater than 0".into(),
             ));
         }
+        if self.query_cache_size.to_bytes() == 0 {
+            return Err(Error::InvalidOptions(
+                "query_cache_size must be greater than 0".into(),
+            ));
+        }
         if self.max_levels < 2 {
             return Err(Error::InvalidOptions(
                 "max_levels must be at least 2 (L0 + at least one more level)".into(),
@@ -412,6 +431,15 @@ mod tests {
     }
 
     #[test]
+    fn query_cache_size_defaults_to_non_zero_value() {
+        let opts = base_options();
+        assert_eq!(
+            opts.query_cache_size(),
+            StorageQuantity::new(4, StorageUnit::Mebibytes)
+        );
+    }
+
+    #[test]
     fn l2_scales_by_sqrt_of_multiplier() {
         let opts = base_options();
         let base = default_base_bytes();
@@ -472,6 +500,18 @@ mod tests {
     fn panics_on_level_zero() {
         base_options().target_file_size_for_level(0);
     }
+
+    #[test]
+    fn validate_rejects_zero_query_cache_size() {
+        let err = Options::default()
+            .with_query_cache_size(StorageQuantity::new(0, StorageUnit::Bytes))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid options: query_cache_size must be greater than 0"
+        );
+    }
 }
 
 impl fmt::Display for Options {
@@ -484,6 +524,7 @@ impl fmt::Display for Options {
         )?;
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
+        writeln!(f, "  Query Cache Size: {:?}", self.query_cache_size)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
         writeln!(
             f,

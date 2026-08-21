@@ -15,6 +15,7 @@ pub enum IntervalPosition {
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
+use crate::io::size_estimate::SizeEstimate;
 
 /// A struct representing a range with customizable bounds.
 ///
@@ -454,6 +455,19 @@ impl<T: Serializable> Serializable for Interval<T> {
     fn write_to(&self, writer: &mut ByteWriter) {
         self.start.write_to(writer);
         self.end.write_to(writer);
+    }
+}
+
+impl<T: SizeEstimate> SizeEstimate for Interval<T> {
+    fn estimated_heap_size(&self) -> usize {
+        estimate_bound_heap_size(self.start_bound()) + estimate_bound_heap_size(self.end_bound())
+    }
+}
+
+fn estimate_bound_heap_size<T: SizeEstimate>(bound: Bound<&T>) -> usize {
+    match bound {
+        Bound::Included(value) | Bound::Excluded(value) => value.estimated_heap_size(),
+        Bound::Unbounded => 0,
     }
 }
 

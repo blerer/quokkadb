@@ -124,6 +124,13 @@ pub mod names {
         pub const HIT_RATIO: &str = "sstable_cache_hit_ratio";
     }
 
+    pub mod query_cache {
+        pub const SIZE: &str = "query_cache_size";
+        pub const HITS: &str = "query_cache_hit";
+        pub const MISSES: &str = "query_cache_miss";
+        pub const HIT_RATIO: &str = "query_cache_hit_ratio";
+    }
+
     pub mod storage {
         pub fn sstable_count_level(level: usize) -> String {
             format!("sstable_count_level_{}", level)

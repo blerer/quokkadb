@@ -2,6 +2,7 @@ use crate::error;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
+use crate::io::size_estimate::SizeEstimate;
 use crate::query::tree_node::TreeNode;
 use crate::storage::catalog::{IndexDefinition, IndexDirection, IndexPath, OrderedIndexField};
 use crate::util::bson_utils;
@@ -24,6 +25,7 @@ pub(crate) mod logical_plan;
 pub(crate) mod optimizer;
 pub(crate) mod parser;
 pub(crate) mod physical_plan;
+pub(crate) mod query_cache;
 mod tree_node;
 pub(crate) mod update;
 #[cfg(test)]
@@ -81,6 +83,28 @@ pub enum Expr {
     AlwaysTrue,
     /// Represents an expression that is always false (e.g. $or: [])
     AlwaysFalse,
+}
+
+impl SizeEstimate for Expr {
+    fn estimated_heap_size(&self) -> usize {
+        match self {
+            Expr::Field(path) | Expr::PositionalField(path) => path.estimated_heap_size(),
+            Expr::Literal(value) => value.estimated_heap_size(),
+            Expr::Placeholder(_) | Expr::Exists(_) | Expr::AlwaysTrue | Expr::AlwaysFalse => 0,
+            Expr::FieldFilters { field, filters } => {
+                field.estimated_heap_size() + filters.estimated_heap_size()
+            }
+            Expr::Comparison { value, .. } => value.estimated_heap_size(),
+            Expr::Interval(interval) => interval.estimated_heap_size(),
+            Expr::And(children)
+            | Expr::Or(children)
+            | Expr::Nor(children)
+            | Expr::ElemMatch(children) => children.estimated_heap_size(),
+            Expr::Not(child) | Expr::All(child) => child.estimated_heap_size(),
+            Expr::Type { bson_type, .. } => bson_type.estimated_heap_size(),
+            Expr::Size { size, .. } => size.estimated_heap_size(),
+        }
+    }
 }
 
 impl TreeNode for Expr {
@@ -658,6 +682,21 @@ impl Serializable for ProjectionExpr {
     }
 }
 
+impl SizeEstimate for ProjectionExpr {
+    fn estimated_heap_size(&self) -> usize {
+        match self {
+            ProjectionExpr::Fields { children } | ProjectionExpr::ArrayElements { children } => {
+                children.estimated_heap_size()
+            }
+            ProjectionExpr::Field => 0,
+            ProjectionExpr::Slice { skip, limit } => {
+                skip.estimated_heap_size() + limit.estimated_heap_size()
+            }
+            ProjectionExpr::ElemMatch { filter } => filter.estimated_heap_size(),
+        }
+    }
+}
+
 /// Projection for included or excluded fields
 /// This is used to specify which fields to include or exclude in the result set of a query.
 #[derive(Debug, Clone, PartialEq)]
@@ -690,6 +729,14 @@ impl Serializable for Projection {
                 writer.write_u8(1);
                 exprs.write_to(writer);
             }
+        }
+    }
+}
+
+impl SizeEstimate for Projection {
+    fn estimated_heap_size(&self) -> usize {
+        match self {
+            Projection::Include(expr) | Projection::Exclude(expr) => expr.estimated_heap_size(),
         }
     }
 }
@@ -772,6 +819,12 @@ impl Serializable for SortField {
     fn write_to(&self, writer: &mut ByteWriter) {
         self.field.write_to(writer);
         self.order.write_to(writer);
+    }
+}
+
+impl SizeEstimate for SortField {
+    fn estimated_heap_size(&self) -> usize {
+        self.field.estimated_heap_size()
     }
 }
 
@@ -1009,6 +1062,15 @@ impl Serializable for PathComponent {
     }
 }
 
+impl SizeEstimate for PathComponent {
+    fn estimated_heap_size(&self) -> usize {
+        match self {
+            PathComponent::FieldName(name) => name.estimated_heap_size(),
+            PathComponent::ArrayElement(size) => size.estimated_heap_size(),
+        }
+    }
+}
+
 impl From<&str> for PathComponent {
     fn from(value: &str) -> Self {
         PathComponent::FieldName(value.to_string())
@@ -1114,6 +1176,12 @@ impl Serializable for Limit {
     }
 }
 
+impl SizeEstimate for Limit {
+    fn estimated_heap_size(&self) -> usize {
+        self.skip.estimated_heap_size() + self.limit.estimated_heap_size()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BsonValue(pub Bson);
 
@@ -1128,6 +1196,12 @@ impl BsonValue {
 
     pub fn as_ref(&self) -> BsonValueRef<'_> {
         BsonValueRef(&self.0)
+    }
+}
+
+impl SizeEstimate for BsonValue {
+    fn estimated_heap_size(&self) -> usize {
+        bson_utils::estimate_bson_heap_size(&self.0)
     }
 }
 

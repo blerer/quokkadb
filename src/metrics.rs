@@ -35,6 +35,11 @@ pub struct SSTableCacheMetrics<'a> {
     registry: &'a MetricRegistry,
 }
 
+/// Metrics for the query plan cache.
+pub struct QueryCacheMetrics<'a> {
+    registry: &'a MetricRegistry,
+}
+
 /// Metrics for the write-ahead log.
 pub struct WalMetrics<'a> {
     registry: &'a MetricRegistry,
@@ -81,6 +86,13 @@ impl<'a> Metrics<'a> {
     /// Returns SSTable-cache metrics.
     pub fn sstable_cache(&self) -> SSTableCacheMetrics<'a> {
         SSTableCacheMetrics {
+            registry: self.registry,
+        }
+    }
+
+    /// Returns query-cache metrics.
+    pub fn query_cache(&self) -> QueryCacheMetrics<'a> {
+        QueryCacheMetrics {
             registry: self.registry,
         }
     }
@@ -183,6 +195,32 @@ impl<'a> SSTableCacheMetrics<'a> {
     pub fn hit_ratio(&self) -> f64 {
         self.registry
             .computed_value(obs_metrics::names::sstable_cache::HIT_RATIO)
+    }
+}
+
+impl<'a> QueryCacheMetrics<'a> {
+    /// Returns the current estimated query-cache size in bytes.
+    pub fn size(&self) -> u64 {
+        self.registry
+            .gauge_value(obs_metrics::names::query_cache::SIZE)
+    }
+
+    /// Returns the number of query-cache hits since the database was opened.
+    pub fn hits(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::query_cache::HITS)
+    }
+
+    /// Returns the number of query-cache misses since the database was opened.
+    pub fn misses(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::query_cache::MISSES)
+    }
+
+    /// Returns the query-cache hit ratio in the range `[0.0, 1.0]`.
+    pub fn hit_ratio(&self) -> f64 {
+        self.registry
+            .computed_value(obs_metrics::names::query_cache::HIT_RATIO)
     }
 }
 

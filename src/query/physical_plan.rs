@@ -1,8 +1,10 @@
+use crate::io::size_estimate::SizeEstimate;
 use crate::query::update::UpdateExpr;
 use crate::query::{Expr, Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
 use crate::util::interval::Interval;
 use bson::Document;
+use std::mem::size_of;
 use std::sync::Arc;
 
 /// A storage-facing description of the bounds for a secondary index scan.
@@ -19,6 +21,12 @@ pub struct IndexScanRangeExpr {
     pub equal_prefix: Vec<Arc<Expr>>,
     /// Optional interval predicate on the first non-equality index field.
     pub tail: Option<Interval<Arc<Expr>>>,
+}
+
+impl SizeEstimate for IndexScanRangeExpr {
+    fn estimated_heap_size(&self) -> usize {
+        self.equal_prefix.estimated_heap_size() + self.tail.estimated_heap_size()
+    }
 }
 
 /// Represents a physical plan that can be executed by the query engine.
@@ -253,4 +261,89 @@ pub enum PhysicalPlan {
         /// The maximum number of rows to return.
         limit: Option<usize>,
     },
+}
+
+impl SizeEstimate for PhysicalPlan {
+    fn estimated_heap_size(&self) -> usize {
+        match self {
+            PhysicalPlan::NoOp => 0,
+            PhysicalPlan::CollectionScan {
+                range,
+                filter,
+                projection,
+                ..
+            } => {
+                range.estimated_heap_size()
+                    + filter.estimated_heap_size()
+                    + projection.estimated_heap_size()
+            }
+            PhysicalPlan::PointSearch {
+                key,
+                filter,
+                projection,
+                ..
+            } => {
+                key.estimated_heap_size()
+                    + filter.estimated_heap_size()
+                    + projection.estimated_heap_size()
+            }
+            PhysicalPlan::IndexScan {
+                range,
+                filter,
+                projection,
+                ..
+            } => {
+                range.estimated_heap_size()
+                    + filter.estimated_heap_size()
+                    + projection.estimated_heap_size()
+            }
+            PhysicalPlan::MultiPointSearch {
+                keys,
+                filter,
+                projection,
+                ..
+            } => {
+                keys.estimated_heap_size()
+                    + filter.estimated_heap_size()
+                    + projection.estimated_heap_size()
+            }
+            PhysicalPlan::Filter { input, predicate } => {
+                input.estimated_heap_size() + predicate.estimated_heap_size()
+            }
+            PhysicalPlan::Projection { input, projection } => {
+                input.estimated_heap_size() + projection.estimated_heap_size()
+            }
+            PhysicalPlan::InMemorySort { input, sort_fields } => {
+                input.estimated_heap_size() + sort_fields.estimated_heap_size()
+            }
+            PhysicalPlan::ExternalMergeSort {
+                input,
+                sort_fields,
+                max_in_memory_rows,
+            } => {
+                input.estimated_heap_size()
+                    + sort_fields.estimated_heap_size()
+                    + max_in_memory_rows.estimated_heap_size()
+            }
+            PhysicalPlan::TopKHeapSort {
+                input,
+                sort_fields,
+                k,
+            } => {
+                input.estimated_heap_size()
+                    + sort_fields.estimated_heap_size()
+                    + k.estimated_heap_size()
+            }
+            PhysicalPlan::Limit { input, skip, limit } => {
+                input.estimated_heap_size()
+                    + skip.estimated_heap_size()
+                    + limit.estimated_heap_size()
+            }
+            _ => unreachable!("Size estimation for this variant should not be requested"),
+        }
+    }
+}
+
+fn size_of_val<T>(_: &T) -> usize {
+    size_of::<T>()
 }

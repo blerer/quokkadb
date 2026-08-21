@@ -5,6 +5,7 @@ pub(crate) mod byte_writer;
 pub(crate) mod checksum;
 pub(crate) mod compressor;
 pub(crate) mod serializable;
+pub(crate) mod size_estimate;
 pub(crate) mod varint;
 
 use std::fs::{File, OpenOptions};

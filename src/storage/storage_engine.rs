@@ -491,13 +491,13 @@ impl StorageEngine {
         }
     }
 
-    pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<()> {
+    pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<Option<u32>> {
         self.check_error_mode()?;
         let id = self.catalog().get_collection_by_name(name).map(|c| c.id);
 
         if id.is_none() {
             // Collection does not exist, nothing to do
-            return Ok(());
+            return Ok(None);
         }
 
         let id = id.unwrap();
@@ -512,7 +512,7 @@ impl StorageEngine {
         wal_and_manifest.wal.sync()?;
         tracing::debug!(collection = %name, id, "dropping collection");
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
-        Ok(())
+        Ok(Some(id))
     }
 
     pub fn rename_collection(
