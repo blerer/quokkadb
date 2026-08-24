@@ -728,10 +728,10 @@ impl StorageEngine {
         count
     }
 
-    pub fn write(self: &Arc<Self>, batch: WriteBatch) -> StorageResult<()> {
+    pub fn write(self: &Arc<Self>, batch: WriteBatch, sync: bool) -> StorageResult<()> {
         self.check_error_mode()?;
 
-        let writer = Arc::new(Writer::new(batch));
+        let writer = Arc::new(Writer::new(batch, sync));
 
         // Add the writer to the queue
         self.queue.lock().unwrap().push_back(writer.clone());
@@ -1061,16 +1061,18 @@ impl StorageEngine {
         mut seq: u64,
     ) -> Result<Vec<(Arc<Writer>, u64)>> {
         let mut with_sequence = Vec::with_capacity(writers.len());
+        let mut should_sync = false;
 
         for writer in writers {
             let batch = writer.batch();
             wal_and_manifest.wal.append(seq, batch)?;
             with_sequence.push((writer.clone(), seq));
+            should_sync |= writer.sync();
 
             seq += 1;
         }
 
-        wal_and_manifest.wal.finish_append_group()?;
+        wal_and_manifest.wal.finish_append_group(should_sync)?;
         Ok(with_sequence)
     }
 
@@ -1622,14 +1624,16 @@ fn scan_db_directory(dir: &Path, oldest_log_number: u64) -> StorageResult<Startu
 #[allow(dead_code)]
 struct Writer {
     write_batch: WriteBatch,
+    sync: bool,
     result: Mutex<Option<StorageResult<()>>>,
     condvar: Condvar,
 }
 
 impl Writer {
-    fn new(batch: WriteBatch) -> Writer {
+    fn new(batch: WriteBatch, sync: bool) -> Writer {
         Writer {
             write_batch: batch,
+            sync,
             result: Mutex::new(None),
             condvar: Condvar::new(),
         }
@@ -1637,6 +1641,10 @@ impl Writer {
 
     pub fn batch(&self) -> &WriteBatch {
         &self.write_batch
+    }
+
+    pub fn sync(&self) -> bool {
+        self.sync
     }
 
     fn wait(&self) -> StorageResult<()> {

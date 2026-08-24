@@ -90,7 +90,7 @@ impl ExecutorTestHook for ConflictingPrimaryWriteHook {
         );
 
         self.storage_engine
-            .write(write_batch(vec![operation]))
+            .write(write_batch(vec![operation]), false)
             .unwrap();
     }
 }
@@ -113,7 +113,7 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
         collection: collection_id,
         document: doc1_dup.to_vec()?,
     };
-    let result = executor.execute_direct(insert_dup_plan, None);
+    let result = executor.execute_direct(insert_dup_plan, None, false);
     match result {
         Err(Error::InvalidRequest(msg)) => {
             assert!(msg.starts_with("Duplicate key error"));
@@ -130,7 +130,7 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
         collection: collection_id,
         documents: vec![doc2.to_vec()?, doc2_dup.to_vec()?],
     };
-    let result_many_intra = executor.execute_direct(insert_many_intra_batch_dup_plan, None);
+    let result_many_intra = executor.execute_direct(insert_many_intra_batch_dup_plan, None, false);
     match result_many_intra {
         Err(Error::InvalidRequest(msg)) => {
             assert!(msg.starts_with("Duplicate key error"));
@@ -146,7 +146,7 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
         collection: collection_id,
         documents: vec![doc3.to_vec()?, doc1.to_vec()?], // doc1 has _id: 1
     };
-    let result_many_existing = executor.execute_direct(insert_many_existing_dup_plan, None);
+    let result_many_existing = executor.execute_direct(insert_many_existing_dup_plan, None, false);
     match result_many_existing {
         Err(Error::InvalidRequest(msg)) => {
             assert!(msg.starts_with("Duplicate key error"));
@@ -625,7 +625,7 @@ fn test_update_one_succeeds_on_retry() -> Result<()> {
     };
 
     // The executor will attempt the update, fail, retry, and then succeed.
-    let result = executor.execute_direct(update_plan, Some(params))?;
+    let result = executor.execute_direct(update_plan, Some(params), false)?;
     assert_update_result(result, 1, 1, Option::<Bson>::None);
 
     // 4. Assert final state
@@ -1084,7 +1084,7 @@ fn test_delete_one_deletes_matching_document() -> Result<()> {
         query: query_plan,
     };
 
-    let result = executor.execute_direct(delete_plan, Some(params))?;
+    let result = executor.execute_direct(delete_plan, Some(params), false)?;
     assert_delete_result(result, 1);
 
     let mut verify_params = Parameters::new();
@@ -1117,7 +1117,7 @@ fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
         query: query_plan,
     };
 
-    let result = executor.execute_direct(delete_plan, Some(params))?;
+    let result = executor.execute_direct(delete_plan, Some(params), false)?;
     assert_delete_result(result, 0);
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
@@ -1153,7 +1153,7 @@ fn test_delete_one_succeeds_on_retry() -> Result<()> {
         query: query_plan,
     };
 
-    let result = executor.execute_direct(delete_plan, Some(params))?;
+    let result = executor.execute_direct(delete_plan, Some(params), false)?;
     assert_delete_result(result, 1);
 
     let mut verify_params = Parameters::new();
@@ -1257,7 +1257,7 @@ fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
         query: query_plan,
     };
 
-    let result = executor.execute_direct(delete_plan, Some(params))?;
+    let result = executor.execute_direct(delete_plan, Some(params), false)?;
     assert_delete_result(result, 0);
 
     let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;

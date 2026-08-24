@@ -306,15 +306,29 @@ impl Collection {
     /// let doc = doc! { "name": "Alice", "age": 30 };
     /// collection.insert_one(doc)?;
     pub fn insert_one(&self, document: impl Serialize) -> Result<InsertOneResult> {
+        self.insert_one_with(document)?.execute()
+    }
+
+    /// Creates an insert operation builder for inserting a single document.
+    pub fn insert_one_with(&self, document: impl Serialize) -> Result<InsertOne<'_>> {
+        InsertOne::new(self, document)
+    }
+
+    fn execute_insert_one(
+        &self,
+        document: Vec<u8>,
+        options: InsertOptions,
+    ) -> Result<InsertOneResult> {
         let collection_id = self.collection_id_for_write()?;
 
         let plan = LogicalPlan::InsertOne {
             collection: collection_id,
-            document: serialize_to_vec(&document)?,
+            document,
         };
 
         Ok(InsertOneResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -326,20 +340,32 @@ impl Collection {
         &self,
         documents: impl IntoIterator<Item = impl Serialize>,
     ) -> Result<InsertManyResult> {
-        let collection_id = self.collection_id_for_write()?;
+        self.insert_many_with(documents)?.execute()
+    }
 
-        let mut serialized = Vec::new();
-        for doc in documents {
-            serialized.push(serialize_to_vec(&doc)?);
-        }
+    /// Creates an insert operation builder for inserting multiple documents.
+    pub fn insert_many_with(
+        &self,
+        documents: impl IntoIterator<Item = impl Serialize>,
+    ) -> Result<InsertMany<'_>> {
+        InsertMany::new(self, documents)
+    }
+
+    fn execute_insert_many(
+        &self,
+        documents: Vec<Vec<u8>>,
+        options: InsertOptions,
+    ) -> Result<InsertManyResult> {
+        let collection_id = self.collection_id_for_write()?;
 
         let plan = LogicalPlan::InsertMany {
             collection: collection_id,
-            documents: serialized,
+            documents,
         };
 
         Ok(InsertManyResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -391,7 +417,8 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -414,7 +441,8 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -436,7 +464,7 @@ impl Collection {
     /// * `filter` - The filter document to match the documents to delete.
     /// Returns a `Result` containing delete metadata or an error.
     pub fn delete_many(&self, filter: Document) -> Result<DeleteResult> {
-        self.execute_delete_many(filter)
+        self.execute_delete_many(filter, DeleteOptions::default())
     }
 
     /// Creates a delete operation builder for deleting all matching documents.
@@ -474,11 +502,16 @@ impl Collection {
         };
 
         Ok(DeleteResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
-    fn execute_delete_many(&self, filter: Document) -> Result<DeleteResult> {
+    fn execute_delete_many(
+        &self,
+        filter: Document,
+        options: DeleteOptions,
+    ) -> Result<DeleteResult> {
         let collection_id = match self.policy {
             CollectionPolicy::Strict => self.get_collection_metadata()?.id,
             CollectionPolicy::CreateIfMissing => {
@@ -497,7 +530,8 @@ impl Collection {
         };
 
         Ok(DeleteResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -527,7 +561,8 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -595,7 +630,8 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -633,7 +669,8 @@ impl Collection {
         };
 
         Ok(UpdateResult::from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 
@@ -679,26 +716,35 @@ impl Collection {
         };
 
         Ok(Self::document_from_write_result(
-            self.db_impl.execute_write(collection_id, plan)?,
+            self.db_impl
+                .execute_write(collection_id, plan, options.sync)?,
         ))
     }
 }
 
 #[derive(Default)]
+struct InsertOptions {
+    sync: bool,
+}
+
+#[derive(Default)]
 struct UpdateOptions {
     array_filters: Option<Vec<Document>>,
+    sync: bool,
     upsert: bool,
     sort: Option<Document>,
 }
 
 #[derive(Default)]
 struct DeleteOptions {
+    sync: bool,
     sort: Option<Document>,
 }
 
 #[derive(Default)]
 struct FindOneAndUpdateOptions {
     projection: Option<Document>,
+    sync: bool,
     sort: Option<Document>,
     upsert: bool,
     return_document: ReturnDocument,
@@ -707,11 +753,13 @@ struct FindOneAndUpdateOptions {
 #[derive(Default)]
 struct FindOneAndDeleteOptions {
     projection: Option<Document>,
+    sync: bool,
     sort: Option<Document>,
 }
 
 #[derive(Default)]
 struct ReplaceOneOptions {
+    sync: bool,
     upsert: bool,
     sort: Option<Document>,
 }
@@ -719,9 +767,80 @@ struct ReplaceOneOptions {
 #[derive(Default)]
 struct FindOneAndReplaceOptions {
     projection: Option<Document>,
+    sync: bool,
     sort: Option<Document>,
     upsert: bool,
     return_document: ReturnDocument,
+}
+
+pub struct InsertOne<'a> {
+    collection: &'a Collection,
+    document: Vec<u8>,
+    options: InsertOptions,
+}
+
+impl<'a> InsertOne<'a> {
+    fn new(collection: &'a Collection, document: impl Serialize) -> Result<Self> {
+        Ok(Self {
+            collection,
+            document: serialize_to_vec(&document)?,
+            options: InsertOptions::default(),
+        })
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
+    }
+
+    /// Executes the insert operation.
+    pub fn execute(self) -> Result<InsertOneResult> {
+        self.collection
+            .execute_insert_one(self.document, self.options)
+    }
+}
+
+pub struct InsertMany<'a> {
+    collection: &'a Collection,
+    documents: Vec<Vec<u8>>,
+    options: InsertOptions,
+}
+
+impl<'a> InsertMany<'a> {
+    fn new(
+        collection: &'a Collection,
+        documents: impl IntoIterator<Item = impl Serialize>,
+    ) -> Result<Self> {
+        let mut serialized = Vec::new();
+        for doc in documents {
+            serialized.push(serialize_to_vec(&doc)?);
+        }
+
+        Ok(Self {
+            collection,
+            documents: serialized,
+            options: InsertOptions::default(),
+        })
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
+    }
+
+    /// Executes the insert operation.
+    pub fn execute(self) -> Result<InsertManyResult> {
+        self.collection
+            .execute_insert_many(self.documents, self.options)
+    }
 }
 
 pub struct UpdateOne<'a> {
@@ -751,6 +870,15 @@ impl<'a> UpdateOne<'a> {
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
+        self
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
         self
     }
 
@@ -797,6 +925,15 @@ impl<'a> UpdateMany<'a> {
         self
     }
 
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
+    }
+
     /// Executes the update operation.
     pub fn execute(self) -> Result<UpdateResult> {
         self.collection
@@ -825,6 +962,15 @@ impl<'a> DeleteOne<'a> {
         self
     }
 
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
+    }
+
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
         self.collection
@@ -835,16 +981,31 @@ impl<'a> DeleteOne<'a> {
 pub struct DeleteMany<'a> {
     collection: &'a Collection,
     filter: Document,
+    options: DeleteOptions,
 }
 
 impl<'a> DeleteMany<'a> {
     fn new(collection: &'a Collection, filter: Document) -> Self {
-        Self { collection, filter }
+        Self {
+            collection,
+            filter,
+            options: DeleteOptions::default(),
+        }
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
     }
 
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
-        self.collection.execute_delete_many(self.filter)
+        self.collection
+            .execute_delete_many(self.filter, self.options)
     }
 }
 
@@ -872,6 +1033,15 @@ impl<'a> FindOneAndDelete<'a> {
     /// Sets the sort order used to choose which matching document to delete.
     pub fn sort(mut self, sort: Document) -> Self {
         self.options.sort = Some(sort);
+        self
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
         self
     }
 
@@ -959,6 +1129,15 @@ impl<'a> FindOneAndUpdate<'a> {
         self
     }
 
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
+        self
+    }
+
     /// Sets whether to return the document before or after the update.
     pub fn return_document(mut self, return_document: ReturnDocument) -> Self {
         self.options.return_document = return_document;
@@ -992,6 +1171,15 @@ impl<'a> ReplaceOne<'a> {
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
+        self
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
         self
     }
 
@@ -1040,6 +1228,15 @@ impl<'a> FindOneAndReplace<'a> {
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
+        self
+    }
+
+    /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
+    ///
+    /// This overrides the database's configured WAL durability for this operation only. It does
+    /// not flush the memtable or wait for SSTable work.
+    pub fn sync(mut self) -> Self {
+        self.options.sync = true;
         self
     }
 

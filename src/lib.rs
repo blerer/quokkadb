@@ -266,6 +266,7 @@ impl DbImpl {
         &self,
         collection: u32,
         logical_plan: LogicalPlan,
+        sync: bool,
     ) -> error::Result<WriteResult> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
@@ -417,7 +418,8 @@ impl DbImpl {
             _ => panic!("Unsupported write operation {:?}", logical_plan),
         };
 
-        self.executor.execute_direct(physical_plan, parameters)
+        self.executor
+            .execute_direct(physical_plan, parameters, sync)
     }
 
     pub fn execute_query(

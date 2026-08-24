@@ -58,16 +58,17 @@ impl WriteExecutor {
         &self,
         plan: PhysicalPlan,
         parameters: Option<Parameters>,
+        sync: bool,
     ) -> Result<WriteResult> {
         let result = match plan {
             PhysicalPlan::InsertMany {
                 collection,
                 documents,
-            } => self.perform_insert_many(collection, documents),
+            } => self.perform_insert_many(collection, documents, sync),
             PhysicalPlan::InsertOne {
                 collection,
                 document,
-            } => self.perform_insert_one(collection, document),
+            } => self.perform_insert_one(collection, document, sync),
             PhysicalPlan::UpdateOne {
                 collection,
                 query,
@@ -75,7 +76,7 @@ impl WriteExecutor {
                 upsert,
             } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateOne");
-                self.perform_update_one(collection, query, &update, upsert, &parameters)
+                self.perform_update_one(collection, query, &update, upsert, &parameters, sync)
             }
             PhysicalPlan::UpdateMany {
                 collection,
@@ -84,7 +85,7 @@ impl WriteExecutor {
                 upsert,
             } => {
                 let parameters = parameters.expect("Parameters must be provided for UpdateMany");
-                self.perform_update_many(collection, query, &update, upsert, &parameters)
+                self.perform_update_many(collection, query, &update, upsert, &parameters, sync)
             }
             PhysicalPlan::FindOneAndUpdate {
                 collection,
@@ -104,6 +105,7 @@ impl WriteExecutor {
                     upsert,
                     return_document,
                     &parameters,
+                    sync,
                 )
             }
             PhysicalPlan::ReplaceOne {
@@ -113,7 +115,7 @@ impl WriteExecutor {
                 upsert,
             } => {
                 let parameters = parameters.expect("Parameters must be provided for ReplaceOne");
-                self.perform_replace_one(collection, query, replacement, upsert, &parameters)
+                self.perform_replace_one(collection, query, replacement, upsert, &parameters, sync)
             }
             PhysicalPlan::FindOneAndReplace {
                 collection,
@@ -133,6 +135,7 @@ impl WriteExecutor {
                     upsert,
                     return_document,
                     &parameters,
+                    sync,
                 )
             }
             PhysicalPlan::FindOneAndDelete {
@@ -142,15 +145,15 @@ impl WriteExecutor {
             } => {
                 let parameters =
                     parameters.expect("Parameters must be provided for FindOneAndDelete");
-                self.perform_find_one_and_delete(collection, query, projection, &parameters)
+                self.perform_find_one_and_delete(collection, query, projection, &parameters, sync)
             }
             PhysicalPlan::DeleteOne { collection, query } => {
                 let parameters = parameters.expect("Parameters must be provided for DeleteOne");
-                self.perform_delete_one(collection, query, &parameters)
+                self.perform_delete_one(collection, query, &parameters, sync)
             }
             PhysicalPlan::DeleteMany { collection, query } => {
                 let parameters = parameters.expect("Parameters must be provided for DeleteMany");
-                self.perform_delete_many(collection, query, &parameters)
+                self.perform_delete_many(collection, query, &parameters, sync)
             }
             _ => unreachable!("Direct execution not supported for plan: {:?}", plan),
         };
@@ -244,6 +247,7 @@ impl WriteExecutor {
         update: &UpdateExpr,
         upsert: bool,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
         let _span = trace_span!("update_many", upsert, snapshot,).entered();
@@ -325,7 +329,7 @@ impl WriteExecutor {
         );
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::UpdateManyBeforeCommit);
-        self.storage_engine.write(batch)?;
+        self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Update {
             matched_count,
@@ -341,9 +345,12 @@ impl WriteExecutor {
         update: &UpdateExpr,
         upsert: bool,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("update_one", upsert).entered();
-        match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
+        match self
+            .perform_single_document_update(collection, query, update, upsert, parameters, sync)?
+        {
             SingleDocumentUpdateResult::Updated { .. } => Ok(WriteResult::Update {
                 matched_count: 1,
                 modified_count: 1,
@@ -371,6 +378,7 @@ impl WriteExecutor {
         upsert: bool,
         return_document: ReturnDocument,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!(
             "find_one_and_update",
@@ -378,7 +386,9 @@ impl WriteExecutor {
             return_document = ?return_document
         )
         .entered();
-        match self.perform_single_document_update(collection, query, update, upsert, parameters)? {
+        match self
+            .perform_single_document_update(collection, query, update, upsert, parameters, sync)?
+        {
             SingleDocumentUpdateResult::Updated { old_doc, new_doc } => {
                 let returned = match return_document {
                     ReturnDocument::Before => old_doc,
@@ -421,6 +431,7 @@ impl WriteExecutor {
         replacement: Document,
         upsert: bool,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("replace_one", upsert).entered();
         match self.perform_single_document_replace(
@@ -429,6 +440,7 @@ impl WriteExecutor {
             replacement,
             upsert,
             parameters,
+            sync,
         )? {
             SingleDocumentReplaceResult::Replaced { .. } => Ok(WriteResult::Update {
                 matched_count: 1,
@@ -457,6 +469,7 @@ impl WriteExecutor {
         upsert: bool,
         return_document: ReturnDocument,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!(
             "find_one_and_replace",
@@ -470,6 +483,7 @@ impl WriteExecutor {
             replacement,
             upsert,
             parameters,
+            sync,
         )? {
             SingleDocumentReplaceResult::Replaced { old_doc, new_doc } => {
                 let returned = match return_document {
@@ -511,9 +525,10 @@ impl WriteExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("delete_one").entered();
-        match self.perform_single_document_delete(collection, query, parameters)? {
+        match self.perform_single_document_delete(collection, query, parameters, sync)? {
             SingleDocumentDeleteResult::Deleted { .. } => {
                 Ok(WriteResult::Delete { deleted_count: 1 })
             }
@@ -526,6 +541,7 @@ impl WriteExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let snapshot = self.storage_engine.last_visible_sequence();
         let _span = trace_span!("delete_many", snapshot,).entered();
@@ -565,7 +581,7 @@ impl WriteExecutor {
         );
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::DeleteManyBeforeCommit);
-        self.storage_engine.write(batch)?;
+        self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Delete { deleted_count })
     }
@@ -576,9 +592,10 @@ impl WriteExecutor {
         query: Arc<PhysicalPlan>,
         projection: Option<Arc<Projection>>,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("find_one_and_delete").entered();
-        match self.perform_single_document_delete(collection, query, parameters)? {
+        match self.perform_single_document_delete(collection, query, parameters, sync)? {
             SingleDocumentDeleteResult::Deleted { old_doc } => Ok(WriteResult::SingleDocument {
                 affected_count: 1,
                 document: Some(self.apply_return_projection(
@@ -614,6 +631,7 @@ impl WriteExecutor {
         update: &UpdateExpr,
         upsert: bool,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<SingleDocumentUpdateResult> {
         let start_time = Instant::now();
         let mut attempt = 0;
@@ -642,6 +660,7 @@ impl WriteExecutor {
                     Some(old_doc.clone()),
                     new_doc.clone(),
                     new_doc_bytes,
+                    sync,
                 ) {
                     Ok(_) => {
                         return Ok(SingleDocumentUpdateResult::Updated { old_doc, new_doc });
@@ -670,6 +689,7 @@ impl WriteExecutor {
                 None,
                 new_doc.clone(),
                 new_doc_bytes,
+                sync,
             ) {
                 Ok(_) => {
                     return Ok(SingleDocumentUpdateResult::Upserted {
@@ -691,6 +711,7 @@ impl WriteExecutor {
         replacement: Document,
         upsert: bool,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<SingleDocumentReplaceResult> {
         let start_time = Instant::now();
         let mut attempt = 0;
@@ -718,6 +739,7 @@ impl WriteExecutor {
                     Some(old_doc.clone()),
                     new_doc.clone(),
                     new_doc_bytes,
+                    sync,
                 ) {
                     Ok(_) => {
                         return Ok(SingleDocumentReplaceResult::Replaced { old_doc, new_doc });
@@ -745,6 +767,7 @@ impl WriteExecutor {
                 None,
                 new_doc.clone(),
                 new_doc_bytes,
+                sync,
             ) {
                 Ok(_) => {
                     return Ok(SingleDocumentReplaceResult::Upserted {
@@ -764,6 +787,7 @@ impl WriteExecutor {
         collection: u32,
         query: Arc<PhysicalPlan>,
         parameters: &Parameters,
+        sync: bool,
     ) -> Result<SingleDocumentDeleteResult> {
         let start_time = Instant::now();
         let mut attempt = 0;
@@ -782,7 +806,7 @@ impl WriteExecutor {
 
                 #[cfg(test)]
                 self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
-                match self.delete_document(collection, snapshot, user_key, &old_doc) {
+                match self.delete_document(collection, snapshot, user_key, &old_doc, sync) {
                     Ok(_) => return Ok(SingleDocumentDeleteResult::Deleted { old_doc }),
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
@@ -799,6 +823,7 @@ impl WriteExecutor {
         &self,
         collection: u32,
         document: Vec<u8>,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("insert_one").entered();
         let mut doc = document;
@@ -843,10 +868,12 @@ impl WriteExecutor {
             )
         };
 
-        self.storage_engine.write(batch).map_err(|e| match e {
-            StorageError::VersionConflict { .. } => Self::duplicate_key_error(&id),
-            _ => e.into(),
-        })?;
+        self.storage_engine
+            .write(batch, sync)
+            .map_err(|e| match e {
+                StorageError::VersionConflict { .. } => Self::duplicate_key_error(&id),
+                _ => e.into(),
+            })?;
 
         Ok(WriteResult::InsertOne { inserted_id: id })
     }
@@ -855,6 +882,7 @@ impl WriteExecutor {
         &self,
         collection: u32,
         documents: Vec<Vec<u8>>,
+        sync: bool,
     ) -> Result<WriteResult> {
         let _span = trace_span!("insert_many").entered();
         if documents.is_empty() {
@@ -948,7 +976,7 @@ impl WriteExecutor {
             self.invoke_test_hook(ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite);
         }
 
-        if let Err(e) = self.storage_engine.write(batch) {
+        if let Err(e) = self.storage_engine.write(batch, sync) {
             match e {
                 StorageError::VersionConflict {
                     user_key: conflicting_key,
@@ -972,6 +1000,7 @@ impl WriteExecutor {
         old_doc: Option<Document>,
         new_doc: Document,
         new_doc_bytes: Vec<u8>,
+        sync: bool,
     ) -> std::result::Result<(), StorageError> {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
@@ -1004,7 +1033,7 @@ impl WriteExecutor {
             Preconditions::new(snapshot, vec![precondition]),
             count_stats.build(),
         );
-        self.storage_engine.write(batch)
+        self.storage_engine.write(batch, sync)
     }
 
     fn delete_document(
@@ -1013,6 +1042,7 @@ impl WriteExecutor {
         snapshot: u64,
         user_key: Vec<u8>,
         old_doc: &Document,
+        sync: bool,
     ) -> std::result::Result<(), StorageError> {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
@@ -1032,7 +1062,7 @@ impl WriteExecutor {
             Preconditions::new(snapshot, vec![precondition]),
             count_stats.build(),
         );
-        self.storage_engine.write(batch)
+        self.storage_engine.write(batch, sync)
     }
 
     fn prepare_replacement_document(

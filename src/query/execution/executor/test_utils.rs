@@ -178,6 +178,7 @@ pub(crate) fn insert_one(
             document: doc.to_vec()?,
         },
         None,
+        false,
     )
 }
 
@@ -206,6 +207,7 @@ pub(crate) fn insert_many(
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         },
         None,
+        false,
     )
 }
 
@@ -262,7 +264,7 @@ pub(crate) fn execute_update_one(
         upsert: false,
     };
 
-    executor.execute_direct(update_plan, Some(params))
+    executor.execute_direct(update_plan, Some(params), false)
 }
 
 pub(crate) fn execute_update_one_with_expr(
@@ -280,7 +282,7 @@ pub(crate) fn execute_update_one_with_expr(
         upsert: false,
     };
 
-    executor.execute_direct(update_plan, Some(params))
+    executor.execute_direct(update_plan, Some(params), false)
 }
 
 pub(crate) fn execute_delete_one(
@@ -295,7 +297,7 @@ pub(crate) fn execute_delete_one(
         query: query_plan,
     };
 
-    executor.execute_direct(delete_plan, Some(params))
+    executor.execute_direct(delete_plan, Some(params), false)
 }
 
 pub(crate) fn execute_delete_many(
@@ -309,7 +311,7 @@ pub(crate) fn execute_delete_many(
         query,
     };
 
-    executor.execute_direct(delete_plan, Some(params))
+    executor.execute_direct(delete_plan, Some(params), false)
 }
 
 pub(crate) fn execute_find_one_and_delete(
@@ -325,7 +327,7 @@ pub(crate) fn execute_find_one_and_delete(
         projection: None,
     };
 
-    executor.execute_direct(delete_plan, Some(params))
+    executor.execute_direct(delete_plan, Some(params), false)
 }
 
 pub(crate) fn execute_replace_one(
@@ -344,7 +346,7 @@ pub(crate) fn execute_replace_one(
         upsert,
     };
 
-    executor.execute_direct(replace_plan, Some(params))
+    executor.execute_direct(replace_plan, Some(params), false)
 }
 
 pub(crate) fn execute_find_one_and_replace(
@@ -366,7 +368,7 @@ pub(crate) fn execute_find_one_and_replace(
         return_document,
     };
 
-    executor.execute_direct(replace_plan, Some(params))
+    executor.execute_direct(replace_plan, Some(params), false)
 }
 
 pub(crate) fn spawn_paused_update_one(
@@ -477,7 +479,7 @@ pub(crate) fn execute_update_one_with_expr_and_upsert(
         upsert,
     };
 
-    executor.execute_direct(update_plan, Some(params))
+    executor.execute_direct(update_plan, Some(params), false)
 }
 
 pub(crate) fn execute_find_one_and_update_with_expr_and_upsert(
@@ -499,7 +501,7 @@ pub(crate) fn execute_find_one_and_update_with_expr_and_upsert(
         return_document,
     };
 
-    executor.execute_direct(update_plan, Some(params))
+    executor.execute_direct(update_plan, Some(params), false)
 }
 
 pub(crate) fn spawn_paused_find_one_and_update_with_expr_and_upsert(
@@ -540,7 +542,7 @@ pub(crate) fn execute_update_many(
         upsert,
     };
 
-    executor.execute_direct(update_plan, Some(params))
+    executor.execute_direct(update_plan, Some(params), false)
 }
 
 pub(crate) fn spawn_paused_update_many(

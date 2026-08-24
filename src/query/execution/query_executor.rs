@@ -54,10 +54,11 @@ impl QueryExecutor {
         &self,
         plan: PhysicalPlan,
         parameters: Option<Parameters>,
+        sync: bool,
     ) -> Result<WriteResult> {
         self.metrics.write_queries.inc();
         let start = Instant::now();
-        let result = self.write_executor.execute_direct(plan, parameters);
+        let result = self.write_executor.execute_direct(plan, parameters, sync);
         self.metrics
             .write_query_duration
             .record(start.elapsed().as_micros() as u64);
@@ -222,6 +223,7 @@ mod tests {
                 document: doc! { "_id": 1, "name": "a" }.to_vec()?,
             },
             None,
+            false,
         )?;
 
         assert_eq!(
@@ -266,6 +268,7 @@ mod tests {
                 document: doc! { "_id": 1, "name": "a" }.to_vec()?,
             },
             None,
+            false,
         )?;
 
         let mut params = Parameters::new();

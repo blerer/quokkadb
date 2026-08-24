@@ -52,7 +52,7 @@ fn test_execution_roundtrip() -> Result<()> {
         documents: vec![doc2.to_vec()?, doc3.to_vec()?],
     };
 
-    let inserted_ids = inserted_ids(executor.execute_direct(insert_many_plan, None)?);
+    let inserted_ids = inserted_ids(executor.execute_direct(insert_many_plan, None, false)?);
     assert_eq!(inserted_ids.len(), 2);
     let inserted_id2 = inserted_ids[0].clone();
     let inserted_id3 = inserted_ids[1].clone();
@@ -129,7 +129,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     // 3a. Delete the document via direct storage engine write
     let key_to_delete = BsonValue(Bson::Int32(40)).try_into_key()?;
     let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
-    storage_engine.write(write_batch(vec![delete_op]))?;
+    storage_engine.write(write_batch(vec![delete_op]), false)?;
 
     // 3b. Search for it
     let mut params_deleted = Parameters::new();
@@ -1077,7 +1077,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
         key.clone(),
         doc! { "_id": 1_i32, "value": "updated" }.to_vec()?,
     );
-    storage_engine.write(write_batch(vec![update_op]))?;
+    storage_engine.write(write_batch(vec![update_op]), false)?;
 
     // 5. Query at snapshot
     let mut params = Parameters::new();
@@ -1103,7 +1103,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
 
     let key_to_delete = BsonValue(Bson::Int32(2)).try_into_key()?;
     let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
-    storage_engine.write(write_batch(vec![delete_op]))?;
+    storage_engine.write(write_batch(vec![delete_op]), false)?;
 
     let scan_plan = full_scan_plan(collection_id);
 

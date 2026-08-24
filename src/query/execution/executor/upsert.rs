@@ -335,7 +335,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         assert_update_result(result, 0, 0, Some(1));
 
         // 3. Verify the document was inserted
@@ -419,7 +419,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         assert_update_result(result, 1, 1, Option::<Bson>::None);
 
         // 3. Verify the document was updated
@@ -455,7 +455,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         match result {
             WriteResult::Update {
                 matched_count,
@@ -510,7 +510,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         assert_update_result(result, 0, 0, Some(42));
 
         // 3. Verify the nested structure was created
@@ -563,7 +563,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         match result {
             WriteResult::Update {
                 matched_count,
@@ -621,7 +621,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(update_plan, Some(params))?;
+        let result = executor.execute_direct(update_plan, Some(params), false)?;
         match result {
             WriteResult::Update {
                 matched_count,
@@ -673,7 +673,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(replace_plan, Some(params))?;
+        let result = executor.execute_direct(replace_plan, Some(params), false)?;
         assert_update_result(result, 0, 0, Some(42));
 
         let doc = read_stored_doc(&storage_engine, collection_id, 42)?;
@@ -718,7 +718,7 @@ mod tests {
             upsert: true,
         };
 
-        let result = executor.execute_direct(replace_plan, Some(params))?;
+        let result = executor.execute_direct(replace_plan, Some(params), false)?;
         assert_update_result(result, 0, 0, Some(7));
 
         let doc = read_stored_doc(&storage_engine, collection_id, 7)?;

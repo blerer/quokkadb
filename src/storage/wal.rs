@@ -130,12 +130,17 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    pub(crate) fn finish_append_group(&mut self) -> Result<()> {
-        match self.wal_durability {
-            WalDurability::Durable => self.sync()?,
-            WalDurability::ProcessSafe => self.append_log.flush()?,
-            WalDurability::Buffered => (),
+    pub(crate) fn finish_append_group(&mut self, force_sync: bool) -> Result<()> {
+        if force_sync {
+            self.sync()?;
+        } else {
+            match self.wal_durability {
+                WalDurability::Durable => self.sync()?,
+                WalDurability::ProcessSafe => self.append_log.flush()?,
+                WalDurability::Buffered => (),
+            }
         }
+
         Ok(())
     }
 
@@ -189,7 +194,7 @@ impl WriteAheadLog {
     }
 
     fn sync_if_needed(&mut self) -> Result<()> {
-        if self.pending_bytes > 0 && self.pending_bytes >= self.wal_bytes_per_sync {
+        if self.pending_bytes >= self.wal_bytes_per_sync {
             tracing::debug!(
                 pending_bytes = self.pending_bytes,
                 wal_bytes_per_sync = self.wal_bytes_per_sync,
@@ -399,7 +404,7 @@ mod tests {
         for (seq, batch) in &batches {
             wal.append(*seq, batch).unwrap();
         }
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         let wal_file = path.join("000001.log");
         assert!(wal_file.exists());
@@ -467,7 +472,7 @@ mod tests {
         );
 
         wal.append(10, &batch).unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         let wal_file = path.join("000001.log");
         let replayed: Vec<_> = WriteAheadLog::replay(&wal_file)
@@ -495,7 +500,7 @@ mod tests {
             &write_batch(vec![Operation::new_put(1, 1, b"a".to_vec(), b"1".to_vec())]),
         )
         .unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
         wal.rotate(2).unwrap();
 
         // Append and rotate to log 3
@@ -504,7 +509,7 @@ mod tests {
             &write_batch(vec![Operation::new_put(1, 1, b"b".to_vec(), b"2".to_vec())]),
         )
         .unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
         wal.rotate(3).unwrap();
 
         // Validate replay of rotated files
@@ -567,7 +572,7 @@ mod tests {
         }
 
         wal.append(1, &write_batch(batch)).unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         // Should have triggered sync
         assert_eq!(wal.pending_bytes, 0);
@@ -588,7 +593,7 @@ mod tests {
             WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 1).unwrap();
 
         wal.append(1, &write_batch(vec![new_operation(1)])).unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         assert_eq!(wal.metrics.bytes_buffered.get(), 0);
         assert!(wal.metrics.bytes_written.get() > BUFFER_SIZE_IN_BYTES as u64);
@@ -608,12 +613,35 @@ mod tests {
             WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 1).unwrap();
 
         wal.append(1, &write_batch(vec![new_operation(1)])).unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         assert!(wal.metrics.bytes_buffered.get() > 0);
         assert_eq!(wal.metrics.bytes_written.get(), BUFFER_SIZE_IN_BYTES as u64);
         assert_eq!(wal.metrics.syncs.get(), 1); // header only
         assert!(wal.pending_bytes > 0);
+    }
+
+    #[test]
+    fn test_force_sync_flushes_buffered_append_group() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let options = Options::default()
+            .with_wal_durability(WalDurability::Buffered)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, StorageUnit::Mebibytes));
+
+        let mut wal =
+            WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 1).unwrap();
+
+        wal.append(1, &write_batch(vec![new_operation(1)])).unwrap();
+
+        assert_eq!(wal.metrics.syncs.get(), 1); // header only
+        assert!(wal.pending_bytes > 0);
+
+        wal.finish_append_group(true).unwrap();
+
+        assert_eq!(wal.pending_bytes, 0);
+        assert_eq!(wal.metrics.bytes_buffered.get(), 0);
+        assert_eq!(wal.metrics.syncs.get(), 2); // header + forced group sync
     }
 
     #[test]
@@ -626,7 +654,7 @@ mod tests {
             WriteAheadLog::new(&mut MetricRegistry::default(), &options, path, 1).unwrap();
 
         wal.append(1, &write_batch(vec![new_operation(1)])).unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         assert_eq!(wal.pending_bytes, 0);
         assert_eq!(wal.metrics.bytes_buffered.get(), 0);
@@ -648,7 +676,7 @@ mod tests {
         assert_eq!(wal.metrics.syncs.get(), 1); // header only
         assert!(wal.pending_bytes > 0);
 
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
 
         assert_eq!(wal.pending_bytes, 0);
         assert_eq!(wal.metrics.syncs.get(), 2); // header + one group sync
@@ -666,7 +694,7 @@ mod tests {
             wal.append(100 + i as u64, &write_batch(vec![new_operation(i)]))
                 .unwrap();
         }
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
         wal.rotate(8).unwrap();
 
         // metrics check
@@ -727,7 +755,7 @@ mod tests {
             &write_batch(vec![Operation::new_put(1, 1, b"x".to_vec(), b"1".to_vec())]),
         )
         .unwrap();
-        wal.finish_append_group().unwrap();
+        wal.finish_append_group(false).unwrap();
         wal.rotate(14).unwrap();
 
         let log_file = path.join("000013.log");

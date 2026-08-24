@@ -1,5 +1,6 @@
 use super::*;
 use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
+use crate::options::options::WalDurability;
 use crate::options::storage_quantity::StorageUnit::Mebibytes;
 use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use crate::storage::catalog::{
@@ -124,12 +125,14 @@ fn test_read() {
     ];
 
     for insert in inserts {
-        let _ = &engine.write(write_batch(vec![insert])).unwrap();
+        let _ = &engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let snapshot = engine.last_visible_seq.load(Ordering::Relaxed);
 
-    let _ = &engine.write(write_batch(vec![delete_op(col, 4)])).unwrap();
+    let _ = &engine
+        .write(write_batch(vec![delete_op(col, 4)]), false)
+        .unwrap();
 
     assert_gauge_eq(registry, "sstable_count", 0);
     assert_gauge_eq(registry, "sstable_count_level_0", 0);
@@ -164,7 +167,7 @@ fn test_read() {
     let updates = vec![put_op(col, 2, 2), put_op(col, 3, 2), put_op(col, 4, 2)];
 
     for update in updates {
-        let _ = &engine.write(write_batch(vec![update])).unwrap();
+        let _ = &engine.write(write_batch(vec![update]), false).unwrap();
     }
 
     for flush in [false, true] {
@@ -237,7 +240,7 @@ fn test_range_scan() {
         put_op(col, 5, 1), // seq 5
     ];
     for insert in inserts {
-        engine.write(write_batch(vec![insert])).unwrap();
+        engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let snapshot1 = engine.last_visible_seq.load(Ordering::Relaxed);
@@ -249,7 +252,7 @@ fn test_range_scan() {
         delete_op(col, 4), // seq 7
     ];
     for update in updates {
-        engine.write(write_batch(vec![update])).unwrap();
+        engine.write(write_batch(vec![update]), false).unwrap();
     }
 
     // --- Verification: memtable only ---
@@ -284,7 +287,7 @@ fn test_range_scan() {
         delete_op(col, 5), // seq 10
     ];
     for update in updates2 {
-        engine.write(write_batch(vec![update])).unwrap();
+        engine.write(write_batch(vec![update]), false).unwrap();
     }
 
     // --- Verification: 1 SSTable + memtable ---
@@ -319,7 +322,7 @@ fn test_range_scan() {
         put_op(col, 7, 1), // seq 12
     ];
     for update in updates3 {
-        engine.write(write_batch(vec![update])).unwrap();
+        engine.write(write_batch(vec![update]), false).unwrap();
     }
 
     // --- Verification: 2 SSTables + memtable ---
@@ -375,24 +378,30 @@ fn test_read_and_scan_with_immutable_memtables() {
     let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
     for i in 1..=4 {
         engine
-            .write(write_batch(vec![Operation::new_put(
-                col,
-                idx,
-                user_key(i),
-                val_1mb.clone(),
-            )]))
+            .write(
+                write_batch(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(i),
+                    val_1mb.clone(),
+                )]),
+                false,
+            )
             .unwrap();
     }
 
     // This fifth write will trigger rotation, creating an immutable memtable.
     let val_active = doc! { "v": "active" }.to_vec().unwrap();
     engine
-        .write(write_batch(vec![Operation::new_put(
-            col,
-            idx,
-            user_key(5),
-            val_active.clone(),
-        )]))
+        .write(
+            write_batch(vec![Operation::new_put(
+                col,
+                idx,
+                user_key(5),
+                val_active.clone(),
+            )]),
+            false,
+        )
         .unwrap();
 
     // Verify that one immutable memtable now exists.
@@ -443,12 +452,15 @@ fn test_read_and_scan_with_immutable_memtables() {
     // Update a key that is in the immutable memtable. The update goes to the active memtable.
     let val_update = doc! { "v": "updated" }.to_vec().unwrap();
     engine
-        .write(write_batch(vec![Operation::new_put(
-            col,
-            idx,
-            user_key(2),
-            val_update.clone(),
-        )]))
+        .write(
+            write_batch(vec![Operation::new_put(
+                col,
+                idx,
+                user_key(2),
+                val_update.clone(),
+            )]),
+            false,
+        )
         .unwrap();
 
     // Read the updated key without a snapshot. Should see the new value.
@@ -523,12 +535,15 @@ fn test_replay_with_multiple_wals() {
         // We write four ~1MB values to fill up the 4MB memtable.
         for i in 1..=11 {
             old_engine
-                .write(write_batch(vec![Operation::new_put(
-                    col,
-                    idx,
-                    user_key(i),
-                    val_1mb.clone(),
-                )]))
+                .write(
+                    write_batch(vec![Operation::new_put(
+                        col,
+                        idx,
+                        user_key(i),
+                        val_1mb.clone(),
+                    )]),
+                    false,
+                )
                 .unwrap();
         }
 
@@ -596,7 +611,7 @@ fn test_manifest_rotation() {
     // is ~40 bytes. We need to cross the 5KiB threshold, so we need ~25 flushes.
     for i in 0..25 {
         engine
-            .write(write_batch(vec![put_op(col, i, i as u32)]))
+            .write(write_batch(vec![put_op(col, i, i as u32)]), false)
             .unwrap();
         engine.flush().unwrap();
     }
@@ -663,7 +678,7 @@ fn test_manifest_rotation_error() {
     // We need to cross the 5KiB threshold, so we need ~30 flushes.
     for i in 0..30 {
         engine
-            .write(write_batch(vec![put_op(col, i, i as u32)]))
+            .write(write_batch(vec![put_op(col, i, i as u32)]), false)
             .unwrap();
         let rs = engine.flush();
         if rs.is_err() {
@@ -697,7 +712,9 @@ fn test_obsolete_wal_deletion() {
     assert!(wal_path_1.exists());
 
     // Write some data, which goes into the first WAL.
-    engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
 
     // Flush will rotate the WAL, flush the memtable, and then delete the old WAL.
     engine.flush().unwrap();
@@ -710,7 +727,9 @@ fn test_obsolete_wal_deletion() {
     assert!(wal_path_2.exists());
 
     // Write more data, which goes into the second WAL.
-    engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 2, 2)]), false)
+        .unwrap();
 
     // Flush again.
     engine.flush().unwrap();
@@ -749,7 +768,9 @@ fn test_obsolete_sst_deletion_after_compaction() {
         .create_collection_if_not_exists("test_obsolete_sst_deletion_after_compaction")
         .unwrap();
 
-    engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
     engine.flush().unwrap();
 
     let l0_before = engine
@@ -765,7 +786,9 @@ fn test_obsolete_sst_deletion_after_compaction() {
     let first_sst_path = path.join(DbFile::new_sst(l0_before[0]).filename());
     assert!(first_sst_path.exists());
 
-    engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 2, 1)]), false)
+        .unwrap();
     engine.flush().unwrap();
 
     engine.compact().unwrap();
@@ -794,7 +817,9 @@ fn test_orphaned_sst_cleanup_on_startup() {
             .create_collection_if_not_exists("test_orphaned_sst_cleanup_on_startup")
             .unwrap();
 
-        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 1, 1)]), false)
+            .unwrap();
         engine.flush().unwrap();
 
         let live_sst_numbers = engine.lsm_tree().levels().live_sst_numbers();
@@ -870,7 +895,7 @@ fn test_concurrent_writes(with_concurrent_flushes: bool) {
                     let key = i * writes_per_thread + j;
                     let value = key as u32;
                     let op = put_op(col, key, value);
-                    engine_clone.write(write_batch(vec![op])).unwrap();
+                    engine_clone.write(write_batch(vec![op]), false).unwrap();
                     if with_concurrent_flushes && j == 100 {
                         // Occasionally flush to increase concurrency complexity
                         engine_clone.flush().unwrap();
@@ -926,13 +951,21 @@ fn test_shutdown_and_restart() {
             .unwrap();
 
         // Write some data and flush it to an SSTable.
-        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
-        engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 1, 1)]), false)
+            .unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 2, 1)]), false)
+            .unwrap();
         engine.flush().unwrap();
 
         // Write more data that will remain in the memtable.
-        engine.write(write_batch(vec![put_op(col, 3, 1)])).unwrap();
-        engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap(); // Update flushed key
+        engine
+            .write(write_batch(vec![put_op(col, 3, 1)]), false)
+            .unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 2, 2)]), false)
+            .unwrap(); // Update flushed key
 
         // Gracefully shut down the engine. This should flush the memtable.
         engine.shutdown().unwrap();
@@ -993,15 +1026,23 @@ fn test_wal_replay_on_restart() {
             .unwrap();
 
         // Write some data and flush it to an SSTable.
-        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap(); // seq 1
-        engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap(); // seq 2
+        engine
+            .write(write_batch(vec![put_op(col, 1, 1)]), false)
+            .unwrap(); // seq 1
+        engine
+            .write(write_batch(vec![put_op(col, 2, 1)]), false)
+            .unwrap(); // seq 2
         engine.flush().unwrap(); // Flushes memtable, rotates WAL.
 
         // Data in SSTable: {1:1, 2:1}
 
         // Write more data that will remain in the memtable and WAL.
-        engine.write(write_batch(vec![put_op(col, 3, 1)])).unwrap(); // seq 3
-        engine.write(write_batch(vec![put_op(col, 2, 2)])).unwrap(); // seq 4, updates a flushed key
+        engine
+            .write(write_batch(vec![put_op(col, 3, 1)]), false)
+            .unwrap(); // seq 3
+        engine
+            .write(write_batch(vec![put_op(col, 2, 2)]), false)
+            .unwrap(); // seq 4, updates a flushed key
 
         // Simulate a crash by just dropping the engine without calling shutdown.
         // The memtable content is lost, but the WAL records should persist.
@@ -1074,52 +1115,58 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
         let index_id = created_index.id;
 
         engine
-            .write(write_batch_with_count_stats(
-                vec![
-                    Operation::new_put(
-                        collection_id,
-                        0,
-                        user_key(1),
-                        document(1, 1).to_vec().unwrap(),
-                    ),
-                    Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
-                ],
-                CountStats::new(BTreeMap::from([
-                    (CountStatsKey::Collection(collection_id), 1),
-                    (
-                        CountStatsKey::Index {
-                            collection: collection_id,
-                            index: index_id,
-                        },
-                        1,
-                    ),
-                ])),
-            ))
+            .write(
+                write_batch_with_count_stats(
+                    vec![
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(1),
+                            document(1, 1).to_vec().unwrap(),
+                        ),
+                        Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
+                    ],
+                    CountStats::new(BTreeMap::from([
+                        (CountStatsKey::Collection(collection_id), 1),
+                        (
+                            CountStatsKey::Index {
+                                collection: collection_id,
+                                index: index_id,
+                            },
+                            1,
+                        ),
+                    ])),
+                ),
+                false,
+            )
             .unwrap();
         engine.flush().unwrap();
 
         engine
-            .write(write_batch_with_count_stats(
-                vec![
-                    Operation::new_put(
-                        collection_id,
-                        0,
-                        user_key(2),
-                        document(2, 1).to_vec().unwrap(),
-                    ),
-                    Operation::new_put(collection_id, index_id, b"bob".to_vec(), user_key(2)),
-                ],
-                CountStats::new(BTreeMap::from([
-                    (CountStatsKey::Collection(collection_id), 1),
-                    (
-                        CountStatsKey::Index {
-                            collection: collection_id,
-                            index: index_id,
-                        },
-                        1,
-                    ),
-                ])),
-            ))
+            .write(
+                write_batch_with_count_stats(
+                    vec![
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(2),
+                            document(2, 1).to_vec().unwrap(),
+                        ),
+                        Operation::new_put(collection_id, index_id, b"bob".to_vec(), user_key(2)),
+                    ],
+                    CountStats::new(BTreeMap::from([
+                        (CountStatsKey::Collection(collection_id), 1),
+                        (
+                            CountStatsKey::Index {
+                                collection: collection_id,
+                                index: index_id,
+                            },
+                            1,
+                        ),
+                    ])),
+                ),
+                false,
+            )
             .unwrap();
 
         drop(engine);
@@ -1170,47 +1217,53 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
         let index_id = created_index.id;
 
         engine
-            .write(write_batch_with_count_stats(
-                vec![
-                    Operation::new_put(
-                        collection_id,
-                        0,
-                        user_key(1),
-                        document(1, 1).to_vec().unwrap(),
-                    ),
-                    Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
-                ],
-                CountStats::new(std::collections::BTreeMap::from([
-                    (CountStatsKey::Collection(collection_id), 1),
-                    (
-                        CountStatsKey::Index {
-                            collection: collection_id,
-                            index: index_id,
-                        },
-                        1,
-                    ),
-                ])),
-            ))
+            .write(
+                write_batch_with_count_stats(
+                    vec![
+                        Operation::new_put(
+                            collection_id,
+                            0,
+                            user_key(1),
+                            document(1, 1).to_vec().unwrap(),
+                        ),
+                        Operation::new_put(collection_id, index_id, b"alice".to_vec(), user_key(1)),
+                    ],
+                    CountStats::new(std::collections::BTreeMap::from([
+                        (CountStatsKey::Collection(collection_id), 1),
+                        (
+                            CountStatsKey::Index {
+                                collection: collection_id,
+                                index: index_id,
+                            },
+                            1,
+                        ),
+                    ])),
+                ),
+                false,
+            )
             .unwrap();
         engine.flush().unwrap();
 
         engine
-            .write(write_batch_with_count_stats(
-                vec![
-                    Operation::new_delete(collection_id, 0, user_key(1)),
-                    Operation::new_delete(collection_id, index_id, b"alice".to_vec()),
-                ],
-                CountStats::new(std::collections::BTreeMap::from([
-                    (CountStatsKey::Collection(collection_id), -1),
-                    (
-                        CountStatsKey::Index {
-                            collection: collection_id,
-                            index: index_id,
-                        },
-                        -1,
-                    ),
-                ])),
-            ))
+            .write(
+                write_batch_with_count_stats(
+                    vec![
+                        Operation::new_delete(collection_id, 0, user_key(1)),
+                        Operation::new_delete(collection_id, index_id, b"alice".to_vec()),
+                    ],
+                    CountStats::new(std::collections::BTreeMap::from([
+                        (CountStatsKey::Collection(collection_id), -1),
+                        (
+                            CountStatsKey::Index {
+                                collection: collection_id,
+                                index: index_id,
+                            },
+                            -1,
+                        ),
+                    ])),
+                ),
+                false,
+            )
             .unwrap();
 
         drop(engine);
@@ -1255,8 +1308,12 @@ fn test_wal_replay_with_last_log_partially_written() {
             .create_collection_if_not_exists("test_wal_replay_with_partial_log")
             .unwrap();
 
-        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
-        engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 1, 1)]), false)
+            .unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 2, 1)]), false)
+            .unwrap();
 
         wal_path = db_path.join("000002.log");
         drop(engine);
@@ -1297,7 +1354,7 @@ fn test_wal_replay_with_last_log_partially_written() {
 
     // Writing a new record should work.
     engine_restarted
-        .write(write_batch(vec![put_op(col, 3, 1)]))
+        .write(write_batch(vec![put_op(col, 3, 1)]), false)
         .unwrap();
     let (_key3, val3) = engine_restarted
         .read(col, idx, &user_key(3), None)
@@ -1328,7 +1385,9 @@ fn test_wal_replay_with_header_corruption() {
             .create_collection_if_not_exists("test_wal_replay_with_header_corruption")
             .unwrap();
 
-        engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+        engine
+            .write(write_batch(vec![put_op(col, 1, 1)]), false)
+            .unwrap();
         original_wal_path = db_path.join("000002.log");
         drop(engine);
         col
@@ -1368,7 +1427,7 @@ fn test_wal_replay_with_header_corruption() {
 
     // The database should be usable.
     engine_restarted
-        .write(write_batch(vec![put_op(col, 2, 1)]))
+        .write(write_batch(vec![put_op(col, 2, 1)]), false)
         .unwrap();
     assert!(engine_restarted
         .read(col, idx, &user_key(2), None)
@@ -1408,20 +1467,26 @@ fn test_restart_fails_with_corrupted_old_wal() {
         // Write enough data to trigger memtable rotation, which also rotates the WAL.
         let large_val = vec![0; 1024];
         engine
-            .write(write_batch(vec![Operation::new_put(
-                col,
-                idx,
-                user_key(1),
-                large_val.clone(),
-            )]))
+            .write(
+                write_batch(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(1),
+                    large_val.clone(),
+                )]),
+                false,
+            )
             .unwrap();
         engine
-            .write(write_batch(vec![Operation::new_put(
-                col,
-                idx,
-                user_key(2),
-                large_val.clone(),
-            )]))
+            .write(
+                write_batch(vec![Operation::new_put(
+                    col,
+                    idx,
+                    user_key(2),
+                    large_val.clone(),
+                )]),
+                false,
+            )
             .unwrap();
 
         // A new WAL should exist now.
@@ -1476,7 +1541,7 @@ fn test_restart_with_stale_files() {
         ];
 
         for insert in inserts {
-            let _ = &engine.write(write_batch(vec![insert])).unwrap();
+            let _ = &engine.write(write_batch(vec![insert]), false).unwrap();
         }
 
         // Simulate crash
@@ -1510,7 +1575,7 @@ fn test_restart_with_stale_files() {
     // Verify that new files are created with the correct numbers.
     // A flush rotates the WAL, so a new WAL file should be created.
     engine_restarted
-        .write(write_batch(vec![put_op(col, 1, 1)]))
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
         .unwrap();
     engine_restarted.flush().unwrap();
 
@@ -1543,7 +1608,7 @@ fn test_error_mode_activation_and_rejection() {
     engine.wal_return_error_on_write(true);
 
     // 2. Perform a write operation that is expected to fail.
-    let write_result = engine.write(write_batch(vec![put_op(col, 1, 1)]));
+    let write_result = engine.write(write_batch(vec![put_op(col, 1, 1)]), false);
     assert!(write_result.is_err());
     let error = write_result.err().unwrap();
     let io_error = error.as_io_error().unwrap();
@@ -1580,12 +1645,15 @@ fn test_wal_rotation_on_write_error() {
     let val_1mb_string = "a".repeat(1024 * 1024);
     let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
     for i in 1..=5 {
-        let rs = engine.write(write_batch(vec![Operation::new_put(
-            col,
-            idx,
-            user_key(i),
-            val_1mb.clone(),
-        )]));
+        let rs = engine.write(
+            write_batch(vec![Operation::new_put(
+                col,
+                idx,
+                user_key(i),
+                val_1mb.clone(),
+            )]),
+            false,
+        );
 
         if rs.is_err() {
             assert_eq!(
@@ -1624,7 +1692,7 @@ fn test_wal_rotation_on_flush_error() {
     ];
 
     for insert in inserts {
-        let _ = &engine.write(write_batch(vec![insert])).unwrap();
+        let _ = &engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let rs = engine.flush();
@@ -1663,7 +1731,7 @@ fn test_manifest_write_error() {
     ];
 
     for insert in inserts {
-        let _ = &engine.write(write_batch(vec![insert])).unwrap();
+        let _ = &engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let rs = engine.flush();
@@ -1702,7 +1770,7 @@ fn test_memtable_flush_error() {
     ];
 
     for insert in inserts {
-        let _ = &engine.write(write_batch(vec![insert])).unwrap();
+        let _ = &engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let rs = engine.flush();
@@ -1724,7 +1792,7 @@ fn check_error_mode(engine: Arc<StorageEngine>, col: u32) {
         "Error mode: The database is in error mode dues to a previous write error";
 
     // Test write
-    let write_result_after_error = engine.write(write_batch(vec![put_op(col, 2, 2)]));
+    let write_result_after_error = engine.write(write_batch(vec![put_op(col, 2, 2)]), false);
     assert!(write_result_after_error.is_err());
     assert_eq!(
         write_result_after_error.err().unwrap().to_string(),
@@ -2179,7 +2247,7 @@ fn test_drop_collection() {
 
     // Write some data to it
     engine
-        .write(write_batch(vec![put_op(col_id, 1, 1)]))
+        .write(write_batch(vec![put_op(col_id, 1, 1)]), false)
         .unwrap();
 
     // Verify data exists
@@ -2229,12 +2297,14 @@ fn test_write_to_non_existent_collection() {
 
     let name = "existing_collection";
     let col = engine.create_collection_if_not_exists(name).unwrap();
-    engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
 
     engine.drop_collection(name).unwrap();
 
     // Try to write to a collection that doesn't exist
-    let result = engine.write(write_batch(vec![put_op(col, 1, 1)]));
+    let result = engine.write(write_batch(vec![put_op(col, 1, 1)]), false);
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err, StorageError::CollectionNotFound { .. }));
@@ -2254,7 +2324,7 @@ fn test_write_to_dropped_collection() {
     engine.drop_collection("test_collection").unwrap();
 
     // Try to write to the dropped collection
-    let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]));
+    let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]), false);
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err, StorageError::CollectionNotFound { .. }));
@@ -2280,10 +2350,10 @@ fn test_collection_persistence_across_restart() {
 
         // Write data to both
         engine
-            .write(write_batch(vec![put_op(col_id_1, 1, 1)]))
+            .write(write_batch(vec![put_op(col_id_1, 1, 1)]), false)
             .unwrap();
         engine
-            .write(write_batch(vec![put_op(col_id_2, 2, 2)]))
+            .write(write_batch(vec![put_op(col_id_2, 2, 2)]), false)
             .unwrap();
 
         engine.shutdown().unwrap();
@@ -2363,7 +2433,7 @@ fn test_drop_collection_persistence_across_restart() {
         assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
 
         // Writing to dropped collection should fail
-        let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]));
+        let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]), false);
         assert!(result.is_err());
     }
 }
@@ -2382,13 +2452,13 @@ fn test_drop_and_recreate_collection_data_isolation() {
     assert_eq!(col_id_1, 10);
 
     engine
-        .write(write_batch(vec![put_op(col_id_1, 1, 100)]))
+        .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
         .unwrap();
     engine
-        .write(write_batch(vec![put_op(col_id_1, 2, 200)]))
+        .write(write_batch(vec![put_op(col_id_1, 2, 200)]), false)
         .unwrap();
     engine
-        .write(write_batch(vec![put_op(col_id_1, 3, 300)]))
+        .write(write_batch(vec![put_op(col_id_1, 3, 300)]), false)
         .unwrap();
 
     // Verify data exists
@@ -2424,7 +2494,7 @@ fn test_drop_and_recreate_collection_data_isolation() {
 
     // Write new data to the recreated collection
     engine
-        .write(write_batch(vec![put_op(col_id_2, 1, 999)]))
+        .write(write_batch(vec![put_op(col_id_2, 1, 999)]), false)
         .unwrap();
 
     // The new data should be visible
@@ -2457,10 +2527,10 @@ fn test_drop_and_recreate_collection_with_flush() {
         .unwrap();
 
     engine
-        .write(write_batch(vec![put_op(col_id_1, 1, 100)]))
+        .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
         .unwrap();
     engine
-        .write(write_batch(vec![put_op(col_id_1, 2, 200)]))
+        .write(write_batch(vec![put_op(col_id_1, 2, 200)]), false)
         .unwrap();
 
     // Flush data to SSTable
@@ -2468,7 +2538,7 @@ fn test_drop_and_recreate_collection_with_flush() {
 
     // Write more data (in memtable)
     engine
-        .write(write_batch(vec![put_op(col_id_1, 3, 300)]))
+        .write(write_batch(vec![put_op(col_id_1, 3, 300)]), false)
         .unwrap();
 
     // Verify all data exists
@@ -2522,7 +2592,7 @@ fn test_drop_and_recreate_collection_with_flush() {
 
     // Write and flush new data
     engine
-        .write(write_batch(vec![put_op(col_id_2, 1, 999)]))
+        .write(write_batch(vec![put_op(col_id_2, 1, 999)]), false)
         .unwrap();
     engine.flush().unwrap();
 
@@ -2570,10 +2640,10 @@ fn test_drop_and_recreate_collection_persistence() {
             .create_collection("test_collection", CollectionOptions::default())
             .unwrap();
         engine
-            .write(write_batch(vec![put_op(col_id_1, 1, 100)]))
+            .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
             .unwrap();
         engine
-            .write(write_batch(vec![put_op(col_id_1, 2, 200)]))
+            .write(write_batch(vec![put_op(col_id_1, 2, 200)]), false)
             .unwrap();
         engine.flush().unwrap();
 
@@ -2585,10 +2655,10 @@ fn test_drop_and_recreate_collection_persistence() {
 
         // Write different data to recreated collection
         engine
-            .write(write_batch(vec![put_op(col_id_2, 5, 500)]))
+            .write(write_batch(vec![put_op(col_id_2, 5, 500)]), false)
             .unwrap();
         engine
-            .write(write_batch(vec![put_op(col_id_2, 6, 600)]))
+            .write(write_batch(vec![put_op(col_id_2, 6, 600)]), false)
             .unwrap();
 
         engine.shutdown().unwrap();
@@ -2646,7 +2716,7 @@ fn test_rename_collection() {
         .create_collection("original_name", CollectionOptions::default())
         .unwrap();
     engine
-        .write(write_batch(vec![put_op(col_id, 1, 100)]))
+        .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
         .unwrap();
 
     // Rename the collection
@@ -2724,7 +2794,7 @@ fn test_rename_collection_persistence() {
             .create_collection("original", CollectionOptions::default())
             .unwrap();
         engine
-            .write(write_batch(vec![put_op(col_id, 1, 100)]))
+            .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
             .unwrap();
         engine.rename_collection("original", "renamed").unwrap();
         engine.shutdown().unwrap();
@@ -2763,13 +2833,17 @@ fn test_optimistic_locking_must_not_exist() {
     let idx = 0;
 
     // 1. Write key1.
-    engine.write(write_batch(vec![put_op(col, 1, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
 
     // 2. Take a snapshot after key1 is written.
     let snapshot1 = engine.last_visible_sequence();
 
     // 3. Write key2.
-    engine.write(write_batch(vec![put_op(col, 2, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 2, 1)]), false)
+        .unwrap();
 
     // 4. Try to write key2 again with a precondition based on the old snapshot.
     // This should fail because key2 was created *after* snapshot1.
@@ -2780,7 +2854,7 @@ fn test_optimistic_locking_must_not_exist() {
     };
     let preconditions = Preconditions::new(snapshot1, vec![precondition]);
     let batch = write_batch_with_preconditions(vec![put_op(col, 2, 2)], preconditions);
-    let result = engine.write(batch);
+    let result = engine.write(batch, false);
 
     assert!(result.is_err());
     let err = result.err().unwrap();
@@ -2797,7 +2871,7 @@ fn test_optimistic_locking_must_not_exist() {
     };
     let preconditions_ok = Preconditions::new(snapshot2, vec![precondition_ok]);
     let batch_ok = write_batch_with_preconditions(vec![put_op(col, 3, 1)], preconditions_ok);
-    engine.write(batch_ok).unwrap();
+    engine.write(batch_ok, false).unwrap();
 
     // 6. Try to write an existing key (key1) again. This should fail because the key
     // already exists, and the `read_since` check will find it.
@@ -2808,7 +2882,7 @@ fn test_optimistic_locking_must_not_exist() {
     };
     let preconditions_fail = Preconditions::new(0, vec![precondition_fail]);
     let batch_fail = write_batch_with_preconditions(vec![put_op(col, 1, 2)], preconditions_fail);
-    let result_fail = engine.write(batch_fail);
+    let result_fail = engine.write(batch_fail, false);
     assert!(result_fail.is_err());
     let err_fail = result_fail.err().unwrap();
     assert!(err_fail
@@ -2827,7 +2901,9 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
         .create_collection_if_not_exists("test_optimistic_locking_skip_reads")
         .unwrap();
 
-    engine.write(write_batch(vec![put_op(col, 0, 1)])).unwrap();
+    engine
+        .write(write_batch(vec![put_op(col, 0, 1)]), false)
+        .unwrap();
 
     let since = engine.last_visible_sequence();
     let preconditions = Preconditions::new(
@@ -2842,13 +2918,136 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
     engine.fail_next_precondition_checks(1);
 
     engine
-        .write(write_batch_with_preconditions(
-            vec![put_op(col, 1, 1)],
-            preconditions,
-        ))
+        .write(
+            write_batch_with_preconditions(vec![put_op(col, 1, 1)], preconditions),
+            false,
+        )
         .unwrap();
 
     let (_, value) = engine.read(col, 0, &user_key(1), None).unwrap().unwrap();
     let (_, expected) = put_rec(col, 1, 1, since + 1);
     assert_eq!(value, expected);
+}
+
+fn assert_write_sync_forces_wal_sync_before_return(
+    wal_durability: WalDurability,
+    expect_buffered_bytes_before_forced_sync: bool,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    let registry = &mut MetricRegistry::default();
+    let options = Arc::new(
+        Options::lightweight()
+            .with_wal_durability(wal_durability)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+    );
+    let engine = StorageEngine::new(registry, options, path).unwrap();
+
+    let col = engine
+        .create_collection_if_not_exists("test_write_sync")
+        .unwrap();
+
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 1); // header sync
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 1);
+    assert_eq!(
+        registry.gauge_value(metrics::names::wal::BYTES_BUFFERED) > 0,
+        expect_buffered_bytes_before_forced_sync
+    );
+
+    engine
+        .write(write_batch(vec![put_op(col, 2, 2)]), true)
+        .unwrap();
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 2);
+    assert_eq!(registry.gauge_value(metrics::names::wal::BYTES_BUFFERED), 0);
+}
+
+#[test]
+fn test_write_sync_forces_wal_sync_before_return() {
+    assert_write_sync_forces_wal_sync_before_return(WalDurability::Buffered, true);
+}
+
+#[test]
+fn test_write_sync_forces_wal_sync_for_process_safe_wal() {
+    assert_write_sync_forces_wal_sync_before_return(WalDurability::ProcessSafe, false);
+}
+
+#[test]
+fn test_grouped_writes_with_one_forced_sync_only_sync_once() {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    let registry = &mut MetricRegistry::default();
+    let options = Arc::new(
+        Options::lightweight()
+            .with_wal_durability(WalDurability::Buffered)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+    );
+    let engine = StorageEngine::new(registry, options, path).unwrap();
+
+    let writers = vec![
+        Arc::new(Writer::new(write_batch(vec![put_op(1, 1, 1)]), false)),
+        Arc::new(Writer::new(write_batch(vec![put_op(1, 2, 2)]), true)),
+        Arc::new(Writer::new(write_batch(vec![put_op(1, 3, 3)]), false)),
+    ];
+
+    let mut wal_and_manifest = engine.db_mutex.lock().unwrap();
+    StorageEngine::append_to_wal(&writers, &mut wal_and_manifest, 1).unwrap();
+    drop(wal_and_manifest);
+
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 2); // header + one forced group sync
+    assert_eq!(registry.gauge_value(metrics::names::wal::BYTES_BUFFERED), 0);
+}
+
+#[test]
+fn test_default_writes_follow_buffered_wal_durability() {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    let registry = &mut MetricRegistry::default();
+    let options = Arc::new(
+        Options::lightweight()
+            .with_wal_durability(WalDurability::Buffered)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+    );
+    let engine = StorageEngine::new(registry, options, path).unwrap();
+
+    let col = engine
+        .create_collection_if_not_exists("test_default_writes_follow_buffered_wal_durability")
+        .unwrap();
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
+
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 1); // header only
+    assert!(
+        registry.gauge_value(metrics::names::wal::BYTES_BUFFERED) > 0,
+        "buffered writes should leave WAL bytes pending in userspace"
+    );
+}
+
+#[test]
+fn test_default_writes_follow_durable_wal_durability() {
+    let dir = tempdir().unwrap();
+    let path = dir.path();
+    let registry = &mut MetricRegistry::default();
+    let options = Arc::new(
+        Options::lightweight()
+            .with_wal_durability(WalDurability::Durable)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+    );
+    let engine = StorageEngine::new(registry, options, path).unwrap();
+
+    let col = engine
+        .create_collection_if_not_exists("test_default_writes_follow_durable_wal_durability")
+        .unwrap();
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
+
+    assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 2); // header + durable group sync
+    assert_eq!(registry.gauge_value(metrics::names::wal::BYTES_BUFFERED), 0);
 }
