@@ -193,10 +193,15 @@ impl<F: LogFileCreator> AppendLog<F> {
         Ok(())
     }
 
+    /// Flush buffered bytes to the file descriptor without forcing them to durable storage.
+    pub fn flush(&mut self) -> Result<()> {
+        self.flush_buffer()
+    }
+
     /// Sync data to the disk. A sync does not pad the content of the current buffer to the block
     /// size.
     pub fn sync(&mut self) -> Result<()> {
-        self.flush_buffer()?;
+        self.flush()?;
         self.current_file.sync()?;
         Ok(())
     }
@@ -358,7 +363,7 @@ impl<O: LogObserver> LogFile<O> {
     }
 
     fn sync(&mut self) -> Result<()> {
-        self.file.sync_all()?;
+        self.file.sync_data()?;
         self.file_size += self.pending_bytes;
         self.observer.on_sync(self.pending_bytes);
         self.pending_bytes = 0;
@@ -703,6 +708,47 @@ mod tests {
         assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
         assert_eq!(observer.files_size.load(Ordering::Relaxed), total_size);
         assert_eq!(observer.bytes_written.load(Ordering::Relaxed), total_size);
+    }
+
+    #[test]
+    fn test_rotate_after_partial_flush_pads_last_block() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+
+        let file_creator = Arc::new(MockLogFileCreator);
+        let observer = MockLogObserver::new();
+        let mut log = AppendLog::new(
+            path,
+            DbFile::new_write_ahead_log(24),
+            file_creator.clone(),
+            observer.clone(),
+        )
+        .unwrap();
+
+        let payload = vec![1; 250];
+        log.append(&payload).unwrap();
+        log.flush().unwrap();
+
+        let first_log = path.join("000024.log");
+        assert_eq!(
+            std::fs::metadata(first_log.clone()).unwrap().len(),
+            BUFFER_SIZE_IN_BYTES as u64 + 262
+        );
+
+        log.rotate(DbFile::new_write_ahead_log(25)).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(first_log.clone()).unwrap().len(),
+            2 * BUFFER_SIZE_IN_BYTES as u64
+        );
+
+        let (header, entries) =
+            AppendLog::<MockLogFileCreator>::read_log_file(first_log, "HEADER".len()).unwrap();
+
+        assert_eq!(header, b"HEADER");
+
+        let entries: Vec<Vec<u8>> = entries.map(|r| r.unwrap()).collect();
+        assert_eq!(entries, vec![payload]);
     }
 
     #[test]

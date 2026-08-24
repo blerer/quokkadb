@@ -3,6 +3,19 @@ use crate::io::compressor::CompressorType;
 use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use std::fmt;
 
+/// Controls how acknowledged WAL writes are propagated from QuokkaDB buffers to the OS and disk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalDurability {
+    /// Acknowledged writes are durable before the call returns.
+    Durable,
+    /// Acknowledged writes survive a process crash, but recent writes may still be lost on an OS
+    /// crash or power loss until the next periodic sync.
+    ProcessSafe,
+    /// Acknowledged writes may still be sitting in QuokkaDB's userspace buffer and can be lost on
+    /// a normal process crash.
+    Buffered,
+}
+
 /// Top-level configuration struct containing all database tuning options.
 ///
 /// Use one of the preset profiles (`lightweight()`, `optimized()`, `high_query_load()`)
@@ -14,6 +27,7 @@ pub struct Options {
     max_open_files: u32,
     block_cache_size: StorageQuantity,
     query_cache_size: StorageQuantity,
+    wal_durability: WalDurability,
     wal_bytes_per_sync: StorageQuantity,
     max_manifest_file_size: StorageQuantity,
 
@@ -40,6 +54,7 @@ impl Default for Options {
             max_open_files: 200,
             block_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
+            wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(256, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(256, StorageUnit::Kibibytes),
 
@@ -74,6 +89,7 @@ impl Options {
             max_open_files: 512,
             block_cache_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(16, StorageUnit::Mebibytes),
+            wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_manifest_file_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_levels: 4,
@@ -96,6 +112,7 @@ impl Options {
             max_open_files: 1024,
             block_cache_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(64, StorageUnit::Mebibytes),
+            wal_durability: WalDurability::ProcessSafe,
             wal_bytes_per_sync: StorageQuantity::new(512, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(2, StorageUnit::Mebibytes),
             max_levels: 5,
@@ -135,6 +152,12 @@ impl Options {
     /// Override the query cache size.
     pub fn with_query_cache_size(mut self, size: StorageQuantity) -> Self {
         self.query_cache_size = size;
+        self
+    }
+
+    /// Override WAL durability behavior.
+    pub fn with_wal_durability(mut self, durability: WalDurability) -> Self {
+        self.wal_durability = durability;
         self
     }
 
@@ -230,6 +253,10 @@ impl Options {
 
     pub fn query_cache_size(&self) -> StorageQuantity {
         self.query_cache_size
+    }
+
+    pub fn wal_durability(&self) -> WalDurability {
+        self.wal_durability
     }
 
     pub fn wal_bytes_per_sync(&self) -> StorageQuantity {
@@ -440,6 +467,12 @@ mod tests {
     }
 
     #[test]
+    fn wal_durability_defaults_to_durable() {
+        let opts = base_options();
+        assert_eq!(opts.wal_durability(), WalDurability::Durable);
+    }
+
+    #[test]
     fn l2_scales_by_sqrt_of_multiplier() {
         let opts = base_options();
         let base = default_base_bytes();
@@ -525,6 +558,7 @@ impl fmt::Display for Options {
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  Query Cache Size: {:?}", self.query_cache_size)?;
+        writeln!(f, "  WAL Durability: {:?}", self.wal_durability)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
         writeln!(
             f,

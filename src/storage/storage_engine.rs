@@ -1069,6 +1069,8 @@ impl StorageEngine {
 
             seq += 1;
         }
+
+        wal_and_manifest.wal.finish_append_group()?;
         Ok(with_sequence)
     }
 
