@@ -878,3 +878,74 @@ fn query_metrics_are_exposed_via_public_api() {
     assert_eq!(metrics.collection_scans(), 1);
     assert_eq!(metrics.read_query_duration().count(), 1);
 }
+
+#[test]
+fn query_cache_metrics_record_miss_then_hit_for_same_query_shape() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let first_results: Vec<Document> = collection
+        .find(doc! { "status": "A" })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&first_results, &[1, 2, 5, 7]);
+
+    let query_cache_metrics = db.metrics().query_cache();
+    assert_eq!(query_cache_metrics.misses(), 1);
+    assert_eq!(query_cache_metrics.hits(), 0);
+    assert!(query_cache_metrics.size() > 0);
+
+    let second_results: Vec<Document> = collection
+        .find(doc! { "status": "B" })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_ids(&second_results, &[6, 8]);
+
+    let query_cache_metrics = db.metrics().query_cache();
+    assert_eq!(query_cache_metrics.misses(), 1);
+    assert_eq!(query_cache_metrics.hits(), 1);
+}
+
+#[test]
+fn creating_index_invalidates_cached_query_plan() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let mut first_ids = get_ids(
+        &collection
+            .find(doc! { "status": "A" })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>(),
+    );
+    first_ids.sort_unstable();
+    assert_eq!(first_ids, vec![1, 2, 5, 7]);
+
+    assert_eq!(db.metrics().query_cache().misses(), 1);
+    assert_eq!(db.metrics().query_cache().hits(), 0);
+    assert_eq!(db.metrics().executor().index_scans(), 0);
+
+    collection.create_index(doc! { "status": 1 }).unwrap();
+
+    let mut second_ids = get_ids(
+        &collection
+            .find(doc! { "status": "B" })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>(),
+    );
+    second_ids.sort_unstable();
+    assert_eq!(second_ids, vec![6, 8]);
+
+    let query_cache_metrics = db.metrics().query_cache();
+    assert_eq!(query_cache_metrics.misses(), 2);
+    assert_eq!(query_cache_metrics.hits(), 0);
+}

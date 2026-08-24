@@ -128,8 +128,9 @@ fn estimate_cached_plan_size(plan: &PhysicalPlan) -> u32 {
 mod tests {
     use super::*;
     use crate::obs::metrics::MetricRegistry;
-    use crate::query::expr_fn::{field, include, proj_field, proj_fields};
+    use crate::query::expr_fn::{eq, field, field_filters, include, lit, proj_field, proj_fields};
     use crate::query::logical_plan::LogicalPlanBuilder;
+    use crate::query::optimizer::optimizer::Optimizer;
     use crate::query::physical_plan::PhysicalPlan;
     use crate::storage::Direction;
     use crate::util::interval::Interval;
@@ -175,6 +176,60 @@ mod tests {
         assert_eq!(
             metric_registry.computed_value(metrics::names::query_cache::HIT_RATIO),
             0.5
+        );
+    }
+
+    #[test]
+    fn equivalent_parameterized_logical_plans_share_a_cache_entry() {
+        let (cache, metric_registry) = new_cache();
+        let optimizer = Optimizer::new();
+        let build_count = AtomicUsize::new(0);
+
+        let first_logical_plan = LogicalPlanBuilder::scan(7)
+            .filter(field_filters(field(["status"]), [eq(lit("A"))]))
+            .build();
+        let second_logical_plan = LogicalPlanBuilder::scan(7)
+            .filter(field_filters(field(["status"]), [eq(lit("B"))]))
+            .build();
+
+        let (first_parameterized_plan, _) =
+            optimizer.parametrize(optimizer.normalize(first_logical_plan));
+        let (second_parameterized_plan, _) =
+            optimizer.parametrize(optimizer.normalize(second_logical_plan));
+
+        let build_plan = || {
+            build_count.fetch_add(1, Ordering::Relaxed);
+            Arc::new(PhysicalPlan::NoOp)
+        };
+
+        cache.get_or_insert_with(7, first_parameterized_plan, build_plan);
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::MISSES),
+            1
+        );
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::HITS),
+            0
+        );
+
+        let size_after_first_insert =
+            metric_registry.gauge_value(metrics::names::query_cache::SIZE);
+        assert!(size_after_first_insert > 0);
+
+        cache.get_or_insert_with(7, second_parameterized_plan, build_plan);
+
+        assert_eq!(build_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::MISSES),
+            1
+        );
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::HITS),
+            1
+        );
+        assert_eq!(
+            metric_registry.gauge_value(metrics::names::query_cache::SIZE),
+            size_after_first_insert
         );
     }
 
