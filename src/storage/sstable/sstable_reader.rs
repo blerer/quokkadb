@@ -7,7 +7,7 @@ use crate::storage::internal_key::{
     encode_internal_key, extract_record_key, extract_sequence_number,
 };
 use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
-use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterator};
+use crate::storage::iterators::TracingIterator;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::block_reader::{BlockReader, DataEntryReader, IndexEntryReader};
@@ -260,15 +260,12 @@ impl SSTableReader {
     pub fn range_scan(
         &self,
         range: Rc<InternalKeyRange>,
-        snapshot: u64,
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
-        // Fetch and parse the index block
         let _span = trace_span!(
             "sstable_reader.range_scan",
             file = %self.filename,
             range = ?range,
-            snapshot,
             direction = ?direction
         )
         .entered();
@@ -290,15 +287,14 @@ impl SSTableReader {
                         None => None,
                     };
 
-                    let iter = SSTableRangeScanIterator {
+                    Box::new(SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
-                        range: range.clone(), // Pass along for boundary checks
+                        range: range.clone(),
                         direction: direction.clone(),
                         index_iter,
                         current_data_block_iter: data_iter,
                         count: 0,
-                    };
-                    Box::new(ForwardIterator::new(Box::new(iter), snapshot))
+                    })
                 }
                 Direction::Reverse => {
                     let mut index_iter = index_reader.scan_reverse_from(range.end_bound())?;
@@ -313,15 +309,14 @@ impl SSTableReader {
                         None => None,
                     };
 
-                    let iter = SSTableRangeScanIterator {
+                    Box::new(SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
-                        range: range.clone(), // Pass along for boundary checks
+                        range: range.clone(),
                         direction: direction.clone(),
                         index_iter,
                         current_data_block_iter: data_iter,
                         count: 0,
-                    };
-                    Box::new(ReverseIterator::new(Box::new(iter), snapshot))
+                    })
                 }
             };
 
@@ -330,8 +325,8 @@ impl SSTableReader {
                 sstable_iter_base,
                 "sstable",
                 self.filename.clone(),
-                direction.clone(),
-                snapshot,
+                direction,
+                u64::MAX,
             ));
         }
 
@@ -1068,22 +1063,25 @@ mod tests {
     ) where
         <R as IntoIterator>::IntoIter: DoubleEndedIterator,
     {
+        let internal_key_range = key_range(col, selected_range, snapshot, direction.clone());
         let mut iter = reader
-            .range_scan(
-                key_range(col, selected_range, snapshot, direction.clone()),
-                snapshot,
-                direction.clone(),
-            )
+            .range_scan(internal_key_range.clone(), direction.clone())
             .unwrap();
 
-        check_iter(&mut iter, col, expected_range, snapshot, direction);
+        check_iter(
+            &mut iter,
+            col,
+            expected_range,
+            &internal_key_range,
+            direction,
+        );
     }
 
     fn check_iter<I, R: RangeBounds<i32> + IntoIterator<Item = i32> + Clone>(
         iter: &mut I,
         col: u32,
         range: &mut R,
-        snapshot: u64,
+        internal_key_range: &InternalKeyRange,
         direction: &Direction,
     ) where
         I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
@@ -1095,48 +1093,40 @@ mod tests {
             Box::new(range.clone().into_iter())
         };
 
+        let mut expected_entries = Vec::new();
         for i in range {
             if i < 1 || i > 1001 {
-                // Skip out of range indices
                 continue;
             }
 
             if i % 7 == 0 {
-                // Skip every 7th item
                 continue;
             }
 
-            let op_and_sequences = operations_and_sequences_for(col, i);
+            let mut visible_ops: Vec<_> = operations_and_sequences_for(col, i)
+                .into_iter()
+                .filter(|(op, seq)| internal_key_range.contains(&op.internal_key(*seq)))
+                .collect();
 
-            if op_and_sequences.is_empty() {
-                panic!("No operations found for index {}", i);
+            if direction == &Direction::Reverse {
+                visible_ops.reverse();
             }
 
-            match iter.next() {
-                Some(Ok((key, value))) => {
-                    let mut validated = false;
-                    for (op, seq) in op_and_sequences {
-                        if seq > snapshot {
-                            continue; // Skip operations with sequence numbers greater than the snapshot
-                        } else {
-                            assert_eq!(key, op.internal_key(seq), "Key mismatch at index {}", i);
-                            assert_eq!(value, op.value(), "Value mismatch at index {}", i);
-                            validated = true;
-                            break; // Break after the first valid operation
-                        }
-                    }
-                    if !validated {
-                        panic!(
-                            "No valid operation found for index {} with snapshot {}",
-                            i, snapshot
-                        );
-                    }
-                }
-                Some(Err(e)) => panic!("Unexpected error at index {}: {:?}", i, e),
-                None => panic!("Iterator ended prematurely at index {}", i),
+            for (op, seq) in visible_ops {
+                expected_entries.push((op.internal_key(seq), op.value().to_vec()));
             }
         }
-        // Ensure the iterator is exhausted
+
+        for (index, expected) in expected_entries.into_iter().enumerate() {
+            match iter.next() {
+                Some(Ok(actual)) => {
+                    assert_eq!(actual, expected, "Entry mismatch at position {}", index);
+                }
+                Some(Err(e)) => panic!("Unexpected error at position {}: {:?}", index, e),
+                None => panic!("Iterator ended prematurely at position {}", index),
+            }
+        }
+
         assert!(iter.next().is_none(), "Iterator should be exhausted");
     }
 

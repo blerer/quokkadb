@@ -13,6 +13,7 @@ mod manifest;
 mod manifest_state;
 mod memtable;
 pub(crate) mod operation;
+pub(crate) mod snapshot_manager;
 mod sstable;
 pub(crate) mod storage_engine;
 #[cfg(test)]

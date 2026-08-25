@@ -1067,7 +1067,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     insert_one(&executor, collection_id, &initial_doc)?;
 
     // 3. Get snapshot
-    let snapshot1 = storage_engine.last_visible_sequence();
+    let snapshot1 = storage_engine.acquire_snapshot();
 
     // 4. Update the doc directly in storage
     let key = BsonValue(Bson::Int32(1)).try_into_key()?;
@@ -1083,8 +1083,11 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     let mut params = Parameters::new();
     let point_search_plan = point_search_query(collection_id, &mut params, 1_i32);
 
-    let mut result_at_snapshot =
-        executor.execute_cached_at_snapshot(point_search_plan.clone(), &params, Some(snapshot1))?;
+    let mut result_at_snapshot = executor.execute_cached_at_snapshot(
+        point_search_plan.clone(),
+        &params,
+        Some(snapshot1.clone()),
+    )?;
     let doc_at_snapshot = result_at_snapshot.next().unwrap()?;
     assert!(result_at_snapshot.next().is_none());
     assert_eq!(doc_at_snapshot, initial_doc);
@@ -1099,7 +1102,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     let doc_to_delete = doc! { "_id": 2_i32, "value": "to_delete" };
     insert_one(&executor, collection_id, &doc_to_delete)?;
 
-    let snapshot2 = storage_engine.last_visible_sequence();
+    let snapshot2 = storage_engine.acquire_snapshot();
 
     let key_to_delete = BsonValue(Bson::Int32(2)).try_into_key()?;
     let delete_op = Operation::new_delete(collection_id, 0, key_to_delete);
@@ -1111,7 +1114,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     let results_at_snapshot2 = executor.execute_cached_at_snapshot(
         scan_plan.clone(),
         &Parameters::new(),
-        Some(snapshot2),
+        Some(snapshot2.clone()),
     )?;
     let mut docs_at_snapshot2: Vec<Document> = results_at_snapshot2.collect::<Result<_>>()?;
     assert_eq!(docs_at_snapshot2.len(), 2);

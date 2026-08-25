@@ -280,11 +280,12 @@ impl LsmTree {
         for sst_meta in sstable_metas {
             let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
             let sst_reader = sstable_cache.get(&file_path)?;
-            iterators.push(sst_reader.range_scan(
-                internal_key_range_for_scan.clone(),
-                snapshot,
-                direction.clone(),
-            )?);
+            let iter =
+                sst_reader.range_scan(internal_key_range_for_scan.clone(), direction.clone())?;
+            iterators.push(match direction {
+                Direction::Forward => Box::new(ForwardIterator::new(iter, snapshot)),
+                Direction::Reverse => Box::new(ReverseIterator::new(iter, snapshot)),
+            });
         }
 
         let merge_iter = MergeIterator::new(iterators, direction.clone())?;

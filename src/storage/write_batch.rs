@@ -3,6 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::storage::count_stats::CountStats;
 use crate::storage::operation::Operation;
+use crate::storage::snapshot_manager::Snapshot;
 use std::collections::BTreeSet;
 use std::io::Result;
 
@@ -14,19 +15,22 @@ pub enum Precondition {
         user_key: Vec<u8>,
     },
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Preconditions {
-    since: u64,
+    snapshot: Snapshot,
     conditions: Vec<Precondition>,
 }
 
 impl Preconditions {
-    pub fn new(since: u64, conditions: Vec<Precondition>) -> Self {
-        Preconditions { since, conditions }
+    pub fn new(snapshot: Snapshot, conditions: Vec<Precondition>) -> Self {
+        Preconditions {
+            snapshot,
+            conditions,
+        }
     }
 
     pub fn since(&self) -> u64 {
-        self.since
+        self.snapshot.sequence()
     }
 
     pub fn conditions(&self) -> &[Precondition] {
@@ -144,6 +148,12 @@ impl PartialEq for WriteBatch {
         self.operations == other.operations
             && self.preconditions == other.preconditions
             && self.count_stats == other.count_stats
+    }
+}
+
+impl PartialEq for Preconditions {
+    fn eq(&self, other: &Self) -> bool {
+        self.since() == other.since() && self.conditions == other.conditions
     }
 }
 

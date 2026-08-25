@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{extract_record_key, InternalKeyRange};
-use crate::storage::iterators::{ForwardIterator, MergeIterator};
+use crate::storage::internal_key::{extract_record_key, extract_sequence_number, InternalKeyRange};
+use crate::storage::iterators::MergeIterator;
 use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::Direction;
@@ -28,6 +28,7 @@ impl<'a> CompactionIterator<'a> {
         input_files: &[Arc<SSTableMetadata>],
         output_files: &[Arc<SSTableMetadata>],
         drops: &[Arc<DropMetadata>],
+        oldest_active_snapshot: Option<u64>,
     ) -> Result<Box<Self>> {
         // drops should be sorted and should be non overlapping after compaction picker's merge/split logic
         let drops: Vec<Arc<DropMetadata>> = drops.iter().cloned().collect();
@@ -39,7 +40,7 @@ impl<'a> CompactionIterator<'a> {
             .map(|sst| {
                 let file_path = db_dir.join(DbFile::new_sst(sst.number).filename());
                 let reader = sst_cache.get(&file_path)?;
-                reader.range_scan(InternalKeyRange::all(), u64::MAX, Direction::Forward)
+                reader.range_scan(InternalKeyRange::all(), Direction::Forward)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -58,7 +59,10 @@ impl<'a> CompactionIterator<'a> {
                 Box::new(MergeIterator::new(sources, Direction::Forward)?)
             };
 
-        let record_iter = Box::new(Box::new(ForwardIterator::new(record_iter, u64::MAX)));
+        let record_iter = Box::new(VersionRetentionIterator::new(
+            record_iter,
+            oldest_active_snapshot,
+        ));
 
         let mut drop_iter: Box<dyn Iterator<Item = Arc<DropMetadata>>> =
             Box::new(drops.into_iter());
@@ -71,6 +75,71 @@ impl<'a> CompactionIterator<'a> {
             drop_iter,
             current_drop_interval,
         }))
+    }
+}
+
+struct VersionRetentionIterator<'a> {
+    iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+    oldest_active_snapshot: Option<u64>,
+    previous_record_key: Option<Vec<u8>>,
+    emitted_floor_version: bool,
+}
+
+impl<'a> VersionRetentionIterator<'a> {
+    fn new(
+        iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+        oldest_active_snapshot: Option<u64>,
+    ) -> Self {
+        Self {
+            iter,
+            oldest_active_snapshot,
+            previous_record_key: None,
+            emitted_floor_version: false,
+        }
+    }
+}
+
+impl<'a> Iterator for VersionRetentionIterator<'a> {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(entry) = self.iter.next() {
+            match entry {
+                Ok((key, value)) => {
+                    let record_key = extract_record_key(&key);
+                    let is_new_record = self
+                        .previous_record_key
+                        .as_ref()
+                        .is_none_or(|previous| previous.as_slice() != record_key);
+
+                    if is_new_record {
+                        self.previous_record_key = Some(record_key.to_vec());
+                        self.emitted_floor_version = false;
+                    }
+
+                    match self.oldest_active_snapshot {
+                        None => {
+                            if is_new_record {
+                                return Some(Ok((key, value)));
+                            }
+                        }
+                        Some(snapshot_floor) => {
+                            let seq = extract_sequence_number(&key);
+                            if seq > snapshot_floor {
+                                return Some(Ok((key, value)));
+                            }
+                            if !self.emitted_floor_version {
+                                self.emitted_floor_version = true;
+                                return Some(Ok((key, value)));
+                            }
+                        }
+                    }
+                }
+                Err(err) => return Some(Err(err)),
+            }
+        }
+
+        None
     }
 }
 
@@ -164,7 +233,8 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None)
+                .unwrap();
 
         for expected in &entries {
             let actual = iter.next().unwrap().unwrap();
@@ -197,7 +267,8 @@ mod tests {
         let sst2 = write_sst(path, 2, &entries2, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[], None)
+                .unwrap();
 
         // Should be merged in sorted order
         let expected_keys: Vec<i32> = vec![1, 2, 3, 4, 5, 6];
@@ -234,7 +305,8 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col_1, 100);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop], None)
+                .unwrap();
 
         let expected_entries = vec![
             put_rec(col_2, 1, 1, 11),
@@ -284,6 +356,7 @@ mod tests {
             &[sst],
             &[],
             &[drop_1, drop_3],
+            None,
         )
         .unwrap();
 
@@ -315,9 +388,129 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(COL, 100);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop], None)
+                .unwrap();
 
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_compaction_iterator_retains_versions_needed_by_oldest_snapshot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let options = Options::lightweight();
+        let sst_cache = setup_cache();
+
+        let entries = vec![
+            put_rec(COL, 1, 4, 4),
+            put_rec(COL, 1, 3, 3),
+            put_rec(COL, 1, 2, 2),
+            put_rec(COL, 1, 1, 1),
+        ];
+
+        let sst = write_sst(path, 1, &entries, &options);
+
+        let retained: Vec<_> =
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(2))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(
+            retained,
+            vec![
+                put_rec(COL, 1, 4, 4),
+                put_rec(COL, 1, 3, 3),
+                put_rec(COL, 1, 2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compaction_iterator_retains_single_floor_version_when_all_versions_are_old() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let options = Options::lightweight();
+        let sst_cache = setup_cache();
+
+        let entries = vec![
+            put_rec(COL, 1, 3, 3),
+            put_rec(COL, 1, 2, 2),
+            put_rec(COL, 1, 1, 1),
+        ];
+
+        let sst = write_sst(path, 1, &entries, &options);
+
+        let retained: Vec<_> =
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(5))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(retained, vec![put_rec(COL, 1, 3, 3)]);
+    }
+
+    #[test]
+    fn test_compaction_iterator_retains_exactly_one_version_at_snapshot_floor() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let options = Options::lightweight();
+        let sst_cache = setup_cache();
+
+        let entries = vec![
+            put_rec(COL, 1, 5, 5),
+            put_rec(COL, 1, 4, 4),
+            put_rec(COL, 1, 3, 3),
+            put_rec(COL, 1, 2, 2),
+        ];
+
+        let sst = write_sst(path, 1, &entries, &options);
+
+        let retained: Vec<_> =
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(4))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(
+            retained,
+            vec![put_rec(COL, 1, 5, 5), put_rec(COL, 1, 4, 4),]
+        );
+    }
+
+    #[test]
+    fn test_compaction_iterator_resets_snapshot_floor_retention_per_record_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let options = Options::lightweight();
+        let sst_cache = setup_cache();
+
+        let entries = vec![
+            put_rec(COL, 1, 5, 5),
+            put_rec(COL, 1, 4, 4),
+            put_rec(COL, 1, 3, 3),
+            put_rec(COL, 2, 6, 6),
+            put_rec(COL, 2, 4, 4),
+            put_rec(COL, 2, 2, 2),
+        ];
+
+        let sst = write_sst(path, 1, &entries, &options);
+
+        let retained: Vec<_> =
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(4))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+        assert_eq!(
+            retained,
+            vec![
+                put_rec(COL, 1, 5, 5),
+                put_rec(COL, 1, 4, 4),
+                put_rec(COL, 2, 6, 6),
+                put_rec(COL, 2, 4, 4),
+            ]
+        );
     }
 
     #[test]
@@ -349,9 +542,15 @@ mod tests {
         // Create a drop that fully covers SST 1
         let drop = DropMetadata::new_collection_drop(col_1, 100);
 
-        let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1, sst2], &[], &[drop])
-                .unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst1, sst2],
+            &[],
+            &[drop],
+            None,
+        )
+        .unwrap();
 
         // SST 1 should be skipped entirely, only entries from SST 2 should be returned
         for expected in &entries2 {
@@ -378,7 +577,8 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None)
+                .unwrap();
 
         // All entries including deletes should be present
         for expected in &entries {
@@ -405,7 +605,8 @@ mod tests {
         let sst2 = write_sst(path, 2, &entries2, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[]).unwrap();
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[], None)
+                .unwrap();
 
         // ForwardIterator should deduplicate, keeping only the newest version (seq 20)
         let (key, value) = iter.next().unwrap().unwrap();

@@ -5,6 +5,7 @@ use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::OperationType;
+use crate::storage::snapshot_manager::Snapshot;
 use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
@@ -32,11 +33,26 @@ impl ReadExecutor {
         }
     }
 
+    /// Executes a cached read plan under a real snapshot lease.
+    ///
+    /// When `snapshot` is `None`, the executor acquires a fresh snapshot for the
+    /// full operation and keeps it alive until the returned iterator is dropped.
     pub(crate) fn execute_cached_at_snapshot(
         &self,
         plan: Arc<PhysicalPlan>,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Option<Snapshot>,
+    ) -> Result<QueryOutput> {
+        let snapshot = snapshot.unwrap_or_else(|| self.storage_engine.acquire_snapshot());
+        let output = self.execute_cached_with_snapshot(plan, parameters, snapshot.clone())?;
+        Ok(Box::new(SnapshotTrackedQueryOutput::new(output, snapshot)))
+    }
+
+    fn execute_cached_with_snapshot(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        parameters: &Parameters,
+        snapshot: Snapshot,
     ) -> Result<QueryOutput> {
         match plan.as_ref() {
             PhysicalPlan::CollectionScan {
@@ -88,7 +104,7 @@ impl ReadExecutor {
             PhysicalPlan::Filter { input, predicate } => {
                 let filter = filters::to_filter(predicate.clone(), parameters);
                 let input_iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 Ok(Box::new(input_iter.filter(move |res| {
                     if res.is_err() {
                         true
@@ -101,7 +117,7 @@ impl ReadExecutor {
                 let projector =
                     crate::query::execution::projections::to_projector(projection, parameters)?;
                 let input_iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 Ok(Box::new(
                     input_iter.map(move |res| res.and_then(|doc| projector(doc))),
                 ))
@@ -109,7 +125,7 @@ impl ReadExecutor {
             PhysicalPlan::InMemorySort { input, sort_fields } => {
                 self.metrics.in_memory_sorts.inc();
                 let input_iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::in_memory_sort(input_iter, sort_fields)
             }
             PhysicalPlan::ExternalMergeSort {
@@ -119,7 +135,7 @@ impl ReadExecutor {
             } => {
                 self.metrics.external_merge_sorts.inc();
                 let input_iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::external_merge_sort(
                     input_iter,
                     sort_fields.clone(),
@@ -133,12 +149,12 @@ impl ReadExecutor {
             } => {
                 self.metrics.top_k_sorts.inc();
                 let input_iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 crate::query::execution::sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
             PhysicalPlan::Limit { input, skip, limit } => {
                 let mut iter =
-                    self.execute_cached_at_snapshot(input.clone(), parameters, snapshot)?;
+                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 if let Some(s) = skip {
                     iter = Box::new(iter.skip(*s));
                 }
@@ -154,7 +170,7 @@ impl ReadExecutor {
     pub(super) fn perform_multi_point_search(
         &self,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Snapshot,
         collection: &u32,
         keys: &Arc<Expr>,
         direction: &Direction,
@@ -162,7 +178,7 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "multi_point_search",
-            snapshot = ?snapshot,
+            snapshot = snapshot.sequence(),
             direction = ?direction
         );
         let filter = filter
@@ -192,9 +208,15 @@ impl ReadExecutor {
 
         let storage_engine = self.storage_engine.clone();
         let collection = *collection;
+        let snapshot_for_reads = snapshot.clone();
 
         let iter = key_iterator.filter_map(move |key| match key.try_into_key() {
-            Ok(storage_key) => match storage_engine.read(collection, 0, &storage_key, snapshot) {
+            Ok(storage_key) => match storage_engine.read_at_snapshot(
+                collection,
+                0,
+                &storage_key,
+                &snapshot_for_reads,
+            ) {
                 Ok(Some((k, v))) => {
                     let op = extract_operation_type(&k);
                     if op == OperationType::Put {
@@ -227,15 +249,12 @@ impl ReadExecutor {
     pub(super) fn perform_point_search(
         &self,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Snapshot,
         collection: &u32,
         key: &Arc<Expr>,
         filter: &Option<Arc<Expr>>,
     ) -> Result<QueryOutput> {
-        let access_span = trace_span!(
-            "point_search",
-            snapshot = ?snapshot
-        );
+        let access_span = trace_span!("point_search", snapshot = snapshot.sequence());
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
         let filter = filter
             .clone()
@@ -244,6 +263,7 @@ impl ReadExecutor {
         let key = bind::bind_key_parameter(key, parameters)?;
         let storage_engine = self.storage_engine.clone();
         let collection = *collection;
+        let snapshot_for_reads = snapshot.clone();
         let mut executed = false;
         let iter: QueryOutput = Box::new(std::iter::from_fn(move || {
             if executed {
@@ -251,10 +271,11 @@ impl ReadExecutor {
             }
             executed = true;
 
-            let result = match storage_engine.read(collection, 0, &key, snapshot) {
-                Ok(result) => result,
-                Err(err) => return Some(Err(err.into())),
-            };
+            let result =
+                match storage_engine.read_at_snapshot(collection, 0, &key, &snapshot_for_reads) {
+                    Ok(result) => result,
+                    Err(err) => return Some(Err(err.into())),
+                };
 
             match result {
                 Some((k, v)) => {
@@ -280,7 +301,7 @@ impl ReadExecutor {
     pub(super) fn perform_collection_scan(
         &self,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Snapshot,
         collection: &u32,
         range: &Interval<Arc<Expr>>,
         direction: &Direction,
@@ -288,7 +309,7 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let access_span = trace_span!(
             "collection_scan",
-            snapshot = ?snapshot,
+            snapshot = snapshot.sequence(),
             direction = ?direction
         );
         let range = bind::bind_key_range_parameters(range, parameters)?;
@@ -300,7 +321,7 @@ impl ReadExecutor {
 
         let iter = self
             .storage_engine
-            .range_scan(*collection, 0, &range, snapshot, direction.clone())?
+            .range_scan_at_snapshot(*collection, 0, &range, &snapshot, direction.clone())?
             .filter_map(move |res| {
                 let doc = match res {
                     Ok((k, v)) => {
@@ -341,7 +362,7 @@ impl ReadExecutor {
     pub(super) fn perform_index_scan(
         &self,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Snapshot,
         collection: &u32,
         index: &u32,
         range: &IndexScanRangeExpr,
@@ -351,7 +372,7 @@ impl ReadExecutor {
         let access_span = trace_span!(
             "index_scan",
             index = *index,
-            snapshot = ?snapshot,
+            snapshot = snapshot.sequence(),
             direction = ?direction
         );
         let index_metadata = self
@@ -372,13 +393,14 @@ impl ReadExecutor {
         let collection = *collection;
         let secondary_index = *index;
         let primary_lookup_span = access_span.clone();
+        let snapshot_for_reads = snapshot.clone();
 
         let iter = storage_engine
-            .range_scan(
+            .range_scan_at_snapshot(
                 collection,
                 secondary_index,
                 &bound_range,
-                snapshot,
+                &snapshot,
                 direction.clone(),
             )?
             .filter_map(move |res| {
@@ -405,11 +427,16 @@ impl ReadExecutor {
                         parent: &primary_lookup_span,
                         "primary_lookup",
                         source_index = secondary_index,
-                        snapshot = ?snapshot
+                        snapshot = snapshot_for_reads.sequence()
                     )
                     .entered();
 
-                    match storage_engine.read(collection, 0, &primary_key, snapshot) {
+                    match storage_engine.read_at_snapshot(
+                        collection,
+                        0,
+                        &primary_key,
+                        &snapshot_for_reads,
+                    ) {
                         Ok(Some((k, v))) => {
                             let op = extract_operation_type(&k);
                             match op {
@@ -438,6 +465,28 @@ impl ReadExecutor {
             Box::new(iter),
             access_span,
         )))
+    }
+}
+
+struct SnapshotTrackedQueryOutput {
+    inner: QueryOutput,
+    _snapshot: Snapshot,
+}
+
+impl SnapshotTrackedQueryOutput {
+    fn new(inner: QueryOutput, snapshot: Snapshot) -> Self {
+        Self {
+            inner,
+            _snapshot: snapshot,
+        }
+    }
+}
+
+impl Iterator for SnapshotTrackedQueryOutput {
+    type Item = Result<Document>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
     }
 }
 

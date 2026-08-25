@@ -5,6 +5,7 @@ use crate::query::execution::executor::{
 };
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::Parameters;
+use crate::storage::snapshot_manager::Snapshot;
 use crate::storage::storage_engine::StorageEngine;
 use sonyflake::Sonyflake;
 use std::sync::{Arc, Mutex};
@@ -74,11 +75,16 @@ impl QueryExecutor {
         self.execute_cached_at_snapshot(plan, parameters, None)
     }
 
+    /// Executes a cached read plan under a snapshot lease.
+    ///
+    /// When `snapshot` is `None`, the read executor acquires a fresh snapshot for
+    /// the full operation and keeps it alive until the returned iterator is
+    /// dropped.
     pub fn execute_cached_at_snapshot(
         &self,
         plan: Arc<PhysicalPlan>,
         parameters: &Parameters,
-        snapshot: Option<u64>,
+        snapshot: Option<Snapshot>,
     ) -> Result<QueryOutput> {
         self.metrics.read_queries.inc();
         let start = Instant::now();

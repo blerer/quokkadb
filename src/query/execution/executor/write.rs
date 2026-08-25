@@ -16,6 +16,7 @@ use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::Operation;
 use crate::storage::operation::OperationType;
+use crate::storage::snapshot_manager::Snapshot;
 use crate::storage::storage_engine::StorageEngine;
 use crate::storage::storage_engine::StorageError;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
@@ -175,10 +176,10 @@ impl WriteExecutor {
         storage_engine: &StorageEngine,
         collection: u32,
         user_key: &[u8],
-        snapshot: u64,
+        snapshot: &Snapshot,
     ) -> Result<bool> {
         Ok(storage_engine
-            .read(collection, 0, user_key, Some(snapshot))?
+            .read_at_snapshot(collection, 0, user_key, snapshot)?
             .is_some_and(|(internal_key, _)| {
                 extract_operation_type(&internal_key) != OperationType::Delete
             }))
@@ -249,12 +250,13 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
-        let snapshot = self.storage_engine.last_visible_sequence();
-        let _span = trace_span!("update_many", upsert, snapshot,).entered();
+        let snapshot = self.storage_engine.acquire_snapshot();
+        let snapshot_sequence = snapshot.sequence();
+        let _span = trace_span!("update_many", upsert, snapshot = snapshot_sequence).entered();
         let mut iter = self.read_executor.execute_cached_at_snapshot(
             query.clone(),
             parameters,
-            Some(snapshot),
+            Some(snapshot.clone()),
         )?;
 
         let mut operations = Vec::new();
@@ -543,11 +545,14 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
-        let snapshot = self.storage_engine.last_visible_sequence();
-        let _span = trace_span!("delete_many", snapshot,).entered();
-        let mut iter =
-            self.read_executor
-                .execute_cached_at_snapshot(query, parameters, Some(snapshot))?;
+        let snapshot = self.storage_engine.acquire_snapshot();
+        let snapshot_sequence = snapshot.sequence();
+        let _span = trace_span!("delete_many", snapshot = snapshot_sequence).entered();
+        let mut iter = self.read_executor.execute_cached_at_snapshot(
+            query,
+            parameters,
+            Some(snapshot.clone()),
+        )?;
 
         let mut operations = Vec::new();
         let mut preconditions = Vec::new();
@@ -637,11 +642,11 @@ impl WriteExecutor {
         let mut attempt = 0;
 
         loop {
-            let snapshot = self.storage_engine.last_visible_sequence();
+            let snapshot = self.storage_engine.acquire_snapshot();
             let mut iter = self.read_executor.execute_cached_at_snapshot(
                 query.clone(),
                 parameters,
-                Some(snapshot),
+                Some(snapshot.clone()),
             )?;
 
             if let Some(doc_result) = iter.next() {
@@ -655,7 +660,7 @@ impl WriteExecutor {
                 self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
                 match self.write_document(
                     collection,
-                    snapshot,
+                    &snapshot,
                     user_key,
                     Some(old_doc.clone()),
                     new_doc.clone(),
@@ -684,7 +689,7 @@ impl WriteExecutor {
             self.invoke_test_hook(ExecutorFailpoint::UpdateOneUpsertAfterNoMatch);
             match self.write_document(
                 collection,
-                snapshot,
+                &snapshot,
                 user_key,
                 None,
                 new_doc.clone(),
@@ -717,11 +722,11 @@ impl WriteExecutor {
         let mut attempt = 0;
 
         loop {
-            let snapshot = self.storage_engine.last_visible_sequence();
+            let snapshot = self.storage_engine.acquire_snapshot();
             let mut iter = self.read_executor.execute_cached_at_snapshot(
                 query.clone(),
                 parameters,
-                Some(snapshot),
+                Some(snapshot.clone()),
             )?;
 
             if let Some(doc_result) = iter.next() {
@@ -734,7 +739,7 @@ impl WriteExecutor {
                 self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
                 match self.write_document(
                     collection,
-                    snapshot,
+                    &snapshot,
                     user_key,
                     Some(old_doc.clone()),
                     new_doc.clone(),
@@ -762,7 +767,7 @@ impl WriteExecutor {
 
             match self.write_document(
                 collection,
-                snapshot,
+                &snapshot,
                 user_key,
                 None,
                 new_doc.clone(),
@@ -793,11 +798,11 @@ impl WriteExecutor {
         let mut attempt = 0;
 
         loop {
-            let snapshot = self.storage_engine.last_visible_sequence();
+            let snapshot = self.storage_engine.acquire_snapshot();
             let mut iter = self.read_executor.execute_cached_at_snapshot(
                 query.clone(),
                 parameters,
-                Some(snapshot),
+                Some(snapshot.clone()),
             )?;
 
             if let Some(doc_result) = iter.next() {
@@ -806,7 +811,7 @@ impl WriteExecutor {
 
                 #[cfg(test)]
                 self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
-                match self.delete_document(collection, snapshot, user_key, &old_doc, sync) {
+                match self.delete_document(collection, &snapshot, user_key, &old_doc, sync) {
                     Ok(_) => return Ok(SingleDocumentDeleteResult::Deleted { old_doc }),
                     Err(e) => {
                         on_version_conflict(e, &start_time, &mut attempt)?;
@@ -848,9 +853,9 @@ impl WriteExecutor {
         let batch = if id_strategy == IdCreationStrategy::Generated {
             WriteBatch::new(operations, count_stats.build())
         } else {
-            let snapshot = self.storage_engine.last_visible_sequence();
+            let snapshot = self.storage_engine.acquire_snapshot();
 
-            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, snapshot)? {
+            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
                 return Err(Self::duplicate_key_error(&id));
             }
 
@@ -922,7 +927,7 @@ impl WriteExecutor {
             }
             (WriteBatch::new(operations, count_stats.build()), ids, None)
         } else {
-            let snapshot = self.storage_engine.last_visible_sequence();
+            let snapshot = self.storage_engine.acquire_snapshot();
 
             let mut seen_keys = HashMap::new();
             for (_, id, user_key) in &documents_with_ids {
@@ -931,7 +936,7 @@ impl WriteExecutor {
                         &self.storage_engine,
                         collection,
                         user_key,
-                        snapshot,
+                        &snapshot,
                     )?
                 {
                     return Err(Self::duplicate_key_error(id));
@@ -995,7 +1000,7 @@ impl WriteExecutor {
     fn write_document(
         &self,
         collection: u32,
-        snapshot: u64,
+        snapshot: &Snapshot,
         user_key: Vec<u8>,
         old_doc: Option<Document>,
         new_doc: Document,
@@ -1030,7 +1035,7 @@ impl WriteExecutor {
         };
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot, vec![precondition]),
+            Preconditions::new(snapshot.clone(), vec![precondition]),
             count_stats.build(),
         );
         self.storage_engine.write(batch, sync)
@@ -1039,7 +1044,7 @@ impl WriteExecutor {
     fn delete_document(
         &self,
         collection: u32,
-        snapshot: u64,
+        snapshot: &Snapshot,
         user_key: Vec<u8>,
         old_doc: &Document,
         sync: bool,
@@ -1059,7 +1064,7 @@ impl WriteExecutor {
         };
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot, vec![precondition]),
+            Preconditions::new(snapshot.clone(), vec![precondition]),
             count_stats.build(),
         );
         self.storage_engine.write(batch, sync)

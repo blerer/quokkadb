@@ -227,10 +227,7 @@ pub(crate) fn read_stored_doc(
     id: impl Into<BsonValue>,
 ) -> Result<Document> {
     let user_key = id.into().try_into_key()?;
-    let doc_bytes = storage_engine
-        .read(collection_id, 0, &user_key, None)?
-        .unwrap()
-        .1;
+    let doc_bytes = storage_engine.read(collection_id, 0, &user_key)?.unwrap().1;
     Ok(Document::from_reader(Cursor::new(doc_bytes))?)
 }
 

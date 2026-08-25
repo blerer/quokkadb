@@ -20,6 +20,7 @@ use tracing::{trace_span, Span};
 
 struct CompactionTask {
     compaction_job: CompactionJob,
+    oldest_active_snapshot: Option<u64>,
     callback: Arc<Callback<Result<SSTableOperation>>>,
 }
 
@@ -93,6 +94,7 @@ impl CompactionManager {
     pub fn schedule_compaction_if_needed(
         &self,
         levels: &Levels,
+        oldest_active_snapshot: Option<u64>,
         callback: &Arc<Callback<Result<SSTableOperation>>>,
     ) {
         while let Some(job) = self
@@ -109,7 +111,7 @@ impl CompactionManager {
                 input_files = job.input_files.len(),
                 "compaction job picked"
             );
-            self.enqueue_compaction_job(job, callback);
+            self.enqueue_compaction_job(job, oldest_active_snapshot, callback);
         }
     }
 
@@ -117,6 +119,7 @@ impl CompactionManager {
     pub fn schedule_single_compaction(
         &self,
         levels: &Levels,
+        oldest_active_snapshot: Option<u64>,
         callback: &Arc<Callback<Result<SSTableOperation>>>,
     ) -> bool {
         if let Some(job) = self
@@ -125,7 +128,7 @@ impl CompactionManager {
             .unwrap()
             .pick_compaction(levels)
         {
-            self.enqueue_compaction_job(job, callback);
+            self.enqueue_compaction_job(job, oldest_active_snapshot, callback);
             true
         } else {
             false
@@ -135,10 +138,12 @@ impl CompactionManager {
     fn enqueue_compaction_job(
         &self,
         job: CompactionJob,
+        oldest_active_snapshot: Option<u64>,
         callback: &Arc<Callback<Result<SSTableOperation>>>,
     ) {
         let task = CompactionTask {
             compaction_job: job,
+            oldest_active_snapshot,
             callback: callback.clone(),
         };
         self.enqueue(task);
@@ -214,6 +219,7 @@ fn worker_loop(
                 let _instance_span = instance_span.as_ref().map(|span| span.enter());
                 let CompactionTask {
                     compaction_job,
+                    oldest_active_snapshot,
                     callback,
                 } = task;
                 let _span = trace_span!(
@@ -229,6 +235,7 @@ fn worker_loop(
                     db_dir,
                     sst_cache.clone(),
                     compaction_job,
+                    oldest_active_snapshot,
                     next_file_number,
                 );
                 match rs {
@@ -269,16 +276,19 @@ fn perform_compaction(
     db_dir: &PathBuf,
     sst_cache: Arc<SSTableCache>,
     job: CompactionJob,
+    oldest_active_snapshot: Option<u64>,
     next_file_number: &AtomicU64,
 ) -> Result<SSTableOperation> {
     let sst_max_size = options.target_file_size_for_level(job.output_level);
+    let drops_to_apply = drops_safe_to_apply(&job.drops, oldest_active_snapshot);
 
     let compaction_iter = CompactionIterator::new(
         db_dir,
         sst_cache.clone(),
         &job.input_files,
         &job.output_files,
-        &job.drops,
+        &drops_to_apply,
+        oldest_active_snapshot,
     )?;
 
     let mut added = Vec::new();
@@ -328,6 +338,20 @@ fn perform_compaction(
         removed_sstables: removed,
         drops,
     })
+}
+
+fn drops_safe_to_apply(
+    drops: &[Arc<DropMetadata>],
+    oldest_active_snapshot: Option<u64>,
+) -> Vec<Arc<DropMetadata>> {
+    match oldest_active_snapshot {
+        Some(snapshot) => drops
+            .iter()
+            .filter(|drop| drop.drop_sequence_number <= snapshot)
+            .cloned()
+            .collect(),
+        None => drops.to_vec(),
+    }
 }
 
 /// Splits the drops, so that they match the output partitions
@@ -408,10 +432,12 @@ mod tests {
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
+    use crate::storage::internal_key::InternalKeyRange;
     use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
     use crate::storage::sstable::sstable_cache::SSTableCache;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::{put_rec, record_key};
+    use crate::storage::Direction;
     use crate::util::interval::Interval;
     use std::ops::{Bound, RangeBounds};
     use std::sync::atomic::AtomicU64;
@@ -441,6 +467,21 @@ mod tests {
 
     fn next_file_number(start: u64) -> AtomicU64 {
         AtomicU64::new(start)
+    }
+
+    fn read_sst_entries(
+        dir: &Path,
+        cache: Arc<SSTableCache>,
+        sst: &Arc<SSTableMetadata>,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let reader = cache
+            .get(&dir.join(DbFile::new_sst(sst.number).filename()))
+            .unwrap();
+        reader
+            .range_scan(InternalKeyRange::all(), Direction::Forward)
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -505,6 +546,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -564,6 +606,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -605,8 +648,15 @@ mod tests {
             partitions_grid: None,
         };
 
-        let op =
-            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job,
+            None,
+            &counter,
+        )
+        .unwrap();
         let (_compaction_job, added, removed, drops) = unwrap_compaction(op);
 
         // No partitions_grid → drops returned as-is
@@ -615,6 +665,87 @@ mod tests {
 
         assert_eq!(added.len(), 0);
         assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn test_drop_is_carried_but_not_applied_when_snapshot_is_older_than_drop() {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let cache = setup_cache(&options);
+        let counter = next_file_number(10);
+
+        let col = 10;
+        let entries = vec![put_rec(col, 10, 1, 1)];
+        let input_sst = write_sst(dir.path(), 1, &entries, &options);
+        let drop = DropMetadata::new_collection_drop(col, 50);
+
+        let job = CompactionJob {
+            id: 0,
+            input_level: 0,
+            output_level: 1,
+            input_files: vec![input_sst.clone()],
+            output_files: vec![],
+            drops: vec![drop.clone()],
+            input_key_range: Interval::all(),
+            output_key_range: Interval::all(),
+            partitions_grid: None,
+        };
+
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache.clone(),
+            job,
+            Some(40),
+            &counter,
+        )
+        .unwrap();
+        let (_job, added, _removed, drops) = unwrap_compaction(op);
+
+        assert_eq!(drops, vec![drop]);
+        assert_eq!(added.len(), 1);
+        assert_eq!(read_sst_entries(dir.path(), cache, &added[0]), entries);
+    }
+
+    #[test]
+    fn test_drop_is_applied_when_snapshot_is_old_enough() {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let cache = setup_cache(&options);
+        let counter = next_file_number(10);
+
+        let col = 10;
+        let input_sst = write_sst(dir.path(), 1, &[put_rec(col, 10, 1, 1)], &options);
+        let drop = DropMetadata::new_collection_drop(col, 50);
+
+        let job = CompactionJob {
+            id: 0,
+            input_level: 0,
+            output_level: 1,
+            input_files: vec![input_sst.clone()],
+            output_files: vec![],
+            drops: vec![drop.clone()],
+            input_key_range: Interval::all(),
+            output_key_range: Interval::all(),
+            partitions_grid: None,
+        };
+
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache.clone(),
+            job,
+            Some(50),
+            &counter,
+        )
+        .unwrap();
+        let (_job, added, _removed, drops) = unwrap_compaction(op);
+
+        assert_eq!(drops, vec![drop]);
+        assert!(
+            added.is_empty(),
+            "applied drop should erase compacted history"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -654,6 +785,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -691,8 +823,15 @@ mod tests {
             partitions_grid: Some(vec![]),
         };
 
-        let op =
-            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job,
+            None,
+            &counter,
+        )
+        .unwrap();
         let (_compaction_job, _added, _removed, drops) = unwrap_compaction(op);
 
         assert_eq!(drops.len(), 1);
@@ -742,6 +881,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -807,6 +947,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -851,8 +992,15 @@ mod tests {
             partitions_grid: Some(vec![boundary]),
         };
 
-        let op =
-            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job,
+            None,
+            &counter,
+        )
+        .unwrap();
         let (_compaction_job, added, _removed, _drops) = unwrap_compaction(op);
 
         // Entries only before boundary: the boundary-crossing loop never fires, so
@@ -894,8 +1042,15 @@ mod tests {
             partitions_grid: Some(vec![boundary.clone()]),
         };
 
-        let op =
-            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job,
+            None,
+            &counter,
+        )
+        .unwrap();
         let (_level, _added, _removed, drops) = unwrap_compaction(op);
 
         // The drop should have been split at the boundary.
@@ -946,6 +1101,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -997,6 +1153,7 @@ mod tests {
             &dir.path().to_path_buf(),
             cache,
             job.clone(),
+            None,
             &counter,
         )
         .unwrap();
@@ -1052,8 +1209,15 @@ mod tests {
             partitions_grid: Some(vec![record_key(col, 50)]),
         };
 
-        let op =
-            perform_compaction(&options, &dir.path().to_path_buf(), cache, job, &counter).unwrap();
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache,
+            job,
+            None,
+            &counter,
+        )
+        .unwrap();
         let (_compaction_job, _added, _removed, drops) = unwrap_compaction(op);
 
         // The drop fragment ends at the boundary (Included(50)); it is the left fragment

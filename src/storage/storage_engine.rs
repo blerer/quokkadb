@@ -14,6 +14,7 @@ use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
 use crate::storage::manifest::Manifest;
 use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
+use crate::storage::snapshot_manager::{Snapshot, SnapshotManager};
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
@@ -44,6 +45,7 @@ pub(crate) struct StorageEngine {
     next_file_number: Arc<AtomicU64>, // The counter used to create the file ids
     next_seq_number: AtomicU64,       // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
+    snapshot_manager: Arc<SnapshotManager>,
     sst_cache: Arc<SSTableCache>,
     flush_manager: FlushManager,
     compaction_manager: CompactionManager,
@@ -324,6 +326,7 @@ impl StorageEngine {
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
                 sst_cache,
+                snapshot_manager: Arc::new(SnapshotManager::new()),
                 flush_manager,
                 compaction_manager,
                 async_callback: OnceLock::new(),
@@ -385,6 +388,7 @@ impl StorageEngine {
                 next_seq_number,
                 last_visible_seq: AtomicU64::new(0),
                 sst_cache,
+                snapshot_manager: Arc::new(SnapshotManager::new()),
                 flush_manager,
                 compaction_manager,
                 async_callback: OnceLock::new(),
@@ -705,8 +709,28 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn last_visible_sequence(&self) -> u64 {
+    /// Returns the latest sequence number that is visible to ordinary reads.
+    ///
+    /// This is a visibility fence, not a leased snapshot. Callers may use it to
+    /// perform an internally consistent read operation, but the storage engine does
+    /// not currently retain historical state indefinitely for arbitrary past
+    /// sequence numbers. In particular, compaction may later reclaim older history
+    /// that is no longer protected by a real snapshot lease.
+    fn last_visible_sequence(&self) -> u64 {
         self.last_visible_seq.load(Ordering::Relaxed)
+    }
+
+    /// Acquires a real snapshot lease for the current visible sequence.
+    ///
+    /// The returned lease remains active until the last clone is dropped. Future
+    /// compaction logic can use the oldest active lease to decide which history
+    /// must be retained.
+    pub fn acquire_snapshot(&self) -> Snapshot {
+        self.snapshot_manager.acquire(self.last_visible_sequence())
+    }
+
+    fn clamp_snapshot_sequence(&self, sequence: u64) -> u64 {
+        sequence.min(self.last_visible_sequence())
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
@@ -975,17 +999,35 @@ impl StorageEngine {
         }
     }
 
+    /// Reads a single key from the latest visible state.
+    ///
+    /// This acquires a real snapshot lease for the current latest visible sequence
+    /// and reads through `read_at_snapshot`.
     pub fn read(
         &self,
         collection: u32,
         index: u32,
         user_key: &[u8],
-        snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let last_visible_sequence = self.last_visible_seq.load(Ordering::Relaxed);
-        let snapshot = snapshot.map_or(last_visible_sequence, |s| s.min(last_visible_sequence));
+        let snapshot = self.acquire_snapshot();
+        self.read_at_snapshot(collection, index, user_key, &snapshot)
+    }
 
-        self.read_internal(collection, index, user_key, snapshot, None)
+    /// Reads a single key using a real snapshot lease.
+    pub fn read_at_snapshot(
+        &self,
+        collection: u32,
+        index: u32,
+        user_key: &[u8],
+        snapshot: &Snapshot,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.read_internal(
+            collection,
+            index,
+            user_key,
+            self.clamp_snapshot_sequence(snapshot.sequence()),
+            None,
+        )
     }
 
     fn read_internal(
@@ -1011,20 +1053,19 @@ impl StorageEngine {
             .into()
     }
 
-    pub fn range_scan<R>(
+    /// Scans a key range using a real snapshot lease.
+    pub fn range_scan_at_snapshot<R>(
         &self,
         collection: u32,
         index: u32,
         user_key_range: &R,
-        snapshot: Option<u64>,
+        snapshot: &Snapshot,
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>
     where
         R: RangeBounds<Vec<u8>>,
     {
-        let last_visible_sequence = self.last_visible_seq.load(Ordering::Relaxed);
-        let snapshot = snapshot.map_or(last_visible_sequence, |s| s.min(last_visible_sequence));
-
+        let snapshot_sequence = self.clamp_snapshot_sequence(snapshot.sequence());
         let lsm_tree = self.lsm_tree.load_full();
 
         let iter_with_lifetime = lsm_tree.range_scan(
@@ -1033,13 +1074,10 @@ impl StorageEngine {
             collection,
             index,
             user_key_range,
-            snapshot,
+            snapshot_sequence,
             direction,
         )?;
 
-        // Here we are saying that the iterator can live for 'static.
-        // This is safe because we are moving the lsm_tree Arc into the returned iterator struct,
-        // so the LsmTree will live as long as the iterator.
         let static_iterator = unsafe {
             std::mem::transmute::<
                 Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>,
@@ -1049,6 +1087,7 @@ impl StorageEngine {
 
         let result_iterator = RangeScanIterator {
             _lsm_tree: lsm_tree,
+            _snapshot: Some(snapshot.clone()),
             iterator: static_iterator,
         };
 
@@ -1310,8 +1349,11 @@ impl StorageEngine {
 
         let _wal_and_manifest = self.db_mutex.lock().unwrap();
         let levels = self.lsm_tree.load_full().levels();
-        self.compaction_manager
-            .schedule_compaction_if_needed(&levels, self.get_async_callback());
+        self.compaction_manager.schedule_compaction_if_needed(
+            &levels,
+            self.snapshot_manager.oldest_active_snapshot(),
+            self.get_async_callback(),
+        );
     }
 
     fn delete_obsolete_log_files(self: &Arc<Self>, obsolete_log_files: Vec<PathBuf>) -> Result<()> {
@@ -1532,9 +1574,12 @@ impl StorageEngine {
         }));
 
         let levels = self.lsm_tree.load().levels();
-        let scheduled = self
-            .compaction_manager
-            .schedule_single_compaction(&levels, &callback);
+        let oldest_active_snapshot = self.snapshot_manager.oldest_active_snapshot();
+        let scheduled = self.compaction_manager.schedule_single_compaction(
+            &levels,
+            oldest_active_snapshot,
+            &callback,
+        );
         drop(levels); // We need to release levels to allow obsolete Arc<SSTableMetadata> to be dropped and the files to be deleted after compaction
 
         if scheduled {
@@ -1699,6 +1744,7 @@ pub enum SSTableOperation {
 struct RangeScanIterator {
     // This must be declared before the iterator to be dropped after.
     _lsm_tree: Arc<LsmTree>,
+    _snapshot: Option<Snapshot>,
     iterator: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'static>,
 }
 
