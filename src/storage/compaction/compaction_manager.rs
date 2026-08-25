@@ -113,7 +113,7 @@ impl CompactionManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn schedule_single_compaction(
         &self,
         levels: &Levels,

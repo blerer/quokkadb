@@ -8,6 +8,9 @@ pub mod obs;
 pub mod options;
 mod query;
 mod storage;
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub mod testing;
 mod util;
 
 use crate::collection::CreateIndexOptions;

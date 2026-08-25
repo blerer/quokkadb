@@ -1513,7 +1513,10 @@ impl StorageEngine {
             .fail_next_precondition_checks
             .store(count, Ordering::Relaxed);
     }
+}
 
+#[cfg(any(test, feature = "internal-testing"))]
+impl StorageEngine {
     pub fn disable_auto_compaction(&self) {
         self.disable_auto_compaction.store(true, Ordering::Relaxed);
     }
