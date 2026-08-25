@@ -21,13 +21,30 @@ fn get_sample_data() -> Vec<Document> {
     ]
 }
 
-fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+fn setup_db_with_baseline_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
     let db = common::open_db(path);
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
+}
+
+fn setup_db_with_storage_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    let dir = TempDir::new().unwrap();
+    let db = common::open_db_with_seed_data(dir.path(), "test", &get_sample_data(), layout);
+    (dir, db)
+}
+
+// Prefer the explicit helpers above:
+// - `setup_db_with_baseline_data` for logical/operator tests
+// - `setup_db_with_storage_layout` for storage-sensitive matrix tests
+fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+    setup_db_with_baseline_data()
+}
+
+fn setup_db_with_data_in_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    setup_db_with_storage_layout(layout)
 }
 
 fn get_ids(results: &[Document]) -> Vec<i32> {
@@ -42,16 +59,18 @@ fn assert_ids(results: &[Document], expected_ids: &[i32]) {
 
 #[test]
 fn test_simple_equality() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "status": "A" })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "status": "A" })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
 
-    assert_ids(&results, &[1, 2, 5, 7]);
+        assert_ids(&results, &[1, 2, 5, 7]);
+    }
 }
 
 #[test]
@@ -321,38 +340,42 @@ fn test_projection_positional() {
 
 #[test]
 fn test_sort() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "qty": { "$exists": true } })
-        .sort(doc! { "qty": -1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
-    assert_eq!(qtys, vec![100, 85, 75, 50, 45, 30, 25, 20]);
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "qty": { "$exists": true } })
+            .sort(doc! { "qty": -1 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
+        assert_eq!(qtys, vec![100, 85, 75, 50, 45, 30, 25, 20]);
+    }
 }
 
 #[test]
 fn test_find_one_returns_matching_document() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection.find_one(doc! { "_id": 1 }).unwrap();
+        let result = collection.find_one(doc! { "_id": 1 }).unwrap();
 
-    assert_eq!(
-        result,
-        Some(doc! {
-            "_id": 1,
-            "item": "journal",
-            "qty": 25,
-            "size": { "h": 14, "w": 21, "uom": "cm" },
-            "status": "A",
-            "tags": ["blank", "red"],
-            "dim_cm": [14, 21],
-        })
-    );
+        assert_eq!(
+            result,
+            Some(doc! {
+                "_id": 1,
+                "item": "journal",
+                "qty": 25,
+                "size": { "h": 14, "w": 21, "uom": "cm" },
+                "status": "A",
+                "tags": ["blank", "red"],
+                "dim_cm": [14, 21],
+            })
+        );
+    }
 }
 
 #[test]
@@ -424,40 +447,44 @@ fn test_find_one_create_if_missing_returns_none_for_missing_collection() {
 
 #[test]
 fn test_skip_limit() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "qty": { "$exists": true } })
-        .sort(doc! { "qty": 1 })
-        .skip(2)
-        .limit(3)
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "qty": { "$exists": true } })
+            .sort(doc! { "qty": 1 })
+            .skip(2)
+            .limit(3)
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
 
-    assert_eq!(results.len(), 3);
-    let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
-    assert_eq!(qtys, vec![30, 45, 50]);
+        assert_eq!(results.len(), 3);
+        let qtys: Vec<i32> = results.iter().map(|d| d.get_i32("qty").unwrap()).collect();
+        assert_eq!(qtys, vec![30, 45, 50]);
+    }
 }
 
 #[test]
 fn test_complex_query() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "status": "A", "size.uom": "cm" })
-        .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
-        .sort(doc! { "qty": 1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "status": "A", "size.uom": "cm" })
+            .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
+            .sort(doc! { "qty": 1 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
 
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0], doc! { "item": "journal", "qty": 25 });
-    assert_eq!(results[1], doc! { "item": "postcard", "qty": 45 });
-    assert_eq!(results[2], doc! { "item": "mat", "qty": 85 });
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], doc! { "item": "journal", "qty": 25 });
+        assert_eq!(results[1], doc! { "item": "postcard", "qty": 45 });
+        assert_eq!(results[2], doc! { "item": "mat", "qty": 85 });
+    }
 }
 
 #[test]
@@ -583,85 +610,86 @@ fn test_multi_collection_queries() {
 
 #[test]
 fn test_id_point_query() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "_id": 5 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "_id": 5 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
 
-    assert_ids(&results, &[5]);
+        assert_ids(&results, &[5]);
+    }
 }
 
 #[test]
 fn test_id_range_queries() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    // $gt
-    let gt_results: Vec<Document> = collection
-        .find(doc! { "_id": { "$gt": 8 } })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_ids(&gt_results, &[9, 10]);
+        let gt_results: Vec<Document> = collection
+            .find(doc! { "_id": { "$gt": 8 } })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_ids(&gt_results, &[9, 10]);
 
-    // $gte
-    let gte_results: Vec<Document> = collection
-        .find(doc! { "_id": { "$gte": 8 } })
-        .sort(doc! { "_id": -1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_ids(&gte_results, &[10, 9, 8]);
+        let gte_results: Vec<Document> = collection
+            .find(doc! { "_id": { "$gte": 8 } })
+            .sort(doc! { "_id": -1 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_ids(&gte_results, &[10, 9, 8]);
 
-    // $lt
-    let lt_results: Vec<Document> = collection
-        .find(doc! { "_id": { "$lt": 3 } })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_ids(&lt_results, &[1, 2]);
+        let lt_results: Vec<Document> = collection
+            .find(doc! { "_id": { "$lt": 3 } })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_ids(&lt_results, &[1, 2]);
 
-    // $lte
-    let lte_results: Vec<Document> = collection
-        .find(doc! { "_id": { "$lte": 3 } })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_ids(&lte_results, &[1, 2, 3]);
+        let lte_results: Vec<Document> = collection
+            .find(doc! { "_id": { "$lte": 3 } })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_ids(&lte_results, &[1, 2, 3]);
 
-    // combined
-    let combined_results: Vec<Document> = collection
-        .find(doc! { "_id": { "$gt": 3, "$lte": 6 } })
-        .sort(doc! { "_id": -1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_ids(&combined_results, &[6, 5, 4]);
+        let combined_results: Vec<Document> = collection
+            .find(doc! { "_id": { "$gt": 3, "$lte": 6 } })
+            .sort(doc! { "_id": -1 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_ids(&combined_results, &[6, 5, 4]);
+    }
 }
 
 #[test]
 fn test_id_in_query() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
-    let results: Vec<Document> = collection
-        .find(doc! { "_id": { "$in": [9, 1, 11, 5] } })
-        .sort(doc! { "_id": -1 })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
+        let results: Vec<Document> = collection
+            .find(doc! { "_id": { "$in": [9, 1, 11, 5] } })
+            .sort(doc! { "_id": -1 })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
 
-    let ids: Vec<i32> = results.iter().map(|d| d.get_i32("_id").unwrap()).collect();
-    assert_eq!(ids, vec![9, 5, 1]);
+        let ids: Vec<i32> = results.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+        assert_eq!(ids, vec![9, 5, 1]);
+    }
 }
 
 #[test]

@@ -19,13 +19,30 @@ fn get_sample_data() -> Vec<Document> {
     ]
 }
 
-fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+fn setup_db_with_baseline_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let path = dir.path();
     let db = common::open_db(path);
     let collection = db.collection("test").create_if_missing();
     collection.insert_many(get_sample_data()).unwrap();
     (dir, db)
+}
+
+fn setup_db_with_storage_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    let dir = TempDir::new().unwrap();
+    let db = common::open_db_with_seed_data(dir.path(), "test", &get_sample_data(), layout);
+    (dir, db)
+}
+
+// Prefer the explicit helpers above:
+// - `setup_db_with_baseline_data` for logical/operator tests
+// - `setup_db_with_storage_layout` for storage-sensitive matrix tests
+fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+    setup_db_with_baseline_data()
+}
+
+fn setup_db_with_data_in_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    setup_db_with_storage_layout(layout)
 }
 
 fn find_one(collection: &Collection, filter: Document) -> Option<Document> {
@@ -39,16 +56,18 @@ fn find_one(collection: &Collection, filter: Document) -> Option<Document> {
 
 #[test]
 fn test_set_simple() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    collection
-        .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
-        .unwrap();
+        collection
+            .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 30 } })
+            .unwrap();
 
-    let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
-    assert_eq!(doc.get_i32("qty").unwrap(), 30);
-    assert_eq!(doc.get_str("item").unwrap(), "journal"); // Check other fields remain
+        let doc = find_one(&collection, doc! { "_id": 1 }).unwrap();
+        assert_eq!(doc.get_i32("qty").unwrap(), 30);
+        assert_eq!(doc.get_str("item").unwrap(), "journal"); // Check other fields remain
+    }
 }
 
 #[test]
@@ -330,39 +349,41 @@ fn test_bit() {
 
 #[test]
 fn test_update_many() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    // Set status to 'C' and inc qty for all 'A' status documents
-    let result = collection
-        .update_many(
-            doc! { "status": "A" },
-            doc! { "$set": { "status": "C" }, "$inc": { "qty": 10 } },
-        )
-        .unwrap();
-    assert_eq!(result.matched_count, 4);
-    assert_eq!(result.modified_count, 4);
-    assert_eq!(result.upserted_id, None);
+        // Set status to 'C' and inc qty for all 'A' status documents
+        let result = collection
+            .update_many(
+                doc! { "status": "A" },
+                doc! { "$set": { "status": "C" }, "$inc": { "qty": 10 } },
+            )
+            .unwrap();
+        assert_eq!(result.matched_count, 4);
+        assert_eq!(result.modified_count, 4);
+        assert_eq!(result.upserted_id, None);
 
-    let results: Vec<Document> = collection
-        .find(doc! { "status": "C" })
-        .execute()
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_eq!(results.len(), 4);
+        let results: Vec<Document> = collection
+            .find(doc! { "status": "C" })
+            .execute()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(results.len(), 4);
 
-    let doc1 = find_one(&collection, doc! { "_id": 1 }).unwrap();
-    assert_eq!(doc1.get_i32("qty").unwrap(), 35);
-    let doc2 = find_one(&collection, doc! { "_id": 2 }).unwrap();
-    assert_eq!(doc2.get_i32("qty").unwrap(), 60);
+        let doc1 = find_one(&collection, doc! { "_id": 1 }).unwrap();
+        assert_eq!(doc1.get_i32("qty").unwrap(), 35);
+        let doc2 = find_one(&collection, doc! { "_id": 2 }).unwrap();
+        assert_eq!(doc2.get_i32("qty").unwrap(), 60);
 
-    let count_a = collection
-        .find(doc! { "status": "A" })
-        .execute()
-        .unwrap()
-        .count();
-    assert_eq!(count_a, 0);
+        let count_a = collection
+            .find(doc! { "status": "A" })
+            .execute()
+            .unwrap()
+            .count();
+        assert_eq!(count_a, 0);
+    }
 }
 
 #[test]
@@ -430,110 +451,116 @@ fn test_update_many_no_match() {
 
 #[test]
 fn test_update_one_with_sort_updates_lowest_match() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .update_one_with(
-            doc! { "status": "A" },
-            doc! { "$set": { "selected": "lowest" } },
-        )
-        .sort(doc! { "qty": 1 })
-        .execute()
-        .unwrap();
-    assert_eq!(result.matched_count, 1);
-    assert_eq!(result.modified_count, 1);
-    assert_eq!(result.upserted_id, None);
+        let result = collection
+            .update_one_with(
+                doc! { "status": "A" },
+                doc! { "$set": { "selected": "lowest" } },
+            )
+            .sort(doc! { "qty": 1 })
+            .execute()
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
+        assert_eq!(result.modified_count, 1);
+        assert_eq!(result.upserted_id, None);
 
-    let updated = find_one(&collection, doc! { "selected": "lowest" }).unwrap();
-    assert_eq!(
-        updated,
-        doc! {
-            "_id": 1,
-            "item": "journal",
-            "qty": 25,
-            "size": { "h": 14, "w": 21, "uom": "cm" },
-            "status": "A",
-            "tags": ["blank", "red"],
-            "dim_cm": [14, 21],
-            "selected": "lowest",
-        }
-    );
+        let updated = find_one(&collection, doc! { "selected": "lowest" }).unwrap();
+        assert_eq!(
+            updated,
+            doc! {
+                "_id": 1,
+                "item": "journal",
+                "qty": 25,
+                "size": { "h": 14, "w": 21, "uom": "cm" },
+                "status": "A",
+                "tags": ["blank", "red"],
+                "dim_cm": [14, 21],
+                "selected": "lowest",
+            }
+        );
 
-    let highest = find_one(&collection, doc! { "_id": 7 }).unwrap();
-    assert!(!highest.contains_key("selected"));
+        let highest = find_one(&collection, doc! { "_id": 7 }).unwrap();
+        assert!(!highest.contains_key("selected"));
 
-    let remaining = collection
-        .find(doc! { "status": "A", "selected": { "$exists": false } })
-        .execute()
-        .unwrap()
-        .count();
-    assert_eq!(remaining, 3);
+        let remaining = collection
+            .find(doc! { "status": "A", "selected": { "$exists": false } })
+            .execute()
+            .unwrap()
+            .count();
+        assert_eq!(remaining, 3);
+    }
 }
 
 #[test]
 fn test_update_one_with_sort_updates_highest_match() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .update_one_with(
-            doc! { "status": "A" },
-            doc! { "$set": { "selected": "highest" } },
-        )
-        .sort(doc! { "qty": -1 })
-        .execute()
-        .unwrap();
-    assert_eq!(result.matched_count, 1);
-    assert_eq!(result.modified_count, 1);
-    assert_eq!(result.upserted_id, None);
+        let result = collection
+            .update_one_with(
+                doc! { "status": "A" },
+                doc! { "$set": { "selected": "highest" } },
+            )
+            .sort(doc! { "qty": -1 })
+            .execute()
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
+        assert_eq!(result.modified_count, 1);
+        assert_eq!(result.upserted_id, None);
 
-    let updated = find_one(&collection, doc! { "selected": "highest" }).unwrap();
-    assert_eq!(
-        updated,
-        doc! {
-            "_id": 7,
-            "item": "mat",
-            "qty": 85,
-            "size": { "h": 27.9, "w": 35.5, "uom": "cm" },
-            "status": "A",
-            "tags": ["gray"],
-            "dim_cm": [27.9, 35.5],
-            "ratings": [
-                { "user": "C", "score": 9 },
-                { "user": "D", "score": 5 },
-            ],
-            "selected": "highest",
-        }
-    );
+        let updated = find_one(&collection, doc! { "selected": "highest" }).unwrap();
+        assert_eq!(
+            updated,
+            doc! {
+                "_id": 7,
+                "item": "mat",
+                "qty": 85,
+                "size": { "h": 27.9, "w": 35.5, "uom": "cm" },
+                "status": "A",
+                "tags": ["gray"],
+                "dim_cm": [27.9, 35.5],
+                "ratings": [
+                    { "user": "C", "score": 9 },
+                    { "user": "D", "score": 5 },
+                ],
+                "selected": "highest",
+            }
+        );
 
-    let lowest = find_one(&collection, doc! { "_id": 1 }).unwrap();
-    assert!(!lowest.contains_key("selected"));
+        let lowest = find_one(&collection, doc! { "_id": 1 }).unwrap();
+        assert!(!lowest.contains_key("selected"));
 
-    let remaining = collection
-        .find(doc! { "status": "A", "selected": { "$exists": false } })
-        .execute()
-        .unwrap()
-        .count();
-    assert_eq!(remaining, 3);
+        let remaining = collection
+            .find(doc! { "status": "A", "selected": { "$exists": false } })
+            .execute()
+            .unwrap()
+            .count();
+        assert_eq!(remaining, 3);
+    }
 }
 
 #[test]
 fn test_update_one_no_match_after_delete() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let delete_result = collection.delete_one(doc! { "_id": 1 }).unwrap();
-    assert_eq!(delete_result.deleted_count, 1);
+        let delete_result = collection.delete_one(doc! { "_id": 1 }).unwrap();
+        assert_eq!(delete_result.deleted_count, 1);
 
-    let result = collection
-        .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 999 } })
-        .unwrap();
-    assert_eq!(result.matched_count, 0);
-    assert_eq!(result.modified_count, 0);
-    assert_eq!(result.upserted_id, None);
+        let result = collection
+            .update_one(doc! { "_id": 1 }, doc! { "$set": { "qty": 999 } })
+            .unwrap();
+        assert_eq!(result.matched_count, 0);
+        assert_eq!(result.modified_count, 0);
+        assert_eq!(result.upserted_id, None);
 
-    assert!(find_one(&collection, doc! { "_id": 1 }).is_none());
+        assert!(find_one(&collection, doc! { "_id": 1 }).is_none());
+    }
 }
 
 #[test]
@@ -609,24 +636,26 @@ fn test_find_one_and_update_returns_none_after_delete() {
 
 #[test]
 fn test_find_one_and_update_with_sort_and_projection() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .find_one_and_update_with(
-            doc! { "status": "A" },
-            doc! { "$set": { "selected": true } },
-        )
-        .sort(doc! { "qty": -1 })
-        .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
-        .return_document(ReturnDocument::After)
-        .execute()
-        .unwrap();
+        let result = collection
+            .find_one_and_update_with(
+                doc! { "status": "A" },
+                doc! { "$set": { "selected": true } },
+            )
+            .sort(doc! { "qty": -1 })
+            .projection(doc! { "item": 1, "qty": 1, "_id": 0 })
+            .return_document(ReturnDocument::After)
+            .execute()
+            .unwrap();
 
-    assert_eq!(result, Some(doc! { "item": "mat", "qty": 85 }));
+        assert_eq!(result, Some(doc! { "item": "mat", "qty": 85 }));
 
-    let updated = find_one(&collection, doc! { "_id": 7 }).unwrap();
-    assert!(updated.get_bool("selected").unwrap());
+        let updated = find_one(&collection, doc! { "_id": 7 }).unwrap();
+        assert!(updated.get_bool("selected").unwrap());
+    }
 }
 
 #[test]

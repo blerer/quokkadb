@@ -13,7 +13,7 @@ fn get_sample_data() -> Vec<Document> {
     ]
 }
 
-fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+fn setup_db_with_baseline_data() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let db = common::open_db(dir.path());
     let collection = db.collection("test").create_if_missing();
@@ -21,30 +21,49 @@ fn setup_db_with_data() -> (TempDir, QuokkaDB) {
     (dir, db)
 }
 
+fn setup_db_with_storage_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    let dir = TempDir::new().unwrap();
+    let db = common::open_db_with_seed_data(dir.path(), "test", &get_sample_data(), layout);
+    (dir, db)
+}
+
+// Prefer the explicit helpers above:
+// - `setup_db_with_baseline_data` for logical/operator tests
+// - `setup_db_with_storage_layout` for storage-sensitive matrix tests
+fn setup_db_with_data() -> (TempDir, QuokkaDB) {
+    setup_db_with_baseline_data()
+}
+
+fn setup_db_with_data_in_layout(layout: common::StorageLayout) -> (TempDir, QuokkaDB) {
+    setup_db_with_storage_layout(layout)
+}
+
 #[test]
 fn test_delete_one_deletes_matching_document() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection.delete_one(doc! { "_id": 1 }).unwrap();
+        let result = collection.delete_one(doc! { "_id": 1 }).unwrap();
 
-    assert_eq!(result.deleted_count, 1);
-    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(collection.estimated_document_count().unwrap(), 2);
 
-    let remaining: Vec<_> = collection
-        .find(doc! {})
-        .sort(doc! { "_id": 1 })
-        .execute()
-        .unwrap()
-        .map(|doc| doc.unwrap())
-        .collect();
-    assert_eq!(
-        remaining,
-        vec![
-            doc! { "_id": 2, "item": "notebook", "status": "A" },
-            doc! { "_id": 3, "item": "paper", "status": "D" },
-        ]
-    );
+        let remaining: Vec<_> = collection
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .execute()
+            .unwrap()
+            .map(|doc| doc.unwrap())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                doc! { "_id": 2, "item": "notebook", "status": "A" },
+                doc! { "_id": 3, "item": "paper", "status": "D" },
+            ]
+        );
+    }
 }
 
 #[test]
@@ -69,85 +88,91 @@ fn test_delete_one_returns_zero_when_no_match() {
 
 #[test]
 fn test_delete_one_with_sort_deletes_lowest_match() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .delete_one_with(doc! { "status": "A" })
-        .sort(doc! { "_id": 1 })
-        .execute()
-        .unwrap();
+        let result = collection
+            .delete_one_with(doc! { "status": "A" })
+            .sort(doc! { "_id": 1 })
+            .execute()
+            .unwrap();
 
-    assert_eq!(result.deleted_count, 1);
-    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(collection.estimated_document_count().unwrap(), 2);
 
-    let remaining: Vec<_> = collection
-        .find(doc! {})
-        .sort(doc! { "_id": 1 })
-        .execute()
-        .unwrap()
-        .map(|doc| doc.unwrap())
-        .collect();
-    assert_eq!(
-        remaining,
-        vec![
-            doc! { "_id": 2, "item": "notebook", "status": "A" },
-            doc! { "_id": 3, "item": "paper", "status": "D" },
-        ]
-    );
+        let remaining: Vec<_> = collection
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .execute()
+            .unwrap()
+            .map(|doc| doc.unwrap())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                doc! { "_id": 2, "item": "notebook", "status": "A" },
+                doc! { "_id": 3, "item": "paper", "status": "D" },
+            ]
+        );
+    }
 }
 
 #[test]
 fn test_delete_one_with_sort_deletes_highest_match() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .delete_one_with(doc! { "status": "A" })
-        .sort(doc! { "_id": -1 })
-        .execute()
-        .unwrap();
+        let result = collection
+            .delete_one_with(doc! { "status": "A" })
+            .sort(doc! { "_id": -1 })
+            .execute()
+            .unwrap();
 
-    assert_eq!(result.deleted_count, 1);
-    assert_eq!(collection.estimated_document_count().unwrap(), 2);
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(collection.estimated_document_count().unwrap(), 2);
 
-    let remaining: Vec<_> = collection
-        .find(doc! {})
-        .sort(doc! { "_id": 1 })
-        .execute()
-        .unwrap()
-        .map(|doc| doc.unwrap())
-        .collect();
-    assert_eq!(
-        remaining,
-        vec![
-            doc! { "_id": 1, "item": "journal", "status": "A" },
-            doc! { "_id": 3, "item": "paper", "status": "D" },
-        ]
-    );
+        let remaining: Vec<_> = collection
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .execute()
+            .unwrap()
+            .map(|doc| doc.unwrap())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                doc! { "_id": 1, "item": "journal", "status": "A" },
+                doc! { "_id": 3, "item": "paper", "status": "D" },
+            ]
+        );
+    }
 }
 
 #[test]
 fn test_delete_many_deletes_all_matching_documents() {
-    let (_dir, db) = setup_db_with_data();
-    let collection = db.collection("test");
+    for &layout in common::test_storage_layouts() {
+        let (_dir, db) = setup_db_with_data_in_layout(layout);
+        let collection = db.collection("test");
 
-    let result = collection.delete_many(doc! { "status": "A" }).unwrap();
+        let result = collection.delete_many(doc! { "status": "A" }).unwrap();
 
-    assert_eq!(result.deleted_count, 2);
-    assert_eq!(collection.estimated_document_count().unwrap(), 1);
+        assert_eq!(result.deleted_count, 2);
+        assert_eq!(collection.estimated_document_count().unwrap(), 1);
 
-    let remaining: Vec<_> = collection
-        .find(doc! {})
-        .sort(doc! { "_id": 1 })
-        .execute()
-        .unwrap()
-        .map(|doc| doc.unwrap())
-        .collect();
-    assert_eq!(
-        remaining,
-        vec![doc! { "_id": 3, "item": "paper", "status": "D" },]
-    );
+        let remaining: Vec<_> = collection
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .execute()
+            .unwrap()
+            .map(|doc| doc.unwrap())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![doc! { "_id": 3, "item": "paper", "status": "D" },]
+        );
+    }
 }
 
 #[test]
@@ -207,27 +232,31 @@ fn test_find_one_and_delete_applies_projection() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_respects_sort() -> Result<()> {
-    let dir = TempDir::new()?;
-    let db = common::open_db(dir.path());
-    let collection = db.collection("test").create_if_missing();
+    let documents = vec![
+        doc! { "_id": 1, "priority": 1, "value": "low" },
+        doc! { "_id": 2, "priority": 2, "value": "high" },
+    ];
 
-    collection.insert_one(doc! { "_id": 1, "priority": 1, "value": "low" })?;
-    collection.insert_one(doc! { "_id": 2, "priority": 2, "value": "high" })?;
+    for &layout in common::test_storage_layouts() {
+        let dir = TempDir::new()?;
+        let db = common::open_db_with_seed_data(dir.path(), "test", &documents, layout);
+        let collection = db.collection("test");
 
-    let result = collection
-        .find_one_and_delete_with(doc! {})
-        .sort(doc! { "priority": -1 })
-        .execute()?;
+        let result = collection
+            .find_one_and_delete_with(doc! {})
+            .sort(doc! { "priority": -1 })
+            .execute()?;
 
-    assert_eq!(
-        result,
-        Some(doc! { "_id": 2, "priority": 2, "value": "high" })
-    );
-    assert_eq!(
-        collection.find_one(doc! { "_id": 1 })?,
-        Some(doc! { "_id": 1, "priority": 1, "value": "low" })
-    );
-    assert_eq!(collection.find_one(doc! { "_id": 2 })?, None);
+        assert_eq!(
+            result,
+            Some(doc! { "_id": 2, "priority": 2, "value": "high" })
+        );
+        assert_eq!(
+            collection.find_one(doc! { "_id": 1 })?,
+            Some(doc! { "_id": 1, "priority": 1, "value": "low" })
+        );
+        assert_eq!(collection.find_one(doc! { "_id": 2 })?, None);
+    }
 
     Ok(())
 }
