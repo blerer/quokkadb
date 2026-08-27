@@ -81,10 +81,10 @@ fn test_restart_after_parallel_operations_from_clones() {
     {
         let db = get_db(db_path);
         let collection_name = "clone_parallel_ops";
-        let collection = db.collection(collection_name).create_if_missing();
 
         // Seed document so the collection exists, and validate basic write path.
-        collection
+        db.collection(collection_name)
+            .create_if_missing()
             .insert_one(doc! { "type": "seed", "v": 0_i32 })
             .unwrap();
 
