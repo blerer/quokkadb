@@ -45,6 +45,7 @@ pub(crate) struct StorageEngine {
     next_file_number: Arc<AtomicU64>, // The counter used to create the file ids
     next_seq_number: AtomicU64,       // The counter used to create sequence numbers
     last_visible_seq: AtomicU64,
+    snapshot_registration_mutex: Mutex<()>,
     snapshot_manager: Arc<SnapshotManager>,
     sst_cache: Arc<SSTableCache>,
     flush_manager: FlushManager,
@@ -326,6 +327,7 @@ impl StorageEngine {
                 next_seq_number: AtomicU64::new(last_seq_nbr + 1),
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
                 sst_cache,
+                snapshot_registration_mutex: Mutex::new(()),
                 snapshot_manager: Arc::new(SnapshotManager::new()),
                 flush_manager,
                 compaction_manager,
@@ -388,6 +390,7 @@ impl StorageEngine {
                 next_seq_number,
                 last_visible_seq: AtomicU64::new(0),
                 sst_cache,
+                snapshot_registration_mutex: Mutex::new(()),
                 snapshot_manager: Arc::new(SnapshotManager::new()),
                 flush_manager,
                 compaction_manager,
@@ -709,28 +712,25 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Returns the latest sequence number that is visible to ordinary reads.
-    ///
-    /// This is a visibility fence, not a leased snapshot. Callers may use it to
-    /// perform an internally consistent read operation, but the storage engine does
-    /// not currently retain historical state indefinitely for arbitrary past
-    /// sequence numbers. In particular, compaction may later reclaim older history
-    /// that is no longer protected by a real snapshot lease.
-    fn last_visible_sequence(&self) -> u64 {
-        self.last_visible_seq.load(Ordering::Relaxed)
-    }
-
     /// Acquires a real snapshot lease for the current visible sequence.
     ///
     /// The returned lease remains active until the last clone is dropped. Future
     /// compaction logic can use the oldest active lease to decide which history
     /// must be retained.
     pub fn acquire_snapshot(&self) -> Snapshot {
-        self.snapshot_manager.acquire(self.last_visible_sequence())
+        let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
+        self.snapshot_manager
+            .acquire(self.last_visible_seq.load(Ordering::Acquire))
     }
 
-    fn clamp_snapshot_sequence(&self, sequence: u64) -> u64 {
-        sequence.min(self.last_visible_sequence())
+    fn assert_snapshot_sequence_visible(&self, sequence: u64) {
+        let last_visible = self.last_visible_seq.load(Ordering::Acquire);
+        assert!(
+            sequence <= last_visible,
+            "snapshot sequence {} is ahead of last visible sequence {}",
+            sequence,
+            last_visible
+        );
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
@@ -844,23 +844,25 @@ impl StorageEngine {
 
             lsm_tree.memtable.write(seq, writer.batch());
             with_results.push((writer, Ok(())));
+            let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
             let compare = self.last_visible_seq.compare_exchange(
                 seq - 1,
                 seq,
-                Ordering::Acquire,
+                Ordering::AcqRel,
                 Ordering::Relaxed,
             );
             if compare.is_err() {
                 panic!("Last visible sequence number out of order");
             }
-            tracing::trace!(
-                seq,
-                memtable = lsm_tree.memtable.log_number,
-                "memtable write finished"
-            );
         }
 
         drop(wal_and_manifest); // release the lock as soon as possible
+
+        tracing::trace!(
+            seq,
+            memtable = lsm_tree.memtable.log_number,
+            "memtable write finished"
+        );
 
         for (writer, result) in with_results {
             writer.done(result);
@@ -1007,13 +1009,8 @@ impl StorageEngine {
         user_key: &[u8],
         snapshot: &Snapshot,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        self.read_internal(
-            collection,
-            index,
-            user_key,
-            self.clamp_snapshot_sequence(snapshot.sequence()),
-            None,
-        )
+        self.assert_snapshot_sequence_visible(snapshot.sequence());
+        self.read_internal(collection, index, user_key, snapshot.sequence(), None)
     }
 
     fn read_internal(
@@ -1051,7 +1048,7 @@ impl StorageEngine {
     where
         R: RangeBounds<Vec<u8>>,
     {
-        let snapshot_sequence = self.clamp_snapshot_sequence(snapshot.sequence());
+        self.assert_snapshot_sequence_visible(snapshot.sequence());
         let lsm_tree = self.lsm_tree.load_full();
 
         let iter_with_lifetime = lsm_tree.range_scan(
@@ -1060,7 +1057,7 @@ impl StorageEngine {
             collection,
             index,
             user_key_range,
-            snapshot_sequence,
+            snapshot.sequence(),
             direction,
         )?;
 
@@ -1334,6 +1331,7 @@ impl StorageEngine {
         }
 
         let _wal_and_manifest = self.db_mutex.lock().unwrap();
+        let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
         let levels = self.lsm_tree.load_full().levels();
         self.compaction_manager.schedule_compaction_if_needed(
             &levels,
@@ -1559,6 +1557,7 @@ impl StorageEngine {
             rs
         }));
 
+        let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
         let levels = self.lsm_tree.load().levels();
         let oldest_active_snapshot = self.snapshot_manager.oldest_active_snapshot();
         let scheduled = self.compaction_manager.schedule_single_compaction(
