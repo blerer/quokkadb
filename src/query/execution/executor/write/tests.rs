@@ -1810,7 +1810,8 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
     let user_key_2 = BsonValue::from(2_i32).try_into_key()?;
     let snapshot = storage_engine.acquire_snapshot();
-    assert!(storage_engine.read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
+    assert!(storage_engine
+        .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
         .is_none());
 
     hook.release();

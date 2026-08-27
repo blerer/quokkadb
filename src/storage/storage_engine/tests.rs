@@ -177,27 +177,38 @@ fn test_read() {
 
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 1, 1, 1));
 
         let user_key1 = &user_key(2);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 2, 1, 2));
 
         let user_key1 = &user_key(3);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 3, 1, 3));
 
         let user_key1 = &user_key(4);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &delete_rec(col, 4, 5));
 
         let user_key1 = &user_key(5);
-        let snapshot = engine.acquire_snapshot();
-        assert!(&engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().is_none());
+        assert!(&engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none());
     }
 
     let updates = vec![put_op(col, 2, 2), put_op(col, 3, 2), put_op(col, 4, 2)];
@@ -218,22 +229,31 @@ fn test_read() {
 
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 1, 1, 1));
 
         let user_key1 = &user_key(2);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 2, 2, 6));
 
         let user_key1 = &user_key(3);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 3, 2, 7));
 
         let user_key1 = &user_key(4);
-        let snapshot = engine.acquire_snapshot();
-        let actual = &engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let actual = &engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(actual, &put_rec(col, 4, 2, 8));
     }
 
@@ -499,25 +519,33 @@ fn test_read_and_scan_with_immutable_memtables() {
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
     assert_eq!(
-        engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap().1,
+        engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap()
+            .1,
         val_1mb
     );
     // Read from the active memtable.
     let user_key1 = &user_key(5);
-    let snapshot = engine.acquire_snapshot();
     assert_eq!(
-        engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap().1,
+        engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap()
+            .1,
         val_active
     );
     // Read a non-existent key.
     let user_key1 = &user_key(6);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
 
     // --- Verification: Range scan over both memtables ---
     let user_key_range = &(..);
     let direction = Direction::Forward;
-    let snapshot = engine.acquire_snapshot();
     let results: Vec<_> = engine
         .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction)
         .unwrap()
@@ -555,7 +583,11 @@ fn test_read_and_scan_with_immutable_memtables() {
     let user_key1 = &user_key(2);
     let snapshot1 = engine.acquire_snapshot();
     assert_eq!(
-        engine.read_at_snapshot(col, idx, user_key1, &snapshot1).unwrap().unwrap().1,
+        engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot1)
+            .unwrap()
+            .unwrap()
+            .1,
         val_update
     );
     // Read with the snapshot. Should see the old value.
@@ -582,7 +614,11 @@ fn test_read_and_scan_with_immutable_memtables() {
     let user_key1 = &user_key(2);
     let snapshot1 = engine.acquire_snapshot();
     assert_eq!(
-        engine.read_at_snapshot(col, idx, user_key1, &snapshot1).unwrap().unwrap().1,
+        engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot1)
+            .unwrap()
+            .unwrap()
+            .1,
         val_update
     );
 
@@ -654,7 +690,11 @@ fn test_replay_with_multiple_wals() {
         let user_key1 = &user_key(i);
         let snapshot = engine.acquire_snapshot();
         assert_eq!(
-            engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap().1,
+            engine
+                .read_at_snapshot(col, idx, user_key1, &snapshot)
+                .unwrap()
+                .unwrap()
+                .1,
             val_1mb
         );
     }
@@ -703,11 +743,14 @@ fn test_manifest_rotation() {
     let current_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
     assert_ne!(current_manifest_path, initial_manifest_path);
 
+    let snapshot = engine.acquire_snapshot();
     // Verify data is readable after rotation.
     for i in 0..25 {
         let user_key1 = &user_key(i);
-        let snapshot = engine.acquire_snapshot();
-        let (_key, val) = engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+        let (_key, val) = engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         let (_expected_key, expected_val) = put_rec(col, i, i as u32, (i + 1) as u64);
         assert_eq!(val, expected_val);
     }
@@ -720,10 +763,11 @@ fn test_manifest_rotation() {
         StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
 
     // Verify data is readable after restart.
+    let snapshot = engine_restarted.acquire_snapshot();
     for i in 0..25 {
         let user_key1 = &user_key(i);
-        let snapshot = engine_restarted.acquire_snapshot();
-        let (_key, val) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+        let (_key, val) = engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
         let (_expected_key, expected_val) = put_rec(col, i, i as u32, (i + 1) as u64);
@@ -829,13 +873,18 @@ fn test_obsolete_wal_deletion() {
     // Data should still be readable from SSTables.
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let (_key, val1) = engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+    let (_key, val1) = engine
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_expected_key, expected_val1) = put_rec(col, 1, 1, 1);
     assert_eq!(val1, expected_val1);
 
     let user_key1 = &user_key(2);
-    let snapshot = engine.acquire_snapshot();
-    let (_key, val2) = engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+    let (_key, val2) = engine
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_expected_key, expected_val2) = put_rec(col, 2, 2, 2);
     assert_eq!(val2, expected_val2);
 }
@@ -890,10 +939,15 @@ fn test_obsolete_sst_deletion_after_compaction() {
 
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col, 0, user_key1, &snapshot).unwrap().is_some());
+    assert!(engine
+        .read_at_snapshot(col, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_some());
     let user_key1 = &user_key(2);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col, 0, user_key1, &snapshot).unwrap().is_some());
+    assert!(engine
+        .read_at_snapshot(col, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -1257,7 +1311,8 @@ fn test_orphaned_sst_cleanup_on_startup() {
 
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    let (_key, val) = engine_restarted.read_at_snapshot(col, 0, user_key1, &snapshot)
+    let (_key, val) = engine_restarted
+        .read_at_snapshot(col, 0, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val) = put_rec(col, 1, 1, 1);
@@ -1317,8 +1372,10 @@ fn test_concurrent_writes(with_concurrent_flushes: bool) {
                 let value = key as u32;
                 let user_key1 = &user_key(key);
                 let snapshot = engine.acquire_snapshot();
-                let (_record_key, record_value) =
-                    engine.read_at_snapshot(col, idx, user_key1, &snapshot).unwrap().unwrap();
+                let (_record_key, record_value) = engine
+                    .read_at_snapshot(col, idx, user_key1, &snapshot)
+                    .unwrap()
+                    .unwrap();
                 let expected_value = document(key, value).to_vec().unwrap();
                 assert_eq!(
                     record_value, expected_value,
@@ -1380,31 +1437,32 @@ fn test_shutdown_and_restart() {
     // Verify all data is present and correct after restart.
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    let (_key1, val1) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key1, val1) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val1) = put_rec(col, 1, 1, 1);
     assert_eq!(val1, expected_val1);
 
     let user_key1 = &user_key(2);
-    let snapshot = engine_restarted.acquire_snapshot();
-    let (_key2, val2) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key2, val2) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val2) = put_rec(col, 2, 2, 4);
     assert_eq!(val2, expected_val2);
 
     let user_key1 = &user_key(3);
-    let snapshot = engine_restarted.acquire_snapshot();
-    let (_key3, val3) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key3, val3) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val3) = put_rec(col, 3, 1, 3);
     assert_eq!(val3, expected_val3);
 
     let user_key1 = &user_key(4);
-    let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    assert!(engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .is_none());
 }
@@ -1465,7 +1523,8 @@ fn test_wal_replay_on_restart() {
     // From SSTable
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    let (_key1, val1) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key1, val1) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val1) = put_rec(col, 1, 1, 1);
@@ -1473,8 +1532,8 @@ fn test_wal_replay_on_restart() {
 
     // From WAL replay (update)
     let user_key1 = &user_key(2);
-    let snapshot = engine_restarted.acquire_snapshot();
-    let (_key2, val2) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key2, val2) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val2) = put_rec(col, 2, 2, 4);
@@ -1482,16 +1541,16 @@ fn test_wal_replay_on_restart() {
 
     // From WAL replay (new key)
     let user_key1 = &user_key(3);
-    let snapshot = engine_restarted.acquire_snapshot();
-    let (_key3, val3) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key3, val3) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val3) = put_rec(col, 3, 1, 3);
     assert_eq!(val3, expected_val3);
 
     let user_key1 = &user_key(4);
-    let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    assert!(engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .is_none());
 }
@@ -1742,15 +1801,15 @@ fn test_wal_replay_with_last_log_partially_written() {
     // WAL replay should have truncated the file and recovered the valid records.
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    let (_key1, val1) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key1, val1) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val1) = put_rec(col, 1, 1, 1);
     assert_eq!(val1, expected_val1);
-
     let user_key1 = &user_key(2);
-    let snapshot = engine_restarted.acquire_snapshot();
-    let (_key2, val2) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let (_key2, val2) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val2) = put_rec(col, 2, 1, 2);
@@ -1758,8 +1817,8 @@ fn test_wal_replay_with_last_log_partially_written() {
 
     // Key 3 should not exist because it was part of the corrupted, truncated segment.
     let user_key1 = &user_key(3);
-    let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    assert!(engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .is_none());
 
@@ -1767,9 +1826,10 @@ fn test_wal_replay_with_last_log_partially_written() {
     engine_restarted
         .write(write_batch(vec![put_op(col, 3, 1)]), false)
         .unwrap();
-    let user_key1 = &user_key(3);
     let snapshot = engine_restarted.acquire_snapshot();
-    let (_key3, val3) = engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let user_key1 = &user_key(3);
+    let (_key3, val3) = engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .unwrap();
     let (_, expected_val3) = put_rec(col, 3, 1, 3); // next seq is 3
@@ -1834,7 +1894,8 @@ fn test_wal_replay_with_header_corruption() {
     // The data should be lost.
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    assert!(engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .is_none());
 
@@ -1842,9 +1903,10 @@ fn test_wal_replay_with_header_corruption() {
     engine_restarted
         .write(write_batch(vec![put_op(col, 2, 1)]), false)
         .unwrap();
-    let user_key1 = &user_key(2);
     let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted.read_at_snapshot(col, idx, user_key1, &snapshot)
+    let user_key1 = &user_key(2);
+    assert!(engine_restarted
+        .read_at_snapshot(col, idx, user_key1, &snapshot)
         .unwrap()
         .is_some());
 }
@@ -2667,7 +2729,9 @@ fn test_drop_collection() {
     // Verify data exists
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let result = engine.read_at_snapshot(col_id, 0, user_key1, &snapshot).unwrap();
+    let result = engine
+        .read_at_snapshot(col_id, 0, user_key1, &snapshot)
+        .unwrap();
     assert!(result.is_some());
 
     // Verify no pending drops before dropping
@@ -2789,12 +2853,15 @@ fn test_collection_persistence_across_restart() {
         // Verify data
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        let result_1 = engine.read_at_snapshot(col_id_1, 0, user_key1, &snapshot).unwrap();
+        let result_1 = engine
+            .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+            .unwrap();
         assert!(result_1.is_some());
 
         let user_key1 = &user_key(2);
-        let snapshot = engine.acquire_snapshot();
-        let result_2 = engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap();
+        let result_2 = engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap();
         assert!(result_2.is_some());
 
         // Creating a new collection should get the next ID
@@ -2884,7 +2951,10 @@ fn test_drop_and_recreate_collection_data_isolation() {
     // Verify data exists
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let (_, val1) = engine.read_at_snapshot(col_id_1, 0, user_key1, &snapshot).unwrap().unwrap();
+    let (_, val1) = engine
+        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_, expected_val1) = put_rec(col_id_1, 1, 100, 1);
     assert_eq!(val1, expected_val1);
 
@@ -2900,13 +2970,20 @@ fn test_drop_and_recreate_collection_data_isolation() {
     // The old data should NOT be visible when querying with the new collection ID
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
     let user_key1 = &user_key(2);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
     let user_key1 = &user_key(3);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
 
     // Write new data to the recreated collection
     engine
@@ -2916,7 +2993,10 @@ fn test_drop_and_recreate_collection_data_isolation() {
     // The new data should be visible
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let (_, new_val) = engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().unwrap();
+    let (_, new_val) = engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_, expected_new_val) = put_rec(col_id_2, 1, 999, 5); // seq 5 after create(1), 3 writes, drop(doesn't increment)
     assert_eq!(new_val, expected_new_val);
 
@@ -2962,13 +3042,20 @@ fn test_drop_and_recreate_collection_with_flush() {
     // Verify all data exists
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_1, 0, user_key1, &snapshot).unwrap().is_some());
+    assert!(engine
+        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_some());
     let user_key1 = &user_key(2);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_1, 0, user_key1, &snapshot).unwrap().is_some());
+    assert!(engine
+        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_some());
     let user_key1 = &user_key(3);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_1, 0, user_key1, &snapshot).unwrap().is_some());
+    assert!(engine
+        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_some());
 
     // Verify no pending drops before dropping
     assert!(engine
@@ -2994,13 +3081,20 @@ fn test_drop_and_recreate_collection_with_flush() {
     // Old data (both from SSTable and memtable) should NOT be visible with new collection ID
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
     let user_key1 = &user_key(2);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
     let user_key1 = &user_key(3);
-    let snapshot = engine.acquire_snapshot();
-    assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+    assert!(engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .is_none());
 
     // Write and flush new data
     engine
@@ -3021,7 +3115,10 @@ fn test_drop_and_recreate_collection_with_flush() {
     // New data should be visible
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let (_, new_val) = engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().unwrap();
+    let (_, new_val) = engine
+        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_, expected_new_val) = put_rec(col_id_2, 1, 999, 4);
     assert_eq!(new_val, expected_new_val);
 
@@ -3091,23 +3188,31 @@ fn test_drop_and_recreate_collection_persistence() {
         // Old data (keys 1, 2) should NOT be visible
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+        assert!(engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none());
         let user_key1 = &user_key(2);
-        let snapshot = engine.acquire_snapshot();
-        assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_none());
+        assert!(engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none());
 
         // New data (keys 5, 6) should be visible
         let user_key1 = &user_key(5);
-        let snapshot = engine.acquire_snapshot();
-        assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_some());
+        assert!(engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some());
         let user_key1 = &user_key(6);
-        let snapshot = engine.acquire_snapshot();
-        assert!(engine.read_at_snapshot(col_id_2, 0, user_key1, &snapshot).unwrap().is_some());
+        assert!(engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some());
 
         // Range scan should only return the new data
         let user_key_range = &(..);
         let direction = Direction::Forward;
-        let snapshot = engine.acquire_snapshot();
         let results: Vec<_> = engine
             .range_scan_at_snapshot(col_id_2, 0, user_key_range, &snapshot, direction)
             .unwrap()
@@ -3148,7 +3253,10 @@ fn test_rename_collection() {
     // Verify data is still accessible with the same collection ID
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    let (_, val) = engine.read_at_snapshot(col_id, 0, user_key1, &snapshot).unwrap().unwrap();
+    let (_, val) = engine
+        .read_at_snapshot(col_id, 0, user_key1, &snapshot)
+        .unwrap()
+        .unwrap();
     let (_, expected_val) = put_rec(col_id, 1, 100, 1);
     assert_eq!(val, expected_val);
 }
@@ -3231,7 +3339,10 @@ fn test_rename_collection_persistence() {
         // Data still accessible
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        let (_, val) = engine.read_at_snapshot(col_id, 0, user_key1, &snapshot).unwrap().unwrap();
+        let (_, val) = engine
+            .read_at_snapshot(col_id, 0, user_key1, &snapshot)
+            .unwrap()
+            .unwrap();
         let (_, expected_val) = put_rec(col_id, 1, 100, 1);
         assert_eq!(val, expected_val);
     }
@@ -3345,7 +3456,10 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
 
     let user_key1 = &user_key(1);
     let snapshot1 = engine.acquire_snapshot();
-    let (_, value) = engine.read_at_snapshot(col, 0, user_key1, &snapshot1).unwrap().unwrap();
+    let (_, value) = engine
+        .read_at_snapshot(col, 0, user_key1, &snapshot1)
+        .unwrap()
+        .unwrap();
     let (_, expected) = put_rec(col, 1, 1, since + 1);
     assert_eq!(value, expected);
 }
