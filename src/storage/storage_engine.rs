@@ -999,20 +999,6 @@ impl StorageEngine {
         }
     }
 
-    /// Reads a single key from the latest visible state.
-    ///
-    /// This acquires a real snapshot lease for the current latest visible sequence
-    /// and reads through `read_at_snapshot`.
-    pub fn read(
-        &self,
-        collection: u32,
-        index: u32,
-        user_key: &[u8],
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let snapshot = self.acquire_snapshot();
-        self.read_at_snapshot(collection, index, user_key, &snapshot)
-    }
-
     /// Reads a single key using a real snapshot lease.
     pub fn read_at_snapshot(
         &self,
