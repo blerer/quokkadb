@@ -748,6 +748,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_mixed_drop_visibility_applies_only_drops_visible_to_oldest_snapshot() {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let cache = setup_cache(&options);
+        let counter = next_file_number(10);
+
+        let col_1 = 10;
+        let col_2 = 11;
+
+        let entries = vec![put_rec(col_1, 10, 1, 1), put_rec(col_2, 10, 1, 2)];
+        let input_sst = write_sst(dir.path(), 1, &entries, &options);
+
+        let applied_drop = DropMetadata::new_collection_drop(col_1, 40);
+        let retained_drop = DropMetadata::new_collection_drop(col_2, 60);
+
+        let job = CompactionJob {
+            id: 0,
+            input_level: 0,
+            output_level: 1,
+            input_files: vec![input_sst],
+            output_files: vec![],
+            drops: vec![applied_drop.clone(), retained_drop.clone()],
+            input_key_range: Interval::all(),
+            output_key_range: Interval::all(),
+            partitions_grid: None,
+        };
+
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache.clone(),
+            job,
+            Some(50),
+            &counter,
+        )
+        .unwrap();
+        let (_job, added, _removed, drops) = unwrap_compaction(op);
+
+        assert_eq!(drops, vec![applied_drop, retained_drop]);
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            read_sst_entries(dir.path(), cache, &added[0]),
+            vec![put_rec(col_2, 10, 1, 2)]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Full compaction with empty partitions_grid (L1 → L2, max level empty)
     // -----------------------------------------------------------------------
