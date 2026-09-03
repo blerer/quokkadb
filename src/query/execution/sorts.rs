@@ -1,12 +1,12 @@
 use crate::error::Result;
-use crate::query::{get_path_value, BsonValueRef, Expr, SortField, SortOrder};
+use crate::query::{BsonValueRef, Expr, SortField, SortOrder, get_path_value};
 use bson::error::{Error as BsonError, ErrorKind as BsonErrorKind};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
 use std::sync::Arc;
-use tempfile::{tempdir, NamedTempFile, TempDir};
+use tempfile::{NamedTempFile, TempDir, tempdir};
 
 fn is_bson_stream_exhausted(err: &BsonError) -> bool {
     matches!(&err.kind, BsonErrorKind::EndOfStream { .. })
@@ -269,7 +269,7 @@ impl Iterator for MergeIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{make_sort_field, SortField, SortOrder};
+    use crate::query::{SortField, SortOrder, make_sort_field};
     use bson::doc;
     use std::cmp::Ordering;
     use std::sync::Arc;

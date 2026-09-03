@@ -1,14 +1,9 @@
-use crate::obs::metrics::MetricRegistry;
-use crate::options::options::Options;
 use crate::storage::internal_key::encode_record_key;
 use crate::storage::operation::Operation;
-use crate::storage::storage_engine::{StorageEngine, StorageResult};
 use crate::util::bson_utils::BsonKey;
-use bson::{doc, Bson, Document};
+use bson::{Bson, Document, doc};
 use std::fmt::Debug;
 use std::io::Result;
-use std::sync::Arc;
-use tempfile::{tempdir, TempDir};
 
 pub fn assert_next_entry_eq<
     K: Debug + PartialEq,
@@ -62,12 +57,4 @@ pub fn document(user_key: i32, version: u32) -> Document {
         "version": version,
         "payload": format!("This is document {} version {}.", user_key, version)
     }
-}
-
-pub fn storage_engine() -> StorageResult<(Arc<StorageEngine>, TempDir)> {
-    let dir = tempdir()?;
-    let options = Arc::new(Options::lightweight());
-    let mut metric_registry = MetricRegistry::new();
-    let storage_engine = StorageEngine::new(&mut metric_registry, options, dir.path())?;
-    Ok((storage_engine, dir))
 }

@@ -1,8 +1,8 @@
 mod common;
 
-use bson::{doc, Bson, Document};
-use quokkadb::collection::{Collection, ReturnDocument};
+use bson::{Bson, Document, doc};
 use quokkadb::QuokkaDB;
+use quokkadb::collection::{Collection, ReturnDocument};
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
@@ -733,9 +733,10 @@ fn test_replace_one_rejects_changing_id() {
         )
         .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("The _id field cannot be changed in a replacement document"));
+    assert!(
+        err.to_string()
+            .contains("The _id field cannot be changed in a replacement document")
+    );
     assert_eq!(
         find_one(&collection, doc! { "_id": 1 }).unwrap(),
         doc! {
@@ -1238,26 +1239,32 @@ fn test_filtered_positional_nested_arrays() {
         .unwrap()
         .get_array("employees")
         .unwrap();
-    assert!(eng_employees[0]
-        .as_document()
-        .unwrap()
-        .get_bool("senior")
-        .unwrap());
-    assert!(!eng_employees[1]
-        .as_document()
-        .unwrap()
-        .contains_key("senior"));
+    assert!(
+        eng_employees[0]
+            .as_document()
+            .unwrap()
+            .get_bool("senior")
+            .unwrap()
+    );
+    assert!(
+        !eng_employees[1]
+            .as_document()
+            .unwrap()
+            .contains_key("senior")
+    );
 
     let sales_employees = departments[1]
         .as_document()
         .unwrap()
         .get_array("employees")
         .unwrap();
-    assert!(sales_employees[0]
-        .as_document()
-        .unwrap()
-        .get_bool("senior")
-        .unwrap());
+    assert!(
+        sales_employees[0]
+            .as_document()
+            .unwrap()
+            .get_bool("senior")
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1278,26 +1285,32 @@ fn test_filtered_positional_update_many() {
     // Doc 7: scores 9 and 5
     let doc7 = find_one(&collection, doc! { "_id": 7 }).unwrap();
     let ratings7 = doc7.get_array("ratings").unwrap();
-    assert!(ratings7[0]
-        .as_document()
-        .unwrap()
-        .get_bool("excellent")
-        .unwrap());
+    assert!(
+        ratings7[0]
+            .as_document()
+            .unwrap()
+            .get_bool("excellent")
+            .unwrap()
+    );
     assert!(!ratings7[1].as_document().unwrap().contains_key("excellent"));
 
     // Doc 8: scores 10 and 9
     let doc8 = find_one(&collection, doc! { "_id": 8 }).unwrap();
     let ratings8 = doc8.get_array("ratings").unwrap();
-    assert!(ratings8[0]
-        .as_document()
-        .unwrap()
-        .get_bool("excellent")
-        .unwrap());
-    assert!(ratings8[1]
-        .as_document()
-        .unwrap()
-        .get_bool("excellent")
-        .unwrap());
+    assert!(
+        ratings8[0]
+            .as_document()
+            .unwrap()
+            .get_bool("excellent")
+            .unwrap()
+    );
+    assert!(
+        ratings8[1]
+            .as_document()
+            .unwrap()
+            .get_bool("excellent")
+            .unwrap()
+    );
 
     // Doc 6: scores 8 and 7 - neither >= 9
     let doc6 = find_one(&collection, doc! { "_id": 6 }).unwrap();

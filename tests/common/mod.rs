@@ -1,7 +1,7 @@
-use bson::Document;
+use quokkadb::QuokkaDB;
 use quokkadb::options::options::Options;
 use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
-use quokkadb::QuokkaDB;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::OnceLock;
 use tracing_subscriber::EnvFilter;
@@ -77,7 +77,7 @@ pub fn open_db_for_layout(path: &Path, layout: StorageLayout) -> QuokkaDB {
 pub fn open_db_with_seed_data(
     path: &Path,
     collection_name: &str,
-    documents: &[Document],
+    documents: &[impl Serialize],
     layout: StorageLayout,
 ) -> QuokkaDB {
     let db = open_db_for_layout(path, layout);
@@ -89,7 +89,7 @@ pub fn open_db_with_seed_data(
 pub fn seed_collection(
     db: &QuokkaDB,
     collection_name: &str,
-    documents: &[Document],
+    documents: &[impl Serialize],
     layout: StorageLayout,
 ) {
     let collection = db.collection(collection_name).create_if_missing();
@@ -121,12 +121,12 @@ pub fn seed_collection(
     }
 }
 
-fn insert_documents(collection: &quokkadb::collection::Collection, documents: &[Document]) {
+fn insert_documents(collection: &quokkadb::Collection, documents: &[impl Serialize]) {
     if documents.is_empty() {
         return;
     }
 
-    collection.insert_many(documents.to_vec()).unwrap();
+    collection.insert_many(documents).unwrap();
 }
 
 fn options_for_layout(layout: StorageLayout) -> Options {

@@ -1,6 +1,7 @@
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::obs::metrics::{self, DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
+use crate::storage::Direction;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
 use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
@@ -18,7 +19,6 @@ use crate::storage::snapshot_manager::{Snapshot, SnapshotManager};
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
-use crate::storage::Direction;
 use arc_swap::ArcSwap;
 use std::collections::VecDeque;
 use std::fs::remove_file;
@@ -435,13 +435,26 @@ impl StorageEngine {
         Ok(lsm_tree)
     }
 
-    pub fn create_collection_if_not_exists(self: &Arc<Self>, name: &str) -> StorageResult<u32> {
+    pub fn create_collection(
+        self: &Arc<Self>,
+        name: &str,
+        if_not_exists: bool,
+    ) -> StorageResult<u32> {
+        self.create_collection_with_options(name, CollectionOptions::default(), if_not_exists)
+    }
+
+    pub fn create_collection_with_options(
+        self: &Arc<Self>,
+        name: &str,
+        options: CollectionOptions,
+        if_not_exists: bool,
+    ) -> StorageResult<u32> {
         self.check_error_mode()?;
-        if let Some(collection) = self.catalog().get_collection_by_name(name) {
-            Ok(collection.id)
-        } else {
-            self.perform_create_collection(name, CollectionOptions::default(), true)
+
+        if if_not_exists && let Some(collection) = self.catalog().get_collection_by_name(name) {
+            return Ok(collection.id);
         }
+        self.perform_create_collection(name, options, if_not_exists)
     }
 
     fn check_error_mode(self: &Arc<Self>) -> StorageResult<()> {
@@ -454,20 +467,11 @@ impl StorageEngine {
         }
     }
 
-    pub fn create_collection(
-        self: &Arc<Self>,
-        name: &str,
-        options: CollectionOptions,
-    ) -> StorageResult<u32> {
-        self.check_error_mode()?;
-        self.perform_create_collection(name, options, false)
-    }
-
     fn perform_create_collection(
         self: &Arc<Self>,
         name: &str,
         options: CollectionOptions,
-        if_exists: bool,
+        if_not_exists: bool,
     ) -> StorageResult<u32> {
         // The collection do not exist we need to create it and update the manifest
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
@@ -490,7 +494,7 @@ impl StorageEngine {
             let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
             Ok(id)
         } else {
-            if if_exists {
+            if if_not_exists {
                 Ok(collection.unwrap().id)
             } else {
                 Err(StorageError::CollectionAlreadyExists(name.to_string()))
@@ -993,8 +997,7 @@ impl StorageEngine {
     ) -> StorageError {
         StorageError::VersionConflict {
             user_key: user_key.clone(),
-            reason:
-            format!(
+            reason: format!(
                 "Optimistic locking failed: key for collection {} index {} user_key {:x?} exists since snapshot {}",
                 collection, index, user_key, since
             ),
@@ -1773,7 +1776,7 @@ pub enum StorageError {
 impl StorageError {
     pub fn as_io_error(&self) -> Option<&Error> {
         match self {
-            StorageError::Io(ref e) => Some(e),
+            StorageError::Io(e) => Some(e),
             _ => None,
         }
     }

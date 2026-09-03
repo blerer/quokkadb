@@ -6,7 +6,7 @@ use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
 use crate::storage::manifest_state::{ManifestEdit, ManifestState};
 use std::fs;
-use std::fs::{remove_file, File};
+use std::fs::{File, remove_file};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

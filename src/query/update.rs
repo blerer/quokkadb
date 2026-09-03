@@ -1,5 +1,5 @@
-use crate::query::Expr;
 use crate::Error;
+use crate::query::Expr;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -400,9 +400,9 @@ impl UpdateExpr {
                         for expr in exprs {
                             if !matches!(expr.as_ref(), Expr::Literal(_)) {
                                 return Err(Error::InvalidRequest(format!(
-                                        "Update operator value in $each must be a literal, but got: {:?}",
-                                        expr
-                                    )));
+                                    "Update operator value in $each must be a literal, but got: {:?}",
+                                    expr
+                                )));
                             }
                         }
                     }

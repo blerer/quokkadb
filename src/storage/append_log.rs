@@ -1,13 +1,13 @@
 use crate::io::buffer::Buffer;
-use crate::io::{file_name_as_str, ZeroCopy};
+use crate::io::{ZeroCopy, file_name_as_str};
 use crate::storage::files::DbFile;
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::{fmt, mem, result};
 
 /// The size ot the block used in the log file. The 4KB block optimize write efficiency by
@@ -452,13 +452,15 @@ impl Iterator for LogIterator {
             while offset < size {
                 if self.buffer.readable_bytes() == 0 {
                     match self.refill_buffer() {
-                        Ok(false) =>  {
+                        Ok(false) => {
                             return Some(Err(LogReplayError::Corruption {
                                 record_offset: self.position,
-                                reason: format!("Reached an unexpected end of file in {} while reading data. Stopping replay.",
-                                                &self.path.to_string_lossy()),
-                            }))
-                        },
+                                reason: format!(
+                                    "Reached an unexpected end of file in {} while reading data. Stopping replay.",
+                                    &self.path.to_string_lossy()
+                                ),
+                            }));
+                        }
                         Ok(true) => continue,
                         Err(e) => return Some(Err(e.into())), // propagate error
                     }
@@ -471,13 +473,15 @@ impl Iterator for LogIterator {
 
             if self.buffer.readable_bytes() < 4 {
                 match self.refill_buffer() {
-                    Ok(false) =>  {
+                    Ok(false) => {
                         return Some(Err(LogReplayError::Corruption {
                             record_offset: self.position,
-                            reason: format!("Reached an unexpected end of file in {} while reading data crc. Stopping replay.",
-                                            &self.path.to_string_lossy()),
-                        }))
-                    },
+                            reason: format!(
+                                "Reached an unexpected end of file in {} while reading data crc. Stopping replay.",
+                                &self.path.to_string_lossy()
+                            ),
+                        }));
+                    }
                     Ok(true) => continue,
                     Err(e) => return Some(Err(e.into())), // propagate error
                 }
@@ -555,8 +559,8 @@ fn compute_crc32(data: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::io::truncate_file;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use tempfile::tempdir;
 
     #[derive(Default, Debug)]

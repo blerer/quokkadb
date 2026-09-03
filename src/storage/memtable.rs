@@ -1,13 +1,13 @@
 use crate::options::options::Options;
+use crate::storage::Direction;
 use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{encode_internal_key, InternalKeyRange};
+use crate::storage::internal_key::{InternalKeyRange, encode_internal_key};
 use crate::storage::iterators::{ForwardIterator, ReverseIterator, TracingIterator};
 use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::write_batch::WriteBatch;
-use crate::storage::Direction;
 use crate::util::interval::Interval;
 use crossbeam_skiplist::SkipMap;
 use std::io::Result;
@@ -225,7 +225,7 @@ impl<'a> Iterator for RangeScanIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::internal_key::{encode_internal_key_range, MAX_SEQUENCE_NUMBER};
+    use crate::storage::internal_key::{MAX_SEQUENCE_NUMBER, encode_internal_key_range};
     use crate::storage::operation::Operation;
     use crate::storage::test_utils::{
         assert_next_entry_eq, delete_op, delete_rec, put_op, put_rec, record_key, user_key,

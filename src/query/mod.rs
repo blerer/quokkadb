@@ -29,7 +29,7 @@ pub(crate) mod query_cache;
 mod tree_node;
 pub(crate) mod update;
 #[cfg(test)]
-mod update_fn;
+pub(crate) mod update_fn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReturnDocument {
@@ -547,7 +547,7 @@ impl ProjectionExpr {
                     return Err(error::Error::InvalidRequest(format!(
                         "Invalid projection specification for path {}",
                         format_path(path)
-                    )))
+                    )));
                 }
             },
         }
@@ -1397,7 +1397,7 @@ mod tests {
     use crate::io::serializable::check_serialization_round_trip;
     use crate::query::expr_fn::*;
     use bson::raw::CString;
-    use bson::{doc, Bson, Regex};
+    use bson::{Bson, Regex, doc};
 
     #[test]
     fn test_get_path_value() {

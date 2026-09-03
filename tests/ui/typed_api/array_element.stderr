@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `String: From<{integer}>` is not satisfied
+  --> tests/ui/typed_api/array_element.rs:12:37
+   |
+12 |     User::root_fields().tags.any_eq(42);
+   |                              ------ ^^ the trait `From<{integer}>` is not implemented for `String`
+   |                              |
+   |                              required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `From<T>`:
+             `String` implements `From<&String>`
+             `String` implements `From<&mut str>`
+             `String` implements `From<&str>`
+             `String` implements `From<Box<str>>`
+             `String` implements `From<Cow<'_, str>>`
+             `String` implements `From<bson::raw::cstr::CString>`
+             `String` implements `From<char>`
+             `String` implements `From<uuid::Uuid>`
+   = note: required for `{integer}` to implement `Into<String>`
+note: required by a bound in `ArrayField::<D, T>::any_eq`
+  --> src/document.rs
+   |
+   |     pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
+   |                                      ^^^^^^^ required by this bound in `ArrayField::<D, T>::any_eq`

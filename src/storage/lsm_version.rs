@@ -332,15 +332,6 @@ impl Levels {
                 .into_iter()
         })
     }
-
-    pub fn find_drops_in_range<'a>(
-        &'a self,
-        record_key_range: &'a Interval<Vec<u8>>,
-    ) -> impl Iterator<Item = Arc<DropMetadata>> + 'a {
-        self.levels
-            .iter()
-            .flat_map(move |level| level.find_drops_in_range(record_key_range).into_iter())
-    }
 }
 
 impl Serializable for Levels {
@@ -476,11 +467,14 @@ impl Level {
                     .filter(|sst| !sstables_to_remove.contains(sst))
                     .collect::<Vec<_>>();
 
-                assert_eq!(sstables.len(), new_sstables.len() + sstables_to_remove.len(),
-                           "unexpected issue with sstables removal. [previous: {:?}, new: {:?}, removed: {:?}]",
-                           sstables,
-                           new_sstables,
-                           sstables_to_remove);
+                assert_eq!(
+                    sstables.len(),
+                    new_sstables.len() + sstables_to_remove.len(),
+                    "unexpected issue with sstables removal. [previous: {:?}, new: {:?}, removed: {:?}]",
+                    sstables,
+                    new_sstables,
+                    sstables_to_remove
+                );
 
                 let new_size = size - sstables_to_remove.iter().map(|sst| sst.size).sum::<u64>();
 
@@ -1043,7 +1037,10 @@ impl DropMetadata {
 
     /// Creates a full-range drop for a single index within a collection.
     pub fn new_index_drop(collection: u32, index: u32, drop_sequence_number: u64) -> Arc<Self> {
-        assert_ne!(index, 0, "Index ID 0 is reserved for the primary index and cannot be dropped with new_index_drop. Use new_collection_drop instead.");
+        assert_ne!(
+            index, 0,
+            "Index ID 0 is reserved for the primary index and cannot be dropped with new_index_drop. Use new_collection_drop instead."
+        );
         let user_min_key = Bson::MinKey.try_into_key().unwrap();
         let user_max_key = Bson::MaxKey.try_into_key().unwrap();
 
@@ -1056,21 +1053,6 @@ impl DropMetadata {
             drop_sequence_number,
             key_range: Interval::closed(min_key, max_key),
         })
-    }
-
-    pub fn key_range_ref(&self) -> Interval<&[u8]> {
-        Interval::new(
-            match self.key_range.start_bound() {
-                Bound::Included(v) => Bound::Included(v.as_slice()),
-                Bound::Excluded(v) => Bound::Excluded(v.as_slice()),
-                Bound::Unbounded => Bound::Unbounded,
-            },
-            match self.key_range.end_bound() {
-                Bound::Included(v) => Bound::Included(v.as_slice()),
-                Bound::Excluded(v) => Bound::Excluded(v.as_slice()),
-                Bound::Unbounded => Bound::Unbounded,
-            },
-        )
     }
 
     /// Splits the drop metadata into two non-overlapping drops at the given split key.
@@ -2535,8 +2517,8 @@ mod tests {
         }
 
         #[test]
-        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops(
-        ) {
+        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops()
+         {
             let version = LsmVersion::new(1, 10, 2);
 
             let version = version.add_collection_drop(10, 100);
@@ -2859,7 +2841,7 @@ mod tests {
         fn test_l1_compaction_score() {
             let opts = test_db_options();
             let base_bytes = opts.max_bytes_for_level_base().to_bytes() as u64; // 64 MiB
-                                                                                // L1 target = base_bytes * 10^(1-1) = base_bytes
+            // L1 target = base_bytes * 10^(1-1) = base_bytes
 
             // Size = base_bytes -> score = 1.0
             let level = Level::new(

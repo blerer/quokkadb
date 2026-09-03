@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::query::execution::filters;
 use crate::query::BsonValueRef;
+use crate::query::execution::filters;
 use crate::query::{Parameters, PathComponent, Projection, ProjectionExpr};
 use bson::{Bson, Document};
 use std::fmt;

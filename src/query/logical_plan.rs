@@ -238,9 +238,6 @@ impl TreeNode for LogicalPlan {
     }
 }
 
-// Seed for MurmurHash64
-const HASH_SEED: u64 = 20250309;
-
 impl LogicalPlan {
     fn get_first(children: Vec<Arc<LogicalPlan>>) -> Arc<LogicalPlan> {
         children.into_iter().next().unwrap()
@@ -359,19 +356,21 @@ impl Serializable for LogicalPlan {
 
 /// A builder for constructing `LogicalPlan` instances.
 pub struct LogicalPlanBuilder {
-    plan: Arc<LogicalPlan>,
+    collection: u32,
+    plan: LogicalPlan,
 }
 
 impl LogicalPlanBuilder {
     /// Starts with a `TableScan` plan.
     pub fn scan(collection: u32) -> Self {
         Self {
-            plan: Arc::new(LogicalPlan::CollectionScan {
+            collection,
+            plan: LogicalPlan::CollectionScan {
                 collection,
                 projection: None,
                 filter: None,
                 sort: None,
-            }),
+            },
         }
     }
 
@@ -383,54 +382,183 @@ impl LogicalPlanBuilder {
         sort: Option<Arc<Vec<SortField>>>,
     ) -> Self {
         Self {
-            plan: Arc::new(LogicalPlan::CollectionScan {
+            collection,
+            plan: LogicalPlan::CollectionScan {
                 collection,
                 projection,
                 filter,
                 sort,
-            }),
+            },
         }
     }
 
     /// Adds a filter condition.
     pub fn filter(mut self, condition: Arc<Expr>) -> Self {
-        self.plan = Arc::new(LogicalPlan::Filter {
-            input: self.plan,
+        self.plan = LogicalPlan::Filter {
+            input: Arc::new(self.plan),
             condition,
-        });
+        };
         self
     }
 
     /// Specifies fields for projection.
-    pub fn project(mut self, projection: Arc<Projection>) -> Self {
-        self.plan = Arc::new(LogicalPlan::Projection {
-            input: self.plan,
-            projection,
-        });
+    pub fn project(mut self, projection: Option<Arc<Projection>>) -> Self {
+        if let Some(projection) = projection {
+            self.plan = LogicalPlan::Projection {
+                input: Arc::new(self.plan),
+                projection,
+            };
+        }
         self
     }
 
     /// Specifies sorting order.
-    pub fn sort(mut self, sort_fields: Arc<Vec<SortField>>) -> Self {
-        self.plan = Arc::new(LogicalPlan::Sort {
-            input: self.plan,
-            sort_fields,
-        });
+    pub fn sort(mut self, sort_fields: Option<Arc<Vec<SortField>>>) -> Self {
+        if let Some(sort_fields) = sort_fields {
+            self.plan = LogicalPlan::Sort {
+                input: Arc::new(self.plan),
+                sort_fields,
+            };
+        }
         self
     }
 
     /// Adds a limit and/or skip operation.
     pub fn limit(mut self, skip: Option<usize>, limit: Option<usize>) -> Self {
-        self.plan = Arc::new(LogicalPlan::Limit {
-            input: self.plan,
-            limit: Limit { skip, limit },
-        });
+        if skip.is_some() || limit.is_some() {
+            self.plan = LogicalPlan::Limit {
+                input: Arc::new(self.plan),
+                limit: Limit { skip, limit },
+            };
+        }
+        self
+    }
+
+    /// Adds an update operation for a single document.
+    pub fn update_one(mut self, update: UpdateExpr, upsert: bool) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::UpdateOne {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            update,
+            upsert,
+        };
+        self
+    }
+
+    pub fn find_one_and_update(
+        mut self,
+        update: UpdateExpr,
+        projection: Option<Arc<Projection>>,
+        upsert: bool,
+        return_document: ReturnDocument,
+    ) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::FindOneAndUpdate {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            update,
+            projection,
+            upsert,
+            return_document,
+        };
+        self
+    }
+
+    /// Adds an update operation for a multiple documents.
+    pub fn update_many(mut self, update: UpdateExpr, upsert: bool) -> Self {
+        self.plan = LogicalPlan::UpdateMany {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            update,
+            upsert,
+        };
+        self
+    }
+
+    pub fn replace_one(mut self, replacement: Document, upsert: bool) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::ReplaceOne {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            replacement,
+            upsert,
+        };
+        self
+    }
+
+    pub fn find_one_and_replace(
+        mut self,
+        replacement: Document,
+        projection: Option<Arc<Projection>>,
+        upsert: bool,
+        return_document: ReturnDocument,
+    ) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::FindOneAndReplace {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            replacement,
+            projection,
+            upsert,
+            return_document,
+        };
+        self
+    }
+
+    /// Adds a delete operation for a single document.
+    pub fn delete_one(mut self) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::DeleteOne {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+        };
+        self
+    }
+
+    /// Adds a delete operation for multiple documents.
+    pub fn delete_many(mut self) -> Self {
+        self.plan = LogicalPlan::DeleteMany {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+        };
+        self
+    }
+
+    pub fn find_one_and_delete(mut self, projection: Option<Arc<Projection>>) -> Self {
+        self.plan = Self::with_limit_one(self.plan);
+
+        self.plan = LogicalPlan::FindOneAndDelete {
+            collection: self.collection,
+            query: Arc::new(self.plan),
+            projection,
+        };
         self
     }
 
     /// Finalizes the build process and returns the `LogicalPlan`.
-    pub fn build(self) -> Arc<LogicalPlan> {
+    pub fn build(self) -> LogicalPlan {
         self.plan.clone()
+    }
+
+    /// Finalizes the build process and returns the `Arc<LogicalPlan>`.
+    pub fn build_arc(self) -> Arc<LogicalPlan> {
+        Arc::new(self.plan.clone())
+    }
+
+    fn with_limit_one(plan: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Limit {
+            input: Arc::new(plan),
+            limit: Limit {
+                skip: None,
+                limit: Some(1),
+            },
+        }
     }
 }
 
@@ -668,12 +796,12 @@ mod tests {
                 operator: ComparisonOperator::Eq,
                 value: Arc::new(Expr::Placeholder(0)),
             }))
-            .project(include(proj_fields([("a", proj_field())])))
-            .sort(Arc::new(vec![sort_asc(field(["b"]))]))
+            .project(Some(include(proj_fields([("a", proj_field())]))))
+            .sort(Some(Arc::new(vec![sort_asc(field(["b"]))])))
             .limit(Some(10), Some(20))
-            .build();
+            .build_arc();
 
-        check_serialization_round_trip(plan_arc.as_ref().clone());
+        check_serialization_round_trip(plan_arc.clone());
     }
 
     #[test]
@@ -700,8 +828,8 @@ mod tests {
             None,
         )
         .filter(elem_match([eq(original.clone())]))
-        .project(include(proj_elem_match(eq(original.clone()))))
-        .build();
+        .project(Some(include(proj_elem_match(eq(original.clone())))))
+        .build_arc();
 
         let transformed_up = transform_up_filter(plan.clone(), transformation.clone());
         let transformed_down = transform_down_filter(plan.clone(), transformation.clone());
@@ -713,8 +841,8 @@ mod tests {
             None,
         )
         .filter(elem_match([eq(transformed.clone())]))
-        .project(include(proj_elem_match(eq(transformed.clone()))))
-        .build();
+        .project(Some(include(proj_elem_match(eq(transformed.clone())))))
+        .build_arc();
 
         assert_eq!(transformed_up, expected);
         assert_eq!(transformed_down, expected);

@@ -1,10 +1,10 @@
 use crate::error::Result;
 use crate::obs::metrics::MetricRegistry;
+use crate::query::Parameters;
 use crate::query::execution::executor::{
     Metrics, QueryOutput, ReadExecutor, WriteExecutor, WriteResult,
 };
 use crate::query::physical_plan::PhysicalPlan;
-use crate::query::Parameters;
 use crate::storage::snapshot_manager::Snapshot;
 use crate::storage::storage_engine::StorageEngine;
 use sonyflake::Sonyflake;
@@ -173,7 +173,7 @@ mod tests {
     use crate::options::options::Options;
     use crate::storage::Direction;
     use crate::util::interval::Interval;
-    use bson::{doc, Bson, Document};
+    use bson::{Bson, Document, doc};
     use tempfile::tempdir;
 
     struct ExecutorTestRuntime {
@@ -219,9 +219,8 @@ mod tests {
     #[test]
     fn execute_direct_records_write_metrics() -> Result<()> {
         let runtime = executor_test_runtime()?;
-        let collection_id = runtime
-            .storage_engine
-            .create_collection_if_not_exists("items")?;
+        let self1 = &runtime.storage_engine;
+        let collection_id = self1.create_collection("items", true)?;
 
         let result = runtime.executor.execute_direct(
             PhysicalPlan::InsertOne {
@@ -265,9 +264,8 @@ mod tests {
     #[test]
     fn execute_cached_records_read_metrics_after_consumption() -> Result<()> {
         let runtime = executor_test_runtime()?;
-        let collection_id = runtime
-            .storage_engine
-            .create_collection_if_not_exists("items")?;
+        let self1 = &runtime.storage_engine;
+        let collection_id = self1.create_collection("items", true)?;
         runtime.executor.execute_direct(
             PhysicalPlan::InsertOne {
                 collection: collection_id,
@@ -318,9 +316,8 @@ mod tests {
     #[test]
     fn execute_cached_records_metrics_when_dropped_without_iteration() -> Result<()> {
         let runtime = executor_test_runtime()?;
-        let collection_id = runtime
-            .storage_engine
-            .create_collection_if_not_exists("items")?;
+        let self1 = &runtime.storage_engine;
+        let collection_id = self1.create_collection("items", true)?;
 
         let params = Parameters::new();
         let output = runtime.executor.execute_cached(

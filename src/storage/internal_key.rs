@@ -1,6 +1,6 @@
-use crate::io::{varint, ZeroCopy};
-use crate::storage::operation::OperationType;
+use crate::io::{ZeroCopy, varint};
 use crate::storage::Direction;
+use crate::storage::operation::OperationType;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::Bson;
@@ -319,8 +319,8 @@ mod tests {
     use super::*;
     use crate::storage::operation::OperationType;
     use crate::util::bson_utils::BsonKey;
-    use bson::oid::ObjectId;
     use bson::Bson;
+    use bson::oid::ObjectId;
 
     #[test]
     fn test_internal_key_encoding_decoding() {

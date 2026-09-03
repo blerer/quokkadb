@@ -1,6 +1,6 @@
 mod prepend_raw_bson_field {
     use crate::util::bson_utils::{make_raw_bson_element, prepend_raw_bson_field};
-    use bson::{doc, Bson};
+    use bson::{Bson, doc};
 
     #[test]
     fn inserts_string_field_as_first() {
@@ -33,7 +33,7 @@ mod prepend_raw_bson_field {
 mod bson_key {
     use crate::util::bson_utils::BsonKey;
     use bson::raw::CString;
-    use bson::{oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
+    use bson::{Binary, Bson, DateTime, Decimal128, Timestamp, oid::ObjectId};
     use std::str::FromStr;
 
     fn assert_ordering(a: &Bson, b: &Bson) {
@@ -404,7 +404,7 @@ mod bson_key {
 
 mod bson_cmp {
     use crate::util::bson_utils;
-    use bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime, Decimal128};
+    use bson::{Binary, Bson, DateTime, Decimal128, doc, oid::ObjectId, spec::BinarySubtype};
     use std::cmp::Ordering::*;
     use std::str::FromStr;
 
@@ -646,9 +646,9 @@ mod bson_key_cmp_agreement {
     use std::cmp::Ordering;
     use std::str::FromStr;
 
-    use bson::{oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime, Decimal128, Timestamp};
+    use bson::{Binary, Bson, DateTime, Decimal128, Timestamp, oid::ObjectId, spec::BinarySubtype};
 
-    use crate::util::bson_utils::{cmp_bson, BsonKey};
+    use crate::util::bson_utils::{BsonKey, cmp_bson};
 
     fn assert_key_cmp_agrees(a: &Bson, b: &Bson) {
         let cmp_result = cmp_bson(a, b);
@@ -993,8 +993,8 @@ mod bson_key_cmp_agreement {
 }
 
 mod bson_key_decode {
-    use crate::util::bson_utils::{decode_bson_from_key, key_type_code, BsonKey, TypedKey};
-    use bson::{oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime, Decimal128, Timestamp};
+    use crate::util::bson_utils::{BsonKey, TypedKey, decode_bson_from_key, key_type_code};
+    use bson::{Binary, Bson, DateTime, Decimal128, Timestamp, oid::ObjectId, spec::BinarySubtype};
     use std::io::ErrorKind;
     use std::str::FromStr;
 
@@ -1448,7 +1448,7 @@ mod bson_key_decode {
 mod bson_eq {
     use crate::util::bson_utils::bson_eq;
     use bson::raw::CString;
-    use bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime};
+    use bson::{Binary, Bson, DateTime, doc, oid::ObjectId, spec::BinarySubtype};
 
     #[test]
     fn nan_equality() {
@@ -1568,7 +1568,7 @@ mod bson_hash {
 
     use crate::util::bson_utils::{bson_eq, bson_hash};
     use bson::raw::CString;
-    use bson::{doc, Bson};
+    use bson::{Bson, doc};
 
     fn hash(value: &Bson) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -1662,7 +1662,7 @@ mod bson_hash {
 
 mod arithmetic {
     use crate::util::bson_utils::{
-        add_numeric, multiply_numeric, perform_bitwise_op, BsonArithmeticError,
+        BsonArithmeticError, add_numeric, multiply_numeric, perform_bitwise_op,
     };
     use bson::Bson;
 

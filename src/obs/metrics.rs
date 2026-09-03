@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default, Clone)]
 pub struct MetricRegistry {
@@ -297,11 +297,7 @@ impl Computed for HitRatio {
     fn get(&self) -> f64 {
         let h = self.hit_counter.get() as f64;
         let m = self.miss_counter.get() as f64;
-        if h + m == 0.0 {
-            0.0
-        } else {
-            h / (h + m)
-        }
+        if h + m == 0.0 { 0.0 } else { h / (h + m) }
     }
 }
 

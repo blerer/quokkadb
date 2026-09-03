@@ -35,7 +35,7 @@ pub fn set_path_value(doc: &mut Document, path: &[PathComponent], value: Bson) {
 mod tests {
     use super::set_path_value;
     use crate::query::PathComponent;
-    use bson::{doc, Bson, Document};
+    use bson::{Bson, Document, doc};
 
     #[test]
     fn set_path_value_creates_nested_documents() {

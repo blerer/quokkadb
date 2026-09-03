@@ -1,8 +1,8 @@
 mod common;
 
-use bson::{doc, Document};
-use quokkadb::error::Result;
+use bson::{Document, doc};
 use quokkadb::QuokkaDB;
+use quokkadb::error::Result;
 use tempfile::TempDir;
 
 fn get_sample_data() -> Vec<Document> {
@@ -262,8 +262,8 @@ fn test_find_one_and_delete_respects_sort() -> Result<()> {
 }
 
 #[test]
-fn test_find_one_and_delete_create_if_missing_returns_none_without_creating_collection(
-) -> Result<()> {
+fn test_find_one_and_delete_create_if_missing_returns_none_without_creating_collection()
+-> Result<()> {
     let dir = TempDir::new()?;
     let db = common::open_db(dir.path());
 

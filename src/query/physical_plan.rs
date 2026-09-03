@@ -4,7 +4,6 @@ use crate::query::{Expr, Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
 use crate::util::interval::Interval;
 use bson::Document;
-use std::mem::size_of;
 use std::sync::Arc;
 
 /// A storage-facing description of the bounds for a secondary index scan.
@@ -342,8 +341,4 @@ impl SizeEstimate for PhysicalPlan {
             _ => unreachable!("Size estimation for this variant should not be requested"),
         }
     }
-}
-
-fn size_of_val<T>(_: &T) -> usize {
-    size_of::<T>()
 }

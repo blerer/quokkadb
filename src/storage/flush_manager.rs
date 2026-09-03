@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{
     sync::{
-        mpsc::{sync_channel, Receiver, SyncSender},
         Arc, Condvar, Mutex,
+        mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread,
     time::Duration,
 };
-use tracing::{trace_span, Span};
+use tracing::{Span, trace_span};
 
 /// Represents a task to be handled by the `FlushManager`.
 ///

@@ -1,6 +1,6 @@
 mod common;
 
-use bson::{doc, Document};
+use bson::{Document, doc};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;

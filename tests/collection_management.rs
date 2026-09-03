@@ -1,10 +1,21 @@
 mod common;
 
 use bson::doc;
-use quokkadb::collection::{IdCreationStrategy, IndexDirection};
+use quokkadb::collection::IndexDirection;
 use quokkadb::error::Error;
-use quokkadb::CollectionInfo;
+use quokkadb::{CollectionInfo, IdCreationStrategy, QuokkaDocument};
+use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
+
+#[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
+struct TypedUser {
+    #[quokka(id)]
+    #[serde(rename = "_id")]
+    id: u64,
+    name: String,
+    age: i32,
+    email: String,
+}
 
 #[test]
 fn test_create_collection() {
@@ -548,5 +559,257 @@ fn test_estimated_document_count_create_if_missing_returns_zero_for_missing_coll
         .estimated_document_count()
         .unwrap();
 
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_typed_drop_collection() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("users").unwrap();
+    db.typed_collection::<TypedUser>("users")
+        .drop_collection()
+        .unwrap();
+
+    assert!(db.list_collections().is_empty());
+}
+
+#[test]
+fn test_typed_drop_collection_not_found() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.typed_collection::<TypedUser>("nonexistent")
+        .drop_collection()
+        .unwrap();
+}
+
+#[test]
+fn test_typed_rename_collection() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("old_name").unwrap();
+    let renamed = db
+        .typed_collection::<TypedUser>("old_name")
+        .rename("new_name")
+        .unwrap();
+
+    assert_eq!(db.list_collections()[0].name, "new_name");
+    assert_eq!(renamed.estimated_document_count().unwrap(), 0);
+}
+
+#[test]
+fn test_typed_rename_collection_preserves_data() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let collection = db.collection("old_name").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "name": "Alice" },
+            doc! { "_id": 2, "name": "Bob" },
+        ])
+        .unwrap();
+
+    db.typed_collection::<TypedUser>("old_name")
+        .rename("new_name")
+        .unwrap();
+
+    assert!(matches!(
+        db.collection("old_name").find(doc! {}).execute(),
+        Err(Error::CollectionNotFound { .. })
+    ));
+    let results: Vec<_> = db
+        .collection("new_name")
+        .find(doc! {})
+        .execute()
+        .unwrap()
+        .map(|result| result.unwrap())
+        .collect();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_typed_rename_collection_not_found() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    match db
+        .typed_collection::<TypedUser>("nonexistent")
+        .rename("new_name")
+    {
+        Err(Error::CollectionNotFound { .. }) => {}
+        Err(error) => panic!("Expected CollectionNotFound error, got: {error:?}"),
+        Ok(_) => panic!("Expected CollectionNotFound error"),
+    }
+}
+
+#[test]
+fn test_typed_rename_collection_target_exists() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("source").unwrap();
+    db.create_collection("target").unwrap();
+
+    match db.typed_collection::<TypedUser>("source").rename("target") {
+        Err(Error::CollectionAlreadyExists(name)) => assert_eq!(name, "target"),
+        Err(error) => panic!("Expected CollectionAlreadyExists error, got: {error:?}"),
+        Ok(_) => panic!("Expected CollectionAlreadyExists error"),
+    }
+}
+
+#[test]
+fn test_typed_get_indexes_returns_active_indexes() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("users").unwrap();
+    let collection = db.typed_collection::<TypedUser>("users");
+
+    let default_name = collection
+        .create_index(|user| user.name.index_asc())
+        .unwrap();
+    let custom_name = collection
+        .create_index_with(|user| user.age.index_desc().then(user.email.index_asc()))
+        .name("by_age_email")
+        .execute()
+        .unwrap();
+
+    let indexes = collection.list_indexes().unwrap();
+    assert_eq!(indexes.len(), 2);
+
+    let by_name = indexes
+        .iter()
+        .find(|index| index.name == default_name)
+        .unwrap();
+    assert_eq!(by_name.fields.len(), 1);
+    assert_eq!(by_name.fields[0].path, "name");
+    assert_eq!(by_name.fields[0].direction, IndexDirection::Ascending);
+
+    let by_age_email = indexes
+        .iter()
+        .find(|index| index.name == custom_name)
+        .unwrap();
+    assert_eq!(by_age_email.fields.len(), 2);
+    assert_eq!(by_age_email.fields[0].path, "age");
+    assert_eq!(by_age_email.fields[0].direction, IndexDirection::Descending);
+    assert_eq!(by_age_email.fields[1].path, "email");
+    assert_eq!(by_age_email.fields[1].direction, IndexDirection::Ascending);
+}
+
+#[test]
+fn test_typed_get_indexes_is_strict_by_default() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let err = db
+        .typed_collection::<TypedUser>("missing")
+        .list_indexes()
+        .unwrap_err();
+    assert!(matches!(err, Error::CollectionNotFound { .. }));
+}
+
+#[test]
+fn test_typed_get_indexes_create_if_missing_returns_empty_for_missing_collection() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let indexes = db
+        .typed_collection::<TypedUser>("missing")
+        .create_if_missing()
+        .list_indexes()
+        .unwrap();
+    assert!(indexes.is_empty());
+}
+
+#[test]
+fn test_typed_drop_index_removes_existing_index() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("users").unwrap();
+    let collection = db.typed_collection::<TypedUser>("users");
+    let index_name = collection
+        .create_index(|user| user.name.index_asc())
+        .unwrap();
+
+    collection.drop_index(&index_name).unwrap();
+    assert!(collection.list_indexes().unwrap().is_empty());
+
+    let err = collection.drop_index(&index_name).unwrap_err();
+    assert!(matches!(err, Error::IndexNotFound { .. }));
+}
+
+#[test]
+fn test_typed_drop_index_returns_collection_not_found_for_missing_collection() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let err = db
+        .typed_collection::<TypedUser>("missing")
+        .drop_index("name_1")
+        .unwrap_err();
+    assert!(matches!(err, Error::CollectionNotFound { .. }));
+}
+
+#[test]
+fn test_typed_drop_index_returns_index_not_found_for_missing_index() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    db.create_collection("users").unwrap();
+    let err = db
+        .typed_collection::<TypedUser>("users")
+        .drop_index("missing_index")
+        .unwrap_err();
+    assert!(matches!(err, Error::IndexNotFound { .. }));
+}
+
+#[test]
+fn test_typed_estimated_document_count_returns_collection_count() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let collection = db.collection("users").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "name": "Alice", "age": 30, "email": "alice@example.com" },
+            doc! { "_id": 2, "name": "Bob", "age": 31, "email": "bob@example.com" },
+        ])
+        .unwrap();
+
+    assert_eq!(
+        db.typed_collection::<TypedUser>("users")
+            .estimated_document_count()
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn test_typed_estimated_document_count_is_strict_by_default() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let err = db
+        .typed_collection::<TypedUser>("missing")
+        .estimated_document_count()
+        .unwrap_err();
+    assert!(matches!(err, Error::CollectionNotFound { .. }));
+}
+
+#[test]
+fn test_typed_estimated_document_count_create_if_missing_returns_zero_for_missing_collection() {
+    let dir = tempdir().unwrap();
+    let db = common::open_db(dir.path());
+
+    let count = db
+        .typed_collection::<TypedUser>("missing")
+        .create_if_missing()
+        .estimated_document_count()
+        .unwrap();
     assert_eq!(count, 0);
 }

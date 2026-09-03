@@ -142,7 +142,7 @@ fn test_read() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
-    let col = engine.create_collection_if_not_exists("test_read").unwrap();
+    let col = engine.create_collection("test_read", true).unwrap();
     let idx = 0;
 
     let inserts = vec![
@@ -205,10 +205,12 @@ fn test_read() {
         assert_eq!(actual, &delete_rec(col, 4, 5));
 
         let user_key1 = &user_key(5);
-        assert!(&engine
-            .read_at_snapshot(col, idx, user_key1, &snapshot)
-            .unwrap()
-            .is_none());
+        assert!(
+            &engine
+                .read_at_snapshot(col, idx, user_key1, &snapshot)
+                .unwrap()
+                .is_none()
+        );
     }
 
     let updates = vec![put_op(col, 2, 2), put_op(col, 3, 2), put_op(col, 4, 2)];
@@ -296,7 +298,7 @@ fn test_acquire_snapshot_registers_and_releases_lease() {
     assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(0));
 
     let col = engine
-        .create_collection_if_not_exists("test_acquire_snapshot_registers_and_releases_lease")
+        .create_collection("test_acquire_snapshot_registers_and_releases_lease", true)
         .unwrap();
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -324,9 +326,7 @@ fn test_range_scan() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
-    let col = engine
-        .create_collection_if_not_exists("test_range_scan")
-        .unwrap();
+    let col = engine.create_collection("test_range_scan", true).unwrap();
     let idx = 0;
 
     // Stage 1: All in memtable
@@ -472,7 +472,7 @@ fn test_read_and_scan_with_immutable_memtables() {
     let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_immutable_memtables")
+        .create_collection("test_immutable_memtables", true)
         .unwrap();
     let idx = 0;
 
@@ -538,10 +538,12 @@ fn test_read_and_scan_with_immutable_memtables() {
     );
     // Read a non-existent key.
     let user_key1 = &user_key(6);
-    assert!(engine
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 
     // --- Verification: Range scan over both memtables ---
     let user_key_range = &(..);
@@ -554,12 +556,16 @@ fn test_read_and_scan_with_immutable_memtables() {
     assert_eq!(results.len(), 5);
     assert_eq!(results[0].1, val_1mb);
     assert_eq!(results[4].1, val_active);
-    assert!(results[0]
-        .0
-        .starts_with(&encode_record_key(col, idx, &user_key(1))));
-    assert!(results[4]
-        .0
-        .starts_with(&encode_record_key(col, idx, &user_key(5))));
+    assert!(
+        results[0]
+            .0
+            .starts_with(&encode_record_key(col, idx, &user_key(1)))
+    );
+    assert!(
+        results[4]
+            .0
+            .starts_with(&encode_record_key(col, idx, &user_key(5)))
+    );
 
     // --- Verification: Updates and snapshots ---
     let snapshot = engine.acquire_snapshot();
@@ -648,7 +654,7 @@ fn test_replay_with_multiple_wals() {
         old_engine.flush_manager.pause();
 
         let col = old_engine
-            .create_collection_if_not_exists("test_replay_with_multiple_wals")
+            .create_collection("test_replay_with_multiple_wals", true)
             .unwrap();
 
         // Write enough data to trigger 2 memtable rotations.
@@ -719,14 +725,16 @@ fn test_manifest_rotation() {
     assert_counter_eq(registry, "manifest_rewrite", 0);
 
     let col = engine
-        .create_collection_if_not_exists("test_manifest_rotation")
+        .create_collection("test_manifest_rotation", true)
         .unwrap();
     let idx = 0;
 
     let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
-    assert!(initial_manifest_path
-        .to_string_lossy()
-        .contains("MANIFEST-000001"));
+    assert!(
+        initial_manifest_path
+            .to_string_lossy()
+            .contains("MANIFEST-000001")
+    );
 
     // Each flush generates two edits (WalRotation, Flush), consuming space in the manifest.
     // The initial manifest is ~4KiB. Each pair of edits for a flush
@@ -790,15 +798,17 @@ fn test_manifest_rotation_error() {
     let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_manifest_rotation_error")
+        .create_collection("test_manifest_rotation_error", true)
         .unwrap();
 
     assert_counter_eq(registry, "manifest_rewrite", 0);
 
     let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
-    assert!(initial_manifest_path
-        .to_string_lossy()
-        .contains("MANIFEST-000001"));
+    assert!(
+        initial_manifest_path
+            .to_string_lossy()
+            .contains("MANIFEST-000001")
+    );
 
     engine.manifest_return_error_on_rotate(true);
 
@@ -832,7 +842,7 @@ fn test_obsolete_wal_deletion() {
     let engine = StorageEngine::new(registry, Arc::new(options.clone()), path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_obsolete_wal_deletion")
+        .create_collection("test_obsolete_wal_deletion", true)
         .unwrap();
     let idx = 0;
 
@@ -903,7 +913,7 @@ fn test_obsolete_sst_deletion_after_compaction() {
     let engine = StorageEngine::new(registry, options, &path).unwrap();
     engine.disable_auto_compaction();
     let col = engine
-        .create_collection_if_not_exists("test_obsolete_sst_deletion_after_compaction")
+        .create_collection("test_obsolete_sst_deletion_after_compaction", true)
         .unwrap();
 
     engine
@@ -939,15 +949,19 @@ fn test_obsolete_sst_deletion_after_compaction() {
 
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine
-        .read_at_snapshot(col, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .read_at_snapshot(col, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
     let user_key1 = &user_key(2);
-    assert!(engine
-        .read_at_snapshot(col, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .read_at_snapshot(col, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -959,7 +973,7 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
     engine.disable_auto_compaction();
 
     let col = engine
-        .create_collection_if_not_exists("snapshot_overwrite_visibility")
+        .create_collection("snapshot_overwrite_visibility", true)
         .unwrap();
 
     engine
@@ -1007,7 +1021,7 @@ fn test_snapshot_point_read_survives_compaction_after_delete() {
     engine.disable_auto_compaction();
 
     let col = engine
-        .create_collection_if_not_exists("snapshot_delete_visibility")
+        .create_collection("snapshot_delete_visibility", true)
         .unwrap();
 
     engine
@@ -1055,7 +1069,7 @@ fn test_snapshot_range_scan_survives_compaction() {
     engine.disable_auto_compaction();
 
     let col = engine
-        .create_collection_if_not_exists("snapshot_range_visibility")
+        .create_collection("snapshot_range_visibility", true)
         .unwrap();
 
     for key in 1..=3 {
@@ -1112,8 +1126,9 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
     let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
     engine.disable_auto_compaction();
 
+    let options = CollectionOptions::default();
     let col = engine
-        .create_collection("snapshot_collection_drop", CollectionOptions::default())
+        .create_collection_with_options("snapshot_collection_drop", options, false)
         .unwrap();
 
     engine
@@ -1138,11 +1153,9 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
 
     // Flush unrelated post-drop data so the pending drop is attached to an SSTable level
     // and becomes visible to compaction.
+    let options = CollectionOptions::default();
     let survivor = engine
-        .create_collection(
-            "snapshot_collection_drop_survivor",
-            CollectionOptions::default(),
-        )
+        .create_collection_with_options("snapshot_collection_drop_survivor", options, false)
         .unwrap();
     engine
         .write(write_batch(vec![put_op(survivor, 1, 1)]), false)
@@ -1174,8 +1187,9 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
     let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
     engine.disable_auto_compaction();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("snapshot_index_drop", CollectionOptions::default())
+        .create_collection_with_options("snapshot_index_drop", options, false)
         .unwrap();
     let index_id = engine
         .create_index(
@@ -1267,7 +1281,7 @@ fn test_orphaned_sst_cleanup_on_startup() {
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
         let col = engine
-            .create_collection_if_not_exists("test_orphaned_sst_cleanup_on_startup")
+            .create_collection("test_orphaned_sst_cleanup_on_startup", true)
             .unwrap();
 
         engine
@@ -1337,9 +1351,7 @@ fn test_concurrent_writes(with_concurrent_flushes: bool) {
 
     let num_threads = 5;
     let writes_per_thread = 200;
-    let col = engine
-        .create_collection_if_not_exists("concurrent_writes")
-        .unwrap();
+    let col = engine.create_collection("concurrent_writes", true).unwrap();
     let idx = 0;
 
     std::thread::scope(|s| {
@@ -1404,7 +1416,7 @@ fn test_shutdown_and_restart() {
         let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
         let col = engine
-            .create_collection_if_not_exists("test_shutdown_and_restart")
+            .create_collection("test_shutdown_and_restart", true)
             .unwrap();
 
         // Write some data and flush it to an SSTable.
@@ -1461,10 +1473,12 @@ fn test_shutdown_and_restart() {
     assert_eq!(val3, expected_val3);
 
     let user_key1 = &user_key(4);
-    assert!(engine_restarted
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -1484,7 +1498,7 @@ fn test_wal_replay_on_restart() {
         let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
         let col = engine
-            .create_collection_if_not_exists("test_wal_replay_on_restart")
+            .create_collection("test_wal_replay_on_restart", true)
             .unwrap();
 
         // Write some data and flush it to an SSTable.
@@ -1549,10 +1563,12 @@ fn test_wal_replay_on_restart() {
     assert_eq!(val3, expected_val3);
 
     let user_key1 = &user_key(4);
-    assert!(engine_restarted
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -1568,7 +1584,7 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path).unwrap();
 
         let collection_id = engine
-            .create_collection_if_not_exists("test_count_stats_restart")
+            .create_collection("test_count_stats_restart", true)
             .unwrap();
         let created_index = engine
             .create_index(
@@ -1670,7 +1686,7 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path).unwrap();
 
         let collection_id = engine
-            .create_collection_if_not_exists("test_count_stats_delete_restart")
+            .create_collection("test_count_stats_delete_restart", true)
             .unwrap();
         let created_index = engine
             .create_index(
@@ -1772,7 +1788,7 @@ fn test_wal_replay_with_last_log_partially_written() {
         let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
         let col = engine
-            .create_collection_if_not_exists("test_wal_replay_with_partial_log")
+            .create_collection("test_wal_replay_with_partial_log", true)
             .unwrap();
 
         engine
@@ -1817,10 +1833,12 @@ fn test_wal_replay_with_last_log_partially_written() {
 
     // Key 3 should not exist because it was part of the corrupted, truncated segment.
     let user_key1 = &user_key(3);
-    assert!(engine_restarted
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 
     // Writing a new record should work.
     engine_restarted
@@ -1854,7 +1872,7 @@ fn test_wal_replay_with_header_corruption() {
         let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
 
         let col = engine
-            .create_collection_if_not_exists("test_wal_replay_with_header_corruption")
+            .create_collection("test_wal_replay_with_header_corruption", true)
             .unwrap();
 
         engine
@@ -1894,10 +1912,12 @@ fn test_wal_replay_with_header_corruption() {
     // The data should be lost.
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
-    assert!(engine_restarted
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 
     // The database should be usable.
     engine_restarted
@@ -1905,10 +1925,12 @@ fn test_wal_replay_with_header_corruption() {
         .unwrap();
     let snapshot = engine_restarted.acquire_snapshot();
     let user_key1 = &user_key(2);
-    assert!(engine_restarted
-        .read_at_snapshot(col, idx, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine_restarted
+            .read_at_snapshot(col, idx, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1937,7 +1959,7 @@ fn test_restart_fails_with_corrupted_old_wal() {
         engine.flush_manager.pause();
 
         let col = engine
-            .create_collection_if_not_exists("test_restart_fails_with_corrupted_old_wal")
+            .create_collection("test_restart_fails_with_corrupted_old_wal", true)
             .unwrap();
 
         // Write enough data to trigger memtable rotation, which also rotates the WAL.
@@ -2006,7 +2028,7 @@ fn test_restart_with_stale_files() {
         assert_eq!(next_file_num_before, 3);
 
         let col = engine
-            .create_collection_if_not_exists("test_restart_with_stale_files")
+            .create_collection("test_restart_with_stale_files", true)
             .unwrap();
 
         let inserts = vec![
@@ -2077,7 +2099,7 @@ fn test_error_mode_activation_and_rejection() {
     let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_error_mode_activation_and_rejection")
+        .create_collection("test_error_mode_activation_and_rejection", true)
         .unwrap();
 
     // 1. Inject an error into the WAL write path.
@@ -2110,7 +2132,7 @@ fn test_wal_rotation_on_write_error() {
     let engine = StorageEngine::new(registry, options, &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_wal_rotation_on_write_error")
+        .create_collection("test_wal_rotation_on_write_error", true)
         .unwrap();
     let idx = 0;
 
@@ -2155,7 +2177,7 @@ fn test_wal_rotation_on_flush_error() {
     let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_wal_rotation_on_flush_error")
+        .create_collection("test_wal_rotation_on_flush_error", true)
         .unwrap();
 
     engine.wal_return_error_on_rotate(true);
@@ -2194,7 +2216,7 @@ fn test_manifest_write_error() {
     let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_manifest_write_error")
+        .create_collection("test_manifest_write_error", true)
         .unwrap();
 
     engine.manifest_return_error_on_write(true);
@@ -2233,7 +2255,7 @@ fn test_memtable_flush_error() {
     let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_memtable_flush_error")
+        .create_collection("test_memtable_flush_error", true)
         .unwrap();
 
     engine.lsm_tree().memtable.return_error_on_flush(true);
@@ -2281,7 +2303,7 @@ fn check_error_mode(engine: Arc<StorageEngine>, col: u32) {
     assert_eq!(flush_result.err().unwrap().to_string(), expected_error_msg);
 
     // Test create_collection
-    let create_coll_result = engine.create_collection_if_not_exists("new_collection");
+    let create_coll_result = engine.create_collection("new_collection", true);
     assert!(create_coll_result.is_err());
     assert_eq!(
         create_coll_result.err().unwrap().to_string(),
@@ -2297,8 +2319,9 @@ fn test_create_collection() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a new collection
+    let options = CollectionOptions::default();
     let col_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     assert_eq!(col_id, 10); // First user collection ID
 
@@ -2309,17 +2332,20 @@ fn test_create_collection() {
     assert_eq!(collection.unwrap().id, col_id);
 
     // Create another collection
+    let options = CollectionOptions::default();
     let col_id_2 = engine
-        .create_collection("test_collection_2", CollectionOptions::default())
+        .create_collection_with_options("test_collection_2", options, false)
         .unwrap();
     assert_eq!(col_id_2, 11);
 
     // Verify both collections exist
     let catalog = engine.catalog();
     assert!(catalog.get_collection_by_name("test_collection").is_some());
-    assert!(catalog
-        .get_collection_by_name("test_collection_2")
-        .is_some());
+    assert!(
+        catalog
+            .get_collection_by_name("test_collection_2")
+            .is_some()
+    );
 }
 
 #[test]
@@ -2330,12 +2356,14 @@ fn test_create_collection_already_exists() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection
+    let options = CollectionOptions::default();
     engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     // Try to create the same collection again - should fail
-    let result = engine.create_collection("test_collection", CollectionOptions::default());
+    let options = CollectionOptions::default();
+    let result = engine.create_collection_with_options("test_collection", options, false);
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err, StorageError::CollectionAlreadyExists(_)));
@@ -2350,15 +2378,11 @@ fn test_create_collection_if_not_exists() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection
-    let col_id_1 = engine
-        .create_collection_if_not_exists("test_collection")
-        .unwrap();
+    let col_id_1 = engine.create_collection("test_collection", true).unwrap();
     assert_eq!(col_id_1, 10);
 
     // Call again - should return existing ID, not error
-    let col_id_2 = engine
-        .create_collection_if_not_exists("test_collection")
-        .unwrap();
+    let col_id_2 = engine.create_collection("test_collection", true).unwrap();
     assert_eq!(col_id_2, col_id_1);
 
     // Verify only one collection exists with that name
@@ -2382,8 +2406,9 @@ fn test_create_index() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     let created_index = engine
         .create_index(
@@ -2414,8 +2439,9 @@ fn test_create_index_is_noop_when_same_name_and_equivalent_spec_exist() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     let created_index = engine
@@ -2455,8 +2481,9 @@ fn test_create_index_rejects_equivalent_spec_under_different_name() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     engine
         .create_index(
@@ -2488,8 +2515,9 @@ fn test_create_index_rejects_same_name_with_different_definition() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     engine
         .create_index(
@@ -2528,8 +2556,9 @@ fn test_drop_index() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     let created_index = engine
         .create_index(
@@ -2544,10 +2573,12 @@ fn test_drop_index() {
     assert_eq!(created_index.name, "by_name");
     let index_id = created_index.id;
 
-    assert!(engine
-        .lsm_tree()
-        .get_drops_before_or_at(u64::MAX)
-        .is_empty());
+    assert!(
+        engine
+            .lsm_tree()
+            .get_drops_before_or_at(u64::MAX)
+            .is_empty()
+    );
 
     let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
     engine.drop_index(collection_id, index_id).unwrap();
@@ -2573,8 +2604,9 @@ fn test_drop_index_not_found() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     let result = engine.drop_index(collection_id, 99);
@@ -2591,8 +2623,9 @@ fn test_drop_index_is_noop_when_index_already_dropped() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     let created_index = engine
         .create_index(
@@ -2624,8 +2657,9 @@ fn test_drop_index_is_noop_when_collection_already_dropped() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     let created_index = engine
         .create_index(
@@ -2690,8 +2724,9 @@ fn test_create_index_on_dropped_collection_returns_error() {
     let registry = &mut MetricRegistry::default();
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
+    let options = CollectionOptions::default();
     let collection_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     engine.drop_collection("test_collection").unwrap();
 
@@ -2717,8 +2752,9 @@ fn test_drop_collection() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection
+    let options = CollectionOptions::default();
     let col_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     // Write some data to it
@@ -2776,7 +2812,7 @@ fn test_write_to_non_existent_collection() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     let name = "existing_collection";
-    let col = engine.create_collection_if_not_exists(name).unwrap();
+    let col = engine.create_collection(name, true).unwrap();
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
         .unwrap();
@@ -2798,8 +2834,9 @@ fn test_write_to_dropped_collection() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create and then drop a collection
+    let options = CollectionOptions::default();
     let col_id = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     engine.drop_collection("test_collection").unwrap();
 
@@ -2821,11 +2858,13 @@ fn test_collection_persistence_across_restart() {
         let engine =
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
+        let options1 = CollectionOptions::default();
         let col_id_1 = engine
-            .create_collection("collection_1", CollectionOptions::default())
+            .create_collection_with_options("collection_1", options1, false)
             .unwrap();
+        let options1 = CollectionOptions::default();
         let col_id_2 = engine
-            .create_collection("collection_2", CollectionOptions::default())
+            .create_collection_with_options("collection_2", options1, false)
             .unwrap();
 
         // Write data to both
@@ -2865,8 +2904,9 @@ fn test_collection_persistence_across_restart() {
         assert!(result_2.is_some());
 
         // Creating a new collection should get the next ID
+        let options1 = CollectionOptions::default();
         let col_id_3 = engine
-            .create_collection("collection_3", CollectionOptions::default())
+            .create_collection_with_options("collection_3", options1, false)
             .unwrap();
         assert_eq!(col_id_3, 12);
     }
@@ -2883,11 +2923,13 @@ fn test_drop_collection_persistence_across_restart() {
         let engine =
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
+        let options1 = CollectionOptions::default();
         let col_id = engine
-            .create_collection("to_drop", CollectionOptions::default())
+            .create_collection_with_options("to_drop", options1, false)
             .unwrap();
+        let options1 = CollectionOptions::default();
         engine
-            .create_collection("to_keep", CollectionOptions::default())
+            .create_collection_with_options("to_keep", options1, false)
             .unwrap();
 
         let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
@@ -2933,8 +2975,9 @@ fn test_drop_and_recreate_collection_data_isolation() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection and write data to it
+    let options = CollectionOptions::default();
     let col_id_1 = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     assert_eq!(col_id_1, 10);
 
@@ -2962,28 +3005,35 @@ fn test_drop_and_recreate_collection_data_isolation() {
     engine.drop_collection("test_collection").unwrap();
 
     // Recreate the collection with the same name
+    let options = CollectionOptions::default();
     let col_id_2 = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
     assert_eq!(col_id_2, 11); // Should get a new ID
 
     // The old data should NOT be visible when querying with the new collection ID
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
     let user_key1 = &user_key(2);
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
     let user_key1 = &user_key(3);
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 
     // Write new data to the recreated collection
     engine
@@ -3020,8 +3070,9 @@ fn test_drop_and_recreate_collection_with_flush() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection and write data to it
+    let options = CollectionOptions::default();
     let col_id_1 = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     engine
@@ -3042,26 +3093,34 @@ fn test_drop_and_recreate_collection_with_flush() {
     // Verify all data exists
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine
-        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
     let user_key1 = &user_key(2);
-    assert!(engine
-        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
     let user_key1 = &user_key(3);
-    assert!(engine
-        .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_1, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_some()
+    );
 
     // Verify no pending drops before dropping
-    assert!(engine
-        .lsm_tree()
-        .get_drops_before_or_at(u64::MAX)
-        .is_empty());
+    assert!(
+        engine
+            .lsm_tree()
+            .get_drops_before_or_at(u64::MAX)
+            .is_empty()
+    );
 
     // Drop the collection
     let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
@@ -3074,27 +3133,34 @@ fn test_drop_and_recreate_collection_with_flush() {
     assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
 
     // Recreate the collection
+    let options = CollectionOptions::default();
     let col_id_2 = engine
-        .create_collection("test_collection", CollectionOptions::default())
+        .create_collection_with_options("test_collection", options, false)
         .unwrap();
 
     // Old data (both from SSTable and memtable) should NOT be visible with new collection ID
     let user_key1 = &user_key(1);
     let snapshot = engine.acquire_snapshot();
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
     let user_key1 = &user_key(2);
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
     let user_key1 = &user_key(3);
-    assert!(engine
-        .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+            .unwrap()
+            .is_none()
+    );
 
     // Write and flush new data
     engine
@@ -3147,8 +3213,9 @@ fn test_drop_and_recreate_collection_persistence() {
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
         // Create first collection
+        let options1 = CollectionOptions::default();
         let col_id_1 = engine
-            .create_collection("test_collection", CollectionOptions::default())
+            .create_collection_with_options("test_collection", options1, false)
             .unwrap();
         engine
             .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
@@ -3160,8 +3227,9 @@ fn test_drop_and_recreate_collection_persistence() {
 
         // Drop and recreate
         engine.drop_collection("test_collection").unwrap();
+        let options1 = CollectionOptions::default();
         col_id_2 = engine
-            .create_collection("test_collection", CollectionOptions::default())
+            .create_collection_with_options("test_collection", options1, false)
             .unwrap();
 
         // Write different data to recreated collection
@@ -3188,27 +3256,35 @@ fn test_drop_and_recreate_collection_persistence() {
         // Old data (keys 1, 2) should NOT be visible
         let user_key1 = &user_key(1);
         let snapshot = engine.acquire_snapshot();
-        assert!(engine
-            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-            .unwrap()
-            .is_none());
+        assert!(
+            engine
+                .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+                .unwrap()
+                .is_none()
+        );
         let user_key1 = &user_key(2);
-        assert!(engine
-            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-            .unwrap()
-            .is_none());
+        assert!(
+            engine
+                .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+                .unwrap()
+                .is_none()
+        );
 
         // New data (keys 5, 6) should be visible
         let user_key1 = &user_key(5);
-        assert!(engine
-            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-            .unwrap()
-            .is_some());
+        assert!(
+            engine
+                .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+                .unwrap()
+                .is_some()
+        );
         let user_key1 = &user_key(6);
-        assert!(engine
-            .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
-            .unwrap()
-            .is_some());
+        assert!(
+            engine
+                .read_at_snapshot(col_id_2, 0, user_key1, &snapshot)
+                .unwrap()
+                .is_some()
+        );
 
         // Range scan should only return the new data
         let user_key_range = &(..);
@@ -3230,8 +3306,9 @@ fn test_rename_collection() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create a collection and write data
+    let options = CollectionOptions::default();
     let col_id = engine
-        .create_collection("original_name", CollectionOptions::default())
+        .create_collection_with_options("original_name", options, false)
         .unwrap();
     engine
         .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
@@ -3286,11 +3363,13 @@ fn test_rename_collection_target_exists() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     // Create two collections
+    let options = CollectionOptions::default();
     engine
-        .create_collection("collection_a", CollectionOptions::default())
+        .create_collection_with_options("collection_a", options, false)
         .unwrap();
+    let options = CollectionOptions::default();
     engine
-        .create_collection("collection_b", CollectionOptions::default())
+        .create_collection_with_options("collection_b", options, false)
         .unwrap();
 
     // Try to rename collection_a to collection_b - should fail
@@ -3313,8 +3392,9 @@ fn test_rename_collection_persistence() {
         let engine =
             StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
 
+        let options1 = CollectionOptions::default();
         col_id = engine
-            .create_collection("original", CollectionOptions::default())
+            .create_collection_with_options("original", options1, false)
             .unwrap();
         engine
             .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
@@ -3356,7 +3436,7 @@ fn test_optimistic_locking_must_not_exist() {
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_optimistic_locking")
+        .create_collection("test_optimistic_locking", true)
         .unwrap();
     let idx = 0;
     let snapshot0 = engine.acquire_snapshot();
@@ -3387,9 +3467,10 @@ fn test_optimistic_locking_must_not_exist() {
 
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err
-        .to_string()
-        .contains("Optimistic locking failed: key for collection 10 index 0 user_key"));
+    assert!(
+        err.to_string()
+            .contains("Optimistic locking failed: key for collection 10 index 0 user_key")
+    );
 
     // 5. Take a new snapshot and try to write a new key. This should succeed.
     let snapshot2 = engine.acquire_snapshot();
@@ -3414,9 +3495,11 @@ fn test_optimistic_locking_must_not_exist() {
     let result_fail = engine.write(batch_fail, false);
     assert!(result_fail.is_err());
     let err_fail = result_fail.err().unwrap();
-    assert!(err_fail
-        .to_string()
-        .contains("Optimistic locking failed: key for collection 10 index 0 user_key"));
+    assert!(
+        err_fail
+            .to_string()
+            .contains("Optimistic locking failed: key for collection 10 index 0 user_key")
+    );
 }
 
 #[test]
@@ -3427,7 +3510,7 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
     let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_optimistic_locking_skip_reads")
+        .create_collection("test_optimistic_locking_skip_reads", true)
         .unwrap();
 
     engine
@@ -3478,9 +3561,7 @@ fn assert_write_sync_forces_wal_sync_before_return(
     );
     let engine = StorageEngine::new(registry, options, path).unwrap();
 
-    let col = engine
-        .create_collection_if_not_exists("test_write_sync")
-        .unwrap();
+    let col = engine.create_collection("test_write_sync", true).unwrap();
 
     assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 1); // header sync
 
@@ -3549,7 +3630,7 @@ fn test_default_writes_follow_buffered_wal_durability() {
     let engine = StorageEngine::new(registry, options, path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_default_writes_follow_buffered_wal_durability")
+        .create_collection("test_default_writes_follow_buffered_wal_durability", true)
         .unwrap();
 
     engine
@@ -3576,7 +3657,7 @@ fn test_default_writes_follow_durable_wal_durability() {
     let engine = StorageEngine::new(registry, options, path).unwrap();
 
     let col = engine
-        .create_collection_if_not_exists("test_default_writes_follow_durable_wal_durability")
+        .create_collection("test_default_writes_follow_durable_wal_durability", true)
         .unwrap();
 
     engine

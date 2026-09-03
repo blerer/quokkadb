@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use tracing::{trace_span, Span};
+use tracing::{Span, trace_span};
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -431,17 +431,17 @@ mod tests {
     use super::*;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
+    use crate::storage::Direction;
     use crate::storage::files::DbFile;
     use crate::storage::internal_key::InternalKeyRange;
     use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
     use crate::storage::sstable::sstable_cache::SSTableCache;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::{put_rec, record_key};
-    use crate::storage::Direction;
     use crate::util::interval::Interval;
     use std::ops::{Bound, RangeBounds};
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use tempfile::tempdir;
 
     fn setup_cache(options: &Options) -> Arc<SSTableCache> {

@@ -182,7 +182,7 @@ pub(crate) fn invoke_executor_test_hook(point: ExecutorFailpoint) {
 
 pub(super) fn generate_bson_id(id_generator: &Mutex<Sonyflake>) -> bson::Bson {
     let new_id = id_generator.lock().unwrap().next_id().unwrap();
-    bson::Bson::Int64(
+    Bson::Int64(
         i64::try_from(new_id.to_u64()).expect("Sonyflake IDs must fit into signed 64-bit BSON"),
     )
 }

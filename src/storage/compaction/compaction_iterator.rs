@@ -2,12 +2,12 @@ use std::io::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::storage::Direction;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{extract_record_key, extract_sequence_number, InternalKeyRange};
+use crate::storage::internal_key::{InternalKeyRange, extract_record_key, extract_sequence_number};
 use crate::storage::iterators::MergeIterator;
 use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
 use crate::storage::sstable::sstable_cache::SSTableCache;
-use crate::storage::Direction;
 use crate::util::interval::{Interval, IntervalPosition};
 
 /// An iterator that merges records from multiple SSTables while applying drops to skip deleted

@@ -1,7 +1,7 @@
 use crossbeam_skiplist::SkipMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Tracks active snapshot leases and exposes the oldest live snapshot sequence.
 pub(crate) struct SnapshotManager {

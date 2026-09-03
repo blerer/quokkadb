@@ -2,23 +2,23 @@ use super::*;
 use crate::error::Result;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
+use crate::query::ReturnDocument;
 use crate::query::execution::executor::with_executor_test_hook;
 use crate::query::update::UpdateExpr;
 use crate::query::update_fn::{field_name, set, update};
-use crate::query::ReturnDocument;
 use crate::query::{BsonValue, Parameters};
+use crate::storage::Direction;
 use crate::storage::count_stats::CountStats;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
 use crate::storage::write_batch::WriteBatch;
-use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::{Bson, Document};
 use std::io::Cursor;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 pub(crate) struct ExecutorTestRuntime {
     #[allow(dead_code)]

@@ -1,6 +1,6 @@
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
-use crate::query::logical_plan::{transform_down_filter, LogicalPlan};
+use crate::query::logical_plan::{LogicalPlan, transform_down_filter};
 use crate::query::optimizer::normalization_rules;
 use crate::query::optimizer::normalization_rules::NormalisationRule;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
@@ -8,9 +8,9 @@ use crate::query::tree_node::TreeNode;
 use crate::query::{
     ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder,
 };
+use crate::storage::Direction;
 use crate::storage::catalog::{Catalog, IndexDefinition, IndexDirection, OrderedIndexField};
 use crate::storage::count_stats::{CountStatSource, CountStatsKey};
-use crate::storage::Direction;
 use std::collections::HashMap;
 use std::convert::Into;
 use std::sync::Arc;
@@ -1113,11 +1113,11 @@ fn required_props_for_children(node: &LogicalPlan, req: &ReqProps) -> ReqProps {
 #[cfg(test)]
 mod parametrize_test {
     use super::*;
+    use crate::query::BsonValue;
     use crate::query::expr_fn::{
         and, eq, exists, field, field_filters, interval, lit, placeholder,
     };
     use crate::query::logical_plan::LogicalPlanBuilder;
-    use crate::query::BsonValue;
 
     #[test]
     fn test_parametrize_simple_filter() {
@@ -1125,7 +1125,7 @@ mod parametrize_test {
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build();
+            .build_arc();
 
         // Let's first check when the filter stay at the filter level
         let (parametrized_plan, params) = optimizer.parametrize(plan.clone());
@@ -1138,7 +1138,7 @@ mod parametrize_test {
         let expected_filter = field_filters(field(["a"]), vec![eq(placeholder(0))]);
         let expected_plan = LogicalPlanBuilder::scan(collection)
             .filter(expected_filter)
-            .build();
+            .build_arc();
 
         assert_eq!(parametrized_plan, expected_plan);
 
@@ -1163,7 +1163,7 @@ mod parametrize_test {
             None,
             None,
         )
-        .build();
+        .build_arc();
         assert_eq!(parametrized_plan, expected_plan);
     }
 
@@ -1176,7 +1176,7 @@ mod parametrize_test {
                 field_filters(field(["a"]), vec![eq(lit(10))]),
                 field_filters(field(["b"]), vec![eq(lit("hello"))]),
             ]))
-            .build();
+            .build_arc();
 
         let (parametrized_plan, params) = optimizer.parametrize(plan);
 
@@ -1193,7 +1193,7 @@ mod parametrize_test {
 
         let expected_plan = LogicalPlanBuilder::scan(collection)
             .filter(expected_condition)
-            .build();
+            .build_arc();
 
         assert_eq!(parametrized_plan, expected_plan);
     }
@@ -1204,7 +1204,7 @@ mod parametrize_test {
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection)
             .filter(field_filters(field(["a"]), vec![exists(true)]))
-            .build();
+            .build_arc();
         let plan_clone = plan.clone();
 
         let (parametrized_plan, params) = optimizer.parametrize(plan);
@@ -1239,7 +1239,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_collection_scan_no_filter() {
-        let input = LogicalPlanBuilder::scan(COLLECTION).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION).build_arc();
         let output = full_scan_plan();
 
         check_optimization(input, output);
@@ -1250,7 +1250,7 @@ mod optimizer_tests {
         let filters = field_filters(field(["a"]), vec![gt(lit(10))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(filters.clone())
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
@@ -1270,8 +1270,8 @@ mod optimizer_tests {
     fn test_optimize_projection() {
         let projection = include(proj_fields([("name", proj_field())]));
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .project(projection.clone())
-            .build();
+            .project(Some(projection.clone()))
+            .build_arc();
 
         let output = PhysicalPlan::Projection {
             input: Arc::new(full_scan_plan()),
@@ -1285,7 +1285,7 @@ mod optimizer_tests {
     fn test_optimize_limit() {
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .limit(Some(10), Some(20))
-            .build();
+            .build_arc();
         let output = PhysicalPlan::Limit {
             input: Arc::new(full_scan_plan()),
             skip: Some(10),
@@ -1298,7 +1298,9 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_pk_point_search() {
         let filters = field_filters(field(["_id"]), vec![eq(lit(123))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         let output = PhysicalPlan::PointSearch {
             collection: COLLECTION,
@@ -1313,7 +1315,9 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_pk_range_scan() {
         let filters = field_filters(field(["_id"]), vec![gt(lit(123))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
@@ -1332,7 +1336,9 @@ mod optimizer_tests {
             field_filters(field(["_id"]), vec![gt(lit(123))]),
             field_filters(field(["a"]), vec![gt(lit(10))]),
         ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         // The residual filter will also be normalized and parametrized.
         let residual_filter = field_filters(
@@ -1354,7 +1360,9 @@ mod optimizer_tests {
     #[test]
     fn test_pk_exists_true_is_full_scan() {
         let filters = field_filters(field(["_id"]), vec![exists(true)]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
         let output = full_scan_plan();
         check_optimization(input, output);
     }
@@ -1363,8 +1371,8 @@ mod optimizer_tests {
     fn test_optimize_sort_elimination_pk_asc() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["_id"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         // Sort is eliminated because collection scan provides data sorted by _id asc.
         let output = full_scan_plan();
@@ -1376,8 +1384,8 @@ mod optimizer_tests {
     fn test_optimize_sort_elimination_pk_desc() {
         let sort_fields = Arc::new(vec![SortField::desc(field(["_id"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         // Sort is eliminated, and scan direction is reversed.
         let mut output = full_scan_plan();
@@ -1393,8 +1401,8 @@ mod optimizer_tests {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["_id"]), vec![eq(lit(123))]))
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         // Sort is eliminated because point search returns at most one row.
         let output = PhysicalPlan::PointSearch {
@@ -1411,9 +1419,9 @@ mod optimizer_tests {
     fn test_optimize_topk_heap_sort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields.clone())
+            .sort(Some(sort_fields.clone()))
             .limit(Some(5), Some(10))
-            .build();
+            .build_arc();
 
         let topk_sort = PhysicalPlan::TopKHeapSort {
             input: Arc::new(full_scan_plan()),
@@ -1434,8 +1442,8 @@ mod optimizer_tests {
     fn test_optimize_external_merge_sort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields.clone())
-            .build();
+            .sort(Some(sort_fields.clone()))
+            .build_arc();
 
         let output = PhysicalPlan::ExternalMergeSort {
             input: Arc::new(full_scan_plan()),
@@ -1451,7 +1459,7 @@ mod optimizer_tests {
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["_id"]), vec![eq(lit(123))]))
             .limit(None, Some(10))
-            .build();
+            .build_arc();
 
         // Limit is eliminated because point search returns at most one row, which
         // satisfies the limit of 10.
@@ -1470,9 +1478,9 @@ mod optimizer_tests {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["_id"]), vec![gt(lit(123))]))
-            .sort(sort_fields.clone())
+            .sort(Some(sort_fields.clone()))
             .limit(Some(5), Some(10))
-            .build();
+            .build_arc();
 
         let scan = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
@@ -1501,9 +1509,9 @@ mod optimizer_tests {
     fn test_optimize_limit_elimination_with_heapsort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields.clone())
+            .sort(Some(sort_fields.clone()))
             .limit(None, Some(10))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::TopKHeapSort {
             input: Arc::new(full_scan_plan()),
@@ -1518,7 +1526,9 @@ mod optimizer_tests {
     fn test_optimize_pk_multipoint_search() {
         let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
         let filters = field_filters(field(["_id"]), vec![within(lit(values))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
@@ -1538,8 +1548,8 @@ mod optimizer_tests {
         let sort_fields = Arc::new(vec![SortField::desc(field(["_id"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(filters)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
@@ -1559,7 +1569,9 @@ mod optimizer_tests {
             field_filters(field(["_id"]), vec![within(lit(values))]),
             field_filters(field(["a"]), vec![gt(lit(10))]),
         ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         let residual_filter = field_filters(
             field(["a"]),
@@ -1618,8 +1630,8 @@ mod optimizer_tests {
     fn test_optimize_sort_elimination_single_field_index() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1643,8 +1655,8 @@ mod optimizer_tests {
             SortField::desc(field(["b"])),
         ]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1668,8 +1680,8 @@ mod optimizer_tests {
             SortField::asc(field(["b"])),
         ]);
         let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(sort_fields)
-            .build();
+            .sort(Some(sort_fields))
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1690,7 +1702,7 @@ mod optimizer_tests {
     fn test_optimize_single_field_index_equality_uses_index_scan_range() {
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1714,7 +1726,7 @@ mod optimizer_tests {
                 field_filters(field(["a"]), vec![eq(lit(10))]),
                 field_filters(field(["b"]), vec![gt(lit(20))]),
             ]))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1738,7 +1750,7 @@ mod optimizer_tests {
                 field_filters(field(["a"]), vec![eq(lit(10))]),
                 field_filters(field(["b"]), vec![eq(lit(20))]),
             ]))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1758,7 +1770,9 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_non_indexed_field_still_uses_collection_scan() {
         let filters = field_filters(field(["z"]), vec![eq(lit(99))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION).filter(filters).build();
+        let input = LogicalPlanBuilder::scan(COLLECTION)
+            .filter(filters)
+            .build_arc();
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
@@ -1778,7 +1792,7 @@ mod optimizer_tests {
     fn test_optimize_prefers_index_scan_when_count_stats_favor_index() {
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::IndexScan {
             collection: COLLECTION,
@@ -1813,7 +1827,7 @@ mod optimizer_tests {
     fn test_optimize_prefers_collection_scan_when_count_stats_favor_collection() {
         let input = LogicalPlanBuilder::scan(COLLECTION)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build();
+            .build_arc();
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,

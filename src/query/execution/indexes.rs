@@ -2,14 +2,14 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::{unexpected_eof, varint};
 use crate::query::physical_plan::IndexScanRangeExpr;
 use crate::query::{
-    get_path_value, get_path_value_from_raw, BsonValue, Expr, Parameters, PathComponent, SortOrder,
+    BsonValue, Expr, Parameters, PathComponent, SortOrder, get_path_value, get_path_value_from_raw,
 };
 use crate::storage::catalog::{
     CollectionMetadata, IndexDefinition, IndexDirection, IndexMetadata, OrderedIndexField,
 };
 use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::operation::Operation;
-use crate::util::bson_utils::{decode_bson_from_key_readers, BsonKey, TypedKey};
+use crate::util::bson_utils::{BsonKey, TypedKey, decode_bson_from_key_readers};
 use crate::util::interval::Interval;
 use bson::{Bson, Document, RawDocument};
 use std::io::Result;

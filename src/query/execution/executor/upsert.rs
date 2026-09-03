@@ -197,22 +197,22 @@ impl WriteExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::execution::executor::test_utils::{
-        assert_find_one_and_update_result, assert_insert_one_result, assert_update_result,
-        execute_find_one_and_update_with_expr_and_upsert, execute_update_one_with_expr_and_upsert,
-        executor_test_runtime, full_scan_plan, insert_one, point_search_query, read_stored_doc,
-        spawn_paused_update_one_with_expr_and_upsert, PausingHook,
-    };
     use crate::query::execution::executor::ExecutorFailpoint;
     use crate::query::execution::executor::WriteResult;
+    use crate::query::execution::executor::test_utils::{
+        PausingHook, assert_find_one_and_update_result, assert_insert_one_result,
+        assert_update_result, execute_find_one_and_update_with_expr_and_upsert,
+        execute_update_one_with_expr_and_upsert, executor_test_runtime, full_scan_plan, insert_one,
+        point_search_query, read_stored_doc, spawn_paused_update_one_with_expr_and_upsert,
+    };
     use crate::query::expr_fn::{field, field_filters, interval, point};
     use crate::query::physical_plan::IndexScanRangeExpr;
     use crate::query::update_fn::{field_name, set, update};
-    use crate::query::{make_sort_field, Parameters, ReturnDocument, SortOrder};
+    use crate::query::{Parameters, ReturnDocument, SortOrder, make_sort_field};
+    use crate::storage::Direction;
     use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
     use crate::storage::count_stats::CountStatsKey;
-    use crate::storage::Direction;
-    use bson::{doc, Bson};
+    use bson::{Bson, doc};
     use std::sync::Arc;
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         let paused_expr = update([set([field_name("value")], "paused")]);
         let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
@@ -274,7 +274,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         let paused_expr = update([set([field_name("value")], "paused")]);
         let paused_handle = spawn_paused_update_one_with_expr_and_upsert(
@@ -320,7 +320,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         // 2. Execute UpdateOne with upsert=true on empty collection
         let mut params = Parameters::new();
@@ -351,7 +351,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         let update_expr = update([set([field_name("value")], "created")]);
         let result = execute_find_one_and_update_with_expr_and_upsert(
@@ -375,7 +375,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         let update_expr = update([set([field_name("value")], "created")]);
         let result = execute_find_one_and_update_with_expr_and_upsert(
@@ -400,7 +400,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         // Insert initial doc
         let initial_doc = doc! { "_id": 1, "value": "initial" };
@@ -435,7 +435,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         // 2. Execute UpdateMany with upsert=true on empty collection
         let mut params = Parameters::new();
@@ -485,7 +485,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert")?;
+        let collection_id = storage_engine.create_collection("test_upsert", true)?;
 
         // 2. Execute UpdateOne with upsert=true with nested field equality
         let mut params = Parameters::new();
@@ -528,8 +528,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id =
-            storage_engine.create_collection_if_not_exists("test_upsert_index_scan")?;
+        let collection_id = storage_engine.create_collection("test_upsert_index_scan", true)?;
         let index = storage_engine.create_index(
             collection_id,
             IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
@@ -596,7 +595,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_upsert_topk")?;
+        let collection_id = storage_engine.create_collection("test_upsert_topk", true)?;
 
         let mut params = Parameters::new();
         let category_eq = params.collect_parameter(BsonValue(Bson::String("books".to_string())));
@@ -654,7 +653,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id = storage_engine.create_collection_if_not_exists("test_replace_topk")?;
+        let collection_id = storage_engine.create_collection("test_replace_topk", true)?;
 
         let mut params = Parameters::new();
         let query_plan = Arc::new(PhysicalPlan::TopKHeapSort {
@@ -687,8 +686,7 @@ mod tests {
         let runtime = executor_test_runtime()?;
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
-        let collection_id =
-            storage_engine.create_collection_if_not_exists("test_replace_index_scan")?;
+        let collection_id = storage_engine.create_collection("test_replace_index_scan", true)?;
         let index = storage_engine.create_index(
             collection_id,
             IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),

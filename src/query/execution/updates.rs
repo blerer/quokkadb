@@ -5,9 +5,9 @@ use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePath, UpdatePathComponent,
 };
-use crate::query::{get_path_value, BsonValue, BsonValueRef, Expr, Parameters};
+use crate::query::{BsonValue, BsonValueRef, Expr, Parameters, get_path_value};
 use crate::util::bson_utils::{
-    add_numeric, multiply_numeric, perform_bitwise_op, BsonArithmeticError,
+    BsonArithmeticError, add_numeric, multiply_numeric, perform_bitwise_op,
 };
 use bson::{Bson, Document};
 use std::cmp::PartialEq;
@@ -540,7 +540,7 @@ where
             return Err(Error::InvalidRequest(format!(
                 "Invalid path for update: cannot use {:?} on {:?}",
                 p, c
-            )))
+            )));
         }
     }
     Ok(())

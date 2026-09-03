@@ -1,32 +1,23 @@
+use crate::collection_state::CollectionState;
 use crate::error::Error;
+pub use crate::query::ReturnDocument;
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::parser;
 use crate::storage::catalog::{
-    CollectionOptions as InternalCollectionOptions,
-    IdCreationStrategy as InternalIdCreationStrategy, IndexDefinition,
-    IndexDirection as InternalIndexDirection, IndexOptions, OrderedIndexField,
+    IndexDefinition, IndexDirection as InternalIndexDirection, OrderedIndexField,
 };
-use crate::DbImpl;
-use bson::{serialize_to_vec, Bson, Document};
+use crate::{CreateIndexOptions, DbImpl};
+use bson::{Bson, Document, serialize_to_vec};
 use serde::Serialize;
 use std::sync::Arc;
 
-pub use crate::query::ReturnDocument;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum CollectionPolicy {
-    #[default]
-    Strict,
-    CreateIfMissing,
-}
+pub type QueryOutput = Box<dyn Iterator<Item = crate::error::Result<Document>>>;
 
 /// Represents a collection in the database.
 /// Provides methods to perform CRUD operations on the collection.
 pub struct Collection {
-    db_impl: Arc<DbImpl>,
-    collection: String,
-    policy: CollectionPolicy,
+    state: CollectionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +58,7 @@ pub struct IndexInfo {
 }
 
 impl IndexInfo {
-    fn from_definition(id: u32, name: String, definition: &IndexDefinition) -> Self {
+    pub(crate) fn from_definition(id: u32, name: String, definition: &IndexDefinition) -> Self {
         let fields = match definition {
             IndexDefinition::Regular(fields) => fields.iter().map(IndexFieldInfo::from).collect(),
         };
@@ -143,75 +134,17 @@ impl DeleteResult {
 }
 
 impl Collection {
-    fn document_from_write_result(result: WriteResult) -> Option<Document> {
-        match result {
-            WriteResult::SingleDocument { document, .. } => document,
-            other => panic!("expected SingleDocument write result, got {other:?}"),
-        }
-    }
-
-    fn build_filtered_write_query(
-        &self,
-        collection_id: u32,
-        filter: &Document,
-        sort: Option<&Document>,
-        single_match: bool,
-    ) -> Result<Arc<LogicalPlan>> {
-        let conditions = parser::parse_conditions(filter)?;
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-
-        if let Some(sort) = sort {
-            let sort = parser::parse_sort(sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-
-        if single_match {
-            builder = builder.limit(None, Some(1));
-        }
-
-        Ok(builder.build())
-    }
-
-    fn parse_optional_projection(
-        projection: Option<Document>,
-    ) -> Result<Option<Arc<crate::query::Projection>>> {
-        match projection {
-            Some(projection) => Ok(Some(Arc::new(parser::parse_projection(&projection)?))),
-            None => Ok(None),
-        }
-    }
-
-    pub(crate) fn new(db_impl: Arc<DbImpl>, collection: String) -> Collection {
+    pub(crate) fn new(db: Arc<DbImpl>, name: String) -> Collection {
         Collection {
-            db_impl,
-            collection,
-            policy: CollectionPolicy::Strict,
+            state: CollectionState::new(db, name),
         }
     }
 
     /// Returns a collection handle that will create the collection on first write.
     /// Queries against a missing collection return an empty result set.
     pub fn create_if_missing(mut self) -> Self {
-        self.policy = CollectionPolicy::CreateIfMissing;
+        self.state.create_if_missing();
         self
-    }
-
-    fn get_collection_metadata(&self) -> Result<Arc<crate::storage::catalog::CollectionMetadata>> {
-        self.db_impl
-            .get_collection(&self.collection)
-            .ok_or_else(|| Error::CollectionNotFound {
-                name: self.collection.clone(),
-                id: None,
-            })
-    }
-
-    fn collection_id_for_write(&self) -> Result<u32> {
-        match self.policy {
-            CollectionPolicy::Strict => Ok(self.get_collection_metadata()?.id),
-            CollectionPolicy::CreateIfMissing => self
-                .db_impl
-                .create_collection_if_not_exists(&self.collection),
-        }
     }
 
     /// Creates an index on the collection with the specified keys.
@@ -219,36 +152,17 @@ impl Collection {
     /// * `keys` - The keys for the index, specified as a BSON document.
     /// Returns a `Result` containing the name of the created index or an error.
     pub fn create_index(&self, keys: Document) -> Result<String> {
-        self.execute_create_index(keys, CreateIndexOptions::default())
+        CreateIndex::new(&self.state, keys).execute()
     }
 
     /// Creates an index builder for the collection with the specified keys.
     pub fn create_index_with(&self, keys: Document) -> CreateIndex<'_> {
-        CreateIndex::new(self, keys)
-    }
-
-    fn execute_create_index(&self, keys: Document, options: CreateIndexOptions) -> Result<String> {
-        let collection_id = self.collection_id_for_write()?;
-        let spec = parser::parse_index_keys(&keys)?;
-        self.db_impl.create_index(collection_id, spec, options)
+        CreateIndex::new(&self.state, keys)
     }
 
     /// Returns the active indexes for the collection.
     pub fn list_indexes(&self) -> Result<Vec<IndexInfo>> {
-        let collection = match self.policy {
-            CollectionPolicy::Strict => Some(self.get_collection_metadata()?),
-            CollectionPolicy::CreateIfMissing => self.db_impl.get_collection(&self.collection),
-        };
-
-        let Some(collection) = collection else {
-            return Ok(Vec::new());
-        };
-
-        Ok(collection
-            .active_indexes()
-            .into_iter()
-            .map(|index| IndexInfo::from_definition(index.id, index.name(), &index.definition))
-            .collect())
+        self.state.list_indexes()
     }
 
     /// Drops an index from the collection by its name.
@@ -256,46 +170,24 @@ impl Collection {
     /// * `name` - The name of the index to drop.
     /// Returns a `Result` indicating success or failure.
     pub fn drop_index(&self, name: &str) -> Result<()> {
-        let collection = self.get_collection_metadata()?;
-        let index = collection
-            .get_index_by_name(name)
-            .ok_or_else(|| Error::IndexNotFound {
-                collection_name: self.collection.clone(),
-                index_name: name.to_string(),
-                id: None,
-            })?;
-
-        self.db_impl.drop_index(collection.id, index.id)
+        self.state.drop_index(name)
     }
 
     /// Drops this collection.
     pub fn drop_collection(&self) -> Result<()> {
-        self.db_impl.drop_collection(&self.collection)
+        self.state.drop_collection()
     }
 
     /// Renames this collection and returns a handle for the new name.
     pub fn rename(&self, new_name: &str) -> Result<Collection> {
-        self.db_impl.rename_collection(&self.collection, new_name)?;
         Ok(Collection {
-            db_impl: self.db_impl.clone(),
-            collection: new_name.to_string(),
-            policy: self.policy,
+            state: self.state.rename(new_name)?,
         })
     }
 
     /// Returns the estimated number of documents in the collection based on storage count stats.
     pub fn estimated_document_count(&self) -> Result<u64> {
-        let collection_id = match self.policy {
-            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => {
-                match self.db_impl.get_collection(&self.collection) {
-                    Some(collection) => collection.id,
-                    None => return Ok(0),
-                }
-            }
-        };
-
-        self.db_impl.estimated_document_count(collection_id)
+        self.state.estimated_document_count()
     }
 
     /// Inserts a single document into the collection.
@@ -311,25 +203,7 @@ impl Collection {
 
     /// Creates an insert operation builder for inserting a single document.
     pub fn insert_one_with(&self, document: impl Serialize) -> Result<InsertOne<'_>> {
-        InsertOne::new(self, document)
-    }
-
-    fn execute_insert_one(
-        &self,
-        document: Vec<u8>,
-        options: InsertOptions,
-    ) -> Result<InsertOneResult> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let plan = LogicalPlan::InsertOne {
-            collection: collection_id,
-            document,
-        };
-
-        Ok(InsertOneResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        InsertOne::new(&self.state, document)
     }
 
     /// Inserts multiple documents into the collection.
@@ -348,25 +222,7 @@ impl Collection {
         &self,
         documents: impl IntoIterator<Item = impl Serialize>,
     ) -> Result<InsertMany<'_>> {
-        InsertMany::new(self, documents)
-    }
-
-    fn execute_insert_many(
-        &self,
-        documents: Vec<Vec<u8>>,
-        options: InsertOptions,
-    ) -> Result<InsertManyResult> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let plan = LogicalPlan::InsertMany {
-            collection: collection_id,
-            documents,
-        };
-
-        Ok(InsertManyResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        InsertMany::new(&self.state, documents)
     }
 
     /// Updates a single document in the collection that matches the filter.
@@ -375,12 +231,12 @@ impl Collection {
     /// * `update` - The update document specifying the modifications to apply.
     /// Returns a `Result` containing update metadata or an error.
     pub fn update_one(&self, filter: Document, update: Document) -> Result<UpdateResult> {
-        self.execute_update_one(filter, update, UpdateOptions::default())
+        self.update_one_with(filter, update).execute()
     }
 
     /// Creates an update operation builder for updating a single matching document.
     pub fn update_one_with(&self, filter: Document, update: Document) -> UpdateOne<'_> {
-        UpdateOne::new(self, filter, update)
+        UpdateOne::new(&self.state, filter, update)
     }
 
     /// Updates multiple documents in the collection that match the filter.
@@ -389,61 +245,12 @@ impl Collection {
     /// * `update` - The update document specifying the modifications to apply.
     /// Returns a `Result` containing update metadata or an error.
     pub fn update_many(&self, filter: Document, update: Document) -> Result<UpdateResult> {
-        self.execute_update_many(filter, update, UpdateOptions::default())
+        self.update_many_with(filter, update).execute()
     }
 
     /// Creates an update operation builder for updating all matching documents.
     pub fn update_many_with(&self, filter: Document, update: Document) -> UpdateMany<'_> {
-        UpdateMany::new(self, filter, update)
-    }
-
-    fn execute_update_one(
-        &self,
-        filter: Document,
-        update: Document,
-        options: UpdateOptions,
-    ) -> Result<UpdateResult> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-        let update = parser::parse_update(&update, options.array_filters)?;
-
-        let plan = LogicalPlan::UpdateOne {
-            collection: collection_id,
-            query,
-            update,
-            upsert: options.upsert,
-        };
-
-        Ok(UpdateResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
-    }
-
-    fn execute_update_many(
-        &self,
-        filter: Document,
-        update: Document,
-        options: UpdateOptions,
-    ) -> Result<UpdateResult> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let query = self.build_filtered_write_query(collection_id, &filter, None, false)?;
-        let update = parser::parse_update(&update, options.array_filters)?;
-
-        let plan = LogicalPlan::UpdateMany {
-            collection: collection_id,
-            query,
-            update,
-            upsert: options.upsert,
-        };
-
-        Ok(UpdateResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        UpdateMany::new(&self.state, filter, update)
     }
 
     /// Deletes a single document in the collection that matches the filter.
@@ -451,12 +258,12 @@ impl Collection {
     /// * `filter` - The filter document to match the document to delete.
     /// Returns a `Result` containing delete metadata or an error.
     pub fn delete_one(&self, filter: Document) -> Result<DeleteResult> {
-        self.execute_delete_one(filter, DeleteOptions::default())
+        self.delete_one_with(filter).execute()
     }
 
     /// Creates a delete operation builder for deleting a single matching document.
     pub fn delete_one_with(&self, filter: Document) -> DeleteOne<'_> {
-        DeleteOne::new(self, filter)
+        DeleteOne::new(&self.state, filter)
     }
 
     /// Deletes all documents in the collection that match the filter.
@@ -464,12 +271,12 @@ impl Collection {
     /// * `filter` - The filter document to match the documents to delete.
     /// Returns a `Result` containing delete metadata or an error.
     pub fn delete_many(&self, filter: Document) -> Result<DeleteResult> {
-        self.execute_delete_many(filter, DeleteOptions::default())
+        self.delete_many_with(filter).execute()
     }
 
     /// Creates a delete operation builder for deleting all matching documents.
     pub fn delete_many_with(&self, filter: Document) -> DeleteMany<'_> {
-        DeleteMany::new(self, filter)
+        DeleteMany::new(&self.state, filter)
     }
 
     /// Finds a single document, deletes it, and returns the deleted document.
@@ -479,104 +286,15 @@ impl Collection {
 
     /// Creates a find-one-and-delete operation builder.
     pub fn find_one_and_delete_with(&self, filter: Document) -> FindOneAndDelete<'_> {
-        FindOneAndDelete::new(self, filter)
-    }
-
-    fn execute_delete_one(&self, filter: Document, options: DeleteOptions) -> Result<DeleteResult> {
-        let collection_id = match self.policy {
-            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => {
-                match self.db_impl.get_collection(&self.collection) {
-                    Some(collection) => collection.id,
-                    None => return Ok(DeleteResult { deleted_count: 0 }),
-                }
-            }
-        };
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-
-        let plan = LogicalPlan::DeleteOne {
-            collection: collection_id,
-            query,
-        };
-
-        Ok(DeleteResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
-    }
-
-    fn execute_delete_many(
-        &self,
-        filter: Document,
-        options: DeleteOptions,
-    ) -> Result<DeleteResult> {
-        let collection_id = match self.policy {
-            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => {
-                match self.db_impl.get_collection(&self.collection) {
-                    Some(collection) => collection.id,
-                    None => return Ok(DeleteResult { deleted_count: 0 }),
-                }
-            }
-        };
-
-        let query = self.build_filtered_write_query(collection_id, &filter, None, false)?;
-
-        let plan = LogicalPlan::DeleteMany {
-            collection: collection_id,
-            query,
-        };
-
-        Ok(DeleteResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
-    }
-
-    fn execute_find_one_and_delete(
-        &self,
-        filter: Document,
-        options: FindOneAndDeleteOptions,
-    ) -> Result<Option<Document>> {
-        let collection_id = match self.policy {
-            CollectionPolicy::Strict => self.get_collection_metadata()?.id,
-            CollectionPolicy::CreateIfMissing => {
-                match self.db_impl.get_collection(&self.collection) {
-                    Some(collection) => collection.id,
-                    None => return Ok(None),
-                }
-            }
-        };
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-        let projection = Self::parse_optional_projection(options.projection)?;
-
-        let plan = LogicalPlan::FindOneAndDelete {
-            collection: collection_id,
-            query,
-            projection,
-        };
-
-        Ok(Self::document_from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        FindOneAndDelete::new(&self.state, filter)
     }
 
     /// Creates a query to find documents in the collection that match the filter.
     /// # Arguments
     /// * `filter` - The filter document to match the documents.
     /// Returns a `Find` object that can be further modified and executed.
-    pub fn find(&self, filter: Document) -> Find {
-        Find::new(
-            self.db_impl.clone(),
-            self.collection.clone(),
-            self.policy,
-            filter,
-        )
+    pub fn find(&self, filter: Document) -> Find<'_> {
+        Find::new(&self.state, filter)
     }
 
     /// Finds a single document in the collection that matches the filter.
@@ -586,7 +304,7 @@ impl Collection {
 
     /// Creates a find-one operation builder for finding a single matching document.
     pub fn find_one_with(&self, filter: Document) -> FindOne<'_> {
-        FindOne::new(self, filter)
+        FindOne::new(&self.state, filter)
     }
 
     /// Finds a single document, updates it, and returns either the previous or updated document.
@@ -604,35 +322,7 @@ impl Collection {
         filter: Document,
         update: Document,
     ) -> FindOneAndUpdate<'_> {
-        FindOneAndUpdate::new(self, filter, update)
-    }
-
-    fn execute_find_one_and_update(
-        &self,
-        filter: Document,
-        update: Document,
-        options: FindOneAndUpdateOptions,
-    ) -> Result<Option<Document>> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-        let update = parser::parse_update(&update, None)?;
-        let projection = Self::parse_optional_projection(options.projection)?;
-
-        let plan = LogicalPlan::FindOneAndUpdate {
-            collection: collection_id,
-            query,
-            update,
-            projection,
-            upsert: options.upsert,
-            return_document: options.return_document,
-        };
-
-        Ok(Self::document_from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        FindOneAndUpdate::new(&self.state, filter, update)
     }
 
     /// Replaces a single document in the collection that matches the filter.
@@ -641,37 +331,12 @@ impl Collection {
     /// * `replacement` - The replacement document.
     /// Returns a `Result` containing update metadata or an error.
     pub fn replace_one(&self, filter: Document, replacement: Document) -> Result<UpdateResult> {
-        self.execute_replace_one(filter, replacement, ReplaceOneOptions::default())
+        self.replace_one_with(filter, replacement).execute()
     }
 
     /// Creates a replace operation builder for replacing a single matching document.
     pub fn replace_one_with(&self, filter: Document, replacement: Document) -> ReplaceOne<'_> {
-        ReplaceOne::new(self, filter, replacement)
-    }
-
-    fn execute_replace_one(
-        &self,
-        filter: Document,
-        replacement: Document,
-        options: ReplaceOneOptions,
-    ) -> Result<UpdateResult> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-        let replacement = parser::parse_replacement(&replacement)?;
-
-        let plan = LogicalPlan::ReplaceOne {
-            collection: collection_id,
-            query,
-            replacement,
-            upsert: options.upsert,
-        };
-
-        Ok(UpdateResult::from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
+        ReplaceOne::new(&self.state, filter, replacement)
     }
 
     /// Finds a single document, replaces it, and returns either the previous or replacement document.
@@ -690,41 +355,8 @@ impl Collection {
         filter: Document,
         replacement: Document,
     ) -> FindOneAndReplace<'_> {
-        FindOneAndReplace::new(self, filter, replacement)
+        FindOneAndReplace::new(&self.state, filter, replacement)
     }
-
-    fn execute_find_one_and_replace(
-        &self,
-        filter: Document,
-        replacement: Document,
-        options: FindOneAndReplaceOptions,
-    ) -> Result<Option<Document>> {
-        let collection_id = self.collection_id_for_write()?;
-
-        let query =
-            self.build_filtered_write_query(collection_id, &filter, options.sort.as_ref(), true)?;
-        let replacement = parser::parse_replacement(&replacement)?;
-        let projection = Self::parse_optional_projection(options.projection)?;
-
-        let plan = LogicalPlan::FindOneAndReplace {
-            collection: collection_id,
-            query,
-            replacement,
-            projection,
-            upsert: options.upsert,
-            return_document: options.return_document,
-        };
-
-        Ok(Self::document_from_write_result(
-            self.db_impl
-                .execute_write(collection_id, plan, options.sync)?,
-        ))
-    }
-}
-
-#[derive(Default)]
-struct InsertOptions {
-    sync: bool,
 }
 
 #[derive(Default)]
@@ -773,18 +405,26 @@ struct FindOneAndReplaceOptions {
     return_document: ReturnDocument,
 }
 
+#[derive(Default)]
+struct FindOptions {
+    projection: Option<Document>,
+    sort: Option<Document>,
+    limit: Option<usize>,
+    skip: Option<usize>,
+}
+
 pub struct InsertOne<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     document: Vec<u8>,
-    options: InsertOptions,
+    sync: bool,
 }
 
 impl<'a> InsertOne<'a> {
-    fn new(collection: &'a Collection, document: impl Serialize) -> Result<Self> {
+    fn new(state: &'a CollectionState, document: impl Serialize) -> Result<Self> {
         Ok(Self {
-            collection,
+            state,
             document: serialize_to_vec(&document)?,
-            options: InsertOptions::default(),
+            sync: false,
         })
     }
 
@@ -793,26 +433,34 @@ impl<'a> InsertOne<'a> {
     /// This overrides the database's configured WAL durability for this operation only. It does
     /// not flush the memtable or wait for SSTable work.
     pub fn sync(mut self) -> Self {
-        self.options.sync = true;
+        self.sync = true;
         self
     }
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<InsertOneResult> {
-        self.collection
-            .execute_insert_one(self.document, self.options)
+        let build_plan = |collection| {
+            Ok(LogicalPlan::InsertOne {
+                collection,
+                document: self.document,
+            })
+        };
+
+        Ok(InsertOneResult::from_write_result(
+            self.state.execute_write(build_plan, self.sync)?,
+        ))
     }
 }
 
 pub struct InsertMany<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     documents: Vec<Vec<u8>>,
-    options: InsertOptions,
+    sync: bool,
 }
 
 impl<'a> InsertMany<'a> {
     fn new(
-        collection: &'a Collection,
+        state: &'a CollectionState,
         documents: impl IntoIterator<Item = impl Serialize>,
     ) -> Result<Self> {
         let mut serialized = Vec::new();
@@ -821,9 +469,9 @@ impl<'a> InsertMany<'a> {
         }
 
         Ok(Self {
-            collection,
+            state,
             documents: serialized,
-            options: InsertOptions::default(),
+            sync: false,
         })
     }
 
@@ -832,28 +480,36 @@ impl<'a> InsertMany<'a> {
     /// This overrides the database's configured WAL durability for this operation only. It does
     /// not flush the memtable or wait for SSTable work.
     pub fn sync(mut self) -> Self {
-        self.options.sync = true;
+        self.sync = true;
         self
     }
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<InsertManyResult> {
-        self.collection
-            .execute_insert_many(self.documents, self.options)
+        let build_plan = |collection: u32| {
+            Ok(LogicalPlan::InsertMany {
+                collection,
+                documents: self.documents,
+            })
+        };
+
+        Ok(InsertManyResult::from_write_result(
+            self.state.execute_write(build_plan, self.sync)?,
+        ))
     }
 }
 
 pub struct UpdateOne<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     update: Document,
     options: UpdateOptions,
 }
 
 impl<'a> UpdateOne<'a> {
-    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document, update: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             update,
             options: UpdateOptions::default(),
@@ -890,22 +546,35 @@ impl<'a> UpdateOne<'a> {
 
     /// Executes the update operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        self.collection
-            .execute_update_one(self.filter, self.update, self.options)
+        let build_plan = |collection| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            let update = parser::parse_update(&self.update, self.options.array_filters)?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .sort(sort)
+                .update_one(update, self.options.upsert)
+                .build())
+        };
+
+        Ok(UpdateResult::from_write_result(
+            self.state.execute_write(build_plan, self.options.sync)?,
+        ))
     }
 }
 
 pub struct UpdateMany<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     update: Document,
     options: UpdateOptions,
 }
 
 impl<'a> UpdateMany<'a> {
-    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document, update: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             update,
             options: UpdateOptions::default(),
@@ -936,21 +605,32 @@ impl<'a> UpdateMany<'a> {
 
     /// Executes the update operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        self.collection
-            .execute_update_many(self.filter, self.update, self.options)
+        let build_plan = |collection| {
+            let update = parser::parse_update(&self.update, self.options.array_filters)?;
+            let conditions = parser::parse_conditions(&self.filter)?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .update_many(update, self.options.upsert)
+                .build())
+        };
+
+        Ok(UpdateResult::from_write_result(
+            self.state.execute_write(build_plan, self.options.sync)?,
+        ))
     }
 }
 
 pub struct DeleteOne<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     options: DeleteOptions,
 }
 
 impl<'a> DeleteOne<'a> {
-    fn new(collection: &'a Collection, filter: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             options: DeleteOptions::default(),
         }
@@ -973,21 +653,35 @@ impl<'a> DeleteOne<'a> {
 
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
-        self.collection
-            .execute_delete_one(self.filter, self.options)
+        let build_plan = |collection| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .sort(sort)
+                .delete_one()
+                .build())
+        };
+
+        Ok(DeleteResult::from_write_result(self.state.execute_delete(
+            build_plan,
+            self.options.sync,
+            false,
+        )?))
     }
 }
 
 pub struct DeleteMany<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     options: DeleteOptions,
 }
 
 impl<'a> DeleteMany<'a> {
-    fn new(collection: &'a Collection, filter: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             options: DeleteOptions::default(),
         }
@@ -1004,21 +698,33 @@ impl<'a> DeleteMany<'a> {
 
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
-        self.collection
-            .execute_delete_many(self.filter, self.options)
+        let build_plan = |collection| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .delete_many()
+                .build())
+        };
+
+        Ok(DeleteResult::from_write_result(self.state.execute_delete(
+            build_plan,
+            self.options.sync,
+            false,
+        )?))
     }
 }
 
 pub struct FindOneAndDelete<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     options: FindOneAndDeleteOptions,
 }
 
 impl<'a> FindOneAndDelete<'a> {
-    fn new(collection: &'a Collection, filter: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             options: FindOneAndDeleteOptions::default(),
         }
@@ -1047,22 +753,37 @@ impl<'a> FindOneAndDelete<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        self.collection
-            .execute_find_one_and_delete(self.filter, self.options)
+        let build_plan = |collection| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            let projection = parser::parse_optional_projection(self.options.projection)?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .sort(sort)
+                .find_one_and_delete(projection)
+                .build())
+        };
+
+        Ok(document_from_write_result(self.state.execute_delete(
+            build_plan,
+            self.options.sync,
+            true,
+        )?))
     }
 }
 
 pub struct FindOne<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     projection: Option<Document>,
     sort: Option<Document>,
 }
 
 impl<'a> FindOne<'a> {
-    fn new(collection: &'a Collection, filter: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             projection: None,
             sort: None,
@@ -1083,28 +804,33 @@ impl<'a> FindOne<'a> {
 
     /// Executes the query and returns the first matching document, if any.
     pub fn execute(self) -> Result<Option<Document>> {
-        let mut query = self.collection.find(self.filter);
-        if let Some(projection) = self.projection {
-            query = query.projection(projection);
-        }
-        if let Some(sort) = self.sort {
-            query = query.sort(sort);
-        }
-        query.execute_one()
+        let build_plan = |collection_id| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let projection = parser::parse_optional_projection(self.projection.clone())?;
+            let sort = parser::parse_optional_sort(self.sort.as_ref())?;
+            Ok(LogicalPlanBuilder::scan(collection_id)
+                .filter(conditions)
+                .project(projection)
+                .sort(sort)
+                .limit(None, Some(1))
+                .build_arc())
+        };
+
+        self.state.execute_query(build_plan)?.next().transpose()
     }
 }
 
 pub struct FindOneAndUpdate<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     update: Document,
     options: FindOneAndUpdateOptions,
 }
 
 impl<'a> FindOneAndUpdate<'a> {
-    fn new(collection: &'a Collection, filter: Document, update: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document, update: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             update,
             options: FindOneAndUpdateOptions::default(),
@@ -1146,22 +872,41 @@ impl<'a> FindOneAndUpdate<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        self.collection
-            .execute_find_one_and_update(self.filter, self.update, self.options)
+        let build_plan = |col| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            let update = parser::parse_update(&self.update, None)?;
+            let projection = parser::parse_optional_projection(self.options.projection)?;
+
+            Ok(LogicalPlanBuilder::scan(col)
+                .filter(conditions)
+                .sort(sort)
+                .find_one_and_update(
+                    update,
+                    projection,
+                    self.options.upsert,
+                    self.options.return_document,
+                )
+                .build())
+        };
+
+        Ok(document_from_write_result(
+            self.state.execute_write(build_plan, self.options.sync)?,
+        ))
     }
 }
 
 pub struct ReplaceOne<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     replacement: Document,
     options: ReplaceOneOptions,
 }
 
 impl<'a> ReplaceOne<'a> {
-    fn new(collection: &'a Collection, filter: Document, replacement: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document, replacement: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             replacement,
             options: ReplaceOneOptions::default(),
@@ -1191,22 +936,35 @@ impl<'a> ReplaceOne<'a> {
 
     /// Executes the replace operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        self.collection
-            .execute_replace_one(self.filter, self.replacement, self.options)
+        let build_plan = |col| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            let replacement = parser::parse_replacement(&self.replacement)?;
+
+            Ok(LogicalPlanBuilder::scan(col)
+                .filter(conditions)
+                .sort(sort)
+                .replace_one(replacement, self.options.upsert)
+                .build())
+        };
+
+        Ok(UpdateResult::from_write_result(
+            self.state.execute_write(build_plan, self.options.sync)?,
+        ))
     }
 }
 
 pub struct FindOneAndReplace<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     filter: Document,
     replacement: Document,
     options: FindOneAndReplaceOptions,
 }
 
 impl<'a> FindOneAndReplace<'a> {
-    fn new(collection: &'a Collection, filter: Document, replacement: Document) -> Self {
+    fn new(state: &'a CollectionState, filter: Document, replacement: Document) -> Self {
         Self {
-            collection,
+            state,
             filter,
             replacement,
             options: FindOneAndReplaceOptions::default(),
@@ -1248,41 +1006,44 @@ impl<'a> FindOneAndReplace<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        self.collection
-            .execute_find_one_and_replace(self.filter, self.replacement, self.options)
+        let build_plan = |collection| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            let projection = parser::parse_optional_projection(self.options.projection)?;
+            let replacement = parser::parse_replacement(&self.replacement)?;
+
+            Ok(LogicalPlanBuilder::scan(collection)
+                .filter(conditions)
+                .sort(sort)
+                .find_one_and_replace(
+                    replacement,
+                    projection,
+                    self.options.upsert,
+                    self.options.return_document,
+                )
+                .build())
+        };
+
+        Ok(document_from_write_result(
+            self.state.execute_write(build_plan, self.options.sync)?,
+        ))
     }
 }
 
 /// Represents a query on a collection.
 /// Provides methods to set query parameters and execute the query.
-#[derive(Clone)]
-pub struct Find {
-    db_impl: Arc<DbImpl>,
-    collection: String,
-    policy: CollectionPolicy,
+pub struct Find<'a> {
+    state: &'a CollectionState,
     filter: Document, // Unified filter representation using Expr
-    projection: Option<Document>,
-    sort: Option<Document>,
-    limit: Option<usize>,
-    skip: Option<usize>,
+    options: FindOptions,
 }
 
-impl Find {
-    fn new(
-        db_impl: Arc<DbImpl>,
-        collection: String,
-        policy: CollectionPolicy,
-        filter: Document,
-    ) -> Find {
+impl<'a> Find<'a> {
+    fn new(state: &'a CollectionState, filter: Document) -> Find<'a> {
         Find {
-            db_impl,
-            collection,
-            policy,
+            state,
             filter,
-            projection: None,
-            sort: None,
-            limit: None,
-            skip: None,
+            options: FindOptions::default(),
         }
     }
 
@@ -1291,7 +1052,7 @@ impl Find {
     /// * `projection` - The projection document specifying which fields to include or exclude.
     /// Returns the modified Find instance for chaining.
     pub fn projection(mut self, projection: Document) -> Self {
-        self.projection = Some(projection);
+        self.options.projection = Some(projection);
         self
     }
 
@@ -1300,7 +1061,7 @@ impl Find {
     /// * `sort` - The sort document specifying the fields and their sort order.
     /// Returns the modified Find instance for chaining.
     pub fn sort(mut self, sort: Document) -> Self {
-        self.sort = Some(sort);
+        self.options.sort = Some(sort);
         self
     }
 
@@ -1309,150 +1070,48 @@ impl Find {
     /// * `limit` - The maximum number of documents to return.
     /// Returns the modified Find instance for chaining.
     pub fn limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit);
+        self.options.limit = Some(limit);
         self
     }
 
     /// Sets the number of documents to skip.
     /// # Arguments
-    /// * `value` - The number of documents to skip.
+    /// * `skip` - The number of documents to skip.
     /// Returns the modified Find instance for chaining.
-    pub fn skip(mut self, value: usize) -> Self {
-        self.skip = Some(value);
+    pub fn skip(mut self, skip: usize) -> Self {
+        self.options.skip = Some(skip);
         self
-    }
-
-    /// Executes the query and returns the first resulting document, if any.
-    pub fn execute_one(&self) -> Result<Option<Document>> {
-        let mut query = self.clone();
-        query.limit = Some(1);
-        let mut iter = query.execute()?;
-        iter.next().transpose()
     }
 
     /// Executes the query and returns an iterator over the resulting documents.
     /// Returns a `Result` containing an iterator of documents or an error.
-    pub fn execute(&self) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
-        let Some(collection_id) = self.collection_id_for_query()? else {
-            return Ok(Box::new(std::iter::empty()));
+    pub fn execute(&self) -> Result<QueryOutput> {
+        let build_plan = |collection_id| {
+            let conditions = parser::parse_conditions(&self.filter)?;
+            let projection = parser::parse_optional_projection(self.options.projection.clone())?;
+            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+            Ok(LogicalPlanBuilder::scan(collection_id)
+                .filter(conditions)
+                .project(projection)
+                .sort(sort)
+                .limit(self.options.skip, self.options.limit)
+                .build_arc())
         };
-        let plan = self.build_logical_plan(collection_id)?;
-        self.db_impl.execute_query(collection_id, plan)
-    }
 
-    fn collection_id_for_query(&self) -> Result<Option<u32>> {
-        match self.policy {
-            CollectionPolicy::Strict => {
-                let collection =
-                    self.db_impl
-                        .get_collection(&self.collection)
-                        .ok_or_else(|| Error::CollectionNotFound {
-                            name: self.collection.clone(),
-                            id: None,
-                        })?;
-                Ok(Some(collection.id))
-            }
-            CollectionPolicy::CreateIfMissing => {
-                let collection = self.db_impl.get_collection(&self.collection);
-                match collection {
-                    Some(collection) => Ok(Some(collection.id)),
-                    None => Ok(None),
-                }
-            }
-        }
-    }
-
-    fn build_logical_plan(&self, collection_id: u32) -> Result<Arc<LogicalPlan>> {
-        let conditions = parser::parse_conditions(&self.filter)?;
-
-        let mut builder = LogicalPlanBuilder::scan(collection_id).filter(conditions);
-
-        if let Some(projection) = &self.projection {
-            let projection = parser::parse_projection(&projection)?;
-            builder = builder.project(Arc::new(projection));
-        }
-
-        if let Some(sort) = &self.sort {
-            let sort = parser::parse_sort(&sort)?;
-            builder = builder.sort(Arc::new(sort));
-        }
-
-        if self.limit.is_some() || self.skip.is_some() {
-            builder = builder.limit(self.skip, self.limit);
-        }
-
-        Ok(builder.build())
-    }
-}
-
-/// Strategy for generating document `_id` fields in a collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IdCreationStrategy {
-    /// IDs are auto-generated by the system.
-    Generated,
-    /// IDs must be provided manually by the user.
-    Manual,
-    /// A mix of auto-generated and manual IDs (default).
-    #[default]
-    Mixed,
-}
-
-impl From<IdCreationStrategy> for InternalIdCreationStrategy {
-    fn from(value: IdCreationStrategy) -> Self {
-        match value {
-            IdCreationStrategy::Generated => InternalIdCreationStrategy::Generated,
-            IdCreationStrategy::Manual => InternalIdCreationStrategy::Manual,
-            IdCreationStrategy::Mixed => InternalIdCreationStrategy::Mixed,
-        }
-    }
-}
-
-impl From<InternalIdCreationStrategy> for IdCreationStrategy {
-    fn from(value: InternalIdCreationStrategy) -> Self {
-        match value {
-            InternalIdCreationStrategy::Generated => IdCreationStrategy::Generated,
-            InternalIdCreationStrategy::Manual => IdCreationStrategy::Manual,
-            InternalIdCreationStrategy::Mixed => IdCreationStrategy::Mixed,
-        }
-    }
-}
-
-/// Options for creating a collection.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CreateCollectionOptions {
-    pub(crate) id_creation_strategy: IdCreationStrategy,
-}
-
-impl From<CreateCollectionOptions> for InternalCollectionOptions {
-    fn from(value: CreateCollectionOptions) -> Self {
-        InternalCollectionOptions {
-            id_creation_strategy: value.id_creation_strategy.into(),
-        }
-    }
-}
-
-/// Options for creating an index.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CreateIndexOptions {
-    name: Option<String>,
-}
-
-impl From<CreateIndexOptions> for IndexOptions {
-    fn from(value: CreateIndexOptions) -> Self {
-        IndexOptions { name: value.name }
+        self.state.execute_query(build_plan)
     }
 }
 
 pub struct CreateIndex<'a> {
-    collection: &'a Collection,
+    state: &'a CollectionState,
     keys: Document,
     options: CreateIndexOptions,
 }
 
 impl<'a> CreateIndex<'a> {
-    fn new(collection: &'a Collection, keys: Document) -> Self {
+    pub(crate) fn new(state: &'a CollectionState, keys: Document) -> Self {
         Self {
-            collection,
+            state,
             keys,
             options: CreateIndexOptions::default(),
         }
@@ -1466,8 +1125,15 @@ impl<'a> CreateIndex<'a> {
 
     /// Executes the index creation operation.
     pub fn execute(self) -> Result<String> {
-        self.collection
-            .execute_create_index(self.keys, self.options)
+        let keys = parser::parse_index_keys(&self.keys)?;
+        self.state.create_index(keys, self.options)
+    }
+}
+
+fn document_from_write_result(result: WriteResult) -> Option<Document> {
+    match result {
+        WriteResult::SingleDocument { document, .. } => document,
+        other => panic!("expected SingleDocument write result, got {other:?}"),
     }
 }
 

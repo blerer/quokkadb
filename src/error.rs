@@ -147,4 +147,19 @@ impl From<StorageError> for Error {
     }
 }
 
+pub fn collection_not_found_error(name: &str) -> Error {
+    Error::CollectionNotFound {
+        name: name.to_string(),
+        id: None,
+    }
+}
+
+pub fn index_not_found_error(collection: &str, index: &str) -> Error {
+    Error::IndexNotFound {
+        collection_name: collection.to_string(),
+        index_name: index.to_string(),
+        id: None,
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

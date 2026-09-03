@@ -1,22 +1,22 @@
 use super::*;
+use crate::query::execution::QueryExecutor;
 use crate::query::execution::executor::test_utils::{
     assert_insert_one_result, executor_test_runtime, full_scan_plan, insert_docs, insert_one,
     inserted_id, inserted_ids, point_search_query, write_batch,
 };
-use crate::query::execution::QueryExecutor;
 use crate::query::expr_fn::{
     all, and, at_least, at_most, elem_match, exists, field, field_filters, greater_than, has_type,
     interval, less_than, ne, nor, not, or, point, proj_array_elements, proj_elem_match, proj_field,
     proj_fields, proj_slice, size, within,
 };
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
-use crate::query::{make_sort_field, BsonValue, Parameters, Projection, SortOrder};
+use crate::query::{BsonValue, Parameters, Projection, SortOrder, make_sort_field};
+use crate::storage::Direction;
 use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
 use crate::storage::operation::Operation;
-use crate::storage::Direction;
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::{doc, Bson, Document};
+use bson::{Bson, Document, doc};
 use std::sync::Arc;
 
 #[test]
@@ -25,7 +25,7 @@ fn test_execution_roundtrip() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test")?;
+    let collection_id = storage_engine.create_collection("test", true)?;
 
     // 2. InsertOne
     let doc1 = doc! { "name": "doc1", "value": 1 };
@@ -101,7 +101,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_edge")?;
+    let collection_id = storage_engine.create_collection("test_edge", true)?;
 
     // Insert some docs with known integer _id's for predictable range scans
     let doc1 = doc! { "_id": 10i32, "name": "doc10" };
@@ -240,7 +240,7 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_index_eq")?;
+    let collection_id = storage_engine.create_collection("test_index_eq", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
@@ -283,7 +283,7 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_index_compound")?;
+    let collection_id = storage_engine.create_collection("test_index_compound", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![
@@ -331,7 +331,7 @@ fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<(
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_index_reverse")?;
+    let collection_id = storage_engine.create_collection("test_index_reverse", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
@@ -378,7 +378,7 @@ fn test_limit_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_limit")?;
+    let collection_id = storage_engine.create_collection("test_limit", true)?;
 
     // 2. Insert 5 documents
     let docs: Vec<Document> = (1..=5)
@@ -496,7 +496,7 @@ fn test_sort_plans_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_sorts")?;
+    let collection_id = storage_engine.create_collection("test_sorts", true)?;
 
     // 2. Insert test data
     let docs = vec![
@@ -597,7 +597,7 @@ fn test_filter_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_filters")?;
+    let collection_id = storage_engine.create_collection("test_filters", true)?;
 
     // 2. Insert test data
     let docs = vec![
@@ -777,7 +777,7 @@ fn test_projection_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_projections")?;
+    let collection_id = storage_engine.create_collection("test_projections", true)?;
 
     // 2. Insert test data
     let test_doc = doc! {
@@ -963,7 +963,7 @@ fn test_multipoint_search_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_multipoint")?;
+    let collection_id = storage_engine.create_collection("test_multipoint", true)?;
 
     // 2. Insert test data
     let docs = vec![
@@ -1060,7 +1060,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_snapshot")?;
+    let collection_id = storage_engine.create_collection("test_snapshot", true)?;
 
     // 2. Insert initial doc
     let initial_doc = doc! { "_id": 1_i32, "value": "initial" };

@@ -1,0 +1,95 @@
+error[E0599]: no method named `exclude` found for struct `TypedFind<'_, User, _, quokkadb::typed_collection::InclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:17:10
+   |
+13 |       let _ = db
+   |  _____________-
+14 | |         .typed_collection::<User>("users")
+15 | |         .find(|user| user.active.eq(true))
+16 | |         .include(|user| user.name)
+17 | |         .exclude(|user| user.active);
+   | |         -^^^^^^^ method not found in `TypedFind<'_, User, _, quokkadb::typed_collection::InclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFind<'a, T, R>`
+
+error[E0599]: no method named `include` found for struct `TypedFind<'_, User, _, quokkadb::typed_collection::ExclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:25:10
+   |
+21 |       let _ = db
+   |  _____________-
+22 | |         .typed_collection::<User>("users")
+23 | |         .find(|user| user.active.eq(true))
+24 | |         .exclude(|user| user.active)
+25 | |         .include(|user| user.name);
+   | |         -^^^^^^^ method not found in `TypedFind<'_, User, _, quokkadb::typed_collection::ExclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFind<'a, T, R>`
+
+error[E0599]: no method named `exclude` found for struct `TypedFindOne<'_, User, _, quokkadb::typed_collection::InclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:33:10
+   |
+29 |       let _ = db
+   |  _____________-
+30 | |         .typed_collection::<User>("users")
+31 | |         .find_one_with(|user| user.active.eq(true))
+32 | |         .include(|user| user.name)
+33 | |         .exclude(|user| user.active);
+   | |         -^^^^^^^ method not found in `TypedFindOne<'_, User, _, quokkadb::typed_collection::InclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFindOne<'a, T, R>`
+
+error[E0599]: no method named `exclude` found for struct `TypedFind<'_, User, _, quokkadb::typed_collection::InclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:41:10
+   |
+37 |       let _ = db
+   |  _____________-
+38 | |         .typed_collection::<User>("users")
+39 | |         .find(|user| user.active.eq(true))
+40 | |         .include_without_id(|user| user.name)
+41 | |         .exclude(|user| user.active);
+   | |         -^^^^^^^ method not found in `TypedFind<'_, User, _, quokkadb::typed_collection::InclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFind<'a, T, R>`
+
+error[E0599]: no method named `include` found for struct `TypedFind<'_, User, String, quokkadb::typed_collection::InclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:49:10
+   |
+45 |       let _ = db
+   |  _____________-
+46 | |         .typed_collection::<User>("users")
+47 | |         .find(|user| user.active.eq(true))
+48 | |         .select(|user| user.name)
+49 | |         .include(|user| user.name);
+   | |         -^^^^^^^ method not found in `TypedFind<'_, User, String, quokkadb::typed_collection::InclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFind<'a, T, R>`
+
+error[E0599]: no method named `include` found for struct `TypedFindOne<'_, User, _, quokkadb::typed_collection::ExclusionProjection>` in the current scope
+  --> tests/ui/typed_api/mixed_projection_modes.rs:57:10
+   |
+53 |       let _ = db
+   |  _____________-
+54 | |         .typed_collection::<User>("users")
+55 | |         .find_one_with(|user| user.active.eq(true))
+56 | |         .exclude(|user| user.active)
+57 | |         .include(|user| user.name);
+   | |         -^^^^^^^ method not found in `TypedFindOne<'_, User, _, quokkadb::typed_collection::ExclusionProjection>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `TypedFindOne<'a, T, R>`

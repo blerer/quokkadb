@@ -1,4 +1,4 @@
-use crate::query::{get_path_value, BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters};
+use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters, get_path_value};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
 use bson::{Bson, Document};
@@ -437,7 +437,7 @@ fn to_filters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bson::{doc, Bson, Decimal128};
+    use bson::{Bson, Decimal128, doc};
     use std::str::FromStr;
 
     #[test]

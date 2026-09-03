@@ -1,5 +1,5 @@
-use crate::io::varint;
 use crate::io::ZeroCopy;
+use crate::io::varint;
 use std::cell::Cell;
 use std::io::{Error, ErrorKind, Result};
 

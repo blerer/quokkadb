@@ -1,5 +1,5 @@
-use crate::io::byte_reader::ByteReader;
 use crate::io::ZeroCopy;
+use crate::io::byte_reader::ByteReader;
 use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::{Options, WalDurability};
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};

@@ -1,5 +1,5 @@
 use std::io::{Error, ErrorKind, Result};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use tracing::Span;
 
@@ -75,7 +75,7 @@ impl<T: Send + 'static> AsyncCallback<T> {
 }
 
 use std::marker::PhantomData;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub struct BlockingCallback<T> {
     sender: SyncSender<Result<()>>,

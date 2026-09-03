@@ -1,5 +1,5 @@
-use crate::error::Result;
 use crate::QuokkaDB;
+use crate::error::Result;
 
 /// Internal test-only controls for driving storage state in integration tests.
 #[doc(hidden)]

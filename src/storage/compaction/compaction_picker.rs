@@ -35,8 +35,8 @@
 use crate::obs::metrics::{self, AtomicGauge, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
-use crate::storage::lsm_version::{span, DropMetadata, Level, LevelItem, Levels, SSTableMetadata};
-use crate::util::interval::{has_overlapping_intervals, Interval};
+use crate::storage::lsm_version::{DropMetadata, Level, LevelItem, Levels, SSTableMetadata, span};
+use crate::util::interval::{Interval, has_overlapping_intervals};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use tracing::trace_span;
@@ -116,7 +116,7 @@ impl CompactionScores {
             .scores
             .iter()
             .enumerate()
-            .filter(|(_, &score)| score >= 1.0)
+            .filter(|&(_, &score)| score >= 1.0)
             .map(|(level, &score)| (level, score))
             .collect();
 
@@ -1306,9 +1306,11 @@ mod tests {
             vec![create_sst(1, 3, 0, 100, l3_min)],
             empty(),
         );
-        assert!(picker
-            .compute_partition_boundaries(&levels_single)
-            .is_empty());
+        assert!(
+            picker
+                .compute_partition_boundaries(&levels_single)
+                .is_empty()
+        );
 
         // Case 6: L3 has 2 SSTables but both are too small -> no boundaries emitted
         let levels_small = Levels::new(options.max_levels()).add(

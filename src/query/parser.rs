@@ -1,10 +1,10 @@
+use crate::Error;
 use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePathComponent,
 };
 use crate::query::{BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent};
 use crate::query::{IndexKeyField, IndexKeySpec, Projection, ProjectionExpr, SortField, SortOrder};
-use crate::Error;
 use bson::{Bson, Document};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -242,6 +242,15 @@ fn parse_bson_type(value: &Bson) -> Option<Bson> {
     }
 }
 
+pub fn parse_optional_projection(
+    projection: Option<Document>,
+) -> Result<Option<Arc<Projection>>, Error> {
+    match projection {
+        Some(projection) => Ok(Some(Arc::new(parse_projection(&projection)?))),
+        None => Ok(None),
+    }
+}
+
 /// Parses a projection document into a `Projection`.
 ///
 /// - Fields with value `1` are included (inclusion projection).
@@ -330,7 +339,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                         return Err(Error::InvalidRequest(format!(
                             "Unknown projection operator: {}",
                             op
-                        )))
+                        )));
                     }
                 };
 
@@ -340,7 +349,7 @@ pub fn parse_projection(doc: &Document) -> Result<Projection, Error> {
                 return Err(Error::InvalidRequest(format!(
                     "Invalid projection value for field '{}'",
                     key
-                )))
+                )));
             }
         }
     }
@@ -399,7 +408,7 @@ fn parse_slice_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
                 _ => {
                     return Err(Error::InvalidRequest(
                         "$slice skip must be a non-negative integer".to_string(),
-                    ))
+                    ));
                 }
             };
             let limit = match &arr[1] {
@@ -414,17 +423,17 @@ fn parse_slice_projection(value: &Bson) -> Result<ProjectionExpr, Error> {
                 Bson::Int32(n) if *n < 0 && skip != Some(0) => {
                     return Err(Error::InvalidRequest(
                         "$slice with negative limit and non-zero skip is invalid".to_string(),
-                    ))
+                    ));
                 }
                 Bson::Int64(n) if *n < 0 && skip != Some(0) => {
                     return Err(Error::InvalidRequest(
                         "$slice with negative limit and non-zero skip is invalid".to_string(),
-                    ))
+                    ));
                 }
                 _ => {
                     return Err(Error::InvalidRequest(
                         "$slice limit must be a non-zero integer".to_string(),
-                    ))
+                    ));
                 }
             };
             Ok(ProjectionExpr::Slice { skip, limit })
@@ -467,6 +476,13 @@ fn parse_path_component(component: &str) -> Result<PathComponent, Error> {
     }
 }
 
+pub fn parse_optional_sort(sort: Option<&Document>) -> Result<Option<Arc<Vec<SortField>>>, Error> {
+    match sort {
+        Some(sort) => Ok(Some(Arc::new(parse_sort(sort)?))),
+        None => Ok(None),
+    }
+}
+
 pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
     let mut fields = Vec::new();
 
@@ -478,7 +494,7 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
                 return Err(Error::InvalidRequest(format!(
                     "Invalid sort order for field '{}'",
                     key
-                )))
+                )));
             }
         };
 
@@ -489,7 +505,7 @@ pub fn parse_sort(doc: &Document) -> Result<Vec<SortField>, Error> {
                 return Err(Error::InvalidRequest(format!(
                     "Positional fields cannot used for sorting: {}",
                     key
-                )))
+                )));
             }
             _ => (), // Valid case,
         }
@@ -701,7 +717,7 @@ pub fn parse_update(
                                         return Err(Error::InvalidRequest(
                                             "$currentDate type must be 'date' or 'timestamp'"
                                                 .to_string(),
-                                        ))
+                                        ));
                                     }
                                 }
                             } else {
@@ -713,7 +729,7 @@ pub fn parse_update(
                         _ => {
                             return Err(Error::InvalidRequest(
                                 "Invalid $currentDate value".to_string(),
-                            ))
+                            ));
                         }
                     };
                     ops.push(UpdateOp::CurrentDate { path, type_hint });
@@ -753,7 +769,7 @@ pub fn parse_update(
                         _ => {
                             return Err(Error::InvalidRequest(
                                 "$pop value must be 1 or -1".to_string(),
-                            ))
+                            ));
                         }
                     };
                     ops.push(UpdateOp::Pop { path, from });
@@ -824,7 +840,7 @@ pub fn parse_update(
                                 return Err(Error::InvalidRequest(format!(
                                     "$bit values must be integers but was {:?}",
                                     val
-                                )))
+                                )));
                             }
                         };
                         match op.as_str() {
@@ -835,7 +851,7 @@ pub fn parse_update(
                                 return Err(Error::InvalidRequest(format!(
                                     "Unknown $bit operator: {}",
                                     op
-                                )))
+                                )));
                             }
                         }
                     }
@@ -846,7 +862,7 @@ pub fn parse_update(
                 return Err(Error::InvalidRequest(format!(
                     "Unknown update operator: {}",
                     key
-                )))
+                )));
             }
         }
     }
@@ -1069,7 +1085,7 @@ mod tests {
         by_fields_sort, field_name, filter, inc, pull_eq, pull_matches, push_each_spec,
         push_single, push_spec, set, set_on_insert, unset, update,
     };
-    use bson::{doc, Bson};
+    use bson::{Bson, doc};
 
     #[cfg(test)]
     mod bson_type_parsing {

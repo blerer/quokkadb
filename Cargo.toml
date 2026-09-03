@@ -1,7 +1,7 @@
 [package]
 name = "quokkadb"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [features]
 internal-testing = []
@@ -19,5 +19,7 @@ arc-swap = "1.7.1"
 sonyflake = "0.5.1"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+quokkadb_derive = { path = "quokkadb_derive" }
 
 [dev-dependencies]
+trybuild = "1.0"

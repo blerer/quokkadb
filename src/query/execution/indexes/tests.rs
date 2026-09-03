@@ -11,8 +11,8 @@ use crate::storage::operation::OperationType;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::{
-    doc, oid::ObjectId, raw::RawDocumentBuf, spec::BinarySubtype, Binary, Bson, DateTime,
-    Decimal128, Document, Timestamp,
+    Binary, Bson, DateTime, Decimal128, Document, Timestamp, doc, oid::ObjectId,
+    raw::RawDocumentBuf, spec::BinarySubtype,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;

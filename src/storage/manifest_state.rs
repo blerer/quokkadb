@@ -557,17 +557,41 @@ impl fmt::Display for ManifestEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ManifestEdit::Snapshot(state) => write!(f, "Snapshot({:?})", state),
-            ManifestEdit::CreateCollection { name, id, created_at, options } => {
-                write!(f, "CreateCollection {{ name: {}, id: {}, created_at: {}, options: {} }}", name, id, created_at, options)
+            ManifestEdit::CreateCollection {
+                name,
+                id,
+                created_at,
+                options,
+            } => {
+                write!(
+                    f,
+                    "CreateCollection {{ name: {}, id: {}, created_at: {}, options: {} }}",
+                    name, id, created_at, options
+                )
             }
             ManifestEdit::DropCollection { id, dropped_at } => {
-                write!(f, "DropCollection {{ id: {}, dropped_at: {} }}", id, dropped_at)
+                write!(
+                    f,
+                    "DropCollection {{ id: {}, dropped_at: {} }}",
+                    id, dropped_at
+                )
             }
             ManifestEdit::RenameCollection { id, new_name } => {
-                write!(f, "RenameCollection {{ id: {}, new_name: {} }}", id, new_name)
+                write!(
+                    f,
+                    "RenameCollection {{ id: {}, new_name: {} }}",
+                    id, new_name
+                )
             }
-            ManifestEdit::WalRotation { log_number, next_seq } => {
-                write!(f, "WalRotation {{ log_number: {}, next_seq: {} }}", log_number, next_seq)
+            ManifestEdit::WalRotation {
+                log_number,
+                next_seq,
+            } => {
+                write!(
+                    f,
+                    "WalRotation {{ log_number: {}, next_seq: {} }}",
+                    log_number, next_seq
+                )
             }
             ManifestEdit::ManifestRotation { manifest_number } => write!(
                 f,
@@ -608,15 +632,11 @@ impl fmt::Display for ManifestEdit {
                 index_id,
                 definition,
                 options,
-                created_at
+                created_at,
             } => write!(
                 f,
                 "CreateIndex {{ collection_id: {}, index_id: {}, definition: {}, options: {:?}, created_at: {} }}",
-                collection_id,
-                index_id,
-                definition,
-                options,
-                created_at
+                collection_id, index_id, definition, options, created_at
             ),
             ManifestEdit::DropIndex {
                 collection_id,
@@ -625,9 +645,7 @@ impl fmt::Display for ManifestEdit {
             } => write!(
                 f,
                 "DropIndex {{ collection_id: {}, index_id: {}, dropped_at: {} }}",
-                collection_id,
-                index_id,
-                dropped_at
+                collection_id, index_id, dropped_at
             ),
         }
     }

@@ -1,7 +1,7 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::{invalid_data, unexpected_eof, varint, ZeroCopy};
+use crate::io::{ZeroCopy, invalid_data, unexpected_eof, varint};
 use bson::spec::BinarySubtype;
-use bson::{serialize_to_vec, Bson, Document};
+use bson::{Bson, Document, serialize_to_vec};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -216,8 +216,8 @@ pub fn bson_hash<H: Hasher>(bson: &Bson, state: &mut H) {
 }
 
 pub fn add_numeric(existing: Option<&Bson>, amount: &Bson) -> Result<Bson, BsonArithmeticError> {
-    use bson::Bson::*;
     use BsonArithmeticError::*;
+    use bson::Bson::*;
 
     enum Num {
         I64(i64),
@@ -263,8 +263,8 @@ pub fn multiply_numeric(
     existing: Option<&Bson>,
     factor: &Bson,
 ) -> Result<Bson, BsonArithmeticError> {
-    use bson::Bson::*;
     use BsonArithmeticError::*;
+    use bson::Bson::*;
 
     enum Num {
         I64(i64),
@@ -478,11 +478,7 @@ fn parse_scientific_to_finite_raw(s: &str) -> Option<(bool, Vec<u8>, i32)> {
             value = value.checked_mul(10)?.checked_add(digit)?;
             i += 1;
         }
-        if exp_negative {
-            -value
-        } else {
-            value
-        }
+        if exp_negative { -value } else { value }
     } else {
         0
     };
@@ -1244,7 +1240,7 @@ fn encode_bson_into_key_typed(
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!("Unsupported BSON type: {:?}", value),
-            ))
+            ));
         }
     }
     Ok(())

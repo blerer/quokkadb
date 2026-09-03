@@ -1,0 +1,28 @@
+error[E0277]: the trait bound `i32: From<&str>` is not satisfied
+  --> tests/ui/typed_api/mismatched_scalar.rs:12:32
+   |
+12 |     User::root_fields().age.eq("old");
+   |                             -- ^^^^^ the trait `From<&str>` is not implemented for `i32`
+   |                             |
+   |                             required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `From<T>`:
+             `i32` implements `From<bool>`
+             `i32` implements `From<deranged::RangedI32<MIN, MAX>>`
+             `i32` implements `From<i16>`
+             `i32` implements `From<i8>`
+             `i32` implements `From<u16>`
+             `i32` implements `From<u8>`
+             `i32` implements `From<zerocopy::byteorder::I16<O>>`
+             `i32` implements `From<zerocopy::byteorder::I16<O>>`
+           and $N others
+   = note: required for `&str` to implement `Into<i32>`
+note: required by a bound in `quokkadb::Field::<D, V>::eq`
+  --> src/document.rs
+   |
+   |         pub fn eq(&self, value: impl Into<$value>) -> Filter<D> {
+   |                                      ^^^^^^^^^^^^ required by this bound in `Field::<D, V>::eq`
+...
+   |     value_operations!(V);
+   |     -------------------- in this macro invocation
+   = note: this error originates in the macro `value_operations` (in Nightly builds, run with -Z macro-backtrace for more info)

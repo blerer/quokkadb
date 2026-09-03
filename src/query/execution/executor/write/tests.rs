@@ -1,21 +1,21 @@
 use super::*;
 use crate::error::{Error, Result};
-use crate::query::execution::executor::test_utils::*;
-use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::QueryExecutor;
+use crate::query::execution::executor::ExecutorTestHook;
+use crate::query::execution::executor::test_utils::*;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::update_fn::*;
 use crate::query::*;
+use crate::storage::Direction;
 use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
-use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
 use bson::{Bson, Document};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn index_scan_eq(
     executor: &QueryExecutor,
@@ -101,7 +101,7 @@ fn test_insert_duplicate_key_preflight_check() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_duplicates")?;
+    let collection_id = storage_engine.create_collection("test_duplicates", true)?;
 
     // 2. Insert a document with a known ID
     let doc1 = doc! { "_id": 1_i32, "name": "doc1" };
@@ -173,8 +173,7 @@ fn test_delete_one_removes_index_entries() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_delete_one_indexes")?;
+    let collection_id = storage_engine.create_collection("test_delete_one_indexes", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
@@ -206,8 +205,7 @@ fn test_delete_many_removes_index_entries() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_delete_many_indexes")?;
+    let collection_id = storage_engine.create_collection("test_delete_many_indexes", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
@@ -241,7 +239,7 @@ fn test_find_one_and_delete_removes_index_entries() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_delete_indexes")?;
+        storage_engine.create_collection("test_find_one_and_delete_indexes", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
@@ -274,7 +272,7 @@ fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update_indexes")?;
+        storage_engine.create_collection("test_find_one_and_update_indexes", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
@@ -316,7 +314,7 @@ fn test_replace_one_preserves_existing_id_when_replacement_omits_id() -> Result<
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one")?;
+    let collection_id = storage_engine.create_collection("test_replace_one", true)?;
 
     insert_one(
         &executor,
@@ -344,7 +342,7 @@ fn test_replace_one_rejects_changing_id() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_id")?;
+    let collection_id = storage_engine.create_collection("test_replace_one_id", true)?;
 
     insert_one(
         &executor,
@@ -382,8 +380,7 @@ fn test_find_one_and_replace_returns_previous_document_by_default() -> Result<()
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_replace", true)?;
 
     insert_one(
         &executor,
@@ -412,8 +409,7 @@ fn test_find_one_and_replace_returns_new_document_when_requested() -> Result<()>
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_replace", true)?;
 
     insert_one(
         &executor,
@@ -442,8 +438,7 @@ fn test_find_one_and_replace_returns_none_when_no_match() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_replace")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_replace", true)?;
 
     insert_one(
         &executor,
@@ -473,7 +468,7 @@ fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_replace_indexes")?;
+        storage_engine.create_collection("test_find_one_and_replace_indexes", true)?;
     let index = storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
@@ -515,7 +510,7 @@ fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_replace_one_retry")?;
+    let collection_id = storage_engine.create_collection("test_replace_one_retry", true)?;
 
     insert_one(
         executor.as_ref(),
@@ -558,7 +553,7 @@ fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_replace_retry")?;
+        storage_engine.create_collection("test_find_one_and_replace_retry", true)?;
 
     insert_one(
         executor.as_ref(),
@@ -599,7 +594,7 @@ fn test_update_one_succeeds_on_retry() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -645,7 +640,7 @@ fn test_update_one_fails_after_retry_timeout() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
     let hook = Arc::new(ConflictingPrimaryWriteHook::new(
         ExecutorFailpoint::UpdateOneAfterRead,
         storage_engine.clone(),
@@ -682,7 +677,7 @@ fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -718,8 +713,7 @@ fn test_find_one_and_update_returns_previous_document_by_default() -> Result<()>
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -746,8 +740,7 @@ fn test_find_one_and_update_returns_new_document_when_requested() -> Result<()> 
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -774,8 +767,7 @@ fn test_find_one_and_update_returns_none_when_no_match() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -807,8 +799,7 @@ fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -853,8 +844,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Resu
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -900,8 +890,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() ->
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_update")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_update", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -971,8 +960,7 @@ fn test_find_one_and_delete_returns_deleted_document() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_delete", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -998,8 +986,7 @@ fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_delete", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1036,8 +1023,7 @@ fn test_find_one_and_delete_retries_after_concurrent_delete() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_find_one_and_delete")?;
+    let collection_id = storage_engine.create_collection("test_find_one_and_delete", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1068,7 +1054,7 @@ fn test_delete_one_deletes_matching_document() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+    let collection_id = storage_engine.create_collection("test_delete_one", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -1104,8 +1090,7 @@ fn test_delete_one_returns_zero_when_no_match() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_delete_one_no_match")?;
+    let collection_id = storage_engine.create_collection("test_delete_one_no_match", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -1135,7 +1120,7 @@ fn test_delete_one_succeeds_on_retry() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one_retry")?;
+    let collection_id = storage_engine.create_collection("test_delete_one_retry", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &initial_doc)?;
@@ -1173,8 +1158,7 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_delete_one_retry_timeout")?;
+    let collection_id = storage_engine.create_collection("test_delete_one_retry_timeout", true)?;
     let hook = Arc::new(ConflictingPrimaryWriteHook::new(
         ExecutorFailpoint::DeleteOneAfterRead,
         storage_engine.clone(),
@@ -1213,7 +1197,7 @@ fn test_delete_many_deletes_matching_documents() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many")?;
+    let collection_id = storage_engine.create_collection("test_delete_many", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
     let doc2 = doc! { "_id": 2, "value": "second" };
@@ -1243,8 +1227,7 @@ fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id =
-        storage_engine.create_collection_if_not_exists("test_delete_many_no_match")?;
+    let collection_id = storage_engine.create_collection("test_delete_many_no_match", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
     let doc2 = doc! { "_id": 2, "value": "second" };
@@ -1278,7 +1261,7 @@ fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_many_retry")?;
+    let collection_id = storage_engine.create_collection("test_delete_many_retry", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
     let doc2 = doc! { "_id": 2, "value": "second" };
@@ -1324,7 +1307,7 @@ fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+    let collection_id = storage_engine.create_collection("test_delete_one", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1363,7 +1346,7 @@ fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_delete_one")?;
+    let collection_id = storage_engine.create_collection("test_delete_one", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1399,7 +1382,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1437,7 +1420,7 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1499,7 +1482,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
+    let collection_id = storage_engine.create_collection("test_update_many", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
     let doc2 = doc! { "_id": 2, "value": "second" };
@@ -1551,7 +1534,7 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_update_many")?;
+    let collection_id = storage_engine.create_collection("test_update_many", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "first" };
     let doc2 = doc! { "_id": 2, "value": "second" };
@@ -1606,7 +1589,7 @@ fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+    let collection_id = storage_engine.create_collection("test_insert", true)?;
 
     let paused_handle = spawn_paused_insert_one(
         executor.clone(),
@@ -1653,7 +1636,7 @@ fn test_insert_one_manual_id_succeeds_after_delete_same_key() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+    let collection_id = storage_engine.create_collection("test_insert", true)?;
 
     let inserted_doc = insert_one(
         &executor,
@@ -1691,7 +1674,7 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
+    let collection_id = storage_engine.create_collection("test_insert_many", true)?;
 
     let inserted_doc = insert_one(
         &executor,
@@ -1738,7 +1721,7 @@ fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending()
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_insert")?;
+    let collection_id = storage_engine.create_collection("test_insert", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1785,7 +1768,7 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_insert_many")?;
+    let collection_id = storage_engine.create_collection("test_insert_many", true)?;
 
     let initial_doc = doc! { "_id": 1, "value": "initial" };
     insert_one(executor.as_ref(), collection_id, &initial_doc)?;
@@ -1810,9 +1793,11 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
     let user_key_2 = BsonValue::from(2_i32).try_into_key()?;
     let snapshot = storage_engine.acquire_snapshot();
-    assert!(storage_engine
-        .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
-        .is_none());
+    assert!(
+        storage_engine
+            .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
+            .is_none()
+    );
 
     hook.release();
 
@@ -1837,7 +1822,7 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection_if_not_exists("test_retry")?;
+    let collection_id = storage_engine.create_collection("test_retry", true)?;
 
     let doc1 = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &doc1)?;

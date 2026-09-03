@@ -1,6 +1,6 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::{varint, ZeroCopy};
-use crate::storage::internal_key::{extract_operation_type, InternalKeyBound};
+use crate::io::{ZeroCopy, varint};
+use crate::storage::internal_key::{InternalKeyBound, extract_operation_type};
 use crate::storage::operation::OperationType;
 use crate::storage::sstable::BlockHandle;
 use std::cmp::Ordering;
@@ -206,7 +206,7 @@ impl<W: EntryReader + 'static> BlockEntryIterator<W> {
                             first = Some((prev_key.clone(), prev_value.clone().unwrap()));
                         }
                         data.seek(position)?; // Reset position to the start of the entry
-                                              // If we rewind the position we might need to rewind the restart_idx as well.
+                        // If we rewind the position we might need to rewind the restart_idx as well.
                         if restart {
                             restart_idx -= 1;
                             next_restart_offset = reader.next_restart_offset(restart_idx)?;
@@ -496,15 +496,15 @@ impl EntryReader for DataEntryReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Direction;
     use crate::storage::internal_key::{
-        encode_internal_key, encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER,
+        MAX_SEQUENCE_NUMBER, encode_internal_key, encode_internal_key_range, encode_record_key,
     };
     use crate::storage::sstable::block_builder::{BlockBuilder, DataEntryWriter, IndexEntryWriter};
     use crate::storage::test_utils::assert_next_entry_eq;
-    use crate::storage::Direction;
     use crate::util::bson_utils::BsonKey;
     use crate::util::interval::Interval;
-    use bson::{doc, Bson};
+    use bson::{Bson, doc};
     use std::fmt::Debug;
 
     #[test]

@@ -1,5 +1,5 @@
-use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use crate::storage::Direction;
+use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::Result;

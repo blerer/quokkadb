@@ -1,18 +1,18 @@
-use super::{bind, Metrics, QueryOutput};
+use super::{Metrics, QueryOutput, bind};
 use crate::error::Result;
 use crate::query::execution::{filters, indexes::Index};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
+use crate::storage::Direction;
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::OperationType;
 use crate::storage::snapshot_manager::Snapshot;
-use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::{Bson, Document};
 use std::io::Cursor;
 use std::sync::Arc;
-use tracing::{trace_span, Span};
+use tracing::{Span, trace_span};
 
 use crate::storage::storage_engine::StorageEngine;
 

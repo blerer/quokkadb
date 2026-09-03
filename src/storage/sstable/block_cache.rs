@@ -2,14 +2,14 @@ use crate::io::checksum::ChecksumStrategy;
 use crate::io::compressor::Compressor;
 use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::options::options::Options;
-use crate::storage::sstable::sstable_reader::SharedFile;
 use crate::storage::sstable::BlockHandle;
+use crate::storage::sstable::sstable_reader::SharedFile;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use std::io::Error;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{trace_span, Span};
+use tracing::{Span, trace_span};
 
 /// Block Cache (LRU, retrieves blocks using the shared file provided as a get parameter)
 pub struct BlockCache {

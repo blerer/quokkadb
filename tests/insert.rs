@@ -1,8 +1,8 @@
 mod common;
 
-use bson::{doc, Bson};
-use quokkadb::collection::IdCreationStrategy;
-use quokkadb::{error::Error, QuokkaDB};
+use bson::{Bson, doc};
+use quokkadb::IdCreationStrategy;
+use quokkadb::{QuokkaDB, error::Error};
 use tempfile::tempdir;
 
 fn setup() -> (tempfile::TempDir, QuokkaDB) {

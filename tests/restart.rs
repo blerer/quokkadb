@@ -1,6 +1,6 @@
 mod common;
 
-use bson::{doc, Document};
+use bson::{Document, doc};
 use quokkadb::QuokkaDB;
 use std::path::Path;
 use tempfile::tempdir;

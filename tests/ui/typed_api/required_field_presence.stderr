@@ -1,0 +1,21 @@
+error[E0599]: no method named `exists` found for struct `quokkadb::Field<D, V>` in the current scope
+  --> tests/ui/typed_api/required_field_presence.rs:12:30
+   |
+12 |     User::root_fields().name.exists();
+   |                              ^^^^^^ method not found in `quokkadb::Field<User, String>`
+
+error[E0599]: no method named `unset` found for struct `quokkadb::Field<D, V>` in the current scope
+  --> tests/ui/typed_api/required_field_presence.rs:13:35
+   |
+13 |     User::update(|user| user.name.unset());
+   |                                   ^^^^^
+   |
+help: there is a method `set` with a similar name, but with different arguments
+  --> src/document.rs
+   |
+   |         pub fn set(&self, value: impl Into<$value>) -> Update<D> {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   |     value_operations!(V);
+   |     -------------------- in this macro invocation
+   = note: this error originates in the macro `value_operations` (in Nightly builds, run with -Z macro-backtrace for more info)

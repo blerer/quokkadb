@@ -1,7 +1,7 @@
 use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
+use crate::query::SizeEstimate;
 use crate::query::logical_plan::LogicalPlan;
 use crate::query::physical_plan::PhysicalPlan;
-use crate::query::SizeEstimate;
 use moka::sync::{Cache, CacheBuilder};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn get_or_insert_records_hit_and_miss_metrics() {
         let (cache, metric_registry) = new_cache();
-        let logical_plan = LogicalPlanBuilder::scan(7).build();
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(7).build());
         let build_count = AtomicUsize::new(0);
 
         let build_plan = || {
@@ -185,12 +185,16 @@ mod tests {
         let optimizer = Optimizer::new();
         let build_count = AtomicUsize::new(0);
 
-        let first_logical_plan = LogicalPlanBuilder::scan(7)
-            .filter(field_filters(field(["status"]), [eq(lit("A"))]))
-            .build();
-        let second_logical_plan = LogicalPlanBuilder::scan(7)
-            .filter(field_filters(field(["status"]), [eq(lit("B"))]))
-            .build();
+        let first_logical_plan = Arc::new(
+            LogicalPlanBuilder::scan(7)
+                .filter(field_filters(field(["status"]), [eq(lit("A"))]))
+                .build(),
+        );
+        let second_logical_plan = Arc::new(
+            LogicalPlanBuilder::scan(7)
+                .filter(field_filters(field(["status"]), [eq(lit("B"))]))
+                .build(),
+        );
 
         let (first_parameterized_plan, _) =
             optimizer.parametrize(optimizer.normalize(first_logical_plan));
@@ -236,8 +240,8 @@ mod tests {
     #[test]
     fn invalidate_collection_only_removes_matching_entries() {
         let (cache, metric_registry) = new_cache();
-        let collection_one_plan = LogicalPlanBuilder::scan(1).build();
-        let collection_two_plan = LogicalPlanBuilder::scan(2).build();
+        let collection_one_plan = Arc::new(LogicalPlanBuilder::scan(1).build());
+        let collection_two_plan = Arc::new(LogicalPlanBuilder::scan(2).build());
 
         cache.get_or_insert_with(1, collection_one_plan.clone(), || {
             Arc::new(PhysicalPlan::NoOp)
@@ -272,7 +276,7 @@ mod tests {
     #[test]
     fn size_metric_reports_weighted_bytes() {
         let (cache, metric_registry) = new_cache();
-        let logical_plan = LogicalPlanBuilder::scan(4).build();
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(4).build());
 
         cache.get_or_insert_with(4, logical_plan, || {
             Arc::new(PhysicalPlan::Projection {

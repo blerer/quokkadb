@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::{info_span, Span};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{Span, info_span};
 
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 

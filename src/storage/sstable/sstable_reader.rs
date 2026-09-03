@@ -1,21 +1,22 @@
+use crate::io::ZeroCopy;
 use crate::io::byte_reader::ByteReader;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::{Compressor, CompressorType};
-use crate::io::ZeroCopy;
+use crate::storage::Direction;
 use crate::storage::files::DbFile;
+use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
 use crate::storage::internal_key::{
     encode_internal_key, extract_record_key, extract_sequence_number,
 };
-use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
 use crate::storage::iterators::TracingIterator;
 use crate::storage::operation::OperationType;
+use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::block_cache::BlockCache;
 use crate::storage::sstable::block_reader::{BlockReader, DataEntryReader, IndexEntryReader};
 use crate::storage::sstable::sstable_properties::SSTableProperties;
-use crate::storage::sstable::BlockHandle;
 use crate::storage::sstable::{MAGIC_NUMBER, SSTABLE_FOOTER_LENGTH};
-use crate::storage::Direction;
 use crate::util::bloom_filter::BloomFilter;
+use ErrorKind::InvalidData;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
@@ -29,7 +30,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::Level;
 use tracing::{debug_span, trace_span};
-use ErrorKind::InvalidData;
 
 pub struct SSTableReader {
     block_loader: Arc<BlockLoader>,
@@ -521,7 +521,7 @@ impl SharedFile {
 
     #[cfg(unix)]
     fn fadvise_random(file: &File) -> Result<()> {
-        use rustix::fs::{fadvise, Advice};
+        use rustix::fs::{Advice, fadvise};
         use std::num::NonZeroU64;
         fadvise(file, 0, None::<NonZeroU64>, Advice::Random)?;
         Ok(())
@@ -529,7 +529,7 @@ impl SharedFile {
 
     #[cfg(unix)]
     fn fadvise_dontneed(file: &File, offset: u64, size: usize) -> Result<()> {
-        use rustix::fs::{fadvise, Advice};
+        use rustix::fs::{Advice, fadvise};
         use std::num::NonZeroU64;
         fadvise(file, offset, NonZeroU64::new(size as u64), Advice::DontNeed)?;
         Ok(())
@@ -582,7 +582,7 @@ mod tests {
     use crate::options::options::Options;
     use crate::storage::files::DbFile;
     use crate::storage::internal_key::{
-        encode_internal_key_range, encode_record_key, MAX_SEQUENCE_NUMBER,
+        MAX_SEQUENCE_NUMBER, encode_internal_key_range, encode_record_key,
     };
     use crate::storage::lsm_version::SSTableMetadata;
     use crate::storage::operation::Operation;

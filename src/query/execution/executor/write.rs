@@ -1,8 +1,8 @@
-use super::read::ReadExecutor;
 use super::Metrics;
 use super::WriteResult;
+use super::read::ReadExecutor;
 #[cfg(test)]
-use super::{invoke_executor_test_hook, ExecutorFailpoint};
+use super::{ExecutorFailpoint, invoke_executor_test_hook};
 use crate::error::Error;
 use crate::error::Result;
 use crate::query::execution::indexes::Indexes;
@@ -22,7 +22,7 @@ use crate::storage::storage_engine::StorageError;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::{serialize_to_vec, Bson, Document, RawDocument};
+use bson::{Bson, Document, RawDocument, serialize_to_vec};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
