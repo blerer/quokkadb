@@ -4,126 +4,111 @@
 
 # QuokkaDB
 
-A high-performance, document-oriented database engine written in Rust.
+**The embedded application database.**
 
-> **Disclaimer**  
-> QuokkaDB provides a Mongo-like document API and BSON data model for developer familiarity.  
-> It is **not a drop-in replacement for MongoDB**, does **not reuse any MongoDB source code**,  
-> and is **not affiliated with, endorsed by, or associated with MongoDB, Inc.**
+QuokkaDB makes application persistence simple. Store and query your application's models and state without running database infrastructure.
 
-## Introduction
+## Persistence without infrastructure
 
-QuokkaDB is a modern database built from the ground up in Rust, designed for performance, reliability, and ease of use. It uses a Log-Structured Merge-Tree (LSM-Tree) storage engine, making it highly efficient for write-heavy workloads. Documents are stored in BSON format (a binary JSON encoding originally defined as an open specification), providing a rich and flexible data model.
+- **No server** — QuokkaDB runs inside your application.
+- **Single directory** — all database files live in one place.
+- **No setup** — open a path and start storing data.
+- **Flexible schema** — evolve your documents with your application models.
+- **No ORM** — persist nested application models directly.
+- **Small and bounded** — designed for predictable application-level resource usage.
+- **Real database semantics** — durability, indexes, concurrent access, atomic updates, and crash recovery.
 
-## Features
+QuokkaDB is designed to make persistence a boring part of building an application.
 
-- **Document-Oriented**: Store and query flexible BSON documents.
-- **LSM-Tree Storage Engine**: Optimized for high write throughput, with Memtables, SSTables, and a Write-Ahead Log (WAL) for durability.
-- **Rich Query API**: Fluent API inspired by common document databases, supporting projections, sorting, skipping, and limiting results.
-- **Query Optimization**: A cost-based query optimizer with a set of normalization rules to ensure efficient query execution.
-- **Pluggable Compression**: Supports Snappy, LZ4, and no-op compression for SSTable blocks to save space.
-- **Configurable**: Fine-tune performance with options for cache sizes, block sizes, and more.
-- **Monitoring**: Built-in metrics for observing database performance.
+## Quick start
 
-## Project Status & Roadmap
-
-QuokkaDB is a work in progress and not yet ready for production use. The future roadmap includes:
-
-- **Query Optimization**: Completing the query optimization process.
-- **Compaction**: Implementing LSM-Tree compaction.
-- **Update & Delete**: Adding full support for update and delete operations.
-- **Indexing**: Introducing secondary indexing capabilities.
-- **Transactions**: Planned lightweight atomic batch writes with snapshot isolation.
-
-## Usage
-
-Here's a quick example of how to use QuokkaDB.
-
-First, add QuokkaDB to your `Cargo.toml`:
+Add QuokkaDB and the dependencies used by the examples to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-# The crate name and version are assumed
-quokkadb = "0.1.0"
-bson = "2.0"
+quokkadb = { git = "https://github.com/blerer/quokkadb" }
+bson = "3"
+serde = { version = "1", features = ["derive"] }
 ```
 
-Then, you can use it in your code:
-
 ```rust
-use quokkadb::{QuokkaDB, Document};
-use bson::doc;
+use quokkadb::error::Result;
+use quokkadb::{QuokkaDB, QuokkaDocument};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open the database
-    let db = QuokkaDB::open(Path::new("/tmp/quokkadb"))?;
+#[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
+struct Task {
+    #[quokka(id)]
+    #[serde(rename = "_id")]
+    id: u64,
+    title: String,
+    done: bool,
+}
 
-    // Get a collection. This will create it if it doesn't exist.
-    let collection = db.collection("my_collection");
+fn main() -> Result<()> {
+    let db = QuokkaDB::open(Path::new("./data"))?;
+    let tasks = db.typed_collection::<Task>("tasks").create_if_missing();
 
-    // Insert a document
-    let doc_to_insert = doc! {
-        "name": "Quokka",
-        "continent": "Australia",
-        "cuteness_level": 9001,
-    };
-    collection.insert_one(doc_to_insert)?;
+    tasks.insert_one(Task {
+        id: 1,
+        title: "Ship the release".into(),
+        done: false,
+    })?;
 
-    // Find documents
-    let filter = doc! { "cuteness_level": { "$gt": 9000 } };
-    let results = collection.find(filter)
-        .projection(doc! { "name": 1, "cuteness_level": 1, "_id": 0 })
-        .sort(doc! { "cuteness_level": -1 })
-        .limit(10)
-        .execute()?;
+    let open_task = tasks
+        .find_one(|task| task.done.eq(false))?
+        .expect("inserted task must exist");
 
-    for result in results {
-        let doc = result?;
-        println!("{}", doc);
-    }
-
+    assert_eq!(open_task.title, "Ship the release");
     Ok(())
 }
 ```
 
-## Architecture
+For dynamic data or lower-level access, QuokkaDB also provides a BSON document API.
 
-QuokkaDB has a layered architecture:
+```rust
+use bson::doc;
+use quokkadb::error::Result;
+use quokkadb::QuokkaDB;
+use std::path::Path;
 
-- **Query API**: A user-friendly, fluent API for interacting with the database.
-- **Query Engine**:
-    - **Parser**: Parses BSON queries into an abstract syntax tree (AST) of expressions.
-    - **Logical Planner**: Builds a logical plan from the AST.
-    - **Optimizer**: Applies a series of normalization rules to the logical plan to create an optimized plan. It includes a cost-based estimator to choose the best physical plan.
-    - **Physical Planner**: Converts the optimized logical plan into a physical execution plan.
-    - **Executor**: Executes the physical plan, fetching data from the storage engine.
-- **Storage Engine**:
-    - **LSM-Tree**: The core storage structure, composed of:
-        - **Memtable**: An in-memory skip-list for fast writes.
-        - **SSTables**: Immutable, sorted files on disk for persistent storage.
-        - **Write-Ahead Log (WAL)**: Ensures durability of writes before they are flushed to SSTables.
-    - **Block Cache**: Caches SSTable blocks in memory to speed up reads.
-    - **Concurrency Control**: Manages concurrent reads and writes.
+fn main() -> Result<()> {
+    let db = QuokkaDB::open(Path::new("./data"))?;
+    let tasks = db.collection("tasks").create_if_missing();
 
-## Building
+    tasks.insert_one(doc! {
+        "_id": 1,
+        "title": "Ship the release",
+        "done": false,
+    })?;
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/quokkadb.git
-cd quokkadb
+    let open_task = tasks
+        .find_one(doc! { "done": false })?
+        .expect("inserted task must exist");
 
-# Build
-cargo build --release
-
-# Run tests
-cargo test
+    assert_eq!(
+        open_task.get_str("title").expect("title must be a string"),
+        "Ship the release"
+    );
+    Ok(())
+}
 ```
+
+## Documentation
+
+<!-- TODO: Add documentation link -->
+
+The documentation covers the document and typed APIs, queries, indexes, configuration, database internals, and current limitations.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request.
+QuokkaDB is still evolving, and real-world feedback is especially valuable.
+
+If you try it, I’d love to hear what works, what feels awkward, and which workloads matter to you. Bug reports, small fixes, documentation improvements, and larger contributions are all welcome.
+
+<!-- TODO: Add contributing guide link -->
 
 ## License
 
-This project is licensed under the [Apache-2.0 License](LICENSE).
+Apache License 2.0.
