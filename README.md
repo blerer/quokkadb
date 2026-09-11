@@ -101,7 +101,7 @@ fn main() -> Result<()> {
 
 ## Documentation
 
-<!-- TODO: Add documentation link -->
+[Read the QuokkaDB documentation.](docs/README.md)
 
 The documentation covers the document and typed APIs, queries, indexes, configuration, database internals, and current limitations.
 

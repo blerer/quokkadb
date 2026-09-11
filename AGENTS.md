@@ -160,6 +160,17 @@ When proposing a structural change, call out future costs explicitly:
 - When tests grow large enough to hurt readability, extract them while keeping them as a child of the module under test.
 - For a flat module such as `filters.rs`, extracted tests should live in `filters/tests.rs`, with `#[cfg(test)] mod tests;` declared in `filters.rs`.
 
+## Documentation
+
+- Read docs/STYLE.md first.
+- Preserve QuokkaDB's positioning as an application database:
+  no infrastructure, persist application models directly.
+- Write from the user's task outward, not from implementation details outward.
+- Prefer concise examples before detailed explanation.
+- Be technically precise about guarantees and limitations.
+- Avoid generic marketing language.
+- Do not expose internal storage-engine details unless they are relevant to the page.
+
 ## Sorting strategies
 
 - Provide multiple sort plans (in-memory, external merge, and top-k heap) all using shared comparison semantics:
