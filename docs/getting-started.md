@@ -62,6 +62,31 @@ Each document has an `_id`. The `#[quokka(id)]` attribute identifies the model f
 
 `create_if_missing` makes the `plants` collection available on its first use. `find_one` returns `Result<Option<Plant>>`: an error if the operation fails, `None` when no plant matches, or the matching plant.
 
+## Generate an ID in your application
+
+`QuokkaId::new()` creates a globally ordered Sonyflake ID. `QuokkaId::default()` creates one too. A `QuokkaId` serializes as a BSON `Int64`, so a Serde-serializable value can use it as an application-generated `_id` with a document collection.
+
+```rust
+use quokkadb::QuokkaId;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct PlantDocument {
+    #[serde(rename = "_id")]
+    id: QuokkaId,
+    name: String,
+    needs_water: bool,
+}
+
+documents.insert_one(PlantDocument {
+    id: QuokkaId::new(),
+    name: "Monstera".into(),
+    needs_water: true,
+})?;
+```
+
+This generates the ID in your application before insertion. Collection ID strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete `#[quokka(id)]` field; its ID cannot be an `Option`, so every typed model provides an ID before insertion. `QuokkaId` is not yet available as a typed model ID. See [Manage collections](guides/manage-collections.md) for database-generated IDs.
+
 ## Use a database from another thread
 
 `QuokkaDB` implements `Clone`. Clones share the same database instance, so a worker can use a clone without opening the database again. The instance stays active while at least one handle remains.
