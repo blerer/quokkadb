@@ -42,32 +42,36 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
-struct Task {
+struct Plant {
     #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
-    title: String,
-    done: bool,
+    name: String,
+    needs_water: bool,
 }
 
 fn main() -> Result<()> {
     let db = QuokkaDB::open(Path::new("./data"))?;
-    let tasks = db.typed_collection::<Task>("tasks").create_if_missing();
+    let plants = db
+        .typed_collection::<Plant>("plants")
+        .create_if_missing();
 
-    tasks.insert_one(Task {
+    plants.insert_one(Plant {
         id: 1,
-        title: "Ship the release".into(),
-        done: false,
+        name: "Monstera".into(),
+        needs_water: true,
     })?;
 
-    let open_task = tasks
-        .find_one(|task| task.done.eq(false))?
-        .expect("inserted task must exist");
+    let plant = plants
+        .find_one(|plant| plant.needs_water.eq(true))?
+        .expect("inserted plant must exist");
 
-    assert_eq!(open_task.title, "Ship the release");
+    assert_eq!(plant.name, "Monstera");
     Ok(())
 }
 ```
+
+`QuokkaDB` implements `Clone`. Clones share the same database instance, so you can pass a clone to another thread when your application needs it.
 
 For dynamic data or lower-level access, QuokkaDB also provides a BSON document API.
 
@@ -79,21 +83,21 @@ use std::path::Path;
 
 fn main() -> Result<()> {
     let db = QuokkaDB::open(Path::new("./data"))?;
-    let tasks = db.collection("tasks").create_if_missing();
+    let plants = db.collection("plants").create_if_missing();
 
-    tasks.insert_one(doc! {
+    plants.insert_one(doc! {
         "_id": 1,
-        "title": "Ship the release",
-        "done": false,
+        "name": "Monstera",
+        "needs_water": true,
     })?;
 
-    let open_task = tasks
-        .find_one(doc! { "done": false })?
-        .expect("inserted task must exist");
+    let plant = plants
+        .find_one(doc! { "needs_water": true })?
+        .expect("inserted plant must exist");
 
     assert_eq!(
-        open_task.get_str("title").expect("title must be a string"),
-        "Ship the release"
+        plant.get_str("name").expect("name must be a string"),
+        "Monstera"
     );
     Ok(())
 }

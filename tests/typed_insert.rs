@@ -15,6 +15,15 @@ struct User {
     age: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
+struct Plant {
+    #[quokka(id)]
+    #[serde(rename = "_id")]
+    id: u64,
+    name: String,
+    needs_water: bool,
+}
+
 fn setup() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let db = common::open_db(dir.path());
@@ -82,4 +91,36 @@ fn typed_insert_rejects_duplicate_ids() {
 
     assert!(matches!(error, Error::InvalidRequest(_)));
     assert_eq!(collection.estimated_document_count().unwrap(), 1);
+}
+
+#[test]
+fn cloned_database_handle_can_insert_a_typed_document_from_a_worker_thread() {
+    let (_dir, db) = setup();
+    let plants = db.typed_collection::<Plant>("plants").create_if_missing();
+    plants
+        .insert_one(Plant {
+            id: 1,
+            name: "Monstera".to_string(),
+            needs_water: true,
+        })
+        .unwrap();
+
+    let worker_db = db.clone();
+    let worker = std::thread::spawn(move || {
+        let plants = worker_db.typed_collection::<Plant>("plants");
+        plants.insert_one(Plant {
+            id: 2,
+            name: "Spider plant".to_string(),
+            needs_water: false,
+        })
+    });
+
+    let inserted = worker.join().unwrap().unwrap();
+    assert_eq!(inserted.inserted_id, 2);
+
+    let plant = plants
+        .find_one(|plant| plant.id.eq(2_u64))
+        .unwrap()
+        .unwrap();
+    assert_eq!(plant.name, "Spider plant");
 }
