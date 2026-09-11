@@ -8,6 +8,10 @@
 
 QuokkaDB makes application persistence simple. Store and query your application's models and state without running database infrastructure.
 
+## Persist your models, not your mappings
+
+Applications are built from nested objects, collections, and evolving state. **QuokkaDB stores that structure directly**, without decomposing your models into tables, joins, and mapping layers.
+
 ## Persistence without infrastructure
 
 - **No server** — QuokkaDB runs inside your application.
