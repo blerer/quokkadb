@@ -21,7 +21,7 @@ mod util;
 pub use crate::document::{
     ArrayField, BitwiseValue, Field, Filter, Index, MapField, NumericValue, ObjectField,
     OptionalField, PushOptions, QueryFieldType, QuokkaDocument, QuokkaScalar, QuokkaType, Sort,
-    TypedPath, TypedQueryField, TypedSelection, Update,
+    TypedPath, TypedQueryField, TypedSelection, Update, not,
 };
 pub use crate::id::QuokkaId;
 pub use quokkadb_derive::{QuokkaDocument, QuokkaType};

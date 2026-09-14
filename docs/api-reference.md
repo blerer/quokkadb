@@ -149,7 +149,7 @@ let result = plants
 
 ## Typed fields and expressions
 
-Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and selections. Combine compatible values with `and`, `or`, `not`, `nor`, and `then` as appropriate.
+Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and selections. Combine compatible values with `and`, `or`, `not(filter)`, `nor`, and `then` as appropriate.
 
 | Field kind | Query and navigation methods | Update and ordering methods |
 | --- | --- | --- |
@@ -158,14 +158,14 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 | BSON date or timestamp | All applicable scalar methods | `current_date` for `bson::DateTime`; `current_timestamp` for `bson::Timestamp` |
 | Optional `Option<V>` | The inner field's operations plus `exists` | `unset` plus the inner field's supported updates |
 | Embedded `QuokkaType` | Its generated nested fields; object equality methods | Whole-object scalar-style updates where applicable |
-| Array `Vec<T>` | `at(index)`, `len_eq`, `any_eq`, `all`; embedded models also provide `any(predicate)` | Array-level `set` and ordering methods; `add_to_set`, `add_to_set_each`, `push`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, `pull`, `pull_all`; embedded models also provide `pull_where` |
+| Array `Vec<T>` | `at(index)`, `len_eq`, `any_eq`, `any_where(predicate)`, `all`; embedded models also provide `any(predicate)` | Array-level `set` and ordering methods; `add_to_set`, `add_to_set_each`, `push`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, `pull`, `pull_all`; embedded models also provide `pull_where` |
 | Map `BTreeMap<String, V>` | `key(name)` to access a value field | Map-level scalar-style updates and ordering methods |
 
 `PushOptions::new()` configures `push_each`: use `position`, `slice`, `sort_ascending`, or `sort_descending`. For arrays of embedded `QuokkaType` values, `sort_by` accepts a typed sort closure.
 
 Typed filters and updates follow BSON comparison behavior. See [Find queries](guides/find-queries.md) and [Update data](guides/update-data.md) for task-oriented examples.
 
-`Filter<T>` combines conditions with `and`, `or`, `not`, and `nor`. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
+`Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 
 The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; add `NumericValue` when it supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
 

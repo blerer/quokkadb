@@ -220,13 +220,7 @@ pub fn to_value_filter(
         // - If the array element is a document, all document-level filters must match.
         // - If the array element is a scalar, all value-level filters must match.
         Expr::ElemMatch(filters) => {
-            let is_doc_filter = matches!(
-                filters.first().map(|f| f.as_ref()),
-                Some(Expr::FieldFilters { .. })
-                    | Some(Expr::And(_))
-                    | Some(Expr::Or(_))
-                    | Some(Expr::Not(_))
-            );
+            let is_doc_filter = filters.iter().any(is_document_elem_match_filter);
 
             if is_doc_filter {
                 let elem_filters: Vec<_> = to_filters(filters, parameters);
@@ -338,6 +332,19 @@ pub fn to_value_filter(
             Box::new(move |field_value| !filters.iter().any(|f| f(field_value)))
         }
         _ => unreachable!("Unsupported value filter: {:?}", filter),
+    }
+}
+
+fn is_document_elem_match_filter(expr: &Arc<Expr>) -> bool {
+    match expr.as_ref() {
+        Expr::FieldFilters { field, .. } => {
+            matches!(field.as_ref(), Expr::Field(path) if !path.is_empty())
+        }
+        Expr::And(children) | Expr::Or(children) | Expr::Nor(children) => {
+            children.iter().any(is_document_elem_match_filter)
+        }
+        Expr::Not(child) => is_document_elem_match_filter(child),
+        _ => false,
     }
 }
 

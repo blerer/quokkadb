@@ -509,6 +509,14 @@ impl<D, T: Serialize> ArrayField<D, T> {
     }
 }
 
+impl<D, T: QuokkaScalar> ArrayField<D, T> {
+    /// Builds an `$elemMatch` filter for scalar array elements.
+    pub fn any_where(&self, predicate: impl FnOnce(&Field<D, T>) -> Filter<D>) -> Filter<D> {
+        let element = Field::new(TypedPath::empty());
+        scalar_array_any_filter(self.path.clone(), predicate(&element))
+    }
+}
+
 impl<D, T: QuokkaType> ArrayField<D, T> {
     pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
         array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
@@ -913,6 +921,52 @@ fn array_any_filter<D>(path: TypedPath, predicate: Filter<D>) -> Filter<D> {
     }))
 }
 
+fn scalar_array_any_filter<D>(path: TypedPath, predicate: Filter<D>) -> Filter<D> {
+    let predicate = scalar_array_element_expr(predicate.into_expr());
+
+    Filter::from_expr(Arc::new(Expr::FieldFilters {
+        field: Arc::new(Expr::Field(path.components)),
+        filters: vec![Arc::new(Expr::ElemMatch(vec![predicate]))],
+    }))
+}
+
+fn scalar_array_element_expr(expr: Arc<Expr>) -> Arc<Expr> {
+    match expr.as_ref() {
+        Expr::FieldFilters {
+            field: field_expr,
+            filters,
+        } if matches!(field_expr.as_ref(), Expr::Field(field_path) if field_path.is_empty()) => {
+            match filters.as_slice() {
+                [filter] => filter.clone(),
+                _ => Arc::new(Expr::And(filters.clone())),
+            }
+        }
+        Expr::And(children) => Arc::new(Expr::And(
+            children
+                .iter()
+                .cloned()
+                .map(scalar_array_element_expr)
+                .collect(),
+        )),
+        Expr::Or(children) => Arc::new(Expr::Or(
+            children
+                .iter()
+                .cloned()
+                .map(scalar_array_element_expr)
+                .collect(),
+        )),
+        Expr::Nor(children) => Arc::new(Expr::Nor(
+            children
+                .iter()
+                .cloned()
+                .map(scalar_array_element_expr)
+                .collect(),
+        )),
+        Expr::Not(child) => Arc::new(Expr::Not(scalar_array_element_expr(child.clone()))),
+        _ => expr,
+    }
+}
+
 fn array_all_filter<D>(path: TypedPath, values: impl Serialize) -> Filter<D> {
     let bson = serialize_to_bson(&values).expect("typed filter value must serialize into BSON");
     Filter::from_expr(Arc::new(Expr::FieldFilters {
@@ -1203,11 +1257,6 @@ impl<D> Filter<D> {
         Self::from_expr(Arc::new(Expr::Or(vec![self.expr, other.expr])))
     }
 
-    /// Builds a filter that excludes documents matching this condition.
-    pub fn not(self) -> Self {
-        Self::from_expr(Arc::new(Expr::Not(self.expr)))
-    }
-
     /// Builds a filter that excludes documents matching either condition.
     pub fn nor(self, other: Self) -> Self {
         Self::from_expr(Arc::new(Expr::Nor(vec![self.expr, other.expr])))
@@ -1216,6 +1265,11 @@ impl<D> Filter<D> {
     pub(crate) fn into_expr(self) -> Arc<Expr> {
         self.expr
     }
+}
+
+/// Builds a filter that excludes documents matching `filter`.
+pub fn not<D>(filter: Filter<D>) -> Filter<D> {
+    Filter::from_expr(Arc::new(Expr::Not(filter.expr)))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1307,7 +1361,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
     use crate::query::expr_fn::{
-        and, eq, exists, field, field_filters, gt, lit, lt, nin, nor, not, or, within,
+        and, elem_match, eq, exists, field, field_filters, gt, lit, lt, nin, nor, not as expr_not,
+        or, within,
     };
     use crate::query::update_fn::{field_name, inc, set, unset};
     use bson::{Binary, DateTime, Decimal128, doc, oid::ObjectId};
@@ -1406,8 +1461,8 @@ mod tests {
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.lt(18).not()).into_expr(),
-            not(field_filters(field(["age"]), [lt(lit(18))]))
+            build_filter::<User>(|u| not(u.age.lt(18))).into_expr(),
+            expr_not(field_filters(field(["age"]), [lt(lit(18))]))
         );
 
         assert_eq!(
@@ -1421,6 +1476,18 @@ mod tests {
         assert_eq!(
             build_filter::<User>(|u| u.age.in_values([18, 21, 65])).into_expr(),
             field_filters(field(["age"]), [within(lit(vec![18, 21, 65]))]),
+        );
+
+        assert_eq!(
+            build_filter::<CompoundUser>(|u| {
+                u.tags
+                    .any_where(|tag| tag.eq("database").or(tag.eq("storage")))
+            })
+            .into_expr(),
+            field_filters(
+                field(["tags"]),
+                [elem_match([or([eq(lit("database")), eq(lit("storage"))])])],
+            )
         );
 
         assert_eq!(

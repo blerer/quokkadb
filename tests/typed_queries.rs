@@ -2,7 +2,7 @@ mod common;
 
 use bson::doc;
 use quokkadb::error::Error;
-use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType};
+use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType, not};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -135,33 +135,48 @@ fn typed_find_filters_documents() {
 }
 
 #[test]
-fn typed_find_supports_not_and_nor_filters() {
+fn typed_find_supports_and_not_nor_and_nested_logical_filters() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users");
 
-    let not_matching_ids: Vec<u64> = collection
-        .find(|user| user.age.gte(35).not().and(user.active.eq(true)))
+    let and_matching_ids: Vec<u64> = collection
+        .find(|user| user.active.eq(true).and(user.age.gte(35)))
         .sort(|user| user.id.asc())
         .select(|user| user.id)
         .execute()
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(not_matching_ids, vec![1]);
+    assert_eq!(and_matching_ids, vec![2]);
+
+    let not_matching_ids: Vec<u64> = collection
+        .find(|user| not(user.age.gte(35)))
+        .sort(|user| user.id.asc())
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(not_matching_ids, vec![1, 3]);
 
     let nor_matching_ids: Vec<u64> = collection
-        .find(|user| {
-            user.age
-                .gte(35)
-                .nor(user.active.eq(false))
-                .and(user.name.eq("Alice"))
-        })
+        .find(|user| user.age.gte(35).nor(user.active.eq(false)))
+        .sort(|user| user.id.asc())
         .select(|user| user.id)
         .execute()
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(nor_matching_ids, vec![1]);
+
+    let nested_matching_ids: Vec<u64> = collection
+        .find(|user| user.active.eq(false).nor(not(user.age.gte(35))))
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(nested_matching_ids, vec![2]);
 }
 
 #[test]
@@ -869,6 +884,51 @@ fn typed_find_filters_arrays_by_all_values_and_length() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(two_elements, vec![1]);
+
+    let or_matching_elements: Vec<u64> = collection
+        .find(|user| {
+            user.tags
+                .any_where(|tag| tag.eq("database").or(tag.eq("storage")))
+        })
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(or_matching_elements, vec![1, 2]);
+
+    let and_matching_elements: Vec<u64> = collection
+        .find(|user| {
+            user.tags
+                .any_where(|tag| tag.eq("database").and(tag.ne("storage")))
+        })
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(and_matching_elements, vec![1, 2]);
+
+    let not_matching_elements: Vec<u64> = collection
+        .find(|user| user.tags.any_where(|tag| not(tag.eq("rust"))))
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(not_matching_elements, vec![1, 2]);
+
+    let nor_matching_elements: Vec<u64> = collection
+        .find(|user| {
+            user.tags
+                .any_where(|tag| tag.eq("rust").nor(tag.eq("database")))
+        })
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(nor_matching_elements, vec![2]);
 }
 
 #[test]
