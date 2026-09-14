@@ -135,6 +135,51 @@ fn typed_find_filters_documents() {
 }
 
 #[test]
+fn typed_find_filters_scalar_membership() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let matching_ids: Vec<u64> = collection
+        .find(|user| user.age.in_values([20, 40]).and(user.active.eq(true)))
+        .sort(|user| user.id.asc())
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(matching_ids, vec![2]);
+
+    let excluded_ids: Vec<u64> = collection
+        .find(|user| user.age.nin([20, 40]))
+        .sort(|user| user.id.asc())
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(excluded_ids, vec![1]);
+
+    let no_ids: Vec<u64> = collection
+        .find(|user| user.age.in_values(Vec::<i32>::new()))
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(no_ids.is_empty());
+
+    let all_ids: Vec<u64> = collection
+        .find(|user| user.age.nin(Vec::<i32>::new()))
+        .sort(|user| user.id.asc())
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(all_ids, vec![1, 2, 3]);
+}
+
+#[test]
 fn typed_find_sorts_and_paginates_documents() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users");

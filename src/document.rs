@@ -238,6 +238,30 @@ impl<D, V: QuokkaScalar> Field<D, V> {
 
 impl<D, V: QuokkaScalar> Field<D, V> {
     value_operations!(V);
+
+    /// Builds a filter that matches fields equal to any supplied value.
+    pub fn in_values<I, U>(&self, values: I) -> Filter<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<V>,
+    {
+        let path = self.path.clone();
+        let operator = ComparisonOperator::In;
+        let values1 = values.into_iter().map(Into::into).collect::<Vec<V>>();
+        comparison_filter(path, operator, values1)
+    }
+
+    /// Builds a filter that matches fields unequal to every supplied value.
+    pub fn nin<I, U>(&self, values: I) -> Filter<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<V>,
+    {
+        let path = self.path.clone();
+        let operator = ComparisonOperator::Nin;
+        let values1 = values.into_iter().map(Into::into).collect::<Vec<V>>();
+        comparison_filter(path, operator, values1)
+    }
 }
 
 impl<D, V: NumericValue> Field<D, V> {
@@ -1272,7 +1296,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::expr_fn::{and, eq, exists, field, field_filters, gt, lit, lt, or};
+    use crate::query::expr_fn::{
+        and, eq, exists, field, field_filters, gt, lit, lt, nin, or, within,
+    };
     use crate::query::update_fn::{field_name, inc, set, unset};
     use bson::{Binary, DateTime, Decimal128, doc, oid::ObjectId};
     use quokkadb::query::update_fn;
@@ -1367,6 +1393,16 @@ mod tests {
                 field_filters(field(["age"]), [lt(lit(18))]),
                 field_filters(field(["age"]), [gt(lit(65))]),
             ])
+        );
+
+        assert_eq!(
+            build_filter::<User>(|u| u.age.in_values([18, 21, 65])).into_expr(),
+            field_filters(field(["age"]), [within(lit(vec![18, 21, 65]))]),
+        );
+
+        assert_eq!(
+            build_filter::<User>(|u| u.age.nin([18, 21, 65])).into_expr(),
+            field_filters(field(["age"]), [nin(lit(vec![18, 21, 65]))]),
         );
 
         assert_eq!(

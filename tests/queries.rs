@@ -693,6 +693,37 @@ fn test_id_in_query() {
 }
 
 #[test]
+fn test_empty_in_query_returns_no_documents() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": [] } })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_empty_nin_query_returns_all_documents() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let results: Vec<Document> = collection
+        .find(doc! { "_id": { "$nin": [] } })
+        .sort(doc! { "_id": 1 })
+        .execute()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert_ids(&results, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+}
+
+#[test]
 fn test_id_in_query_with_other_filters() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

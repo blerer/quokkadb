@@ -24,6 +24,14 @@ let plant = plants.find_one(|plant| plant.id.eq(1_u64))?;
 
 Combine filters with `and` and `or`. Typed fields support equality and comparisons where their value type permits them. Nested values, optional fields, arrays, and maps also expose typed query fields; see the [API Reference](../api-reference.md) for their available operations.
 
+Use `in_values` or `nin` when a scalar field must match or exclude several values.
+
+```rust
+let selected = plants
+    .find(|plant| plant.id.in_values([1_u64, 4, 9]).and(plant.needs_water.nin([false])))
+    .execute()?;
+```
+
 ## Return only the data you need
 
 Use `include`, `exclude`, or `select` on a typed find builder to change the returned shape. `include` and `exclude` deserialize the selected document into another Rust type, while `select` returns the chosen field or fields directly.

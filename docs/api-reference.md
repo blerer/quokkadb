@@ -153,7 +153,7 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 
 | Field kind | Query and navigation methods | Update and ordering methods |
 | --- | --- | --- |
-| Scalar `Field<T, V>` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` | `set`, `set_on_insert`, `min`, `max`, `asc`, `desc`, `index_asc`, `index_desc` |
+| Scalar `Field<T, V>` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in_values`, `nin` | `set`, `set_on_insert`, `min`, `max`, `asc`, `desc`, `index_asc`, `index_desc` |
 | Numeric scalar | All scalar methods | `inc`, `mul`; `i32` and `i64` also provide `bit(and, or, xor)` |
 | BSON date or timestamp | All applicable scalar methods | `current_date` for `bson::DateTime`; `current_timestamp` for `bson::Timestamp` |
 | Optional `Option<V>` | The inner field's operations plus `exists` | `unset` plus the inner field's supported updates |

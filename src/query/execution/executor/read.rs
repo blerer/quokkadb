@@ -55,6 +55,7 @@ impl ReadExecutor {
         snapshot: Snapshot,
     ) -> Result<QueryOutput> {
         match plan.as_ref() {
+            PhysicalPlan::NoOp => Ok(Box::new(std::iter::empty())),
             PhysicalPlan::CollectionScan {
                 collection,
                 range,
