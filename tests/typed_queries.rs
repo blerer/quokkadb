@@ -135,6 +135,36 @@ fn typed_find_filters_documents() {
 }
 
 #[test]
+fn typed_find_supports_not_and_nor_filters() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let not_matching_ids: Vec<u64> = collection
+        .find(|user| user.age.gte(35).not().and(user.active.eq(true)))
+        .sort(|user| user.id.asc())
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(not_matching_ids, vec![1]);
+
+    let nor_matching_ids: Vec<u64> = collection
+        .find(|user| {
+            user.age
+                .gte(35)
+                .nor(user.active.eq(false))
+                .and(user.name.eq("Alice"))
+        })
+        .select(|user| user.id)
+        .execute()
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(nor_matching_ids, vec![1]);
+}
+
+#[test]
 fn typed_find_filters_scalar_membership() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users");

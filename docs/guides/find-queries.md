@@ -22,7 +22,7 @@ Use `find_one` when a single matching model is enough. It returns `Result<Option
 let plant = plants.find_one(|plant| plant.id.eq(1_u64))?;
 ```
 
-Combine filters with `and` and `or`. Typed fields support equality and comparisons where their value type permits them. Nested values, optional fields, arrays, and maps also expose typed query fields; see the [API Reference](../api-reference.md) for their available operations.
+Combine filters with `and`, `or`, `not`, and `nor`. Typed fields support equality and comparisons where their value type permits them. Nested values, optional fields, arrays, and maps also expose typed query fields; see the [API Reference](../api-reference.md) for their available operations.
 
 Use `in_values` or `nin` when a scalar field must match or exclude several values.
 

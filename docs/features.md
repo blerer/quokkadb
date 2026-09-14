@@ -12,7 +12,7 @@ This page shows what QuokkaDB supports today and where current limitations apply
 | --- | --- | --- | --- |
 | Equality and ranges | Supported | Supported | Equality, inequality, and `$gt`, `$gte`, `$lt`, and `$lte` are available. Comparisons use BSON value ordering. |
 | Set membership | Supported | Supported | Scalar typed fields use `in_values` and `nin` for `$in` and `$nin`. |
-| Logical operators | Partial | Supported | Typed filters compose with `and` and `or`. The document API also supports `$nor` and `$not`. |
+| Logical operators | Supported | Supported | Typed filters compose with `and`, `or`, `not`, and `nor`. The document API supports `$and`, `$or`, `$not`, and `$nor`. |
 | Field existence and BSON type | Partial | Supported | Typed optional fields support existence checks. The document API also supports `$exists` and `$type`. |
 | Nested fields and maps | Supported | Supported | Typed fields follow embedded Rust types and string-keyed maps. Document queries use dotted paths. |
 | Arrays | Partial | Supported | Typed fields support equality, length, `$all`, fixed indexes, and matching embedded elements. The document API also supports `$size` and `$elemMatch`. |

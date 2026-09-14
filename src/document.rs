@@ -1203,6 +1203,16 @@ impl<D> Filter<D> {
         Self::from_expr(Arc::new(Expr::Or(vec![self.expr, other.expr])))
     }
 
+    /// Builds a filter that excludes documents matching this condition.
+    pub fn not(self) -> Self {
+        Self::from_expr(Arc::new(Expr::Not(self.expr)))
+    }
+
+    /// Builds a filter that excludes documents matching either condition.
+    pub fn nor(self, other: Self) -> Self {
+        Self::from_expr(Arc::new(Expr::Nor(vec![self.expr, other.expr])))
+    }
+
     pub(crate) fn into_expr(self) -> Arc<Expr> {
         self.expr
     }
@@ -1297,7 +1307,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
     use crate::query::expr_fn::{
-        and, eq, exists, field, field_filters, gt, lit, lt, nin, or, within,
+        and, eq, exists, field, field_filters, gt, lit, lt, nin, nor, not, or, within,
     };
     use crate::query::update_fn::{field_name, inc, set, unset};
     use bson::{Binary, DateTime, Decimal128, doc, oid::ObjectId};
@@ -1390,6 +1400,19 @@ mod tests {
         assert_eq!(
             build_filter::<User>(|u| u.age.lt(18).or(u.age.gt(65))).into_expr(),
             or([
+                field_filters(field(["age"]), [lt(lit(18))]),
+                field_filters(field(["age"]), [gt(lit(65))]),
+            ])
+        );
+
+        assert_eq!(
+            build_filter::<User>(|u| u.age.lt(18).not()).into_expr(),
+            not(field_filters(field(["age"]), [lt(lit(18))]))
+        );
+
+        assert_eq!(
+            build_filter::<User>(|u| u.age.lt(18).nor(u.age.gt(65))).into_expr(),
+            nor([
                 field_filters(field(["age"]), [lt(lit(18))]),
                 field_filters(field(["age"]), [gt(lit(65))]),
             ])
