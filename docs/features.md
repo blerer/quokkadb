@@ -1,20 +1,94 @@
 # Features
 
-QuokkaDB is an embedded application database for Rust. It stores application data in a local directory and provides document queries, updates, indexes, and durable writes without a separate database server.
+QuokkaDB is an embedded application database for Rust. It stores application data in a local directory without a separate database server.
 
-## Current support
+This page shows what QuokkaDB supports today and where current limitations apply.
 
-| Area | Status | What is available today |
-| --- | --- | --- |
-| Data access | Supported | Typed Rust models and direct BSON document collections. |
-| Collections | Supported | Create, list, rename, and drop collections; choose generated, manual, or mixed `_id` creation. |
-| Queries | Supported | Filters, projections, sorting, limits, skips, and typed field access for nested values, arrays, and maps. |
-| Writes | Supported | Insert, update, replace, delete, find-and-modify, upserts, and array updates. |
-| Indexes | Supported | Ascending, descending, and compound indexes. |
-| Persistence | Supported | On-disk storage, configurable write-ahead-log durability, and recovery when reopening a database. |
-| Concurrent access | Supported | Clone a database handle and use it from application threads. |
-| Observability | Supported | Tracing instrumentation and an in-process metrics API. |
-| Transactions | Unsupported | Multi-operation transactions are not currently exposed by the public API. |
+**Supported** means the capability is directly supported by that API. **Partial** means it has an important semantic or API limitation, stated in the note. **Not supported** means it is unavailable through that API.
+
+## Querying
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Equality and ranges | Supported | Supported | Equality, inequality, and `$gt`, `$gte`, `$lt`, and `$lte` are available. Comparisons use BSON value ordering. |
+| Set membership | Not supported | Supported | The document API supports `$in` and `$nin`. |
+| Logical operators | Partial | Supported | Typed filters compose with `and` and `or`. The document API also supports `$nor` and `$not`. |
+| Field existence and BSON type | Partial | Supported | Typed optional fields support existence checks. The document API also supports `$exists` and `$type`. |
+| Nested fields and maps | Supported | Supported | Typed fields follow embedded Rust types and string-keyed maps. Document queries use dotted paths. |
+| Arrays | Partial | Supported | Typed fields support equality, length, `$all`, fixed indexes, and matching embedded elements. The document API also supports `$size` and `$elemMatch`. |
+| Sorting and pagination | Supported | Supported | Ascending and descending sorts, compound sorts, `skip`, and `limit` are available. |
+| `$regex` | Not supported | Not supported | BSON regular-expression values can be stored, but regular-expression matching is not available. |
+| `$text`, geospatial, `$expr`, and `$where` queries | Not supported | Not supported | Full-text, geospatial, expression, and JavaScript query operators are not available. |
+
+See [Find queries](guides/find-queries.md) for typed and BSON examples.
+
+## Projections
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Include and exclude fields | Supported | Supported | Typed projections use model fields and deserialize into the requested result type. The document API uses BSON projection documents. |
+| Select individual fields | Supported | Partial | Typed `select` returns the chosen typed value or tuple. Document projections return a BSON document. |
+| Array `$slice` and projection `$elemMatch` | Not supported | Supported | These projection operators are available only in BSON projection documents. |
+| Positional `$` projection | Not supported | Not supported | Positional projection paths are rejected. |
+
+## Write operations
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Insert one or many documents | Supported | Supported | Collections support one-at-a-time and batch inserts. |
+| Replace and delete matching documents | Supported | Supported | `replace_one`, `delete_one`, and `delete_many` are available. |
+| Upserts | Supported | Supported | Update, replacement, and find-and-modify builders can insert when no document matches. |
+| Find and modify | Supported | Supported | Find-one-and-update, replace, and delete operations can return the affected document. |
+
+## Update operators
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Field assignment and conditional replacement | Supported | Supported | `$set`, `$setOnInsert`, `$unset`, `$min`, and `$max` are available. |
+| Numeric, temporal, and bitwise changes | Supported | Supported | `$inc`, `$mul`, `$currentDate`, and `$bit` are available when the typed field type permits the operation. |
+| `$rename` | Not supported | Partial | The document API supports renaming document fields, but not paths through arrays or positional paths. |
+| Array add, append, remove, and deduplicate | Supported | Supported | `$addToSet`, `$push`, `$pop`, `$pull`, and `$pullAll` are available. `$push` supports `$each`, `$position`, `$slice`, and `$sort`. |
+| All and filtered array-element updates | Partial | Partial | Typed updates can target fixed array indexes. The document API also supports `$[]` and `$[identifier]` with `array_filters`; the first-match positional `$` operator is unavailable. |
+| Update pipelines | Not supported | Not supported | Updates use modifier documents or typed update builders; aggregation-style update pipelines are unavailable. |
+
+See [Update data](guides/update-data.md) for common update patterns and the [API Reference](api-reference.md) for builder options.
+
+## Indexes
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Ordered single-field indexes | Supported | Supported | Ascending and descending regular indexes are available. |
+| Ordered compound indexes | Supported | Supported | Field order matters for filters and sorts; an index can satisfy a compatible leading prefix. |
+| Index-backed filters and sorts | Partial | Partial | The optimizer can use compatible equality/range filters and sort order, but not every query shape is indexable. |
+| Multikey or array-path indexes | Not supported | Not supported | An indexed path cannot contain an array element. QuokkaDB does not create multikey indexes. |
+| Unique, sparse, partial, text, geospatial, wildcard, and TTL indexes | Not supported | Not supported | Regular ordered indexes are the only public index type. |
+
+See [Indexes](guides/indexes.md) for creation and lifecycle operations.
+
+## Guarantees and operations
+
+| Capability | Typed API | Document API | Notes |
+| --- | --- | --- | --- |
+| Consistent query snapshots | Supported | Supported | A query sees the state at its start while its iterator is consumed. |
+| Atomic write operations | Supported | Supported | Each operation, including `update_many` and `delete_many`, commits entirely or returns an error without a partial result. Conflicting concurrent writes can return an error and should be retried when safe. |
+| Concurrent access in one application | Supported | Supported | Clone an already-opened `QuokkaDB` handle and share it across application threads. |
+| One-process directory ownership | Supported | Supported | One application process owns a database directory. Do not open or modify that directory from another process. |
+| Durable writes and recovery | Partial | Partial | `Durable` is the default. `ProcessSafe` and `Buffered` trade crash durability for throughput; `sync()` makes an individual write durable before it returns. Reopening the directory recovers acknowledged writes according to that setting. |
+| In-process metrics and tracing | Supported | Supported | `metrics()` exposes in-process measurements and QuokkaDB emits `tracing` instrumentation. |
+
+Read [Concepts](concepts.md) for consistency and durability semantics, and [Operations](operations.md) for configuration, recovery, and observability.
+
+## Not supported
+
+| Capability | Notes |
+| --- | --- |
+| Multi-operation transactions | There is no public transaction API. Keep invariants within one write operation or enforce them in application logic. |
+| Aggregation pipelines | There is no `aggregate` API or aggregation pipeline execution. |
+| Backup and restore | No supported backup or restore procedure exists. Copying live individual database files is not a supported backup method. |
+| Upgrade and downgrade procedures | The on-disk format may change before 1.0; no supported migration, upgrade, or downgrade procedure exists. |
+| Multi-process access | A database directory is owned by one process; cross-process coordination is unavailable. |
+| Remote/server access | QuokkaDB runs in the application process and does not provide a database server or network protocol. |
+| Change streams | There is no change-stream or watch API. |
 
 ## Store application data
 
@@ -28,7 +102,7 @@ let thirsty: Vec<Plant> = plants
     .collect::<quokkadb::error::Result<_>>()?;
 ```
 
-Use the document API when the data is dynamic or you need direct BSON access. It supports the same collection operations with BSON query documents.
+Use the document API when the data is dynamic or you need direct BSON access.
 
 ```rust
 use bson::doc;
@@ -41,31 +115,3 @@ let thirsty = plants
 ```
 
 See [Getting Started](getting-started.md) for a complete typed example and [Guides](guides.md) for task-focused documentation.
-
-## Query and shape results
-
-Queries can match scalar, nested, optional, array, and map values. Combine filters with logical operators, choose fields to include or exclude, sort results, and page through them with `skip` and `limit`.
-
-The typed API generates field access from your model. The document API accepts BSON filter, projection, and sort documents. Use the API that matches the data your application has.
-
-## Change data
-
-Insert one or many documents. Update or replace one or many matches, delete documents, or combine a read with a change through find-and-modify operations.
-
-Updates support scalar changes, nested paths, array changes, positional and filtered array updates, and upserts. Typed updates use model fields; document updates use BSON update documents.
-
-## Use indexes
-
-Create an index when your application frequently filters or sorts on a field. QuokkaDB supports ascending, descending, and compound indexes. You can name indexes, inspect the active indexes on a collection, and remove indexes that are no longer needed.
-
-## Persist and operate the database
-
-Open QuokkaDB on a directory owned by your application. Reopening that directory recovers its stored data. The default configuration uses durable writes; `Options` can select another write-ahead-log durability mode, and write builders can force an individual write to synchronize before it returns.
-
-`QuokkaDB` implements `Clone`, so application threads can share an already opened database instance. Use `metrics()` for in-process cache, storage, compaction, and query metrics. QuokkaDB also emits tracing instrumentation for database activity.
-
-Read [Concepts](concepts.md) for the data and durability model, [Operations](operations.md) for configuration and observability, and [API Reference](api-reference.md) for the available Rust types and methods.
-
-## Current limits
-
-Multi-operation transactions are not currently supported. The on-disk format may change before the first stable release.
