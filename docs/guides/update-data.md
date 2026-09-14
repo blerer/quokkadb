@@ -92,20 +92,11 @@ let updated = plants
 
 ## Use advanced BSON updates when needed
 
-The document API is the escape hatch for update capabilities without a typed equivalent. For example, `$rename` changes a document field.
+The document API is the escape hatch for update capabilities without a typed equivalent. It supports `$[]` for all array elements and `$[identifier]` with `array_filters` for selected elements.
 
 ```rust
 use bson::doc;
 
-documents.update_one(
-    doc! { "_id": 1 },
-    doc! { "$rename": { "last_watered": "last_checked" } },
-)?;
-```
-
-The document API also supports `$[]` for all array elements and `$[identifier]` with `array_filters` for selected elements.
-
-```rust
 documents
     .update_many_with(
         doc! { "needs_water": true },
@@ -113,6 +104,15 @@ documents
     )
     .array_filters(vec![doc! { "step.kind": "water" }])
     .execute()?;
+```
+
+`$rename` changes a document field.
+
+```rust
+documents.update_one(
+    doc! { "_id": 1 },
+    doc! { "$rename": { "last_watered": "last_checked" } },
+)?;
 ```
 
 The first-match positional `$` operator and aggregation-style update pipelines are not available. Read [Features](../features.md#update-operators) for the complete update support matrix.

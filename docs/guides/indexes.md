@@ -61,7 +61,7 @@ A query that filters only `height_cm` does not have the leading `needs_water` co
 
 ## Match sort order
 
-An index can provide a sort when the requested sort fields match an indexed leading prefix in the same direction, or when the complete requested order is reversed. Other sort shapes still work, but QuokkaDB sorts the matching results itself.
+An index can provide a sort when the requested fields match a leading prefix of the index, either in index order or with every direction reversed. Other sort shapes still work, but QuokkaDB sorts the matching results itself.
 
 For example, an index on `needs_water` ascending and `name` ascending can provide that same two-field order or both fields descending. It does not provide an order by `name` alone.
 

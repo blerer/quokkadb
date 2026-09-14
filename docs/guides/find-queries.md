@@ -95,12 +95,12 @@ let names: Vec<String> = plants
 
 ## Sort and paginate
 
-Sort before using `skip` and `limit`. An explicit order keeps pages stable as long as the matching data does not change between requests.
+Sort before using `skip` and `limit`. Stable pagination requires a deterministic sort, so add a unique tie-breaker after fields that can have duplicate values.
 
 ```rust
 let page: Vec<Plant> = plants
     .find(|plant| plant.needs_water.eq(true))
-    .sort(|plant| plant.name.asc())
+    .sort(|plant| plant.name.asc().then(plant.id.asc()))
     .skip(20)
     .limit(20)
     .execute_collect()?;

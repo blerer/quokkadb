@@ -70,8 +70,7 @@ See [Indexes](guides/indexes.md) for creation and lifecycle operations.
 | Consistent query snapshots | Supported | Supported | A query sees the state at its start while its iterator is consumed. |
 | Atomic write operations | Supported | Supported | Each operation, including `update_many` and `delete_many`, commits entirely or returns an error without a partial result. Conflicting concurrent writes can return an error and should be retried when safe. |
 | Concurrent access in one application | Supported | Supported | Clone an already-opened `QuokkaDB` handle and share it across application threads. |
-| One-process directory ownership | Supported | Supported | One application process owns a database directory. Do not open or modify that directory from another process. |
-| Durable writes and recovery | Partial | Partial | `Durable` is the default. `ProcessSafe` and `Buffered` trade crash durability for throughput; `sync()` makes an individual write durable before it returns. Reopening the directory recovers acknowledged writes according to that setting. |
+| Durable writes and recovery | Supported | Supported | `Durable` is the default. `ProcessSafe` and `Buffered` deliberately trade crash durability for throughput; `sync()` makes an individual write durable before it returns. Reopening the directory recovers acknowledged writes according to that setting. |
 | In-process metrics and tracing | Supported | Supported | `metrics()` exposes in-process measurements and QuokkaDB emits `tracing` instrumentation. |
 
 Read [Concepts](concepts.md) for consistency and durability semantics, and [Operations](operations.md) for configuration, recovery, and observability.
@@ -87,27 +86,5 @@ Read [Concepts](concepts.md) for consistency and durability semantics, and [Oper
 | Multi-process access | A database directory is owned by one process; cross-process coordination is unavailable. |
 | Remote/server access | QuokkaDB runs in the application process and does not provide a database server or network protocol. |
 | Change streams | There is no change-stream or watch API. |
-
-## Store application data
-
-Use a typed collection when your application already has a Rust type. Derive `QuokkaDocument` and query its fields with Rust expressions.
-
-```rust
-let thirsty: Vec<Plant> = plants
-    .find(|plant| plant.needs_water.eq(true))
-    .sort(|plant| plant.name.asc())
-    .execute_collect()?;
-```
-
-Use the document API when the data is dynamic or you need direct BSON access.
-
-```rust
-use bson::doc;
-
-let thirsty = plants
-    .find(doc! { "needs_water": true })
-    .sort(doc! { "name": 1 })
-    .execute_collect()?;
-```
 
 See [Getting Started](getting-started.md) for a complete typed example and [Guides](guides.md) for task-focused documentation.
