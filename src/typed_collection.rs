@@ -255,6 +255,14 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
             decoder,
         ))
     }
+
+    /// Executes the query and collects all matching models.
+    pub fn execute_collect(self) -> Result<Vec<R>>
+    where
+        R: DeserializeOwned + 'static,
+    {
+        self.execute()?.collect()
+    }
 }
 
 /// Builds a query for one typed document.

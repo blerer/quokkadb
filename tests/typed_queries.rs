@@ -135,6 +135,23 @@ fn typed_find_filters_documents() {
 }
 
 #[test]
+fn typed_find_execute_collect_collects_models() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let users = collection
+        .find(|user| user.active.eq(true))
+        .sort(|user| user.id.asc())
+        .execute_collect()
+        .unwrap();
+
+    assert_eq!(
+        users.into_iter().map(|user| user.name).collect::<Vec<_>>(),
+        vec!["Alice", "Bob"]
+    );
+}
+
+#[test]
 fn typed_find_supports_and_not_nor_and_nested_logical_filters() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users");

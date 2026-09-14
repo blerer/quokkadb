@@ -1,61 +1,129 @@
 # Find queries
 
-Use `find` when you need several matching models and `find_one` when you need at most one. This guide assumes the `Plant` model and `plants` typed collection from [Getting Started](../getting-started.md).
+Use `find` when you need several matching models and `find_one` when you need at most one. This guide starts with the `Plant` model and `plants` typed collection from [Getting Started](../getting-started.md).
+
+The examples extend `Plant` with `height_cm: i32`, `location` with a `room` field, `tags: Vec<String>`, and `care: BTreeMap<String, String>`.
 
 ## Find matching models
 
-Filter fields with typed expressions, then sort and limit the result set before executing the query.
+Build a filter from typed fields, then execute the query. `find_one` returns `Result<Option<Plant>>`, so `None` means that no model matched.
 
 ```rust
-let thirsty: Vec<Plant> = plants
-    .find(|plant| plant.needs_water.eq(true).and(plant.name.ne("Cactus")))
-    .sort(|plant| plant.name.asc())
-    .skip(0)
-    .limit(20)
-    .execute()?
-    .collect::<quokkadb::error::Result<_>>()?;
+let plant = plants
+    .find_one(|plant| plant.height_cm.gte(100).and(plant.needs_water.eq(true)))?
+    .expect("a tall thirsty plant exists");
 ```
 
-Use `find_one` when a single matching model is enough. It returns `Result<Option<Plant>>`: `None` means that no model matched the filter.
-
-```rust
-let plant = plants.find_one(|plant| plant.id.eq(1_u64))?;
-```
-
-Combine filters with `and`, `or`, `not(filter)`, and `nor`. Typed fields support equality and comparisons where their value type permits them. Nested values, optional fields, arrays, and maps also expose typed query fields; see the [API Reference](../api-reference.md) for their available operations.
-
-Use `in_values` or `nin` when a scalar field must match or exclude several values.
+Scalar fields provide `eq`, `ne`, `gt`, `gte`, `lt`, and `lte`. Use `in_values` and `nin` when a value must match or exclude a set.
 
 ```rust
 let selected = plants
-    .find(|plant| plant.id.in_values([1_u64, 4, 9]).and(plant.needs_water.nin([false])))
+    .find(|plant| plant.id.in_values([1_u64, 4, 9]).and(plant.name.nin(["Cactus"])))
+    .execute()?;
+```
+
+Combine typed filters with `and`, `or`, and `nor`. Import `not` when a whole filter should be negated.
+
+```rust
+use quokkadb::not;
+
+let candidates = plants
+    .find(|plant| {
+        not(plant.needs_water.eq(false)).and(
+            plant.location.room.eq("living-room").or(plant.height_cm.gt(150)),
+        )
+    })
+    .execute()?;
+```
+
+## Query nested values, arrays, and maps
+
+Derived embedded types expose their fields through the parent field. String-keyed maps use `key`, and arrays provide operations that describe the matching rule.
+
+```rust
+let indoor_plants = plants
+    .find(|plant| {
+        plant
+            .location
+            .room
+            .eq("living-room")
+            .and(plant.care.key("light").eq("indirect"))
+            .and(plant.tags.any_eq("low-maintenance"))
+    })
+    .execute()?;
+```
+
+Use `all` when every listed value must occur and `len_eq` when the array must have an exact length. `any_where` applies a typed predicate to scalar array elements. Arrays of embedded models use `any` to match their fields.
+
+```rust
+let tagged = plants
+    .find(|plant| {
+        plant
+            .tags
+            .all(["indoor", "low-maintenance"])
+            .and(plant.tags.len_eq(2))
+            .and(plant.tags.any_where(|tag| tag.eq("indoor").or(tag.eq("office"))))
+    })
     .execute()?;
 ```
 
 ## Return only the data you need
 
-Use `include`, `exclude`, or `select` on a typed find builder to change the returned shape. `include` and `exclude` deserialize the selected document into another Rust type, while `select` returns the chosen field or fields directly.
+`include` and `exclude` shape the BSON document before QuokkaDB deserializes it. Give them a result type that can deserialize the projected fields.
 
-Apply `sort`, `skip`, and `limit` before `execute` when a view needs ordered or paged results.
+```rust
+#[derive(serde::Deserialize)]
+struct PlantCard {
+    name: String,
+    height_cm: i32,
+}
 
-## Use BSON query documents
+let cards: Vec<PlantCard> = plants
+    .find(|plant| plant.needs_water.eq(true))
+    .include(|plant| (plant.name, plant.height_cm))
+    .execute_collect()?;
+```
 
-The document API accepts BSON filter, projection, and sort documents. Use it when the query or result shape is dynamic.
+`select` changes the typed result shape instead. It returns the selected value or tuple directly, so no projected model type is needed.
+
+```rust
+let names: Vec<String> = plants
+    .find(|plant| plant.needs_water.eq(true))
+    .select(|plant| plant.name)
+    .execute_collect()?;
+```
+
+## Sort and paginate
+
+Sort before using `skip` and `limit`. An explicit order keeps pages stable as long as the matching data does not change between requests.
+
+```rust
+let page: Vec<Plant> = plants
+    .find(|plant| plant.needs_water.eq(true))
+    .sort(|plant| plant.name.asc())
+    .skip(20)
+    .limit(20)
+    .execute_collect()?;
+```
+
+## Use BSON query documents when they add value
+
+Use the document API when data or filter shape is dynamic. BSON documents also expose document-only query syntax such as `$type` and direct `$elemMatch` expressions.
 
 ```rust
 use bson::doc;
 
-let thirsty = documents
+let candidates = documents
     .find(doc! {
-        "needs_water": true,
-        "name": { "$ne": "Cactus" },
+        "$nor": [
+            { "care.light": { "$nin": ["indirect", "shade"] } },
+            { "height_cm": { "$lt": 100 } },
+        ],
+        "tags": { "$elemMatch": { "$in": ["indoor", "office"] } },
     })
-    .projection(doc! { "name": 1, "_id": 0 })
+    .projection(doc! { "name": 1, "height_cm": 1, "_id": 0 })
     .sort(doc! { "name": 1 })
-    .skip(0)
-    .limit(20)
-    .execute()?
-    .collect::<quokkadb::error::Result<Vec<_>>>()?;
+    .execute()?;
 ```
 
-Continue with [Indexes](indexes.md) when a filter or sort becomes a frequent part of your application.
+Read [Features](../features.md#querying) for the complete support matrix, including unavailable query families such as `$regex`, text, geospatial, `$expr`, and `$where`. Continue with [Indexes](indexes.md) when a filter or sort becomes a frequent part of your application.

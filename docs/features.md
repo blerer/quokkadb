@@ -98,8 +98,7 @@ Use a typed collection when your application already has a Rust type. Derive `Qu
 let thirsty: Vec<Plant> = plants
     .find(|plant| plant.needs_water.eq(true))
     .sort(|plant| plant.name.asc())
-    .execute()?
-    .collect::<quokkadb::error::Result<_>>()?;
+    .execute_collect()?;
 ```
 
 Use the document API when the data is dynamic or you need direct BSON access.
@@ -110,8 +109,7 @@ use bson::doc;
 let thirsty = plants
     .find(doc! { "needs_water": true })
     .sort(doc! { "name": 1 })
-    .execute()?
-    .collect::<quokkadb::error::Result<Vec<_>>>()?;
+    .execute_collect()?;
 ```
 
 See [Getting Started](getting-started.md) for a complete typed example and [Guides](guides.md) for task-focused documentation.

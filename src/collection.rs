@@ -1100,6 +1100,11 @@ impl<'a> Find<'a> {
 
         self.state.execute_query(build_plan)
     }
+
+    /// Executes the query and collects all matching documents.
+    pub fn execute_collect(&self) -> Result<Vec<Document>> {
+        self.execute()?.collect()
+    }
 }
 
 pub struct CreateIndex<'a> {

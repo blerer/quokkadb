@@ -74,6 +74,20 @@ fn test_simple_equality() {
 }
 
 #[test]
+fn test_execute_collect_collects_documents() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let results = collection
+        .find(doc! { "status": "A" })
+        .sort(doc! { "_id": 1 })
+        .execute_collect()
+        .unwrap();
+
+    assert_ids(&results, &[1, 2, 5, 7]);
+}
+
+#[test]
 fn test_comparison_operator() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");

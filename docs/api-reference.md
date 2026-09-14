@@ -96,7 +96,7 @@ let index_name = plants.create_index(|plant| {
 | `find_one(filter)` | `Result<Option<T>>` | Returns at most one matching model. |
 | `find_one_with(filter)` | `TypedFindOne<T>` | Builds a one-model query with options. |
 
-`TypedFind` supports `sort`, `skip`, `limit`, and `execute`. `execute()` returns `TypedQueryOutput<R>`, an iterator of `Result<R>` values. Collect it with `collect::<quokkadb::error::Result<Vec<_>>>()` when the application needs all results.
+`TypedFind` supports `sort`, `skip`, `limit`, `execute`, and `execute_collect`. `execute()` returns `TypedQueryOutput<R>`, an iterator of `Result<R>` values for streaming reads. `execute_collect()` returns `Result<Vec<R>>` when the application needs every result.
 
 `TypedFind`, `TypedFindOne`, and typed find-and-modify builders provide these projection methods:
 
@@ -204,7 +204,7 @@ let index_name = plants.create_index(doc! {
 
 | Operation | Direct method | Builder and options | Result |
 | --- | --- | --- | --- |
-| Find many | `find(filter)` | `projection`, `sort`, `skip`, `limit`, `execute` | `QueryOutput`, an iterator of `Result<Document>` |
+| Find many | `find(filter)` | `projection`, `sort`, `skip`, `limit`, `execute`, `execute_collect` | `QueryOutput`, an iterator of `Result<Document>`, or `Result<Vec<Document>>` from `execute_collect` |
 | Find one | `find_one(filter)` | `find_one_with(filter).projection(...).sort(...).execute()` | `Result<Option<Document>>` |
 | Insert one | `insert_one(document)` | `insert_one_with(document).sync()` | `InsertOneResult` with `inserted_id: Bson` |
 | Insert many | `insert_many(documents)` | `insert_many_with(documents).sync()` | `InsertManyResult` with `inserted_ids: Vec<Bson>` |
