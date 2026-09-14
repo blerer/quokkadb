@@ -1,6 +1,6 @@
 # Getting Started
 
-Use QuokkaDB to persist your application's data in the same process as your Rust application. In a few steps, you will store a plant and read it back.
+Store a Rust model and read it back.
 
 The common path uses a typed collection. Define a Rust type for your data, derive `QuokkaDocument`, open a directory, and create the collection when it is first written.
 

@@ -1,8 +1,6 @@
 # Concepts
 
-QuokkaDB is an application database. It runs in the same process as your Rust application and stores its data in a directory you choose. Open that directory when the application starts, then work with collections of documents or Rust models.
-
-You do not need to manage a database server. You do need to choose how your application models map to documents, how it creates IDs, and what durability level each write needs.
+QuokkaDB runs in your Rust application's process. This page explains how application models map to documents, how collections create IDs, and which consistency and durability guarantees apply to each write.
 
 ## Documents and typed models
 

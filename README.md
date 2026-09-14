@@ -115,7 +115,7 @@ QuokkaDB is still evolving, and real-world feedback is especially valuable.
 
 If you try it, I’d love to hear what works, what feels awkward, and which workloads matter to you. Bug reports, small fixes, documentation improvements, and larger contributions are all welcome.
 
-<!-- TODO: Add contributing guide link -->
+Read the [Project page](docs/project.md) for stability expectations and contribution guidance.
 
 ## License
 

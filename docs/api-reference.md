@@ -224,7 +224,7 @@ let index_name = plants.create_index(doc! {
 Import options from their public modules:
 
 ```rust
-use quokkadb::options::options::{Options, WalDurability};
+use quokkadb::options::options::{CompressorType, Options, WalDurability};
 use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
 ```
 
@@ -235,11 +235,11 @@ use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
 | Resource and cache limits | `with_file_write_buffer_size`, `with_max_open_files`, `with_block_cache_size`, `with_query_cache_size` |
 | WAL behavior | `with_wal_durability`, `with_wal_bytes_per_sync`, `with_max_manifest_file_size` |
 | Compaction | `with_max_levels`, `with_level0_file_num_compaction_trigger`, `with_max_bytes_for_level_base`, `with_max_bytes_for_level_multiplier`, `with_compaction_threads`, `with_max_target_file_size` |
-| Storage format | `with_block_size`, `with_restart_interval`, `with_bloom_fpr` |
+| Storage format | `with_block_size`, `with_restart_interval`, `with_bloom_fpr`, `with_compressor` |
 
 Each builder has a corresponding accessor without `with_`, such as `block_cache_size()` or `wal_durability()`. `validate()` checks an `Options` value directly; opening a database validates it automatically.
 
-`Options` also exposes `with_compressor` and `compressor_type`, but their `CompressorType` is not currently re-exported through a public module. Downstream applications cannot construct a compressor value through the public API, so use the configured default compressor until that type is exposed.
+`with_compressor(CompressorType::Noop)` disables block compression. `CompressorType::LZ4` is the default for every built-in profile. `compressor_type()` returns the selected compressor.
 
 `StorageQuantity::new(value, unit)` expresses a size. Use `to_bytes()` for bytes and `convert_to(unit)` for a converted, truncated quantity. `StorageUnit` has `Bytes`, `Kibibytes`, `Mebibytes`, and `Gibibytes` variants.
 

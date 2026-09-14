@@ -1,6 +1,6 @@
 # Project
 
-QuokkaDB is an evolving embedded application database for Rust. It aims to let applications persist their models without running separate database infrastructure. This page explains the current stability expectations and how to contribute.
+This page explains QuokkaDB's current stability expectations and how to contribute.
 
 ## Current development stage
 

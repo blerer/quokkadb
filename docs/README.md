@@ -4,14 +4,15 @@ QuokkaDB is an embedded application database for Rust. It stores application mod
 
 Start with the typed API when your data has a Rust type. Use the document API when you need to work with dynamic BSON documents.
 
-## Chapters
+## Start here
 
-1. [Getting Started](getting-started.md) — open a database and persist a model.
-2. [Features](features.md) — see what QuokkaDB supports today.
-3. [Guides](guides.md) — find task-oriented documentation topics.
-4. [Concepts](concepts.md) — understand the ideas behind the API.
-5. [API Reference](api-reference.md) — navigate the public Rust API.
-6. [Operations](operations.md) — run, configure, and observe a database.
-7. [Project](project.md) — contribute to QuokkaDB and understand its current stability expectations.
+- **New to QuokkaDB?** [Getting Started](getting-started.md) — open a database and persist a model.
+- **Evaluating QuokkaDB?** [Features](features.md) — see what QuokkaDB supports today.
+- **Trying to do something?** [Guides](guides.md) — find task-oriented documentation topics.
 
-Each chapter begins with an overview. The listed topics will become focused pages as the documentation grows.
+## Reference and project information
+
+- [Concepts](concepts.md) — understand the ideas behind the API.
+- [API Reference](api-reference.md) — navigate the public Rust API.
+- [Operations](operations.md) — run, configure, and observe a database.
+- [Project](project.md) — contribute to QuokkaDB and understand its current stability expectations.

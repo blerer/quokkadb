@@ -1,7 +1,5 @@
 # Features
 
-QuokkaDB is an embedded application database for Rust. It stores application data in a local directory without a separate database server.
-
 This page shows what QuokkaDB supports today and where current limitations apply.
 
 **Supported** means the capability is directly supported by that API. **Partial** means it has an important semantic or API limitation, stated in the note. **Not supported** means it is unavailable through that API.

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::io::compressor::CompressorType;
+pub use crate::io::compressor::CompressorType;
 use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use std::fmt;
 
