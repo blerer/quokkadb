@@ -54,60 +54,6 @@ fn main() -> Result<()> {
 }
 ```
 
-The `Plant` type is your application model. `QuokkaDocument` makes it usable with a typed collection, while Serde reads and writes its stored form.
-
-`QuokkaDB::open` creates or reopens the database at the path you provide. Reopen the same directory when the application starts again to access its stored data.
-
-Each document has an `_id`. The `#[quokka(id)]` attribute identifies the model field used for it, and `#[serde(rename = "_id")]` stores this example's `id` field under that name. This example provides its own ID.
-
-`create_if_missing` makes the `plants` collection available on its first use. `find_one` returns `Result<Option<Plant>>`: an error if the operation fails, `None` when no plant matches, or the matching plant.
-
-## Generate an ID in your application
-
-`QuokkaId::new()` creates a globally ordered Sonyflake ID. `QuokkaId::default()` creates one too. A `QuokkaId` serializes as a BSON `Int64`, so a Serde-serializable value can use it as an application-generated `_id` with a document collection.
-
-```rust
-use quokkadb::QuokkaId;
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct PlantDocument {
-    #[serde(rename = "_id")]
-    id: QuokkaId,
-    name: String,
-    needs_water: bool,
-}
-
-documents.insert_one(PlantDocument {
-    id: QuokkaId::new(),
-    name: "Monstera".into(),
-    needs_water: true,
-})?;
-```
-
-This generates the ID in your application before insertion. Collection ID strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete `#[quokka(id)]` field; its ID cannot be an `Option`, so every typed model provides an ID before insertion. `QuokkaId` is not yet available as a typed model ID. See [Manage collections](guides/manage-collections.md) for database-generated IDs.
-
-## Use a database from another thread
-
-`QuokkaDB` implements `Clone`. Clones share the same database instance, so a worker can use a clone without opening the database again. The instance stays active while at least one handle remains.
-
-```rust
-let worker_db = db.clone();
-let worker = std::thread::spawn(move || {
-    let plants = worker_db.typed_collection::<Plant>("plants");
-    plants.insert_one(Plant {
-        id: 2,
-        name: "Spider plant".into(),
-        needs_water: false,
-    })
-});
-
-let inserted = worker
-    .join()
-    .expect("worker thread must not panic")?;
-assert_eq!(inserted.inserted_id, 2);
-```
-
 ## Next steps
 
-Use the BSON document API when your application works with dynamic data instead of a fixed Rust type. Continue with the [Guides](guides.md) for common tasks, [Concepts](concepts.md) for the data model and guarantees, or [API Reference](api-reference.md) for the public Rust API.
+Continue with [Manage collections](guides/manage-collections.md) when you need to choose how document IDs are created. Read the [Guides](guides.md) for common tasks, [Concepts](concepts.md) for the data model and guarantees, and [Operations](operations.md) for sharing, running, and observing a database.

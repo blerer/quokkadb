@@ -24,7 +24,32 @@ db.create_collection_with("plants")
 
 `Generated` creates every document ID in the database and rejects a supplied `_id`. `Manual` requires an application-provided ID. `Mixed` accepts a supplied `_id` or generates one when it is missing; it is the default.
 
-These strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete `#[quokka(id)]` field; the ID cannot be an `Option`, so each typed model provides an ID before insertion. `QuokkaId` is not yet available as a typed model ID. See [Getting Started](../getting-started.md#generate-an-id-in-your-application) for application-generated IDs.
+These strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete `#[quokka(id)]` field; the ID cannot be an `Option`, so each typed model provides an ID before insertion.
+
+## Generate a document ID in your application
+
+`QuokkaId::new()` creates a globally ordered Sonyflake ID. `QuokkaId::default()` creates one too. It serializes as a BSON `Int64`, so a Serde-serializable value can use it as an application-generated `_id` with a document collection.
+
+```rust
+use quokkadb::QuokkaId;
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct PlantDocument {
+    #[serde(rename = "_id")]
+    id: QuokkaId,
+    name: String,
+    needs_water: bool,
+}
+
+documents.insert_one(PlantDocument {
+    id: QuokkaId::new(),
+    name: "Monstera".into(),
+    needs_water: true,
+})?;
+```
+
+Use `QuokkaId` when the application must choose an ID before insertion. It is not currently available as a typed model ID. See [Concepts](../concepts.md#ids) for the complete ID model.
 
 ## Inspect and change collections
 
