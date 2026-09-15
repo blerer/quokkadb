@@ -162,7 +162,7 @@ When proposing a structural change, call out future costs explicitly:
 
 ## Documentation
 
-- Read docs/STYLE.md first.
+- Read docs/AGENTS.md first.
 - Preserve QuokkaDB's positioning as an application database:
   no infrastructure, persist application models directly.
 - Write from the user's task outward, not from implementation details outward.

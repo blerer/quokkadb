@@ -44,7 +44,7 @@ Add focused semantic tests close to the code they cover. Use concrete BSON docum
 
 For broad or structural changes, describe the design before implementation. Include the trade-offs, the assumptions it introduces, and the future costs it creates. Preserve existing comments and documentation unless they are incorrect or misleading.
 
-Read the [documentation style guide](STYLE.md) before changing user documentation. The [API Reference](api-reference.md) maps the public API, while the [Guides](guides.md) explain common tasks.
+The [API Reference](api-reference.md) maps the public API, while the [Guides](guides.md) explain common tasks.
 
 ## Report and discuss work
 
