@@ -18,7 +18,7 @@ Applications are built from nested objects, collections, and evolving state. **Q
 - **Single directory** — all database files live in one place.
 - **No setup** — open a path and start storing data.
 - **Flexible schema** — evolve your documents with your application models.
-- **No ORM** — persist nested application models directly.
+- **No mapping layer** — persist nested application models directly.
 - **Small and bounded** — designed for predictable application-level resource usage.
 - **Real database semantics** — durability, indexes, concurrent access, atomic updates, and crash recovery.
 
