@@ -11,6 +11,7 @@ Use these guides after [Getting Started](getting-started.md) to complete common 
 
 - [Indexes](guides/indexes.md) — create indexes for frequent filters and sorts.
 - [Manage collections](guides/manage-collections.md) — create, inspect, rename, and remove collections.
+- [Import and export data](guides/import-export.md) — move a collection through JSONL or CSV files.
 
 ## Configure and protect data
 

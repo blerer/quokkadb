@@ -9,6 +9,7 @@ Start with the typed API when your data has a Rust type. Use the document API wh
 - **New to QuokkaDB?** [Getting Started](getting-started.md) — open a database and persist a model.
 - **Evaluating QuokkaDB?** [Features](features.md) — see what QuokkaDB supports today.
 - **Trying to do something?** [Guides](guides.md) — find task-oriented documentation topics.
+- **Moving collection data?** [Import and export data](guides/import-export.md) — use the CLI with JSONL or CSV files.
 
 ## Reference and project information
 

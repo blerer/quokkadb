@@ -19,6 +19,8 @@ Keep the directory separate from temporary files, build output, and application 
 
 Give the application identity read and write access to the directory, and restrict access from unrelated users and processes. The documented sharing model is cloned `QuokkaDB` handles in one application process. Treat one process as the directory owner.
 
+The `quokka` CLI is a separate process and therefore also needs exclusive ownership. Stop the application before importing from or exporting to its database directory, wait for it to exit, run the CLI command, then restart the application. See [Import and export data](guides/import-export.md) for the CLI workflow.
+
 ## Start, share, and stop the database
 
 Open the same directory whenever the application starts. QuokkaDB recovers stored data during opening, then its collection handles are ready to use.

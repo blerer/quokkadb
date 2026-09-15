@@ -25,13 +25,13 @@ The test suite includes unit tests beside implementation modules, integration te
 Run a focused test while developing a narrow change:
 
 ```sh
-cargo test --test typed_insert
+cargo test -p quokkadb --test typed_insert
 ```
 
 Some storage-layout test helpers require the internal test feature. Use it when a test needs to force a flush or compaction state:
 
 ```sh
-cargo test --features internal-testing
+cargo test -p quokkadb --features internal-testing
 ```
 
 Run `cargo fmt` after changing Rust code. Documentation-only changes do not need Rust formatting. Run the full `cargo test` suite before submitting a change that affects behavior.
