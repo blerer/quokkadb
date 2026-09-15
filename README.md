@@ -6,7 +6,7 @@
 
 **The embedded application database.**
 
-QuokkaDB makes application persistence simple. Store and query your application's models and state without running database infrastructure.
+QuokkaDB is an embedded application database for **Rust**, with Node.js/TypeScript support planned. It lets you persist your application models directly, without running or managing a database server.
 
 ## Persist your models, not your mappings
 

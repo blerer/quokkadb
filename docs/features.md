@@ -25,7 +25,7 @@ See [Find queries](guides/find-queries.md) for typed and BSON examples.
 | Capability | Typed API | Document API | Notes |
 | --- | --- | --- | --- |
 | Include and exclude fields | Supported | Supported | Typed projections use model fields and deserialize into the requested result type. The document API uses BSON projection documents. |
-| Select individual fields | Supported | Partial | Typed `select` returns the chosen typed value or tuple. Document projections return a BSON document. |
+| Select individual fields | Supported | Supported | Typed `select` returns the chosen typed value or tuple. Document projections return a BSON document. |
 | Array `$slice` and projection `$elemMatch` | Not supported | Supported | These projection operators are available only in BSON projection documents. |
 | Positional `$` projection | Not supported | Not supported | Positional projection paths are rejected. |
 
@@ -83,7 +83,6 @@ Read [Concepts](concepts.md) for consistency and durability semantics, and [Oper
 | Aggregation pipelines | There is no `aggregate` API or aggregation pipeline execution. |
 | Backup and restore | No supported backup or restore procedure exists. Copying live individual database files is not a supported backup method. |
 | Upgrade and downgrade procedures | The on-disk format may change before 1.0; no supported migration, upgrade, or downgrade procedure exists. |
-| Multi-process access | A database directory is owned by one process; cross-process coordination is unavailable. |
 | Remote/server access | QuokkaDB runs in the application process and does not provide a database server or network protocol. |
 | Change streams | There is no change-stream or watch API. |
 
