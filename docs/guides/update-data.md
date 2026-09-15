@@ -37,6 +37,17 @@ plants.update_many(
 )?;
 ```
 
+Use `Filter::all()` when the update should apply to every model in the collection.
+
+```rust
+use quokkadb::Filter;
+
+plants.update_many(
+    |_| Filter::all(),
+    |plant| plant.needs_water.set(false),
+)?;
+```
+
 ## Change arrays
 
 Array methods use the same names you will see in the API: `add_to_set` adds a value only when it is absent, `push` appends, and `pull` removes matching values.

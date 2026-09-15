@@ -93,6 +93,7 @@ let index_name = plants.create_index(|plant| {
 | Method | Returns | Purpose |
 | --- | --- | --- |
 | `find(filter)` | `TypedFind<T>` | Builds a query for all matching models. |
+| `find_all()` | `TypedFind<T>` | Builds a collection scan over every model. |
 | `find_one(filter)` | `Result<Option<T>>` | Returns at most one matching model. |
 | `find_one_with(filter)` | `TypedFindOne<T>` | Builds a one-model query with options. |
 
@@ -165,7 +166,7 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 
 Typed filters and updates follow BSON comparison behavior. See [Find queries](guides/find-queries.md) and [Update data](guides/update-data.md) for task-oriented examples.
 
-`Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
+`Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 
 The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; add `NumericValue` when it supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
 

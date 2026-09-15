@@ -16,6 +16,15 @@ let plant = plants
     .expect("a tall thirsty plant exists");
 ```
 
+Use `find_all` when every model in the collection is needed. It returns the usual query builder, so you can still sort, project, and paginate the scan.
+
+```rust
+let plants = plants
+    .find_all()
+    .sort(|plant| plant.id.asc())
+    .execute_collect()?;
+```
+
 Scalar fields provide `eq`, `ne`, `gt`, `gte`, `lt`, and `lte`. Use `in_values` and `nin` when a value must match or exclude a set.
 
 ```rust

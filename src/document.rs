@@ -1235,6 +1235,11 @@ pub struct Filter<D> {
 }
 
 impl<D> Filter<D> {
+    /// Builds a filter that matches every document.
+    pub fn all() -> Self {
+        Self::from_expr(Arc::new(Expr::AlwaysTrue))
+    }
+
     pub fn raw(raw: Document) -> Result<Self> {
         Ok(Self {
             expr: parser::parse_conditions(&raw)?,

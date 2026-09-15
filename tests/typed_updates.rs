@@ -1,7 +1,7 @@
 mod common;
 
 use quokkadb::collection::ReturnDocument;
-use quokkadb::{PushOptions, QuokkaDB, QuokkaDocument, QuokkaType};
+use quokkadb::{Filter, PushOptions, QuokkaDB, QuokkaDocument, QuokkaType};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -154,6 +154,28 @@ fn typed_update_many_and_upsert_report_write_results() {
             age: 25,
             active: true,
         }
+    );
+}
+
+#[test]
+fn typed_filter_all_updates_every_document() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let result = collection
+        .update_many(|_| Filter::all(), |user| user.active.set(false))
+        .unwrap();
+
+    assert_eq!(result.matched_count, 3);
+    assert_eq!(result.modified_count, 3);
+    assert_eq!(
+        collection
+            .find_all()
+            .sort(|user| user.id.asc())
+            .select(|user| user.active)
+            .execute_collect()
+            .unwrap(),
+        vec![false, false, false]
     );
 }
 

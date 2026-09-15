@@ -1301,6 +1301,11 @@ impl<T: QuokkaDocument> TypedCollection<T> {
         TypedFind::new(&self.state, filter(&T::root_fields()))
     }
 
+    /// Creates a query that scans every typed document in the collection.
+    pub fn find_all(&self) -> TypedFind<'_, T> {
+        TypedFind::new(&self.state, Filter::all())
+    }
+
     /// Finds one typed document matching the filter closure.
     pub fn find_one(&self, filter: impl FnOnce(&T::Fields<T>) -> Filter<T>) -> Result<Option<T>> {
         self.find_one_with(filter).execute()

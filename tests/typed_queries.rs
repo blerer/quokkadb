@@ -152,6 +152,68 @@ fn typed_find_execute_collect_collects_models() {
 }
 
 #[test]
+fn typed_find_all_scans_every_document() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let names = collection
+        .find_all()
+        .sort(|user| user.id.asc())
+        .select(|user| user.name)
+        .execute_collect()
+        .unwrap();
+
+    assert_eq!(names, vec!["Alice", "Bob", "Cara"]);
+}
+
+#[test]
+fn typed_find_all_returns_only_target_collection_documents() {
+    let (_dir, db) = setup();
+    let other_collection = db
+        .typed_collection::<User>("other_users")
+        .create_if_missing();
+    other_collection
+        .insert_one(User {
+            id: 4,
+            name: "Dora".to_string(),
+            age: 25,
+            active: true,
+        })
+        .unwrap();
+
+    let users = db
+        .typed_collection::<User>("users")
+        .find_all()
+        .sort(|user| user.id.asc())
+        .execute_collect()
+        .unwrap();
+
+    assert_eq!(
+        users,
+        vec![
+            User {
+                id: 1,
+                name: "Alice".to_string(),
+                age: 30,
+                active: true,
+            },
+            User {
+                id: 2,
+                name: "Bob".to_string(),
+                age: 40,
+                active: true,
+            },
+            User {
+                id: 3,
+                name: "Cara".to_string(),
+                age: 20,
+                active: false,
+            },
+        ]
+    );
+}
+
+#[test]
 fn typed_find_supports_and_not_nor_and_nested_logical_filters() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users");
