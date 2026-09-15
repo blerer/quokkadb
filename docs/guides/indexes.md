@@ -4,6 +4,8 @@ Create an index for a filter or sort that occurs often enough to justify extra w
 
 The range example extends the `Plant` model from [Getting Started](../getting-started.md) with `height_cm: i32`.
 
+Related: [Find queries](find-queries.md) · [Features — Indexes](../features.md#indexes).
+
 ## Create an index for a query pattern
 
 Suppose a screen finds thirsty plants and orders them by name. Create the compound index in that field order.
@@ -87,3 +89,9 @@ Every index adds write work and occupies storage. Do not index every field. Add 
 QuokkaDB supports ordered ascending, descending, and compound indexes. An indexed path cannot include an array element, so multikey and array-path indexes are not available.
 
 Unique, sparse, partial, text, geospatial, wildcard, and TTL indexes are not available. Read [Features](../features.md#indexes) for the complete support matrix.
+
+## Next
+
+- [Find queries](find-queries.md)
+- [Operations](../operations.md)
+- [API Reference](../api-reference.md)

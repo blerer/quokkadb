@@ -4,6 +4,8 @@ Use an update when you want to change selected fields without replacing the rest
 
 The examples extend `Plant` with `height_cm: i32`, `last_watered: Option<bson::DateTime>`, and `tags: Vec<String>`.
 
+Related: [Find queries](find-queries.md) · [Features — Update operators](../features.md#update-operators).
+
 ## Make normal typed updates
 
 Pass one closure to choose models and another to describe the change. Update expressions use `and` to combine changes into one operation.
@@ -116,3 +118,9 @@ documents.update_one(
 ```
 
 The first-match positional `$` operator and aggregation-style update pipelines are not available. Read [Features](../features.md#update-operators) for the complete update support matrix.
+
+## Next
+
+- [Find queries](find-queries.md)
+- [Durable writes](durable-writes.md)
+- [API Reference](../api-reference.md)

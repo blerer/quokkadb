@@ -4,6 +4,8 @@ Use `find` when you need several matching models and `find_one` when you need at
 
 The examples extend `Plant` with `height_cm: i32`, `location` with a `room` field, `tags: Vec<String>`, and `care: BTreeMap<String, String>`.
 
+Related: [Features — Querying](../features.md#querying) · [Indexes](indexes.md).
+
 ## Find matching models
 
 Build a filter from typed fields, then execute the query. `find_one` returns `Result<Option<Plant>>`, so `None` means that no model matched.
@@ -126,4 +128,10 @@ let candidates = documents
     .execute()?;
 ```
 
-Read [Features](../features.md#querying) for the complete support matrix, including unavailable query families such as `$regex`, text, geospatial, `$expr`, and `$where`. Continue with [Indexes](indexes.md) when a filter or sort becomes a frequent part of your application.
+Read [Features](../features.md#querying) for the complete support matrix, including unavailable query families such as `$regex`, text, geospatial, `$expr`, and `$where`.
+
+## Next
+
+- [Update data](update-data.md)
+- [Indexes](indexes.md)
+- [API Reference](../api-reference.md)

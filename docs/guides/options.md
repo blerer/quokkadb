@@ -2,6 +2,8 @@
 
 Choose database options when you open QuokkaDB. Start with the default configuration unless you have a clear workload requirement, then select a profile or change the settings that address that requirement.
 
+Related: [Operations](../operations.md) · [Durable writes](durable-writes.md) · [API Reference — Configuration](../api-reference.md#configuration).
+
 ## Open with options
 
 Use `open_with_options` to choose a profile and override a focused setting.
@@ -39,4 +41,8 @@ Use [Durable writes](durable-writes.md) to synchronize one write without changin
 
 The option builders cover cache and resource limits, write-ahead-log behavior, compaction capacity, and storage-format settings. Cache sizes, `max_open_files`, and `compaction_threads` are common resource controls. The [API Reference](../api-reference.md) lists every builder and its validation rules.
 
-Read [Operations](../operations.md) for database-directory management, metrics, and workload-oriented tuning guidance.
+## Next
+
+- [Durable writes](durable-writes.md)
+- [Operations](../operations.md)
+- [API Reference](../api-reference.md)

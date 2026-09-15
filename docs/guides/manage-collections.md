@@ -2,6 +2,8 @@
 
 A collection is a named group of models or documents. Use a typed collection when the collection has one Rust model type, or a document collection for dynamic BSON data.
 
+Related: [Concepts — Collections](../concepts.md#collections) · [API Reference — Collection lifecycle and indexes](../api-reference.md#collection-lifecycle-and-indexes).
+
 ## Create a collection when it is first used
 
 Collection handles are strict by default: an operation on a missing collection returns an error. Call `create_if_missing` when a collection should be created by its first write. Queries through that handle return no results while the collection is still missing.
@@ -65,3 +67,9 @@ houseplants.drop_collection()?;
 `estimated_document_count` uses storage count statistics and is useful when an exact query count is not required.
 
 The document API follows the same lifecycle methods after calling `db.collection("plants")`.
+
+## Next
+
+- [Getting Started](../getting-started.md)
+- [Find queries](find-queries.md)
+- [API Reference](../api-reference.md)

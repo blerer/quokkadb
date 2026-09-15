@@ -43,6 +43,12 @@ Emphasize embedded operation, typed models, document queries and updates, indexe
 
 Link to the authoritative page instead of repeating its content. Add contextual links when readers are likely to need a related capability, concept, or constraint.
 
+## Navigation and cross-links
+
+- Add a short `Related:` line near the top of a task page when it helps readers find a closely connected capability or concept.
+- End every guide with a `## Next` section containing two or three relevant pages.
+- Link to an explanation where the concept matters instead of repeating it. For example, link atomic-write behavior to Concepts and database-level WAL durability to Operations.
+
 ## Terminology
 
 Use these terms consistently: **application database**, **embedded**, **model** or **Rust type**, **document**, **typed API**, **document API**, and **collection**.
