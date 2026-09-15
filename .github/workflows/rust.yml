@@ -16,7 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v5
+    - name: Install Rust 1.95.0
+      uses: dtolnay/rust-toolchain@1.95.0
+      with:
+        components: rust-src
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --locked --verbose
