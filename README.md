@@ -102,6 +102,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+## When to use QuokkaDB
+
+Choose QuokkaDB when you need **local application persistence without database infrastructure**.
+
+* Persist and query your models directly.
+* No database server to deploy or operate.
+* Flexible nested data without mapping it to tables.
+* Built for desktop apps, developer tools, agents, edge applications, and local services.
+
+For shared, multi-node database workloads, use a server database.
 
 ## Documentation
 
