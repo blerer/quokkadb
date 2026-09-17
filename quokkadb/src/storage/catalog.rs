@@ -129,7 +129,7 @@ impl Catalog {
             id: col.id,
             name: col.name.clone(),
             created_at: col.created_at,
-            version: dropped_at,
+            version: col.next_version(),
             dropped_at: Some(dropped_at),
             indexes: col.indexes.clone(),
             index_id_by_name: col.index_id_by_name.clone(),
@@ -410,8 +410,8 @@ pub struct CollectionMetadata {
     pub name: String,
     /// Timestamp when the collection was created.
     pub created_at: u64,
-    /// Sequence number of the latest collection or index lifecycle change.
-    pub version: u64,
+    /// Monotonically increasing version for collection metadata changes.
+    pub version: u32,
     /// Timestamp when the collection was dropped (if applicable).
     pub dropped_at: Option<u64>,
     /// Mapping from index id to its metadata.
@@ -429,7 +429,7 @@ impl CollectionMetadata {
             id,
             name: name.to_string(),
             created_at,
-            version: created_at,
+            version: 1,
             dropped_at: None,
             indexes: BTreeMap::new(),
             index_id_by_name: HashMap::new(),
@@ -481,6 +481,12 @@ impl CollectionMetadata {
             .find(|index| index.is_equivalent_to(&definition, &options))
     }
 
+    fn next_version(&self) -> u32 {
+        self.version
+            .checked_add(1)
+            .expect("Collection metadata version must not overflow")
+    }
+
     fn add_index(&self, index: IndexMetadata) -> CollectionMetadata {
         assert_eq!(self.dropped_at, None);
         assert_eq!(self.next_index_id, index.id);
@@ -489,7 +495,6 @@ impl CollectionMetadata {
         let mut index_id_by_name = self.index_id_by_name.clone();
         let index_id = index.id;
         let index_name = index.name();
-        let version = index.created_at;
         indexes.insert(index_id, Arc::new(index));
         index_id_by_name.insert(index_name, index_id);
         CollectionMetadata {
@@ -497,7 +502,7 @@ impl CollectionMetadata {
             id: self.id,
             name: self.name.clone(),
             created_at: self.created_at,
-            version,
+            version: self.next_version(),
             dropped_at: self.dropped_at,
             indexes,
             index_id_by_name,
@@ -528,7 +533,7 @@ impl CollectionMetadata {
             id: self.id,
             name: self.name.clone(),
             created_at: self.created_at,
-            version: dropped_at,
+            version: self.next_version(),
             dropped_at: self.dropped_at,
             indexes,
             index_id_by_name: id_by_name,
@@ -555,7 +560,7 @@ impl CollectionMetadata {
             id: self.id,
             name: self.name.clone(),
             created_at: self.created_at,
-            version: self.version,
+            version: self.next_version(),
             dropped_at: self.dropped_at,
             indexes,
             index_id_by_name: self.index_id_by_name.clone(),
@@ -580,6 +585,7 @@ impl Serializable for CollectionMetadata {
         let id = reader.read_varint_u64()? as u32;
         let name = reader.read_str()?.to_string();
         let created_at = reader.read_varint_u64()?;
+        let version = reader.read_varint_u32()?;
         let dropped_at = if reader.read_u8()? == 1 {
             Some(reader.read_varint_u64()?)
         } else {
@@ -599,13 +605,6 @@ impl Serializable for CollectionMetadata {
             indexes.insert(index_id, index);
         }
         let options = CollectionOptions::read_from(reader)?;
-        let version = indexes
-            .values()
-            .fold(dropped_at.unwrap_or(created_at), |version, index| {
-                version
-                    .max(index.created_at)
-                    .max(index.dropped_at.unwrap_or_default())
-            });
 
         Ok(CollectionMetadata {
             next_index_id,
@@ -625,6 +624,7 @@ impl Serializable for CollectionMetadata {
         writer.write_varint_u32(self.id);
         writer.write_str(&self.name);
         writer.write_varint_u64(self.created_at);
+        writer.write_varint_u32(self.version);
         match self.dropped_at {
             Some(ts) => {
                 writer.write_u8(1);
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn test_collections_metadata_serialization() {
         let metadata = create_collections_with_indexes();
-        assert_eq!(metadata.version, 1627846263);
+        assert_eq!(metadata.version, 3);
         check_serialization_round_trip(metadata);
     }
 
@@ -1174,20 +1174,26 @@ mod tests {
     }
 
     #[test]
-    fn test_collection_version_tracks_index_and_collection_lifecycle_changes() {
+    fn test_collection_version_tracks_metadata_changes() {
         let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
         let catalog = Catalog::new().add_collection("users", 10, 100);
-        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 100);
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 1);
+
+        let catalog = catalog.rename_collection(10, "people");
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 1);
 
         let catalog =
             catalog.add_index_to_collection(10, 1, &definition, &IndexOptions::default(), 200);
-        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 200);
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 2);
+
+        let catalog = catalog.mark_index_queryable(10, 1, 200);
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 3);
 
         let catalog = catalog.drop_index(10, 1, 300);
-        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 300);
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 4);
 
         let catalog = catalog.drop_collection(10, 400);
-        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 400);
+        assert_eq!(catalog.get_collection_by_id(&10).unwrap().version, 5);
     }
 
     #[test]
