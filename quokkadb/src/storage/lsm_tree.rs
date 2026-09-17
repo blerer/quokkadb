@@ -24,6 +24,8 @@ use std::sync::Arc;
 /// and immutable memtables waiting to be flushed to disk.
 pub struct LsmTree {
     pub manifest: Arc<ManifestState>,
+    /// The durable catalog overlaid with pending schema edits.
+    catalog: Arc<Catalog>,
     pub memtable: Arc<Memtable>,
     pub imm_memtables: Arc<VecDeque<Arc<Memtable>>>,
 }
@@ -41,6 +43,7 @@ impl LsmTree {
                 next_file_number,
                 max_levels,
             )),
+            catalog: Arc::new(Catalog::new()),
             memtable: Arc::new(Memtable::new(current_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
@@ -49,14 +52,28 @@ impl LsmTree {
     pub fn from(manifest_state: ManifestState) -> Self {
         let oldest_log_number = manifest_state.lsm.oldest_log_number;
         let next_seq = manifest_state.lsm.last_sequence_number + 1;
+        let catalog = manifest_state.visible_catalog();
         LsmTree {
             manifest: Arc::new(manifest_state),
+            catalog,
             memtable: Arc::new(Memtable::new(oldest_log_number, next_seq)),
             imm_memtables: Arc::new(VecDeque::new()),
         }
     }
 
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
+        let manifest = Arc::new(self.manifest.apply(edit));
+        let catalog = match edit {
+            ManifestEdit::CreateCollection { .. }
+            | ManifestEdit::DropCollection { .. }
+            | ManifestEdit::RenameCollection { .. }
+            | ManifestEdit::CreateIndex { .. }
+            | ManifestEdit::DropIndex { .. }
+            | ManifestEdit::Flush { .. }
+            | ManifestEdit::DiscardPendingCatalogEditsAfter { .. }
+            | ManifestEdit::Snapshot(_) => manifest.visible_catalog(),
+            _ => self.catalog.clone(),
+        };
         match edit {
             ManifestEdit::WalRotation {
                 log_number,
@@ -70,7 +87,8 @@ impl LsmTree {
                 imm_memtables.push_back(self.memtable.clone());
 
                 LsmTree {
-                    manifest: Arc::new(self.manifest.apply(edit)),
+                    manifest,
+                    catalog,
                     memtable: Arc::new(Memtable::new(*log_number, *next_seq)),
                     imm_memtables: Arc::new(imm_memtables),
                 }
@@ -85,7 +103,8 @@ impl LsmTree {
                 let _flushed = imm_memtables.pop_front();
 
                 LsmTree {
-                    manifest: Arc::new(self.manifest.apply(edit)),
+                    manifest,
+                    catalog,
                     memtable: self.memtable.clone(),
                     imm_memtables: Arc::new(imm_memtables),
                 }
@@ -98,13 +117,15 @@ impl LsmTree {
                 let _ignored = imm_memtables.pop_front();
 
                 LsmTree {
-                    manifest: Arc::new(self.manifest.apply(edit)),
+                    manifest,
+                    catalog,
                     memtable: self.memtable.clone(),
                     imm_memtables: Arc::new(imm_memtables),
                 }
             }
             _ => LsmTree {
-                manifest: Arc::new(self.manifest.apply(edit)),
+                manifest,
+                catalog,
                 memtable: self.memtable.clone(),
                 imm_memtables: self.imm_memtables.clone(),
             },
@@ -300,8 +321,7 @@ impl LsmTree {
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
-        let self1 = &self.manifest;
-        self1.catalog.clone()
+        self.catalog.clone()
     }
 
     pub fn levels(&self) -> Arc<Levels> {
@@ -342,18 +362,16 @@ impl LsmTree {
 mod tests {
     use super::*;
     use crate::storage::count_stats::{CountStats, CountStatsKey};
-    use crate::storage::lsm_version::LsmVersion;
     use crate::storage::manifest_state::ManifestState;
     use crate::storage::write_batch::WriteBatch;
     use std::collections::BTreeMap;
 
     #[test]
     fn count_stat_aggregates_manifest_active_and_immutable_memtables() {
-        let tree = LsmTree::from(ManifestState {
-            lsm: Arc::new(LsmVersion::new(1, 10, 4)),
-            catalog: Arc::new(Catalog::new()),
-            count_stats: CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 5)])),
-        });
+        let mut manifest_state = ManifestState::new(1, 10, 4);
+        manifest_state.count_stats =
+            CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 5)]));
+        let tree = LsmTree::from(manifest_state);
 
         tree.memtable.write(
             1,

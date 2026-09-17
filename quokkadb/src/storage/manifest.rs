@@ -465,7 +465,7 @@ mod tests {
         let snapshot_edit = ManifestEdit::Snapshot(snapshot.clone());
 
         let options = Options::default()
-            .with_max_manifest_file_size(StorageQuantity::new(4130, StorageUnit::Bytes));
+            .with_max_manifest_file_size(StorageQuantity::new(4131, StorageUnit::Bytes));
         let mut manifest = Manifest::new(
             &mut MetricRegistry::default(),
             &options,

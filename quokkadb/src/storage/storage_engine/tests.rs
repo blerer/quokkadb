@@ -1919,6 +1919,18 @@ fn test_wal_replay_with_header_corruption() {
             .is_none()
     );
 
+    // The pending collection creation was discarded with the corrupt WAL tail.
+    assert!(
+        engine_restarted
+            .catalog()
+            .get_collection_by_id(&col)
+            .is_none()
+    );
+    let recovered_col = engine_restarted
+        .create_collection("test_wal_replay_with_header_corruption", true)
+        .unwrap();
+    assert_eq!(recovered_col, col);
+
     // The database should be usable.
     engine_restarted
         .write(write_batch(vec![put_op(col, 2, 1)]), false)
@@ -2349,6 +2361,47 @@ fn test_create_collection() {
 }
 
 #[test]
+fn test_explicit_flush_does_not_commit_pending_catalog_edits_without_data() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let options = Arc::new(Options::lightweight());
+
+    let engine =
+        StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+    let collection_id = engine
+        .create_collection("pending_collection", true)
+        .unwrap();
+
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_id(&collection_id)
+            .is_some()
+    );
+    assert!(
+        engine
+            .lsm_tree()
+            .manifest
+            .catalog
+            .get_collection_by_id(&collection_id)
+            .is_none()
+    );
+    assert!(engine.lsm_tree().manifest.has_pending_catalog_edits());
+
+    engine.flush().unwrap();
+
+    assert!(
+        engine
+            .lsm_tree()
+            .manifest
+            .catalog
+            .get_collection_by_id(&collection_id)
+            .is_none()
+    );
+    assert!(engine.lsm_tree().manifest.has_pending_catalog_edits());
+}
+
+#[test]
 fn test_create_collection_already_exists() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
@@ -2589,9 +2642,20 @@ fn test_drop_index() {
         .unwrap();
     assert!(collection.get_index_by_name(&created_index.name).is_none());
 
-    let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
-    assert_eq!(pending_drops.len(), 1);
-    let drop_metadata = &pending_drops[0];
+    assert!(
+        engine
+            .lsm_tree()
+            .get_drops_before_or_at(u64::MAX)
+            .is_empty()
+    );
+    engine
+        .write(write_batch(vec![put_op(collection_id, 1, 1)]), false)
+        .unwrap();
+    engine.flush().unwrap();
+
+    let drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+    assert_eq!(drops.len(), 1);
+    let drop_metadata = &drops[0];
     assert_eq!(drop_metadata.collection, collection_id);
     assert_eq!(drop_metadata.kind, DropKind::Index(index_id));
     assert_eq!(drop_metadata.drop_sequence_number, drop_seq);
@@ -2782,11 +2846,26 @@ fn test_drop_collection() {
     let catalog = engine.catalog();
     assert!(catalog.get_collection_by_name("test_collection").is_none());
 
-    // Verify DropMetadata is registered in pending_drops
+    // The drop only becomes eligible for physical cleanup after a flush.
+    assert!(
+        engine
+            .lsm_tree()
+            .get_drops_before_or_at(u64::MAX)
+            .is_empty()
+    );
+    let flush_marker_id = engine
+        .create_collection_with_options("flush_marker", CollectionOptions::default(), false)
+        .unwrap();
+    engine
+        .write(write_batch(vec![put_op(flush_marker_id, 1, 1)]), false)
+        .unwrap();
+    engine.flush().unwrap();
+
+    // Verify DropMetadata is registered in drops
     let lsm_tree = engine.lsm_tree();
-    let pending_drops = lsm_tree.get_drops_before_or_at(u64::MAX);
-    assert_eq!(pending_drops.len(), 1);
-    let drop_metadata = &pending_drops[0];
+    let drops = lsm_tree.get_drops_before_or_at(u64::MAX);
+    assert_eq!(drops.len(), 1);
+    let drop_metadata = &drops[0];
     assert_eq!(drop_metadata.collection, col_id);
     assert_eq!(drop_metadata.kind, DropKind::Collection);
     assert_eq!(drop_metadata.drop_sequence_number, drop_seq);
@@ -2935,11 +3014,18 @@ fn test_drop_collection_persistence_across_restart() {
         let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
         engine.drop_collection("to_drop").unwrap();
 
-        // Verify DropMetadata is registered before shutdown
-        let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
-        assert_eq!(pending_drops.len(), 1);
-        assert_eq!(pending_drops[0].collection, col_id);
-        assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
+        let keep_id = engine
+            .catalog()
+            .get_collection_by_name("to_keep")
+            .unwrap()
+            .id;
+        engine
+            .write(write_batch(vec![put_op(keep_id, 1, 1)]), false)
+            .unwrap();
+
+        // The drop is visible but not eligible for physical cleanup yet.
+        let drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+        assert!(drops.is_empty());
 
         engine.shutdown().unwrap();
 
@@ -2956,10 +3042,10 @@ fn test_drop_collection_persistence_across_restart() {
         assert!(catalog.get_collection_by_name("to_keep").is_some());
 
         // Verify DropMetadata persisted across restart
-        let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
-        assert_eq!(pending_drops.len(), 1);
-        assert_eq!(pending_drops[0].collection, col_id);
-        assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
+        let drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].collection, col_id);
+        assert_eq!(drops[0].drop_sequence_number, drop_seq);
 
         // Writing to dropped collection should fail
         let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]), false);
@@ -3126,11 +3212,26 @@ fn test_drop_and_recreate_collection_with_flush() {
     let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
     engine.drop_collection("test_collection").unwrap();
 
+    // The drop only becomes eligible for physical cleanup after a flush.
+    assert!(
+        engine
+            .lsm_tree()
+            .get_drops_before_or_at(u64::MAX)
+            .is_empty()
+    );
+    let flush_marker_id = engine
+        .create_collection_with_options("flush_marker", CollectionOptions::default(), false)
+        .unwrap();
+    engine
+        .write(write_batch(vec![put_op(flush_marker_id, 1, 1)]), false)
+        .unwrap();
+    engine.flush().unwrap();
+
     // Verify DropMetadata is registered
-    let pending_drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
-    assert_eq!(pending_drops.len(), 1);
-    assert_eq!(pending_drops[0].collection, col_id_1);
-    assert_eq!(pending_drops[0].drop_sequence_number, drop_seq);
+    let drops = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+    assert_eq!(drops.len(), 1);
+    assert_eq!(drops[0].collection, col_id_1);
+    assert_eq!(drops[0].drop_sequence_number, drop_seq);
 
     // Recreate the collection
     let options = CollectionOptions::default();
@@ -3168,15 +3269,10 @@ fn test_drop_and_recreate_collection_with_flush() {
         .unwrap();
     engine.flush().unwrap();
 
-    // After flush, DropMetadata should be removed since the SSTable max_seq > drop_seq
-    // The flush creates an SSTable with sequence numbers up to the current sequence,
-    // which is after the drop_seq, so the drop should be cleared from pending_drops
-    let pending_drops_after_flush = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
-    assert!(
-        pending_drops_after_flush.is_empty(),
-        "Expected pending_drops to be empty after flush, got {:?}",
-        pending_drops_after_flush
-    );
+    // The drop remains attached to L0 until a compaction carries or applies it.
+    let drops_after_flush = engine.lsm_tree().get_drops_before_or_at(u64::MAX);
+    assert_eq!(drops_after_flush.len(), 1);
+    assert_eq!(drops_after_flush[0].collection, col_id_1);
 
     // New data should be visible
     let user_key1 = &user_key(1);
@@ -3400,6 +3496,9 @@ fn test_rename_collection_persistence() {
             .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
             .unwrap();
         engine.rename_collection("original", "renamed").unwrap();
+        engine
+            .write(write_batch(vec![put_op(col_id, 2, 200)]), false)
+            .unwrap();
         engine.shutdown().unwrap();
     }
 

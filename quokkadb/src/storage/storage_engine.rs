@@ -287,6 +287,17 @@ impl StorageEngine {
                 wal
             };
 
+            if lsm_tree
+                .manifest
+                .has_pending_catalog_edits_after(last_seq_nbr)
+            {
+                let edit = ManifestEdit::DiscardPendingCatalogEditsAfter {
+                    sequence: last_seq_nbr,
+                };
+                lsm_tree = lsm_tree.apply(&edit);
+                manifest.append_edit(&edit)?;
+            }
+
             // Delete SST files that are on disk but not referenced by the manifest.
             // These are leftovers from a compaction that was interrupted before the
             // old input files could be deleted.
@@ -566,6 +577,7 @@ impl StorageEngine {
         let edit = ManifestEdit::RenameCollection {
             id,
             new_name: new_name.to_string(),
+            renamed_at: self.next_seq_number.load(Ordering::Relaxed),
         };
 
         wal_and_manifest.wal.sync()?;

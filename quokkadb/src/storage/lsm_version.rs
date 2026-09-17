@@ -33,8 +33,6 @@ pub struct LsmVersion {
     pub last_sequence_number: u64,
     /// The SSTables per levels
     pub sst_levels: Arc<Levels>,
-    /// The metadata of the drops associated to the unflushed data
-    pub pending_drops: Vec<Arc<DropMetadata>>,
 }
 
 impl LsmVersion {
@@ -45,7 +43,6 @@ impl LsmVersion {
             next_file_number,
             last_sequence_number: 0,
             sst_levels: Arc::new(Levels::new(max_levels)),
-            pending_drops: Vec::with_capacity(0),
         }
     }
 
@@ -61,7 +58,6 @@ impl LsmVersion {
             last_sequence_number: self.last_sequence_number,
             next_file_number,
             sst_levels: self.sst_levels.clone(),
-            pending_drops: self.pending_drops.clone(),
         }
     }
 
@@ -69,20 +65,14 @@ impl LsmVersion {
         &self,
         oldest_log_number: u64,
         sst: &Arc<SSTableMetadata>,
+        drops: impl IntoIterator<Item = Arc<DropMetadata>>,
     ) -> LsmVersion {
-        let (pending_drops, drops): (Vec<_>, Vec<_>) = self
-            .pending_drops
-            .iter()
-            .cloned()
-            .partition(|drop| drop.drop_sequence_number > sst.max_sequence_number);
-
         LsmVersion {
             current_log_number: self.current_log_number,
             oldest_log_number,
             last_sequence_number: sst.max_sequence_number,
             next_file_number: self.next_file_number,
             sst_levels: Arc::new(self.sst_levels.add(0, once(sst.clone()), drops)),
-            pending_drops,
         }
     }
 
@@ -93,7 +83,6 @@ impl LsmVersion {
             last_sequence_number: self.last_sequence_number,
             next_file_number: self.next_file_number,
             sst_levels: self.sst_levels.clone(),
-            pending_drops: self.pending_drops.clone(),
         }
     }
 
@@ -107,7 +96,6 @@ impl LsmVersion {
             last_sequence_number: self.last_sequence_number,
             next_file_number: manifest_number + 1,
             sst_levels: self.sst_levels.clone(),
-            pending_drops: self.pending_drops.clone(),
         }
     }
 
@@ -118,7 +106,6 @@ impl LsmVersion {
             last_sequence_number: self.last_sequence_number,
             next_file_number,
             sst_levels: self.sst_levels.clone(),
-            pending_drops: self.pending_drops.clone(),
         }
     }
 
@@ -160,44 +147,19 @@ impl LsmVersion {
             last_sequence_number: self.last_sequence_number,
             next_file_number,
             sst_levels,
-            pending_drops: self.pending_drops.clone(),
-        }
-    }
-
-    pub fn add_collection_drop(&self, collection: u32, sequence_number: u64) -> LsmVersion {
-        let drop = DropMetadata::new_collection_drop(collection, sequence_number);
-        self.add_drop(drop)
-    }
-
-    pub fn add_index_drop(&self, collection: u32, index: u32, sequence_number: u64) -> LsmVersion {
-        let drop = DropMetadata::new_index_drop(collection, index, sequence_number);
-        self.add_drop(drop)
-    }
-
-    fn add_drop(&self, drop: Arc<DropMetadata>) -> LsmVersion {
-        let mut copy = self.pending_drops.iter().cloned().collect::<Vec<_>>();
-        copy.push(drop.clone());
-        LsmVersion {
-            current_log_number: self.current_log_number,
-            oldest_log_number: self.oldest_log_number,
-            last_sequence_number: self.last_sequence_number,
-            next_file_number: self.next_file_number,
-            sst_levels: self.sst_levels.clone(),
-            pending_drops: copy,
         }
     }
 
     /// Returns the drops with a drop_sequence_number smaller or equal to the given sequence_number.
     #[cfg(test)]
     pub fn get_drops_before_or_at(&self, sequence_number: u64) -> Vec<Arc<DropMetadata>> {
-        let mut result = Vec::new();
-        for drop in &self.pending_drops {
-            if drop.drop_sequence_number > sequence_number {
-                break;
-            }
-            result.push(drop.clone());
-        }
-        result
+        self.sst_levels
+            .levels
+            .iter()
+            .flat_map(|level| level.drops().iter())
+            .filter(|drop| drop.drop_sequence_number <= sequence_number)
+            .cloned()
+            .collect()
     }
 
     pub fn find_sstables<'a>(
@@ -227,15 +189,12 @@ impl Serializable for LsmVersion {
         let next_file_number = reader.read_varint_u64()?;
         let last_sequence_number = reader.read_varint_u64()?;
         let sst_levels = Arc::new(Levels::read_from(reader)?);
-        let pending_drops = Vec::<Arc<DropMetadata>>::read_from(reader)?;
-
         Ok(LsmVersion {
             current_log_number,
             oldest_log_number,
             next_file_number,
             last_sequence_number,
             sst_levels,
-            pending_drops,
         })
     }
 
@@ -245,7 +204,6 @@ impl Serializable for LsmVersion {
         writer.write_varint_u64(self.next_file_number);
         writer.write_varint_u64(self.last_sequence_number);
         self.sst_levels.write_to(writer);
-        self.pending_drops.write_to(writer);
     }
 }
 
@@ -1454,173 +1412,6 @@ mod tests {
         check_serialization_round_trip(create_lsm_version());
     }
 
-    #[test]
-    fn test_lsm_version_serialization_with_pending_drops() {
-        let mut version = LsmVersion::new(456, 1024, 2);
-        let levels = create_levels();
-        version.sst_levels = Arc::new(levels);
-
-        // Add some pending drops
-        version = version.add_collection_drop(10, 150);
-        version = version.add_collection_drop(20, 250);
-        version = version.add_collection_drop(30, 350);
-
-        assert_eq!(version.pending_drops.len(), 3);
-
-        check_serialization_round_trip(version);
-    }
-
-    #[test]
-    fn test_lsm_version_serialization_without_pending_drops() {
-        let version = LsmVersion::new(123, 456, 3);
-        assert!(version.pending_drops.is_empty());
-        check_serialization_round_trip(version);
-    }
-
-    #[test]
-    fn test_get_drops_before_or_at_empty() {
-        let version = LsmVersion::new(1, 10, 2);
-        let drops = version.get_drops_before_or_at(100);
-        assert!(drops.is_empty());
-    }
-
-    #[test]
-    fn test_get_drops_before_or_at_single_drop() {
-        let version = LsmVersion::new(1, 10, 2);
-        let version = version.add_collection_drop(5, 50);
-
-        // Before the drop sequence
-        let drops = version.get_drops_before_or_at(49);
-        assert!(drops.is_empty());
-
-        // Exactly at the drop sequence
-        let drops = version.get_drops_before_or_at(50);
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0].collection, 5);
-        assert_eq!(drops[0].drop_sequence_number, 50);
-
-        // After the drop sequence
-        let drops = version.get_drops_before_or_at(100);
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0].collection, 5);
-    }
-
-    #[test]
-    fn test_get_drops_before_or_at_multiple_drops() {
-        let version = LsmVersion::new(1, 10, 2);
-        let version = version.add_collection_drop(10, 100);
-        let version = version.add_collection_drop(20, 200);
-        let version = version.add_collection_drop(30, 300);
-
-        // Before all drops
-        let drops = version.get_drops_before_or_at(50);
-        assert!(drops.is_empty());
-
-        // Include first drop only
-        let drops = version.get_drops_before_or_at(100);
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0].collection, 10);
-
-        // Include first two drops
-        let drops = version.get_drops_before_or_at(200);
-        assert_eq!(drops.len(), 2);
-        assert_eq!(drops[0].collection, 10);
-        assert_eq!(drops[1].collection, 20);
-
-        // Include all drops
-        let drops = version.get_drops_before_or_at(300);
-        assert_eq!(drops.len(), 3);
-
-        // After all drops
-        let drops = version.get_drops_before_or_at(500);
-        assert_eq!(drops.len(), 3);
-    }
-
-    #[test]
-    fn test_get_drops_before_or_at_boundary_conditions() {
-        let version = LsmVersion::new(1, 10, 2);
-        let version = version.add_collection_drop(5, 100);
-        let version = version.add_collection_drop(6, 101);
-
-        // Just before first drop
-        let drops = version.get_drops_before_or_at(99);
-        assert!(drops.is_empty());
-
-        // Exactly at first drop
-        let drops = version.get_drops_before_or_at(100);
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0].collection, 5);
-
-        // Between drops
-        let drops = version.get_drops_before_or_at(100);
-        assert_eq!(drops.len(), 1);
-
-        // Exactly at second drop
-        let drops = version.get_drops_before_or_at(101);
-        assert_eq!(drops.len(), 2);
-    }
-
-    #[test]
-    fn test_drops_cleared_after_flush() {
-        let version = LsmVersion::new(1, 10, 2);
-
-        // Add drops at various sequence numbers
-        let version = version.add_collection_drop(10, 100);
-        let version = version.add_collection_drop(20, 200);
-        let version = version.add_collection_drop(30, 300);
-
-        assert_eq!(version.pending_drops.len(), 3);
-
-        // Flush an SSTable with max_sequence_number = 250
-        // This should clear drops with drop_sequence_number <= 250
-        let sst = Arc::new(SSTableMetadata::new(
-            1,
-            0,
-            &record_key(1),
-            &record_key(100),
-            1,
-            250,
-            1024,
-        ));
-        let version = version.with_flushed_sstable(1, &sst);
-
-        // Only drop at sequence 300 should remain (300 > 250)
-        assert_eq!(version.pending_drops.len(), 1);
-        assert_eq!(version.pending_drops[0].collection, 30);
-        assert_eq!(version.pending_drops[0].drop_sequence_number, 300);
-
-        // get_drops_before_or_at should reflect the cleared state
-        let drops = version.get_drops_before_or_at(u64::MAX);
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0].collection, 30);
-    }
-
-    #[test]
-    fn test_drops_all_cleared_after_flush() {
-        let version = LsmVersion::new(1, 10, 2);
-
-        let version = version.add_collection_drop(10, 100);
-        let version = version.add_collection_drop(20, 200);
-
-        assert_eq!(version.pending_drops.len(), 2);
-
-        // Flush an SSTable with max_sequence_number = 300
-        // This should clear all drops since all have drop_sequence_number <= 300
-        let sst = Arc::new(SSTableMetadata::new(
-            1,
-            0,
-            &record_key(1),
-            &record_key(100),
-            1,
-            300,
-            1024,
-        ));
-        let version = version.with_flushed_sstable(1, &sst);
-
-        assert!(version.pending_drops.is_empty());
-        assert!(version.get_drops_before_or_at(u64::MAX).is_empty());
-    }
-
     fn record_key(number: i32) -> Vec<u8> {
         let user_key = Bson::Int32(number).try_into_key().unwrap();
         encode_record_key(1, 0, &user_key)
@@ -2462,20 +2253,13 @@ mod tests {
         }
     }
 
-    mod pending_drops_invariant_tests {
+    mod flush_drop_tests {
         use super::*;
         use std::sync::Arc;
 
         #[test]
-        fn test_with_flushed_sstable_partitions_pending_drops_and_preserves_sorted_order() {
+        fn test_with_flushed_sstable_adds_drops_to_level_zero() {
             let version = LsmVersion::new(1, 10, 2);
-
-            // Add drops in increasing order (the expected invariant).
-            let version = version.add_collection_drop(10, 100);
-            let version = version.add_collection_drop(20, 200);
-            let version = version.add_collection_drop(30, 300);
-
-            // Flush an SSTable up to seq=200: drops <= 200 should move into L0, >200 remain pending.
             let sst = Arc::new(SSTableMetadata::new(
                 1,
                 0,
@@ -2485,57 +2269,11 @@ mod tests {
                 200,
                 1024,
             ));
-            let version2 = version.with_flushed_sstable(1, &sst);
-
-            // Pending drops keep only seq 300.
-            assert_eq!(version2.pending_drops.len(), 1);
-            assert_eq!(version2.pending_drops[0].drop_sequence_number, 300);
-
-            // Pending drops remain sorted.
-            let seqs: Vec<u64> = version2
-                .pending_drops
-                .iter()
-                .map(|d| d.drop_sequence_number)
-                .collect();
-            assert_eq!(seqs, vec![300]);
-
-            // Flushed drops should be added to level 0.
-            let l0 = version2.sst_levels.level(0).unwrap();
-            match l0 {
-                Overlapping { drops, .. } => {
-                    let drop_seqs: Vec<u64> =
-                        drops.iter().map(|d| d.drop_sequence_number).collect();
-                    assert_eq!(drop_seqs, vec![100, 200]);
-                }
-                _ => panic!("Expected Overlapping level"),
-            }
-
-            // get_drops_before_or_at should reflect only pending drops.
-            let drops = version2.get_drops_before_or_at(u64::MAX);
-            assert_eq!(drops.len(), 1);
-            assert_eq!(drops[0].drop_sequence_number, 300);
-        }
-
-        #[test]
-        fn test_with_flushed_sstable_when_all_drops_flushed_pending_empty_and_l0_contains_all_drops()
-         {
-            let version = LsmVersion::new(1, 10, 2);
-
-            let version = version.add_collection_drop(10, 100);
-            let version = version.add_collection_drop(20, 200);
-
-            let sst = Arc::new(SSTableMetadata::new(
-                1,
-                0,
-                &record_key(1),
-                &record_key(100),
-                1,
-                500,
-                1024,
-            ));
-            let version2 = version.with_flushed_sstable(1, &sst);
-
-            assert!(version2.pending_drops.is_empty());
+            let drops = vec![
+                DropMetadata::new_collection_drop(10, 100),
+                DropMetadata::new_collection_drop(20, 200),
+            ];
+            let version2 = version.with_flushed_sstable(1, &sst, drops);
 
             let l0 = version2.sst_levels.level(0).unwrap();
             match l0 {
