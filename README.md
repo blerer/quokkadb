@@ -8,6 +8,11 @@
 
 QuokkaDB is an embedded application database for **Rust**, with Node.js/TypeScript support planned. It lets you persist your application models directly, without running or managing a database server.
 
+<p style="text-align: left;">
+  <img src="assets/quokkadb_overview.png" alt="QuokkaDB overview: an embedded application database that persists application models directly, with querying and indexing and no database server or ORM." width="800"/>
+</p>
+
+
 ## Persist your models, not your mappings
 
 Applications are built from nested objects, collections, and evolving state. **QuokkaDB stores that structure directly**, without decomposing your models into tables, joins, and mapping layers.
@@ -23,6 +28,17 @@ Applications are built from nested objects, collections, and evolving state. **Q
 - **Real database semantics** — durability, indexes, concurrent access, atomic updates, and crash recovery.
 
 QuokkaDB is designed to make persistence a boring part of building an application.
+
+## When to use QuokkaDB
+
+Choose QuokkaDB when you need **local application persistence without database infrastructure**.
+
+* Persist and query your models directly.
+* No database server to deploy or operate.
+* Flexible nested data without mapping it to tables.
+* Built for desktop apps, developer tools, agents, edge applications, and local services.
+
+For shared, multi-node database workloads, use a server database.
 
 ## Quick start
 
@@ -102,17 +118,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
-## When to use QuokkaDB
-
-Choose QuokkaDB when you need **local application persistence without database infrastructure**.
-
-* Persist and query your models directly.
-* No database server to deploy or operate.
-* Flexible nested data without mapping it to tables.
-* Built for desktop apps, developer tools, agents, edge applications, and local services.
-
-For shared, multi-node database workloads, use a server database.
-
 ## Documentation
 
 [Read the QuokkaDB documentation.](docs/README.md)
