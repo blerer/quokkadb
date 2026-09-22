@@ -13,6 +13,7 @@ Start with the typed API when your data has a Rust type. Use the document API wh
 
 ## Reference and project information
 
+- [Architecture](architecture.md) — understand how API calls become queries and durable storage operations.
 - [Concepts](concepts.md) — understand the ideas behind the API.
 - [API Reference](api-reference.md) — navigate the public Rust API.
 - [Operations](operations.md) — run, configure, and observe a database.
