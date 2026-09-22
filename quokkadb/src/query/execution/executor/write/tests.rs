@@ -1,21 +1,23 @@
 use super::*;
 use crate::error::{Error, Result};
-use crate::query::execution::QueryExecutor;
-use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::executor::test_utils::*;
+use crate::query::execution::executor::ExecutorTestHook;
+use crate::query::execution::QueryExecutor;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::update_fn::*;
 use crate::query::*;
-use crate::storage::Direction;
-use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
+use crate::storage::catalog::{
+    CollectionOptions, IdCreationStrategy, IndexDefinition, IndexOptions, OrderedIndexField,
+};
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
+use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
 use bson::{Bson, Document};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 fn index_scan_eq(
     executor: &QueryExecutor,
@@ -506,7 +508,7 @@ fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
 
 #[test]
 fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -548,7 +550,7 @@ fn test_replace_one_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_find_one_and_replace_retries_after_concurrent_update() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -642,7 +644,7 @@ fn test_update_one_fails_after_retry_timeout() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_retry", true)?;
     let hook = Arc::new(ConflictingPrimaryWriteHook::new(
-        ExecutorFailpoint::UpdateOneAfterRead,
+        ExecutorFailpoint::AfterRead,
         storage_engine.clone(),
         collection_id,
         1,
@@ -673,7 +675,7 @@ fn test_update_one_fails_after_retry_timeout() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_delete() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -795,7 +797,7 @@ fn test_find_one_and_update_returns_none_when_no_match() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -840,7 +842,7 @@ fn test_find_one_and_update_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -886,7 +888,7 @@ fn test_find_one_and_update_retries_after_concurrent_update_same_field() -> Resu
 
 #[test]
 fn test_find_one_and_update_retries_after_concurrent_update_disjoint_fields() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -982,7 +984,7 @@ fn test_find_one_and_delete_returns_deleted_document() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1019,7 +1021,7 @@ fn test_find_one_and_delete_retries_after_concurrent_update() -> Result<()> {
 
 #[test]
 fn test_find_one_and_delete_retries_after_concurrent_delete() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1160,7 +1162,7 @@ fn test_delete_one_fails_after_retry_timeout() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_delete_one_retry_timeout", true)?;
     let hook = Arc::new(ConflictingPrimaryWriteHook::new(
-        ExecutorFailpoint::DeleteOneAfterRead,
+        ExecutorFailpoint::AfterRead,
         storage_engine.clone(),
         collection_id,
         1,
@@ -1257,7 +1259,7 @@ fn test_delete_many_returns_zero_when_no_match() -> Result<()> {
 
 #[test]
 fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteManyBeforeCommit));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1303,7 +1305,7 @@ fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
 
 #[test]
 fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1342,7 +1344,7 @@ fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
 
 #[test]
 fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1378,7 +1380,7 @@ fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1416,7 +1418,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
 
 #[test]
 fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1478,7 +1480,7 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
 #[test]
 
 fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1530,7 +1532,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
 
 #[test]
 fn test_update_many_fails_after_concurrent_update_without_partial_success() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1583,9 +1585,7 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
 
 #[test]
 fn test_insert_one_manual_id_fails_after_concurrent_insert_same_key() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(
-        ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite,
-    ));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1717,7 +1717,7 @@ fn test_insert_many_manual_id_succeeds_after_delete_same_key() -> Result<()> {
 
 #[test]
 fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1764,7 +1764,7 @@ fn test_insert_one_manual_id_fails_while_concurrent_delete_same_key_is_pending()
 
 #[test]
 fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::DeleteOneAfterRead));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1793,11 +1793,9 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
     let user_key_2 = BsonValue::from(2_i32).try_into_key()?;
     let snapshot = storage_engine.acquire_snapshot();
-    assert!(
-        storage_engine
-            .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
-            .is_none()
-    );
+    assert!(storage_engine
+        .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
+        .is_none());
 
     hook.release();
 
@@ -1818,7 +1816,7 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
 
 #[test]
 fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
-    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::UpdateManyBeforeCommit));
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
@@ -1850,6 +1848,262 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
 
     let final_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(final_doc.get_str("value")?, "concurrent");
+
+    Ok(())
+}
+
+#[test]
+fn test_insert_many_rejects_schema_change_before_commit() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection_with_options(
+        "test_insert_many_schema_change",
+        CollectionOptions {
+            id_creation_strategy: IdCreationStrategy::Generated,
+            ..CollectionOptions::default()
+        },
+        false,
+    )?;
+    let docs = vec![
+        doc! { "schema_value": "first" },
+        doc! { "schema_value": "second" },
+    ];
+
+    let paused_handle =
+        spawn_paused_insert_many(executor.clone(), hook.clone(), collection_id, docs);
+    hook.wait_until_hit();
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("schema_value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(reason)) => assert!(reason.contains("Schema version conflict")),
+        Err(err) => panic!("Expected schema VersionConflict, got {err:?}"),
+        Ok(result) => panic!("Expected schema VersionConflict, got success {result:?}"),
+    }
+    assert!(index_scan_eq(&executor, collection_id, index.id, "first")?.is_empty());
+    assert!(index_scan_eq(&executor, collection_id, index.id, "second")?.is_empty());
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        None
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_update_many_does_not_retry_after_schema_change() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_update_many_schema_change", true)?;
+    let doc1 = doc! { "_id": 1, "value": "first" };
+    let doc2 = doc! { "_id": 2, "value": "second" };
+    insert_docs(&executor, collection_id, [&doc1, &doc2])?;
+
+    let paused_handle = spawn_paused_update_many(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        full_scan_plan(collection_id),
+        update([set([field_name("value")], "updated")]),
+        false,
+    );
+    hook.wait_until_hit();
+    storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(reason)) => assert!(reason.contains("Schema version conflict")),
+        Err(err) => panic!("Expected schema VersionConflict, got {err:?}"),
+        Ok(result) => panic!("Expected schema VersionConflict, got success {result:?}"),
+    }
+    assert_eq!(read_stored_doc(&storage_engine, collection_id, 1)?, doc1);
+    assert_eq!(read_stored_doc(&storage_engine, collection_id, 2)?, doc2);
+
+    Ok(())
+}
+
+#[test]
+fn test_update_one_retries_after_schema_change() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_update_one_schema_change", true)?;
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(&executor, collection_id, &initial_doc)?;
+    let paused_handle =
+        spawn_paused_update_one(executor.clone(), hook.clone(), collection_id, 1, "updated");
+    hook.wait_until_hit();
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+
+    assert_update_result(paused_handle.join().unwrap()?, 1, 1, Option::<Bson>::None);
+    assert_eq!(
+        read_stored_doc(&storage_engine, collection_id, 1)?,
+        doc! { "_id": 1, "value": "updated" }
+    );
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "updated")?,
+        vec![doc! { "_id": 1, "value": "updated" }]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_insert_one_retries_after_schema_change() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_insert_one_schema_change", true)?;
+    let paused_handle = spawn_paused_insert_one(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        doc! { "_id": 1, "schema_value": "value" },
+    );
+    hook.wait_until_hit();
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("schema_value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+
+    assert_insert_one_result(paused_handle.join().unwrap()?, 1);
+    assert_eq!(
+        read_stored_doc(&storage_engine, collection_id, 1)?,
+        doc! { "_id": 1, "schema_value": "value" }
+    );
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "value")?,
+        vec![doc! { "_id": 1, "schema_value": "value" }]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_insert_one_returns_collection_not_found_after_drop() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_insert_one_drop", true)?;
+    let paused_handle = spawn_paused_insert_one(
+        executor,
+        hook.clone(),
+        collection_id,
+        doc! { "_id": 1, "value": "value" },
+    );
+    hook.wait_until_hit();
+    storage_engine.drop_collection("test_insert_one_drop")?;
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::CollectionNotFound { id: Some(id), .. }) => assert_eq!(id, collection_id),
+        Err(err) => panic!("Expected CollectionNotFound, got {err:?}"),
+        Ok(result) => panic!("Expected CollectionNotFound, got success {result:?}"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_update_one_returns_collection_not_found_when_dropped_before_schema_retry() -> Result<()> {
+    let hook = Arc::new(PausingHook::new_for_each_hit(vec![
+        ExecutorFailpoint::BeforeCommit,
+        ExecutorFailpoint::BeforeRetry,
+    ]));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_update_one_drop", true)?;
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+    let paused_handle =
+        spawn_paused_update_one(executor, hook.clone(), collection_id, 1, "updated");
+    hook.wait_until_hit();
+    storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+    hook.wait_until_hits(2);
+    storage_engine.drop_collection("test_update_one_drop")?;
+    hook.release();
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::CollectionNotFound { id: Some(id), .. }) => assert_eq!(id, collection_id),
+        Err(err) => panic!("Expected CollectionNotFound, got {err:?}"),
+        Ok(result) => panic!("Expected CollectionNotFound, got success {result:?}"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_replace_one_returns_collection_not_found_when_dropped_before_schema_retry() -> Result<()> {
+    let hook = Arc::new(PausingHook::new_for_each_hit(vec![
+        ExecutorFailpoint::BeforeCommit,
+        ExecutorFailpoint::BeforeRetry,
+    ]));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_replace_one_drop", true)?;
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "initial" },
+    )?;
+    let paused_handle = spawn_paused_replace_one(
+        executor,
+        hook.clone(),
+        collection_id,
+        1,
+        doc! { "value": "replacement" },
+        false,
+    );
+    hook.wait_until_hit();
+    storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+    hook.wait_until_hits(2);
+    storage_engine.drop_collection("test_replace_one_drop")?;
+    hook.release();
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::CollectionNotFound { id: Some(id), .. }) => assert_eq!(id, collection_id),
+        Err(err) => panic!("Expected CollectionNotFound, got {err:?}"),
+        Ok(result) => panic!("Expected CollectionNotFound, got success {result:?}"),
+    }
 
     Ok(())
 }

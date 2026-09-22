@@ -375,7 +375,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-        WriteBatch::new(operations, CountStats::default())
+        WriteBatch::new_for_test(operations, CountStats::default())
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         let mut wal =
             WriteAheadLog::new(&mut MetricRegistry::default(), &options, &path, 1).unwrap();
 
-        let batch = WriteBatch::new(
+        let batch = WriteBatch::new_for_test(
             vec![
                 Operation::new_put(7, 0, b"doc".to_vec(), b"value".to_vec()),
                 Operation::new_put(7, 1, b"idx".to_vec(), b"doc".to_vec()),

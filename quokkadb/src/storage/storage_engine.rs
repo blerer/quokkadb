@@ -4,7 +4,7 @@ use crate::options::options::Options;
 use crate::storage::Direction;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
-use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
+use crate::storage::catalog::{Catalog, CollectionMetadata, CollectionOptions, IndexDefinition, IndexOptions};
 use crate::storage::compaction::compaction_manager::CompactionManager;
 use crate::storage::compaction::compaction_picker::CompactionJob;
 use crate::storage::count_stats::{CountStatSource, CountStats, CountStatsKey};
@@ -896,15 +896,8 @@ impl StorageEngine {
         let mut successful_writers = Vec::with_capacity(writers.len());
 
         for writer in writers {
-            let rs = self.check_writer_collections_exist(&catalog, writer.batch(), seq);
-
-            if let Err(error) = rs {
-                writer.done(Err(error));
-                continue;
-            }
-
             if let Some(preconditions) = writer.batch().preconditions() {
-                let rs = self.check_writer_preconditions(seq, preconditions);
+                let rs = self.check_writer_preconditions(&catalog, seq, preconditions);
                 if let Err(error) = rs {
                     writer.done(Err(error));
                     continue;
@@ -915,53 +908,46 @@ impl StorageEngine {
         successful_writers
     }
 
-    fn check_writer_collections_exist(
-        self: &Arc<Self>,
-        catalog: &Catalog,
-        batch: &WriteBatch,
-        seq: u64,
-    ) -> StorageResult<()> {
-        for &(col, idx) in batch.required_collections() {
-            let collection =
-                catalog
-                    .get_collection_at(col, seq)
-                    .ok_or(StorageError::CollectionNotFound {
-                        name: catalog
-                            .get_collection_by_id(&col)
-                            .map(|c| c.name.clone())
-                            .unwrap(),
-                        id: Some(col),
-                    })?;
-
-            if idx != 0 {
-                collection
-                    .get_index_at(idx, seq)
-                    .ok_or(StorageError::IndexNotFound {
-                        collection_name: collection.name.clone(),
-                        index_name: collection.get_index_by_id(idx).map(|i| i.name()).unwrap(),
-                        id: Some(idx),
-                    })?;
-            }
-        }
-        Ok(())
-    }
-
     fn check_writer_preconditions(
         self: &Arc<Self>,
+        catalog: &Catalog,
         seq: u64,
         preconditions: &Preconditions,
     ) -> StorageResult<()> {
-        if preconditions.since() + 1 == seq {
-            return Ok(());
-        }
+        let skip_version_matches = preconditions.since() + 1 == seq;
 
         for precondition in preconditions.conditions() {
             match precondition {
+                Precondition::CollectionVersionMatch {
+                    collection,
+                    version,
+                } => {
+                    let metadata =
+                        catalog.get_collection_at(*collection, seq).ok_or_else(|| {
+                            StorageError::CollectionNotFound {
+                                name: catalog
+                                    .get_collection_by_id(collection)
+                                    .map(|metadata| metadata.name.clone())
+                                    .unwrap_or_default(),
+                                id: Some(*collection),
+                            }
+                        })?;
+
+                    if metadata.version != *version {
+                        return Err(
+                            Self::schema_version_conflict_error(collection, version, metadata)
+                        );
+                    }
+                }
                 Precondition::VersionMatch {
                     collection,
                     index,
                     user_key,
                 } => {
+                    if skip_version_matches {
+                        continue;
+                    }
+
                     let rs = self
                         .read_internal(
                             *collection,
@@ -999,6 +985,18 @@ impl StorageEngine {
             }
         }
         Ok(())
+    }
+
+    fn schema_version_conflict_error(
+        collection: &u32,
+        version: &u32,
+        metadata: Arc<CollectionMetadata>
+    ) -> StorageError {
+        StorageError::SchemaVersionConflict {
+            collection: *collection,
+            expected: *version,
+            actual: Some(metadata.version),
+        }
     }
 
     fn version_conflict_error(
@@ -1764,6 +1762,11 @@ pub enum StorageError {
         user_key: Vec<u8>,
         reason: String,
     },
+    SchemaVersionConflict {
+        collection: u32,
+        expected: u32,
+        actual: Option<u32>,
+    },
     LogCorruption {
         record_offset: u64,
         reason: String,
@@ -1825,6 +1828,15 @@ impl Clone for StorageError {
                 user_key: user_key.clone(),
                 reason: reason.clone(),
             },
+            StorageError::SchemaVersionConflict {
+                collection,
+                expected,
+                actual,
+            } => StorageError::SchemaVersionConflict {
+                collection: *collection,
+                expected: *expected,
+                actual: *actual,
+            },
             StorageError::CollectionNotFound { name, id } => StorageError::CollectionNotFound {
                 name: name.clone(),
                 id: *id,
@@ -1871,6 +1883,15 @@ impl fmt::Display for StorageError {
                 f,
                 "Version conflict for user_key {:?} : {}",
                 user_key, reason
+            ),
+            StorageError::SchemaVersionConflict {
+                collection,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Schema version conflict for collection {}: expected {}, found {:?}",
+                collection, expected, actual
             ),
             StorageError::CollectionNotFound { name, id } => {
                 if let Some(col_id) = id {

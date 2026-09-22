@@ -49,19 +49,29 @@ pub(crate) fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
 
 #[derive(Default)]
 pub(crate) struct PauseState {
-    hit: bool,
-    released: bool,
+    hit_count: usize,
+    release_count: usize,
 }
 
 pub(crate) struct PausingHook {
-    point: ExecutorFailpoint,
+    points: Vec<ExecutorFailpoint>,
+    pause_each_hit: bool,
     state: Arc<(Mutex<PauseState>, Condvar)>,
 }
 
 impl PausingHook {
     pub(crate) fn new(point: ExecutorFailpoint) -> Self {
         Self {
-            point,
+            points: vec![point],
+            pause_each_hit: false,
+            state: Arc::new((Mutex::new(PauseState::default()), Condvar::new())),
+        }
+    }
+
+    pub(crate) fn new_for_each_hit(points: Vec<ExecutorFailpoint>) -> Self {
+        Self {
+            points,
+            pause_each_hit: true,
             state: Arc::new((Mutex::new(PauseState::default()), Condvar::new())),
         }
     }
@@ -69,7 +79,15 @@ impl PausingHook {
     pub(crate) fn wait_until_hit(&self) {
         let (lock, condvar) = &*self.state;
         let mut state = lock.lock().unwrap();
-        while !state.hit {
+        while state.hit_count == 0 {
+            state = condvar.wait(state).unwrap();
+        }
+    }
+
+    pub(crate) fn wait_until_hits(&self, hit_count: usize) {
+        let (lock, condvar) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        while state.hit_count < hit_count {
             state = condvar.wait(state).unwrap();
         }
     }
@@ -77,30 +95,31 @@ impl PausingHook {
     pub(crate) fn release(&self) {
         let (lock, condvar) = &*self.state;
         let mut state = lock.lock().unwrap();
-        state.released = true;
+        state.release_count += 1;
         condvar.notify_all();
     }
 }
 
 impl ExecutorTestHook for PausingHook {
     fn hit(&self, point: ExecutorFailpoint) {
-        if point != self.point {
+        if !self.points.contains(&point) {
             return;
         }
 
         let (lock, condvar) = &*self.state;
         let mut state = lock.lock().unwrap();
-        state.hit = true;
+        state.hit_count += 1;
+        let hit_count = state.hit_count;
         condvar.notify_all();
 
-        while !state.released {
+        while state.release_count < hit_count && (self.pause_each_hit || state.release_count == 0) {
             state = condvar.wait(state).unwrap();
         }
     }
 }
 
 pub(crate) fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-    WriteBatch::new(operations, CountStats::default())
+    WriteBatch::new_for_test(operations, CountStats::default())
 }
 
 pub(crate) fn assert_insert_one_result(result: WriteResult, inserted_id: impl Into<Bson>) {
@@ -582,6 +601,19 @@ pub(crate) fn spawn_paused_insert_one(
 ) -> JoinHandle<Result<WriteResult>> {
     thread::spawn(move || {
         with_executor_test_hook(hook, || insert_one(executor.as_ref(), collection_id, &doc))
+    })
+}
+
+pub(crate) fn spawn_paused_insert_many(
+    executor: Arc<QueryExecutor>,
+    hook: Arc<dyn ExecutorTestHook>,
+    collection_id: u32,
+    docs: Vec<Document>,
+) -> JoinHandle<Result<WriteResult>> {
+    thread::spawn(move || {
+        with_executor_test_hook(hook, || {
+            insert_many(executor.as_ref(), collection_id, &docs)
+        })
     })
 }
 

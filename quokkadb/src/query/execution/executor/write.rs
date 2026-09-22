@@ -1,8 +1,8 @@
+use super::read::ReadExecutor;
 use super::Metrics;
 use super::WriteResult;
-use super::read::ReadExecutor;
 #[cfg(test)]
-use super::{ExecutorFailpoint, invoke_executor_test_hook};
+use super::{invoke_executor_test_hook, ExecutorFailpoint};
 use crate::error::Error;
 use crate::error::Result;
 use crate::query::execution::indexes::Indexes;
@@ -11,7 +11,7 @@ use crate::query::execution::updates;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::update::UpdateExpr;
 use crate::query::{Parameters, Projection, ReturnDocument};
-use crate::storage::catalog::IdCreationStrategy;
+use crate::storage::catalog::{CollectionMetadata, IdCreationStrategy};
 use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::internal_key::extract_operation_type;
 use crate::storage::operation::Operation;
@@ -22,7 +22,7 @@ use crate::storage::storage_engine::StorageError;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::{Bson, Document, RawDocument, serialize_to_vec};
+use bson::{serialize_to_vec, Bson, Document, RawDocument};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -185,14 +185,6 @@ impl WriteExecutor {
             }))
     }
 
-    pub(super) fn get_id_creation_strategy(&self, collection: u32) -> IdCreationStrategy {
-        self.storage_engine
-            .catalog()
-            .get_collection_by_id(&collection)
-            .map(|meta| meta.options.id_creation_strategy.clone())
-            .unwrap_or_default()
-    }
-
     pub(super) fn ensure_id(
         &self,
         doc: &mut Vec<u8>,
@@ -232,13 +224,28 @@ impl WriteExecutor {
         super::generate_bson_id(self.id_generator.as_ref())
     }
 
-    pub(super) fn indices(&self, collection: u32) -> Indexes {
-        let metadata = self
-            .storage_engine
+    fn collection_metadata(
+        &self,
+        collection: u32,
+    ) -> std::result::Result<Arc<CollectionMetadata>, StorageError> {
+        self.storage_engine
             .catalog()
             .get_collection_by_id(&collection)
-            .unwrap();
-        Indexes::from_collection(&metadata)
+            .ok_or_else(|| StorageError::CollectionNotFound {
+                name: String::new(),
+                id: Some(collection),
+            })
+    }
+
+    fn preconditions(
+        snapshot: Snapshot,
+        metadata: &CollectionMetadata,
+        conditions: Vec<Precondition>,
+    ) -> Preconditions {
+        let mut preconditions = Preconditions::new(snapshot);
+        preconditions.add_collection_version_match(metadata.id, metadata.version);
+        preconditions.extend_version_matches(conditions);
+        preconditions
     }
 
     pub(super) fn perform_update_many(
@@ -250,6 +257,7 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
+        let metadata = self.collection_metadata(collection)?;
         let snapshot = self.storage_engine.acquire_snapshot();
         let snapshot_sequence = snapshot.sequence();
         let _span = trace_span!("update_many", upsert, snapshot = snapshot_sequence).entered();
@@ -276,7 +284,7 @@ impl WriteExecutor {
                 matched_count += 1;
                 let new_doc = updater(old_doc.clone())?;
 
-                let indices = self.indices(collection);
+                let indices = Indexes::from_collection(&metadata);
 
                 indices.append_delete_ops(&mut operations, &old_doc, &mut count_stats)?;
 
@@ -302,7 +310,7 @@ impl WriteExecutor {
             upserted_id = Some(generated_id.clone());
 
             let user_key = generated_id.try_into_key()?;
-            let indices = self.indices(collection);
+            let indices = Indexes::from_collection(&metadata);
             count_stats.inc_collection(collection, 1);
             indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
             operations.push(Operation::new_put(
@@ -326,11 +334,11 @@ impl WriteExecutor {
 
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot, preconditions),
             count_stats.build(),
+            Self::preconditions(snapshot, &metadata, preconditions),
         );
         #[cfg(test)]
-        self.invoke_test_hook(ExecutorFailpoint::UpdateManyBeforeCommit);
+        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
         self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Update {
@@ -545,6 +553,7 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
+        let metadata = self.collection_metadata(collection)?;
         let snapshot = self.storage_engine.acquire_snapshot();
         let snapshot_sequence = snapshot.sequence();
         let _span = trace_span!("delete_many", snapshot = snapshot_sequence).entered();
@@ -558,7 +567,7 @@ impl WriteExecutor {
         let mut preconditions = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
         let mut deleted_count = 0;
-        let indices = self.indices(collection);
+        let indices = Indexes::from_collection(&metadata);
 
         while let Some(doc_result) = iter.next() {
             let old_doc = doc_result?;
@@ -581,11 +590,11 @@ impl WriteExecutor {
 
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot, preconditions),
             count_stats.build(),
+            Self::preconditions(snapshot, &metadata, preconditions),
         );
         #[cfg(test)]
-        self.invoke_test_hook(ExecutorFailpoint::DeleteManyBeforeCommit);
+        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
         self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Delete { deleted_count })
@@ -638,8 +647,7 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<SingleDocumentUpdateResult> {
-        let start_time = Instant::now();
-        let mut attempt = 0;
+        let mut retry_state = RetryState::new();
 
         loop {
             let snapshot = self.storage_engine.acquire_snapshot();
@@ -657,7 +665,7 @@ impl WriteExecutor {
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
                 #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
+                self.invoke_test_hook(ExecutorFailpoint::AfterRead);
                 match self.write_document(
                     collection,
                     &snapshot,
@@ -671,7 +679,7 @@ impl WriteExecutor {
                         return Ok(SingleDocumentUpdateResult::Updated { old_doc, new_doc });
                     }
                     Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        retry_state.retry_on_version_conflict(e)?;
                         continue;
                     }
                 }
@@ -703,7 +711,7 @@ impl WriteExecutor {
                     });
                 }
                 Err(e) => {
-                    on_version_conflict(e, &start_time, &mut attempt)?;
+                    retry_state.retry_on_version_conflict(e)?;
                 }
             }
         }
@@ -718,8 +726,7 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<SingleDocumentReplaceResult> {
-        let start_time = Instant::now();
-        let mut attempt = 0;
+        let mut retry_state = RetryState::new();
 
         loop {
             let snapshot = self.storage_engine.acquire_snapshot();
@@ -736,7 +743,7 @@ impl WriteExecutor {
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
                 #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::UpdateOneAfterRead);
+                self.invoke_test_hook(ExecutorFailpoint::AfterRead);
                 match self.write_document(
                     collection,
                     &snapshot,
@@ -750,7 +757,7 @@ impl WriteExecutor {
                         return Ok(SingleDocumentReplaceResult::Replaced { old_doc, new_doc });
                     }
                     Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        retry_state.retry_on_version_conflict(e)?;
                         continue;
                     }
                 }
@@ -781,7 +788,7 @@ impl WriteExecutor {
                     });
                 }
                 Err(e) => {
-                    on_version_conflict(e, &start_time, &mut attempt)?;
+                    retry_state.retry_on_version_conflict(e)?;
                 }
             }
         }
@@ -794,8 +801,7 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<SingleDocumentDeleteResult> {
-        let start_time = Instant::now();
-        let mut attempt = 0;
+        let mut retry_state = RetryState::new();
 
         loop {
             let snapshot = self.storage_engine.acquire_snapshot();
@@ -810,11 +816,11 @@ impl WriteExecutor {
                 let user_key = old_doc.get("_id").unwrap().try_into_key()?;
 
                 #[cfg(test)]
-                self.invoke_test_hook(ExecutorFailpoint::DeleteOneAfterRead);
+                self.invoke_test_hook(ExecutorFailpoint::AfterRead);
                 match self.delete_document(collection, &snapshot, user_key, &old_doc, sync) {
                     Ok(_) => return Ok(SingleDocumentDeleteResult::Deleted { old_doc }),
                     Err(e) => {
-                        on_version_conflict(e, &start_time, &mut attempt)?;
+                        retry_state.retry_on_version_conflict(e)?;
                         continue;
                     }
                 }
@@ -832,55 +838,70 @@ impl WriteExecutor {
     ) -> Result<WriteResult> {
         let _span = trace_span!("insert_one").entered();
         let mut doc = document;
-        let id_strategy = self.get_id_creation_strategy(collection);
+        let id_strategy = self
+            .collection_metadata(collection)?
+            .options
+            .id_creation_strategy
+            .clone();
         let id = self.ensure_id(&mut doc, &id_strategy)?;
         let user_key = id.try_into_key()?;
+        let mut retry_state = RetryState::new();
 
-        let mut operations = Vec::new();
-        let mut count_stats = CountStatsBuilder::new();
-        operations.push(Operation::new_put(
-            collection,
-            0,
-            user_key.clone(),
-            doc.clone(),
-        ));
-
-        let indices = self.indices(collection);
-        let raw_doc = RawDocument::from_bytes(&doc)?;
-        count_stats.inc_collection(collection, 1);
-        indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
-
-        let batch = if id_strategy == IdCreationStrategy::Generated {
-            WriteBatch::new(operations, count_stats.build())
-        } else {
-            let snapshot = self.storage_engine.acquire_snapshot();
-
-            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
-                return Err(Self::duplicate_key_error(&id));
-            }
-
-            let precondition = Precondition::VersionMatch {
+        loop {
+            let metadata = self.collection_metadata(collection)?;
+            let mut operations = Vec::new();
+            let mut count_stats = CountStatsBuilder::new();
+            operations.push(Operation::new_put(
                 collection,
-                index: 0,
-                user_key,
+                0,
+                user_key.clone(),
+                doc.clone(),
+            ));
+
+            let indices = Indexes::from_collection(&metadata);
+            let raw_doc = RawDocument::from_bytes(&doc)?;
+            count_stats.inc_collection(collection, 1);
+            indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
+
+            let snapshot = self.storage_engine.acquire_snapshot();
+            let batch = if id_strategy == IdCreationStrategy::Generated {
+                WriteBatch::new_with_preconditions(
+                    operations,
+                    count_stats.build(),
+                    Self::preconditions(snapshot, &metadata, vec![]),
+                )
+            } else {
+                if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)?
+                {
+                    return Err(Self::duplicate_key_error(&id));
+                }
+
+                let precondition = Precondition::VersionMatch {
+                    collection,
+                    index: 0,
+                    user_key: user_key.clone(),
+                };
+                WriteBatch::new_with_preconditions(
+                    operations,
+                    count_stats.build(),
+                    Self::preconditions(snapshot, &metadata, vec![precondition]),
+                )
             };
+
             #[cfg(test)]
-            self.invoke_test_hook(ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite);
-            WriteBatch::new_with_preconditions(
-                operations,
-                Preconditions::new(snapshot, vec![precondition]),
-                count_stats.build(),
-            )
-        };
+            self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
 
-        self.storage_engine
-            .write(batch, sync)
-            .map_err(|e| match e {
-                StorageError::VersionConflict { .. } => Self::duplicate_key_error(&id),
-                _ => e.into(),
-            })?;
-
-        Ok(WriteResult::InsertOne { inserted_id: id })
+            match self.storage_engine.write(batch, sync) {
+                Ok(()) => return Ok(WriteResult::InsertOne { inserted_id: id }),
+                Err(StorageError::VersionConflict { .. }) => {
+                    return Err(Self::duplicate_key_error(&id));
+                }
+                Err(error @ StorageError::SchemaVersionConflict { .. }) => {
+                    retry_state.retry_on_schema_version_conflict(error)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     pub(super) fn perform_insert_many(
@@ -896,7 +917,8 @@ impl WriteExecutor {
             });
         }
 
-        let id_strategy = self.get_id_creation_strategy(collection);
+        let metadata = self.collection_metadata(collection)?;
+        let id_strategy = metadata.options.id_creation_strategy.clone();
 
         let mut documents_with_ids: Vec<(Vec<u8>, Bson, Vec<u8>)> =
             Vec::with_capacity(documents.len());
@@ -907,7 +929,7 @@ impl WriteExecutor {
             documents_with_ids.push((doc, id, user_key));
         }
 
-        let indices = self.indices(collection);
+        let indices = Indexes::from_collection(&metadata);
 
         let (batch, ids, seen_keys) = if id_strategy == IdCreationStrategy::Generated {
             let mut operations = Vec::new();
@@ -925,7 +947,16 @@ impl WriteExecutor {
                 let raw_doc = RawDocument::from_bytes(&doc)?;
                 indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
             }
-            (WriteBatch::new(operations, count_stats.build()), ids, None)
+            let snapshot = self.storage_engine.acquire_snapshot();
+            (
+                WriteBatch::new_with_preconditions(
+                    operations,
+                    count_stats.build(),
+                    Self::preconditions(snapshot, &metadata, vec![]),
+                ),
+                ids,
+                None,
+            )
         } else {
             let snapshot = self.storage_engine.acquire_snapshot();
 
@@ -968,8 +999,8 @@ impl WriteExecutor {
             (
                 WriteBatch::new_with_preconditions(
                     operations,
-                    Preconditions::new(snapshot, preconditions_vec),
                     count_stats.build(),
+                    Self::preconditions(snapshot, &metadata, preconditions_vec),
                 ),
                 ids,
                 Some(seen_keys),
@@ -977,9 +1008,7 @@ impl WriteExecutor {
         };
 
         #[cfg(test)]
-        if id_strategy != IdCreationStrategy::Generated {
-            self.invoke_test_hook(ExecutorFailpoint::InsertManualAfterPreflightBeforeWrite);
-        }
+        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
 
         if let Err(e) = self.storage_engine.write(batch, sync) {
             match e {
@@ -1010,7 +1039,8 @@ impl WriteExecutor {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
 
-        let indices = self.indices(collection);
+        let metadata = self.collection_metadata(collection)?;
+        let indices = Indexes::from_collection(&metadata);
 
         if let Some(doc) = old_doc.as_ref() {
             indices.append_delete_ops(&mut operations, doc, &mut count_stats)?;
@@ -1035,9 +1065,11 @@ impl WriteExecutor {
         };
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot.clone(), vec![precondition]),
             count_stats.build(),
+            Self::preconditions(snapshot.clone(), &metadata, vec![precondition]),
         );
+        #[cfg(test)]
+        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
         self.storage_engine.write(batch, sync)
     }
 
@@ -1052,7 +1084,8 @@ impl WriteExecutor {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
 
-        let indices = self.indices(collection);
+        let metadata = self.collection_metadata(collection)?;
+        let indices = Indexes::from_collection(&metadata);
         indices.append_delete_ops(&mut operations, old_doc, &mut count_stats)?;
         operations.push(Operation::new_delete(collection, 0, user_key.clone()));
         count_stats.inc_collection(collection, -1);
@@ -1064,9 +1097,11 @@ impl WriteExecutor {
         };
         let batch = WriteBatch::new_with_preconditions(
             operations,
-            Preconditions::new(snapshot.clone(), vec![precondition]),
             count_stats.build(),
+            Self::preconditions(snapshot.clone(), &metadata, vec![precondition]),
         );
+        #[cfg(test)]
+        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
         self.storage_engine.write(batch, sync)
     }
 
@@ -1146,36 +1181,56 @@ pub(super) fn prepend_id_to_document(id: Bson, doc: &Document) -> Document {
     new_doc
 }
 
-/// Handles a storage write error inside a retry loop.
-///
-/// If the error is a `VersionConflict` and the deadline has not been reached,
-/// sleeps for the appropriate backoff duration, increments `attempt`, and returns
-/// `Ok(())` so the caller can `continue` to the next iteration.
-///
-/// Otherwise, returns the error converted to [`Error`].
-fn on_version_conflict(e: StorageError, start_time: &Instant, attempt: &mut u32) -> Result<()> {
-    match e {
-        StorageError::VersionConflict { .. } => {
-            if start_time.elapsed() >= RETRY_TIMEOUT {
-                tracing::debug!(
-                    attempts = *attempt,
-                    elapsed_ms = start_time.elapsed().as_millis(),
-                    "write retry timeout reached after version conflicts"
-                );
-                return Err(e.into());
-            }
-            let backoff = calculate_backoff(*attempt);
-            tracing::trace!(
-                attempt = *attempt,
-                elapsed_ms = start_time.elapsed().as_millis(),
-                backoff_ms = backoff.as_millis(),
-                "retrying write after version conflict"
-            );
-            std::thread::sleep(backoff);
-            *attempt += 1;
-            Ok(())
+struct RetryState {
+    start_time: Instant,
+    attempt: u32,
+}
+
+impl RetryState {
+    fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            attempt: 0,
         }
-        _ => Err(e.into()),
+    }
+
+    fn retry_on_version_conflict(&mut self, error: StorageError) -> Result<()> {
+        match error {
+            StorageError::VersionConflict { .. } | StorageError::SchemaVersionConflict { .. } => {
+                self.retry_after_conflict(error)
+            }
+            _ => Err(error.into()),
+        }
+    }
+
+    fn retry_on_schema_version_conflict(&mut self, error: StorageError) -> Result<()> {
+        match error {
+            error @ StorageError::SchemaVersionConflict { .. } => self.retry_after_conflict(error),
+            _ => Err(error.into()),
+        }
+    }
+
+    fn retry_after_conflict(&mut self, error: StorageError) -> Result<()> {
+        if self.start_time.elapsed() >= RETRY_TIMEOUT {
+            tracing::debug!(
+                attempts = self.attempt,
+                elapsed_ms = self.start_time.elapsed().as_millis(),
+                "write retry timeout reached after version conflicts"
+            );
+            return Err(error.into());
+        }
+        #[cfg(test)]
+        invoke_executor_test_hook(ExecutorFailpoint::BeforeRetry);
+        let backoff = calculate_backoff(self.attempt);
+        tracing::trace!(
+            attempt = self.attempt,
+            elapsed_ms = self.start_time.elapsed().as_millis(),
+            backoff_ms = backoff.as_millis(),
+            "retrying write after version conflict"
+        );
+        std::thread::sleep(backoff);
+        self.attempt += 1;
+        Ok(())
     }
 }
 

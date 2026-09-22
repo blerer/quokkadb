@@ -22,18 +22,34 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-    WriteBatch::new(operations, CountStats::default())
+    WriteBatch::new_for_test(operations, CountStats::default())
 }
 
 fn write_batch_with_count_stats(operations: Vec<Operation>, count_stats: CountStats) -> WriteBatch {
-    WriteBatch::new(operations, count_stats)
+    WriteBatch::new_for_test(operations, count_stats)
 }
 
 fn write_batch_with_preconditions(
     operations: Vec<Operation>,
     preconditions: Preconditions,
 ) -> WriteBatch {
-    WriteBatch::new_with_preconditions(operations, preconditions, CountStats::default())
+    WriteBatch::new_with_preconditions(operations, CountStats::default(), preconditions)
+}
+
+fn version_match_preconditions(snapshot: Snapshot, conditions: Vec<Precondition>) -> Preconditions {
+    let mut preconditions = Preconditions::new(snapshot);
+    preconditions.extend_version_matches(conditions);
+    preconditions
+}
+
+fn collection_version_preconditions(
+    snapshot: Snapshot,
+    collection: u32,
+    version: u32,
+) -> Preconditions {
+    let mut preconditions = Preconditions::new(snapshot);
+    preconditions.add_collection_version_match(collection, version);
+    preconditions
 }
 
 fn put_op_at(collection: u32, index: u32, user_key_val: i32, version: u32) -> Operation {
@@ -2884,28 +2900,6 @@ fn test_drop_collection_not_found() {
 }
 
 #[test]
-fn test_write_to_non_existent_collection() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().to_path_buf();
-    let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
-
-    let name = "existing_collection";
-    let col = engine.create_collection(name, true).unwrap();
-    engine
-        .write(write_batch(vec![put_op(col, 1, 1)]), false)
-        .unwrap();
-
-    engine.drop_collection(name).unwrap();
-
-    // Try to write to a collection that doesn't exist
-    let result = engine.write(write_batch(vec![put_op(col, 1, 1)]), false);
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-    assert!(matches!(err, StorageError::CollectionNotFound { .. }));
-}
-
-#[test]
 fn test_write_to_dropped_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
@@ -2920,10 +2914,123 @@ fn test_write_to_dropped_collection() {
     engine.drop_collection("test_collection").unwrap();
 
     // Try to write to the dropped collection
-    let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]), false);
+    let result = engine.write(
+        WriteBatch::new_with_preconditions(
+            vec![put_op(col_id, 1, 1)],
+            CountStats::default(),
+            collection_version_preconditions(engine.acquire_snapshot(), col_id, 1),
+        ),
+        false,
+    );
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(matches!(err, StorageError::CollectionNotFound { .. }));
+}
+
+#[test]
+fn test_write_rejects_stale_collection_schema_precondition() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let registry = &mut MetricRegistry::default();
+    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let collection = engine
+        .create_collection("schema_precondition", true)
+        .unwrap();
+    let snapshot = engine.acquire_snapshot();
+    let version = engine
+        .catalog()
+        .get_collection_by_id(&collection)
+        .unwrap()
+        .version;
+
+    engine
+        .create_index(
+            collection,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
+            IndexOptions::default(),
+        )
+        .unwrap();
+
+    let mut preconditions = Preconditions::new(snapshot);
+    preconditions.extend_version_matches(vec![Precondition::VersionMatch {
+        collection,
+        index: 0,
+        user_key: user_key(1),
+    }]);
+    preconditions.add_collection_version_match(collection, version);
+
+    engine.fail_next_precondition_checks(1);
+
+    let batch = WriteBatch::new_with_preconditions(
+        vec![put_op(collection, 1, 1)],
+        CountStats::default(),
+        preconditions,
+    );
+
+    let error = engine.write(batch, false).unwrap_err();
+    assert!(matches!(error, StorageError::SchemaVersionConflict { .. }));
+}
+
+#[test]
+fn test_write_rejects_stale_schema_for_any_collection_precondition() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let registry = &mut MetricRegistry::default();
+    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let first_collection = engine
+        .create_collection("first_schema_precondition", true)
+        .unwrap();
+    let second_collection = engine
+        .create_collection("second_schema_precondition", true)
+        .unwrap();
+    let snapshot = engine.acquire_snapshot();
+    let first_version = engine
+        .catalog()
+        .get_collection_by_id(&first_collection)
+        .unwrap()
+        .version;
+    let second_version = engine
+        .catalog()
+        .get_collection_by_id(&second_collection)
+        .unwrap()
+        .version;
+
+    engine
+        .create_index(
+            second_collection,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
+            IndexOptions::default(),
+        )
+        .unwrap();
+
+    let mut preconditions = Preconditions::new(snapshot);
+    preconditions.add_collection_version_match(first_collection, first_version);
+    preconditions.add_collection_version_match(second_collection, second_version);
+    let batch = WriteBatch::new_with_preconditions(
+        vec![
+            put_op(first_collection, 1, 1),
+            put_op(second_collection, 1, 2),
+        ],
+        CountStats::default(),
+        preconditions,
+    );
+
+    let error = engine.write(batch, false).unwrap_err();
+    assert!(matches!(error, StorageError::SchemaVersionConflict { .. }));
+
+    let snapshot = engine.acquire_snapshot();
+    assert!(
+        engine
+            .read_at_snapshot(first_collection, 0, &user_key(1), &snapshot)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .read_at_snapshot(second_collection, 0, &user_key(2), &snapshot)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -3048,7 +3155,14 @@ fn test_drop_collection_persistence_across_restart() {
         assert_eq!(drops[0].drop_sequence_number, drop_seq);
 
         // Writing to dropped collection should fail
-        let result = engine.write(write_batch(vec![put_op(col_id, 1, 1)]), false);
+        let result = engine.write(
+            WriteBatch::new_with_preconditions(
+                vec![put_op(col_id, 1, 1)],
+                CountStats::default(),
+                collection_version_preconditions(engine.acquire_snapshot(), col_id, 1),
+            ),
+            false,
+        );
         assert!(result.is_err());
     }
 }
@@ -3560,7 +3674,7 @@ fn test_optimistic_locking_must_not_exist() {
         index: idx,
         user_key: user_key(2),
     };
-    let preconditions = Preconditions::new(snapshot1.clone(), vec![precondition]);
+    let preconditions = version_match_preconditions(snapshot1.clone(), vec![precondition]);
     let batch = write_batch_with_preconditions(vec![put_op(col, 2, 2)], preconditions);
     let result = engine.write(batch, false);
 
@@ -3578,7 +3692,7 @@ fn test_optimistic_locking_must_not_exist() {
         index: idx,
         user_key: user_key(3),
     };
-    let preconditions_ok = Preconditions::new(snapshot2.clone(), vec![precondition_ok]);
+    let preconditions_ok = version_match_preconditions(snapshot2.clone(), vec![precondition_ok]);
     let batch_ok = write_batch_with_preconditions(vec![put_op(col, 3, 1)], preconditions_ok);
     engine.write(batch_ok, false).unwrap();
 
@@ -3589,7 +3703,7 @@ fn test_optimistic_locking_must_not_exist() {
         index: idx,
         user_key: user_key(1),
     };
-    let preconditions_fail = Preconditions::new(snapshot0, vec![precondition_fail]);
+    let preconditions_fail = version_match_preconditions(snapshot0, vec![precondition_fail]);
     let batch_fail = write_batch_with_preconditions(vec![put_op(col, 1, 2)], preconditions_fail);
     let result_fail = engine.write(batch_fail, false);
     assert!(result_fail.is_err());
@@ -3618,7 +3732,7 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
 
     let snapshot = engine.acquire_snapshot();
     let since = snapshot.sequence();
-    let preconditions = Preconditions::new(
+    let preconditions = version_match_preconditions(
         snapshot.clone(),
         vec![Precondition::VersionMatch {
             collection: col,

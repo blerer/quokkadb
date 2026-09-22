@@ -140,12 +140,10 @@ mod write;
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutorFailpoint {
-    UpdateOneAfterRead,
+    AfterRead,
     UpdateOneUpsertAfterNoMatch,
-    UpdateManyBeforeCommit,
-    InsertManualAfterPreflightBeforeWrite,
-    DeleteOneAfterRead,
-    DeleteManyBeforeCommit,
+    BeforeCommit,
+    BeforeRetry,
 }
 
 #[cfg(test)]

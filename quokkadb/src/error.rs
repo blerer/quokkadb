@@ -116,6 +116,14 @@ impl From<StorageError> for Error {
                 user_key: _,
                 reason,
             } => Error::VersionConflict(reason),
+            StorageError::SchemaVersionConflict {
+                collection,
+                expected,
+                actual,
+            } => Error::VersionConflict(format!(
+                "Schema version conflict for collection {}: expected {}, found {:?}",
+                collection, expected, actual
+            )),
             StorageError::LogCorruption {
                 record_offset,
                 reason,

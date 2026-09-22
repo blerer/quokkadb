@@ -683,9 +683,9 @@ mod tests {
     }
 
     fn write_batch(operations: Vec<Operation>) -> WriteBatch {
-        WriteBatch::new(
+        WriteBatch::new_for_test(
             operations,
-            crate::storage::count_stats::CountStats::default(),
+            CountStats::default(),
         )
     }
 }

@@ -375,7 +375,7 @@ mod tests {
 
         tree.memtable.write(
             1,
-            &WriteBatch::new(
+            &WriteBatch::new_for_test(
                 vec![],
                 CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 2)])),
             ),
@@ -388,7 +388,7 @@ mod tests {
 
         tree.memtable.write(
             2,
-            &WriteBatch::new(
+            &WriteBatch::new_for_test(
                 vec![],
                 CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), -1)])),
             ),
