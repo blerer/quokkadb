@@ -9,6 +9,7 @@ Use these guides after [Getting Started](getting-started.md) to complete common 
 
 ## Organize data
 
+- [Schema evolution & migrations](guides/schema-evolution-and-migrations.md) — evolve models, metadata, and existing documents safely.
 - [Indexes](guides/indexes.md) — create indexes for frequent filters and sorts.
 - [Manage collections](guides/manage-collections.md) — create, inspect, rename, and remove collections.
 - [Import and export data](guides/import-export.md) — move a collection through JSONL or CSV files.

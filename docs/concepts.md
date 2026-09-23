@@ -40,6 +40,8 @@ let plant = plants.find_one(|plant| plant.needs_water.eq(true))?;
 
 The Rust type describes how the application reads and writes documents; it does not add a database-wide schema constraint. Code using the document API can write a document with a different shape to the same collection. A typed read of an incompatible document returns a deserialization error. Keep one document shape per typed collection, or use the document API when the shape is intentionally flexible.
 
+For changes to a model or its existing documents, see [Schema evolution & migrations](guides/schema-evolution-and-migrations.md).
+
 ## Collections
 
 A collection is a named group of documents. A collection handle does not create the collection by itself. Operations through a missing collection return an error by default, which helps detect misspelled names and missing setup.
