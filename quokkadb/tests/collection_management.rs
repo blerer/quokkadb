@@ -9,7 +9,6 @@ use tempfile::tempdir;
 
 #[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
 struct TypedUser {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,

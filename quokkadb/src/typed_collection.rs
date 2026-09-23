@@ -1517,7 +1517,6 @@ mod tests {
 
     #[derive(Debug, PartialEq, Serialize, Deserialize, quokkadb_derive::QuokkaDocument)]
     struct User {
-        #[quokka(id)]
         #[serde(rename = "_id")]
         id: u64,
         name: String,

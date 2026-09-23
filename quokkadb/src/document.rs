@@ -1377,7 +1377,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, QuokkaDocument)]
     struct User {
-        #[quokka(id)]
         #[serde(rename = "_id")]
         id: u64,
         name: String,
@@ -1394,7 +1393,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, QuokkaDocument)]
     struct OptionalUser {
-        #[quokka(id)]
         #[serde(rename = "_id")]
         id: u64,
         address: Option<Address>,
@@ -1403,7 +1401,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, QuokkaDocument)]
     struct CompoundUser {
-        #[quokka(id)]
         #[serde(rename = "_id")]
         id: u64,
         address: Address,

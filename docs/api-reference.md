@@ -42,7 +42,7 @@ fn open_database() -> Result<QuokkaDB> {
 
 ## Typed collections
 
-`TypedCollection<T>` stores a Serde-serializable Rust model and produces typed field expressions from it. Derive `QuokkaDocument` for the root collection model. Mark exactly one concrete, non-optional ID field with `#[quokka(id)]`.
+`TypedCollection<T>` stores a Serde-serializable Rust model and produces typed field expressions from it. Derive `QuokkaDocument` for the root collection model. Give exactly one concrete, non-optional field the effective Serde name `_id`, usually with `#[serde(rename = "_id")]`.
 
 ```rust
 use quokkadb::QuokkaDocument;
@@ -50,7 +50,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, QuokkaDocument)]
 struct Plant {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,

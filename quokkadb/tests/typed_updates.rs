@@ -8,7 +8,6 @@ use tempfile::TempDir;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct User {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,
@@ -35,7 +34,6 @@ struct Profile {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct UpdateFeatures {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     total: i32,

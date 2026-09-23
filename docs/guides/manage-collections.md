@@ -26,7 +26,7 @@ db.create_collection_with("plants")
 
 `Generated` creates every document ID in the database and rejects a supplied `_id`. `Manual` requires an application-provided ID. `Mixed` accepts a supplied `_id` or generates one when it is missing; it is the default.
 
-These strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete `#[quokka(id)]` field; the ID cannot be an `Option`, so each typed model provides an ID before insertion.
+These strategies are primarily for the document API, where a document can omit `_id`. A typed `QuokkaDocument` model must declare exactly one concrete, non-optional field whose effective Serde name is `_id`, so each typed model provides an ID before insertion.
 
 ## Generate a document ID in your application
 

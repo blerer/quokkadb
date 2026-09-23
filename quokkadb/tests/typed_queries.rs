@@ -9,7 +9,6 @@ use tempfile::TempDir;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct User {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,
@@ -40,7 +39,6 @@ struct PublicUser {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct OptionalUser {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     nickname: Option<String>,
@@ -73,7 +71,6 @@ struct IndexedOrders {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct NestedUser {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     address: Address,

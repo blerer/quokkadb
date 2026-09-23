@@ -25,7 +25,6 @@ Most applications should use the typed API. A typed collection serializes a Rust
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaDocument)]
 struct Plant {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,
@@ -65,7 +64,7 @@ For a document collection, each collection has one of three ID-creation strategi
 | `Manual` | Require the application to supply `_id`. |
 | `Generated` | Generate every `_id` and reject documents that supply one. |
 
-Typed models always supply their own ID. A `QuokkaDocument` model has exactly one non-optional field marked `#[quokka(id)]`, usually serialized as `_id` with `#[serde(rename = "_id")]`.
+Typed models always supply their own ID. A `QuokkaDocument` model has exactly one non-optional field whose effective Serde name is `_id`, usually configured with `#[serde(rename = "_id")]`.
 
 When an application needs to create IDs before insertion, `QuokkaId::new()` produces a globally ordered Sonyflake ID. It serializes as a BSON `Int64`, so it can be used with the document API. It is not currently available as a typed model ID.
 

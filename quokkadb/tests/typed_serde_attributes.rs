@@ -16,9 +16,8 @@ struct Profile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 #[serde(rename_all = "camelCase")]
 struct AttributeDocument {
-    #[quokka(id)]
     #[serde(rename = "_id")]
-    id: u64,
+    identifier: u64,
     #[serde(rename = "display_name")]
     display_name: String,
     #[serde(default)]
@@ -34,7 +33,7 @@ fn setup() -> (TempDir, QuokkaDB) {
 
 fn attribute_document(id: u64) -> AttributeDocument {
     AttributeDocument {
-        id,
+        identifier: id,
         display_name: "Alice".to_string(),
         retry_count: 7,
         profile: Profile {
@@ -99,7 +98,7 @@ fn typed_serde_default_and_skip_apply_at_the_serde_boundary() {
 
     let document = db
         .typed_collection::<AttributeDocument>("attributes")
-        .find_one(|document| document.id.eq(2_u64))
+        .find_one(|document| document.identifier.eq(2_u64))
         .unwrap()
         .unwrap();
 
@@ -108,7 +107,6 @@ fn typed_serde_default_and_skip_apply_at_the_serde_boundary() {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 struct SkippedDocument {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     #[serde(skip)]
@@ -148,7 +146,6 @@ fn typed_serde_skip_omits_the_field_and_uses_its_default_on_read() {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
 #[serde(rename_all = "camelCase")]
 struct ConditionalDocument {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

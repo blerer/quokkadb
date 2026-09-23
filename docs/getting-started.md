@@ -26,7 +26,6 @@ use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
 struct Plant {
-    #[quokka(id)]
     #[serde(rename = "_id")]
     id: u64,
     name: String,

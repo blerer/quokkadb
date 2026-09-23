@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, QuokkaDocument)]
 struct User {
-    #[quokka(id)]
+    #[serde(rename = "_id")]
     id: u64,
     name: String,
     active: bool,

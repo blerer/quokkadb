@@ -1,15 +1,13 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use quote::{ToTokens, format_ident, quote};
-use syn::parse::Parser;
-use syn::punctuated::Punctuated;
+use quote::{format_ident, quote, ToTokens};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Data, DeriveInput, Error, Fields, GenericArgument, LitStr, Meta, PathArguments,
-    Token, Type, parse_macro_input,
+    parse_macro_input, Attribute, Data, DeriveInput, Error, Fields, GenericArgument, LitStr,
+    PathArguments, Token, Type,
 };
 
-#[proc_macro_derive(QuokkaDocument, attributes(quokka))]
+#[proc_macro_derive(QuokkaDocument)]
 pub fn derive_quokka_document(input: TokenStream) -> TokenStream {
     match derive_quokka_document_impl(parse_macro_input!(input as DeriveInput)) {
         Ok(tokens) => tokens.into(),
@@ -18,7 +16,7 @@ pub fn derive_quokka_document(input: TokenStream) -> TokenStream {
 }
 
 /// Derives typed field metadata for an embedded Serde struct.
-#[proc_macro_derive(QuokkaType, attributes(quokka))]
+#[proc_macro_derive(QuokkaType)]
 pub fn derive_quokka_type(input: TokenStream) -> TokenStream {
     match derive_quokka_type_impl(parse_macro_input!(input as DeriveInput)) {
         Ok(tokens) => tokens.into(),
@@ -81,7 +79,7 @@ fn derive_quokka_document_impl(input: DeriveInput) -> Result<proc_macro2::TokenS
             .ok_or_else(|| Error::new_spanned(&field, "expected named field"))?;
         let field_attributes =
             parse_field_attributes(&field, &container_attributes, DeriveKind::Document)?;
-        let is_id = parse_quokka_id(&field)?;
+        let is_id = field_attributes.stored_name == "_id";
         if is_id && option_inner_type(&field.ty).is_some() {
             return Err(Error::new_spanned(
                 &field.ty,
@@ -93,7 +91,7 @@ fn derive_quokka_document_impl(input: DeriveInput) -> Result<proc_macro2::TokenS
             if id_field_ident.is_some() {
                 return Err(Error::new_spanned(
                     &field,
-                    "QuokkaDocument derive supports exactly one #[quokka(id)] field",
+                    "QuokkaDocument derive supports exactly one field serialized as `_id`",
                 ));
             }
             id_field_ident = Some(field_ident.clone());
@@ -123,7 +121,7 @@ fn derive_quokka_document_impl(input: DeriveInput) -> Result<proc_macro2::TokenS
     let id_field_ident = id_field_ident.ok_or_else(|| {
         Error::new(
             Span::call_site(),
-            "QuokkaDocument derive requires exactly one #[quokka(id)] field",
+            "QuokkaDocument derive requires exactly one field serialized as `_id`",
         )
     })?;
     let id_ty = id_ty.expect("id field type should exist when id field is present");
@@ -204,12 +202,6 @@ fn derive_quokka_type_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             .ident
             .clone()
             .ok_or_else(|| Error::new_spanned(&field, "expected named field"))?;
-        if parse_quokka_id(&field)? {
-            return Err(Error::new_spanned(
-                &field,
-                "QuokkaType fields cannot use #[quokka(id)]",
-            ));
-        }
         let field_attributes =
             parse_field_attributes(&field, &container_attributes, DeriveKind::Type)?;
         if field_attributes.skip {
@@ -490,33 +482,6 @@ fn unsupported_attribute(derive_kind: DeriveKind, path: &syn::Path) -> Error {
     )
 }
 
-fn parse_quokka_id(field: &syn::Field) -> Result<bool, Error> {
-    let mut is_id = false;
-
-    for attr in &field.attrs {
-        if !attr.path().is_ident("quokka") {
-            continue;
-        }
-
-        let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-        let metas = parser.parse2(attr.meta.require_list()?.tokens.clone())?;
-
-        for meta in metas {
-            match meta {
-                Meta::Path(path) if path.is_ident("id") => is_id = true,
-                other => {
-                    return Err(Error::new_spanned(
-                        other,
-                        "unsupported #[quokka(...)] attribute, expected #[quokka(id)]",
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(is_id)
-}
-
 fn option_inner_type(ty: &Type) -> Option<&Type> {
     let Type::Path(type_path) = ty else {
         return None;
@@ -536,8 +501,8 @@ fn option_inner_type(ty: &Type) -> Option<&Type> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RenameRule, derive_quokka_document_impl, derive_quokka_type_impl};
-    use syn::{DeriveInput, parse_quote};
+    use super::{derive_quokka_document_impl, derive_quokka_type_impl, RenameRule};
+    use syn::{parse_quote, DeriveInput};
 
     fn expanded_document(input: DeriveInput) -> String {
         derive_quokka_document_impl(input).unwrap().to_string()
@@ -551,7 +516,7 @@ mod tests {
     fn rejects_optional_id_fields() {
         let error = derive_quokka_document_impl(parse_quote! {
             struct User {
-                #[quokka(id)]
+                #[serde(rename = "_id")]
                 id: Option<u64>,
             }
         })
@@ -565,14 +530,61 @@ mod tests {
 
     #[test]
     fn accepts_concrete_id_fields() {
-        assert!(
-            derive_quokka_document_impl(parse_quote! {
-                struct User {
-                    #[quokka(id)]
-                    id: u64,
-                }
-            })
-            .is_ok()
+        assert!(derive_quokka_document_impl(parse_quote! {
+            struct User {
+                #[serde(rename = "_id")]
+                identifier: u64,
+            }
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_id_fields() {
+        let error = derive_quokka_document_impl(parse_quote! {
+            struct User {
+                id: u64,
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "QuokkaDocument derive requires exactly one field serialized as `_id`"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_id_fields() {
+        let error = derive_quokka_document_impl(parse_quote! {
+            struct User {
+                #[serde(rename = "_id")]
+                first_id: u64,
+                #[serde(rename = "_id")]
+                second_id: u64,
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "QuokkaDocument derive supports exactly one field serialized as `_id`"
+        );
+    }
+
+    #[test]
+    fn rejects_omittable_id_fields() {
+        let error = derive_quokka_document_impl(parse_quote! {
+            struct User {
+                #[serde(rename = "_id", skip)]
+                id: u64,
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "QuokkaDocument ID fields cannot use Serde field-skipping attributes"
         );
     }
 
@@ -580,7 +592,6 @@ mod tests {
     fn generated_document_metadata_uses_renamed_field_paths() {
         let expanded = expanded_document(parse_quote! {
             struct User {
-                #[quokka(id)]
                 #[serde(rename = "_id")]
                 id: u64,
                 #[serde(rename = "display_name")]
@@ -596,7 +607,6 @@ mod tests {
         let expanded = expanded_document(parse_quote! {
             #[serde(rename_all = "camelCase")]
             struct User {
-                #[quokka(id)]
                 #[serde(rename = "_id")]
                 id: u64,
                 display_name: String,
@@ -640,7 +650,6 @@ mod tests {
         let expanded = expanded_document(parse_quote! {
             #[serde(default)]
             struct User {
-                #[quokka(id)]
                 #[serde(rename = "_id")]
                 id: u64,
                 #[serde(default)]
@@ -668,53 +677,45 @@ mod tests {
 
     #[test]
     fn rejects_alias_on_documents() {
-        assert!(
-            derive_quokka_document_impl(parse_quote! {
-                struct User {
-                    #[quokka(id)]
-                    id: u64,
-                    #[serde(alias = "legacy_name")]
-                    name: String,
-                }
-            })
-            .is_err()
-        );
+        assert!(derive_quokka_document_impl(parse_quote! {
+            struct User {
+                #[serde(rename = "_id")]
+                id: u64,
+                #[serde(alias = "legacy_name")]
+                name: String,
+            }
+        })
+        .is_err());
     }
 
     #[test]
     fn rejects_alias_on_embedded_types() {
-        assert!(
-            derive_quokka_type_impl(parse_quote! {
-                struct Profile {
-                    #[serde(alias = "legacy_name")]
-                    name: String,
-                }
-            })
-            .is_err()
-        );
+        assert!(derive_quokka_type_impl(parse_quote! {
+            struct Profile {
+                #[serde(alias = "legacy_name")]
+                name: String,
+            }
+        })
+        .is_err());
     }
 
     #[test]
     fn rejects_directional_serde_renames() {
-        assert!(
-            derive_quokka_document_impl(parse_quote! {
-                #[serde(rename_all(serialize = "camelCase"))]
-                struct User {
-                    #[quokka(id)]
-                    id: u64,
-                }
-            })
-            .is_err()
-        );
+        assert!(derive_quokka_document_impl(parse_quote! {
+            #[serde(rename_all(serialize = "camelCase"))]
+            struct User {
+                #[serde(rename = "_id")]
+                id: u64,
+            }
+        })
+        .is_err());
 
-        assert!(
-            derive_quokka_type_impl(parse_quote! {
-                struct Profile {
-                    #[serde(rename(serialize = "legacy_name"))]
-                    name: String,
-                }
-            })
-            .is_err()
-        );
+        assert!(derive_quokka_type_impl(parse_quote! {
+            struct Profile {
+                #[serde(rename(serialize = "legacy_name"))]
+                name: String,
+            }
+        })
+        .is_err());
     }
 }
