@@ -69,7 +69,7 @@ documents.update_many(
 )?;
 ```
 
-Use an application read-transform-replace loop for type conversions and structural changes. `update_many` is atomic for one operation, but QuokkaDB does not provide a multi-operation transaction or a general migration runner. Validate the result before removing compatibility code.
+Use an application read-transform-replace loop for type conversions and structural changes. `update_many` commits matching documents individually, so a migration must tolerate stopping partway through and be safe to retry. QuokkaDB does not provide a multi-operation transaction or a general migration runner. Validate the result before removing compatibility code.
 
 ## Compatibility table
 

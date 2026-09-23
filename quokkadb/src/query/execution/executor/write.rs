@@ -1,8 +1,8 @@
-use super::read::ReadExecutor;
 use super::Metrics;
 use super::WriteResult;
+use super::read::ReadExecutor;
 #[cfg(test)]
-use super::{invoke_executor_test_hook, ExecutorFailpoint};
+use super::{ExecutorFailpoint, invoke_executor_test_hook};
 use crate::error::Error;
 use crate::error::Result;
 use crate::query::execution::indexes::Indexes;
@@ -22,7 +22,7 @@ use crate::storage::storage_engine::StorageError;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use crate::util::bson_utils;
 use crate::util::bson_utils::BsonKey;
-use bson::{serialize_to_vec, Bson, Document, RawDocument};
+use bson::{Bson, Document, RawDocument, serialize_to_vec};
 use sonyflake::Sonyflake;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -257,7 +257,6 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
-        let metadata = self.collection_metadata(collection)?;
         let snapshot = self.storage_engine.acquire_snapshot();
         let snapshot_sequence = snapshot.sequence();
         let _span = trace_span!("update_many", upsert, snapshot = snapshot_sequence).entered();
@@ -267,9 +266,6 @@ impl WriteExecutor {
             Some(snapshot.clone()),
         )?;
 
-        let mut operations = Vec::new();
-        let mut preconditions = Vec::new();
-        let mut count_stats = CountStatsBuilder::new();
         let mut matched_count = 0;
         let mut modified_count = 0;
         let mut upserted_id: Option<Bson> = None;
@@ -283,25 +279,17 @@ impl WriteExecutor {
                 let old_doc = doc_result?;
                 matched_count += 1;
                 let new_doc = updater(old_doc.clone())?;
-
-                let indices = Indexes::from_collection(&metadata);
-
-                indices.append_delete_ops(&mut operations, &old_doc, &mut count_stats)?;
-
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
-                operations.push(Operation::new_put(
+                let new_doc_bytes = serialize_to_vec(&new_doc)?;
+                self.write_document(
                     collection,
-                    0,
-                    user_key.clone(),
-                    new_doc.to_vec()?,
-                ));
-                indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
-
-                preconditions.push(Precondition::VersionMatch {
-                    collection,
-                    index: 0,
+                    &snapshot,
                     user_key,
-                });
+                    Some(old_doc),
+                    new_doc,
+                    new_doc_bytes,
+                    sync,
+                )?;
                 modified_count += 1;
                 next = iter.next();
             }
@@ -310,20 +298,16 @@ impl WriteExecutor {
             upserted_id = Some(generated_id.clone());
 
             let user_key = generated_id.try_into_key()?;
-            let indices = Indexes::from_collection(&metadata);
-            count_stats.inc_collection(collection, 1);
-            indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
-            operations.push(Operation::new_put(
+            let new_doc_bytes = serialize_to_vec(&new_doc)?;
+            self.write_document(
                 collection,
-                0,
-                user_key.clone(),
-                new_doc.to_vec()?,
-            ));
-            preconditions.push(Precondition::VersionMatch {
-                collection,
-                index: 0,
+                &snapshot,
                 user_key,
-            });
+                None,
+                new_doc,
+                new_doc_bytes,
+                sync,
+            )?;
         } else {
             return Ok(WriteResult::Update {
                 matched_count,
@@ -331,15 +315,6 @@ impl WriteExecutor {
                 upserted_id: None,
             });
         }
-
-        let batch = WriteBatch::new_with_preconditions(
-            operations,
-            count_stats.build(),
-            Self::preconditions(snapshot, &metadata, preconditions),
-        );
-        #[cfg(test)]
-        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
-        self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Update {
             matched_count,
@@ -553,7 +528,6 @@ impl WriteExecutor {
         parameters: &Parameters,
         sync: bool,
     ) -> Result<WriteResult> {
-        let metadata = self.collection_metadata(collection)?;
         let snapshot = self.storage_engine.acquire_snapshot();
         let snapshot_sequence = snapshot.sequence();
         let _span = trace_span!("delete_many", snapshot = snapshot_sequence).entered();
@@ -563,39 +537,19 @@ impl WriteExecutor {
             Some(snapshot.clone()),
         )?;
 
-        let mut operations = Vec::new();
-        let mut preconditions = Vec::new();
-        let mut count_stats = CountStatsBuilder::new();
         let mut deleted_count = 0;
-        let indices = Indexes::from_collection(&metadata);
 
         while let Some(doc_result) = iter.next() {
             let old_doc = doc_result?;
             let user_key = old_doc.get("_id").unwrap().try_into_key()?;
 
-            indices.append_delete_ops(&mut operations, &old_doc, &mut count_stats)?;
-            operations.push(Operation::new_delete(collection, 0, user_key.clone()));
-            count_stats.inc_collection(collection, -1);
-            preconditions.push(Precondition::VersionMatch {
-                collection,
-                index: 0,
-                user_key,
-            });
+            self.delete_document(collection, &snapshot, user_key, &old_doc, sync)?;
             deleted_count += 1;
         }
 
         if deleted_count == 0 {
             return Ok(WriteResult::Delete { deleted_count: 0 });
         }
-
-        let batch = WriteBatch::new_with_preconditions(
-            operations,
-            count_stats.build(),
-            Self::preconditions(snapshot, &metadata, preconditions),
-        );
-        #[cfg(test)]
-        self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
-        self.storage_engine.write(batch, sync)?;
 
         Ok(WriteResult::Delete { deleted_count })
     }

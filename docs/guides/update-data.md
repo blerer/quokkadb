@@ -28,7 +28,7 @@ assert_eq!(result.modified_count, 1);
 
 Scalar fields support `set`, `min`, and `max`. Numeric fields also support `inc` and `mul`; optional fields provide `unset`.
 
-Use `update_many` when every match should change. The operation either applies to all selected documents or returns an error without a partial result. See [Concepts](../concepts.md#concurrent-access-and-atomic-writes) for the atomicity and conflict rules.
+Use `update_many` when every match should change. Each matching document and its indexes are committed atomically, while a conflict or other error can occur after earlier documents were committed. See [Concepts](../concepts.md#concurrent-access-and-atomic-writes) for the snapshot and conflict rules.
 
 ```rust
 plants.update_many(

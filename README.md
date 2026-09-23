@@ -25,7 +25,7 @@ Applications are built from nested objects, collections, and evolving state. **Q
 - **Flexible schema** — evolve your documents with your application models.
 - **No mapping layer** — persist nested application models directly.
 - **Small and bounded** — designed for predictable application-level resource usage.
-- **Real database semantics** — durability, indexes, concurrent access, atomic updates, and crash recovery.
+- **Real database semantics** — durability, indexes, concurrent access, atomic document writes, and crash recovery.
 
 QuokkaDB is designed to make persistence a boring part of building an application.
 

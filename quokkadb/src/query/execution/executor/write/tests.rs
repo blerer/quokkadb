@@ -1,23 +1,23 @@
 use super::*;
 use crate::error::{Error, Result};
-use crate::query::execution::executor::test_utils::*;
-use crate::query::execution::executor::ExecutorTestHook;
 use crate::query::execution::QueryExecutor;
+use crate::query::execution::executor::ExecutorTestHook;
+use crate::query::execution::executor::test_utils::*;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::update_fn::*;
 use crate::query::*;
+use crate::storage::Direction;
 use crate::storage::catalog::{
     CollectionOptions, IdCreationStrategy, IndexDefinition, IndexOptions, OrderedIndexField,
 };
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::operation::Operation;
 use crate::storage::storage_engine::StorageEngine;
-use crate::storage::Direction;
 use crate::util::bson_utils::BsonKey;
 use bson::doc;
 use bson::{Bson, Document};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn index_scan_eq(
     executor: &QueryExecutor,
@@ -1304,6 +1304,74 @@ fn test_delete_many_does_not_retry_on_conflict() -> Result<()> {
 }
 
 #[test]
+fn test_delete_many_commits_each_document_before_continuing() -> Result<()> {
+    let hook = Arc::new(PausingHook::new_for_each_hit(vec![
+        ExecutorFailpoint::BeforeCommit,
+    ]));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_delete_many_per_document", true)?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "first" },
+            &doc! { "_id": 2, "value": "second" },
+        ],
+    )?;
+
+    let delete_handle = spawn_paused_delete_many(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        full_scan_plan(collection_id),
+    );
+
+    hook.wait_until_hit();
+    hook.release();
+    hook.wait_until_hits(2);
+
+    let mut first_params = Parameters::new();
+    let first_plan = point_search_query(collection_id, &mut first_params, 1_i32);
+    let mut first_results = executor.execute_cached(first_plan, &first_params)?;
+    assert!(first_results.next().is_none());
+    assert!(index_scan_eq(&executor, collection_id, index.id, "first")?.is_empty());
+
+    let concurrent_delete_executor = executor.clone();
+    let concurrent_update =
+        execute_update_one(&concurrent_delete_executor, collection_id, 2, "concurrent")?;
+    assert_update_result(concurrent_update, 1, 1, Option::<Bson>::None);
+
+    hook.release();
+
+    match delete_handle.join().unwrap() {
+        Err(Error::VersionConflict(_)) => {}
+        Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+        Ok(result) => panic!("Expected VersionConflict, got success {:?}", result),
+    }
+
+    let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+    assert_eq!(final_doc2, doc! { "_id": 2, "value": "concurrent" });
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "concurrent")?,
+        vec![doc! { "_id": 2, "value": "concurrent" }]
+    );
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        Some(1)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_delete_one_retries_after_concurrent_update() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
     let runtime = executor_test_runtime()?;
@@ -1478,8 +1546,7 @@ fn test_update_one_retries_after_concurrent_update_disjoint_fields() -> Result<(
 }
 
 #[test]
-
-fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> Result<()> {
+fn test_update_many_fails_on_conflicting_first_document_after_delete() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
@@ -1531,7 +1598,7 @@ fn test_update_many_fails_after_concurrent_delete_without_partial_success() -> R
 }
 
 #[test]
-fn test_update_many_fails_after_concurrent_update_without_partial_success() -> Result<()> {
+fn test_update_many_fails_on_conflicting_first_document_after_update() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
@@ -1575,6 +1642,84 @@ fn test_update_many_fails_after_concurrent_update_without_partial_success() -> R
 
     let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
     assert_eq!(final_doc2, doc! { "_id": 2, "value": "second" });
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        Some(2)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_update_many_commits_each_document_before_continuing() -> Result<()> {
+    let hook = Arc::new(PausingHook::new_for_each_hit(vec![
+        ExecutorFailpoint::BeforeCommit,
+    ]));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_update_many_per_document", true)?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("status")]),
+        IndexOptions::default(),
+    )?;
+
+    insert_docs(
+        &executor,
+        collection_id,
+        [
+            &doc! { "_id": 1, "value": "first" },
+            &doc! { "_id": 2, "value": "second" },
+        ],
+    )?;
+
+    let update_handle = spawn_paused_update_many(
+        executor.clone(),
+        hook.clone(),
+        collection_id,
+        full_scan_plan(collection_id),
+        update([set([field_name("status")], "updated")]),
+        false,
+    );
+
+    hook.wait_until_hit();
+    hook.release();
+    hook.wait_until_hits(2);
+
+    assert_eq!(
+        read_stored_doc(&storage_engine, collection_id, 1)?,
+        doc! { "_id": 1, "value": "first", "status": "updated" }
+    );
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "updated")?,
+        vec![doc! { "_id": 1, "value": "first", "status": "updated" }]
+    );
+
+    let concurrent_update_executor = executor.clone();
+    let concurrent_update =
+        execute_update_one(&concurrent_update_executor, collection_id, 2, "concurrent")?;
+    assert_update_result(concurrent_update, 1, 1, Option::<Bson>::None);
+
+    hook.release();
+
+    match update_handle.join().unwrap() {
+        Err(Error::VersionConflict(_)) => {}
+        Err(err) => panic!("Expected VersionConflict, got {:?}", err),
+        Ok(result) => panic!("Expected VersionConflict, got success {:?}", result),
+    }
+
+    let final_doc1 = read_stored_doc(&storage_engine, collection_id, 1)?;
+    assert_eq!(
+        final_doc1,
+        doc! { "_id": 1, "value": "first", "status": "updated" }
+    );
+    let final_doc2 = read_stored_doc(&storage_engine, collection_id, 2)?;
+    assert_eq!(final_doc2, doc! { "_id": 2, "value": "concurrent" });
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "updated")?,
+        vec![doc! { "_id": 1, "value": "first", "status": "updated" }]
+    );
     assert_eq!(
         storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
         Some(2)
@@ -1793,9 +1938,11 @@ fn test_insert_many_manual_id_fails_while_concurrent_delete_same_key_is_pending(
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "initial" });
     let user_key_2 = BsonValue::from(2_i32).try_into_key()?;
     let snapshot = storage_engine.acquire_snapshot();
-    assert!(storage_engine
-        .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
-        .is_none());
+    assert!(
+        storage_engine
+            .read_at_snapshot(collection_id, 0, &user_key_2, &snapshot)?
+            .is_none()
+    );
 
     hook.release();
 

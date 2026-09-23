@@ -68,7 +68,7 @@ See [Indexes](guides/indexes.md) for creation and lifecycle operations.
 | Capability | Typed API | Document API | Notes |
 | --- | --- | --- | --- |
 | Consistent query snapshots | Supported | Supported | A query sees the state at its start while its iterator is consumed. |
-| Atomic write operations | Supported | Supported | Each operation, including `update_many` and `delete_many`, commits entirely or returns an error without a partial result. Conflicting concurrent writes can return an error and should be retried when safe. |
+| Atomic document writes | Supported | Supported | Each document update or delete, including its index changes, commits entirely. `update_many` and `delete_many` process matching documents in separate batches, so a later conflict can return an error after earlier documents were committed. |
 | Concurrent access in one application | Supported | Supported | Clone an already-opened `QuokkaDB` handle and share it across application threads. |
 | Durable writes and recovery | Supported | Supported | `Durable` is the default. `ProcessSafe` and `Buffered` deliberately trade crash durability for throughput; `sync()` makes an individual write durable before it returns. Reopening the directory recovers acknowledged writes according to that setting. |
 | In-process metrics and tracing | Supported | Supported | `metrics()` exposes in-process measurements and QuokkaDB emits `tracing` instrumentation. |

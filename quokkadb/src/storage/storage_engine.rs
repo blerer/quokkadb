@@ -4,7 +4,9 @@ use crate::options::options::Options;
 use crate::storage::Direction;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
-use crate::storage::catalog::{Catalog, CollectionMetadata, CollectionOptions, IndexDefinition, IndexOptions};
+use crate::storage::catalog::{
+    Catalog, CollectionMetadata, CollectionOptions, IndexDefinition, IndexOptions,
+};
 use crate::storage::compaction::compaction_manager::CompactionManager;
 use crate::storage::compaction::compaction_picker::CompactionJob;
 use crate::storage::count_stats::{CountStatSource, CountStats, CountStatsKey};
@@ -934,9 +936,9 @@ impl StorageEngine {
                         })?;
 
                     if metadata.version != *version {
-                        return Err(
-                            Self::schema_version_conflict_error(collection, version, metadata)
-                        );
+                        return Err(Self::schema_version_conflict_error(
+                            collection, version, metadata,
+                        ));
                     }
                 }
                 Precondition::VersionMatch {
@@ -990,7 +992,7 @@ impl StorageEngine {
     fn schema_version_conflict_error(
         collection: &u32,
         version: &u32,
-        metadata: Arc<CollectionMetadata>
+        metadata: Arc<CollectionMetadata>,
     ) -> StorageError {
         StorageError::SchemaVersionConflict {
             collection: *collection,

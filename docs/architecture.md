@@ -44,7 +44,7 @@ The storage engine owns the database directory. It accepts writes through the wr
 
 Collections and indexes share a single LSM storage engine. Document records and index entries use the same WAL, memtable, SSTable, flushing, and compaction machinery; QuokkaDB does not maintain a separate persistence subsystem for indexes.
 
-When a write changes a document, the corresponding index entries are updated through the same write path. This lets index maintenance participate in the atomicity of the write. The catalog describes collections and indexes and informs query planning and execution, but it is metadata at the query/storage boundary rather than another storage output alongside the WAL or SSTables.
+When a write changes a document, the corresponding index entries are updated through the same write path. This lets index maintenance participate in the atomicity of that document write. The catalog describes collections and indexes and informs query planning and execution, but it is metadata at the query/storage boundary rather than another storage output alongside the WAL or SSTables.
 
 ## How a read works
 
@@ -59,9 +59,9 @@ Read [Concepts](concepts.md#queries-updates-and-indexes) for query semantics and
 
 ## How a write works
 
-Insert, update, replace, and delete operations also become plans, but they are executed as writes rather than cached read iterators. Updates and deletes read the matching documents, calculate their changes, and prepare a write batch. Concurrent changes are checked before the batch is committed.
+Insert, update, replace, and delete operations also become plans, but they are executed as writes rather than cached read iterators. Updates and deletes read matching documents from a consistent snapshot, calculate each change, and prepare one write batch per document. Concurrent changes are checked before each batch is committed.
 
-The storage engine appends the batch to the write-ahead log, assigns sequence numbers, and makes the new records visible through the current in-memory table. A write operation commits as a whole or returns an error without applying a partial result. The configured `WalDurability` controls when the recovery record is considered durable; `sync()` can require durability for one operation.
+The storage engine appends each batch to the write-ahead log, assigns a sequence number, and makes the new records visible through the current in-memory table. A batch commits as a whole or returns an error; a multi-document operation can have earlier batches committed when a later batch fails. The configured `WalDurability` controls when each recovery record is considered durable; `sync()` applies to every batch in the operation.
 
 As the in-memory table grows, QuokkaDB rotates it and schedules a flush to an on-disk sorted table. Compaction later merges files and removes obsolete versions when active snapshots no longer need them. These maintenance tasks are separate from the query and write APIs.
 

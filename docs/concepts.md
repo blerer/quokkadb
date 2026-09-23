@@ -96,7 +96,7 @@ See [Indexes](guides/indexes.md) for index creation and management.
 
 Each query runs against a consistent snapshot taken when it starts. A query iterator continues to see that snapshot while it is consumed, even if another thread writes newer data.
 
-Each write operation is atomic. A reader sees the state before the write or the state after it, including operations that affect several matching documents such as `update_many` and `delete_many`. QuokkaDB checks for conflicting concurrent changes before committing these operations; if a conflict prevents the write, it returns an error without applying a partial result. Retry the operation when the application can safely do so.
+Each document write is atomic, including the document's index changes. A reader sees the state before or after that document write. Operations that affect several matching documents, such as `update_many` and `delete_many`, commit one document at a time from a consistent query snapshot. A later conflict can therefore return an error after earlier matching documents were committed. Retry the operation when the application can safely do so.
 
 Multi-operation transactions are not currently supported. If an application invariant spans separate database calls, keep that invariant in application logic or redesign it around one write operation.
 
