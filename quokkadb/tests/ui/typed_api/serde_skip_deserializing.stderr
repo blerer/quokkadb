@@ -1,0 +1,5 @@
+error: QuokkaDocument derive does not support #[serde(skip_deserializing)] in typed query metadata
+ --> tests/ui/typed_api/serde_skip_deserializing.rs:8:13
+  |
+8 |     #[serde(skip_deserializing)]
+  |             ^^^^^^^^^^^^^^^^^^

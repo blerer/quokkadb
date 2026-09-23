@@ -1,0 +1,5 @@
+error: QuokkaDocument derive does not support #[serde(alias)] in typed query metadata
+ --> tests/ui/typed_api/serde_alias_document.rs:8:13
+  |
+8 |     #[serde(alias = "legacy_name")]
+  |             ^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: QuokkaDocument derive does not support #[serde(with)] in typed query metadata
+  --> tests/ui/typed_api/serde_with.rs:26:13
+   |
+26 |     #[serde(with = "codec")]
+   |             ^^^^
