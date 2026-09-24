@@ -93,6 +93,10 @@ impl Operation {
     pub fn value(&self) -> &[u8] {
         &self.value
     }
+
+    pub(crate) fn payload_size_bytes(&self) -> usize {
+        self.user_key.len().saturating_add(self.value.len())
+    }
 }
 
 impl Serializable for Operation {

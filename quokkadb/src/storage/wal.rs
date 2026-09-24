@@ -50,6 +50,8 @@ pub struct WriteAheadLog {
     pending_bytes: usize,
     /// The wal files that have been rotated but are still active
     rotated_log_files: VecDeque<(u64, PathBuf)>,
+    #[cfg(test)]
+    return_error_on_sync: bool,
 }
 
 impl WriteAheadLog {
@@ -137,6 +139,8 @@ impl WriteAheadLog {
             wal_bytes_per_sync: options.wal_bytes_per_sync().to_bytes(),
             pending_bytes: 0,
             rotated_log_files,
+            #[cfg(test)]
+            return_error_on_sync: false,
         })
     }
 
@@ -232,6 +236,10 @@ impl WriteAheadLog {
         if self.pending_bytes == 0 {
             return Ok(());
         }
+        #[cfg(test)]
+        if self.return_error_on_sync {
+            return Err(std::io::Error::other("Injected error on WAL sync"));
+        }
         let _span =
             trace_span!("wal.sync", path = %self.append_log.file_path().display()).entered();
         let start = Instant::now();
@@ -293,13 +301,18 @@ impl WriteAheadLog {
     }
 
     #[cfg(test)]
-    pub fn return_error_on_append(&self, value: bool) {
-        self.append_log.return_error_on_append(value);
+    pub fn return_error_on_sync(&mut self, value: bool) {
+        self.return_error_on_sync = value;
     }
 
     #[cfg(test)]
-    pub fn return_error_on_rotate(&self, value: bool) {
-        self.append_log.return_error_on_rotate(value);
+    pub fn fail_append_after(&self, count: usize) {
+        self.append_log.fail_append_after(count);
+    }
+
+    #[cfg(test)]
+    pub fn fail_rotate_after(&self, count: usize) {
+        self.append_log.fail_rotate_after(count);
     }
 }
 

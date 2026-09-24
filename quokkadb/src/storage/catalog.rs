@@ -3,6 +3,7 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
+use crate::storage::FIRST_USER_COLLECTION_ID;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Result;
@@ -15,7 +16,8 @@ use std::sync::Arc;
 /// such as collection IDs and index definitions.
 #[derive(Debug, PartialEq)]
 pub struct Catalog {
-    /// The next collection id (the first 10 are reserved for internal collections)
+    /// The next user collection ID. IDs below `FIRST_USER_COLLECTION_ID` are
+    /// reserved for internal collections and are not stored in this catalog.
     pub next_collection_id: u32,
     /// Mapping from collection id to its metadata.
     collections: BTreeMap<u32, Arc<CollectionMetadata>>,
@@ -26,11 +28,23 @@ pub struct Catalog {
 impl Serializable for Catalog {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let next_collection_id = reader.read_varint_u32()?;
+        if next_collection_id < FIRST_USER_COLLECTION_ID {
+            return Err(invalid_data(format!(
+                "Invalid next user collection ID: {}",
+                next_collection_id
+            )));
+        }
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
         let mut id_by_name = HashMap::new();
         for _ in 0..size {
             let id = reader.read_varint_u32()?;
+            if id < FIRST_USER_COLLECTION_ID {
+                return Err(invalid_data(format!(
+                    "Catalog contains reserved collection ID: {}",
+                    id
+                )));
+            }
             let collection = Arc::new(CollectionMetadata::read_from(reader, version)?);
             let name = collection.name.clone();
             let include_in_name_lookup = collection.dropped_at.is_none();
@@ -59,7 +73,7 @@ impl Serializable for Catalog {
 impl Catalog {
     pub fn new() -> Self {
         Catalog {
-            next_collection_id: 10,
+            next_collection_id: FIRST_USER_COLLECTION_ID,
             collections: BTreeMap::new(),
             id_by_name: HashMap::new(),
         }
@@ -104,6 +118,10 @@ impl Catalog {
         created_at: u64,
         options: CollectionOptions,
     ) -> Self {
+        assert!(
+            id >= FIRST_USER_COLLECTION_ID,
+            "User collection IDs must not use reserved collection IDs"
+        );
         assert_eq!(self.next_collection_id, id);
         let mut collections = self.collections.clone();
         collections.insert(
@@ -151,6 +169,24 @@ impl Catalog {
         self.collections.values().filter(|c| c.dropped_at.is_none())
     }
 
+    /// Returns active indexes that are still waiting for their initial build,
+    /// together with their source snapshot sequence.
+    pub(crate) fn indexes_being_built(&self) -> impl Iterator<Item = (u32, u32, u64)> + '_ {
+        self.collections
+            .iter()
+            .flat_map(|(collection_id, collection)| {
+                collection
+                    .indexes
+                    .values()
+                    .filter(move |index| {
+                        collection.dropped_at.is_none()
+                            && index.dropped_at.is_none()
+                            && index.queryable_at.is_none()
+                    })
+                    .map(move |index| (*collection_id, index.id, index.build_snapshot_sequence()))
+            })
+    }
+
     pub fn rename_collection(&self, id: u32, new_name: &str) -> Self {
         let col = self.collections.get(&id).cloned().unwrap();
         let old_name = &col.name;
@@ -191,6 +227,9 @@ impl Catalog {
         created_at: u64,
     ) -> Self {
         let col = self.collections.get(&collection_id).cloned().unwrap();
+        // New indexes are registered before their initial population. They are
+        // active for write maintenance, but remain excluded from query planning
+        // until the background builder publishes them with queryable_at.
         let index = IndexMetadata {
             id: index_id,
             definition: definition.clone(),
@@ -451,6 +490,24 @@ impl CollectionMetadata {
             .and_then(|id| self.indexes.get(id).cloned())
     }
 
+    pub fn is_dropped(&self) -> bool {
+        self.dropped_at.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn is_index_dropped(&self, id: u32) -> bool {
+        self.indexes
+            .get(&id)
+            .map_or(false, |index| index.dropped_at.is_some())
+    }
+
+    #[cfg(test)]
+    pub fn is_index_queryable(&self, id: u32) -> bool {
+        self.indexes
+            .get(&id)
+            .map_or(false, |index| index.queryable_at.is_some())
+    }
+
     pub fn get_index_by_id(&self, id: u32) -> Option<Arc<IndexMetadata>> {
         self.indexes.get(&id).cloned()
     }
@@ -469,6 +526,15 @@ impl CollectionMetadata {
             .filter(|idx| idx.dropped_at.is_none() && idx.queryable_at.is_some())
             .cloned()
             .collect()
+    }
+
+    /// Returns whether this active collection has an active index awaiting its initial build.
+    pub(crate) fn has_building_index(&self) -> bool {
+        self.dropped_at.is_none()
+            && self
+                .indexes
+                .values()
+                .any(|index| index.dropped_at.is_none() && index.queryable_at.is_none())
     }
 
     pub fn find_index_equivalent_to(
@@ -887,8 +953,24 @@ impl IndexMetadata {
         }
     }
 
+    /// The visible data sequence immediately before index registration's
+    /// `created_at` boundary.
+    pub(crate) fn build_snapshot_sequence(&self) -> u64 {
+        self.created_at
+            .checked_sub(1)
+            .expect("index creation sequence must be greater than zero")
+    }
+
     pub fn is_equivalent_to(&self, definition: &IndexDefinition, options: &IndexOptions) -> bool {
         self.definition == *definition && self.options.is_equivalent_to(options)
+    }
+
+    pub fn is_dropped(&self) -> bool {
+        self.dropped_at.is_some()
+    }
+
+    pub fn is_queryable(&self) -> bool {
+        !self.is_dropped() && self.queryable_at.is_some()
     }
 
     fn was_created_at(&self, snapshot: u64) -> bool {
@@ -932,6 +1014,15 @@ impl Serializable for IndexMetadata {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
+    use crate::storage::{INTERNAL_INDEX_BUILD_COLLECTION_ID, RESERVED_COLLECTION_ID_COUNT};
+
+    #[test]
+    fn catalog_reserves_internal_collection_ids() {
+        assert_eq!(RESERVED_COLLECTION_ID_COUNT, 10);
+        assert_eq!(FIRST_USER_COLLECTION_ID, RESERVED_COLLECTION_ID_COUNT);
+        assert_eq!(INTERNAL_INDEX_BUILD_COLLECTION_ID, 0);
+        assert_eq!(Catalog::new().next_collection_id, FIRST_USER_COLLECTION_ID);
+    }
 
     #[test]
     fn test_index_name_formatting_single_asc_field() {
@@ -1217,6 +1308,27 @@ mod tests {
 
         let dropped = metadata.drop_index(2, 1627846300);
         assert!(dropped.queryable_indexes().is_empty());
+    }
+
+    #[test]
+    fn test_has_building_index_only_for_active_collection_and_index() {
+        let metadata = create_collections_with_indexes();
+        assert!(metadata.has_building_index());
+
+        let queryable = metadata.mark_index_queryable(1, 1627846270);
+        assert!(!queryable.has_building_index());
+
+        let dropped_index = metadata.drop_index(1, 1627846270);
+        assert!(!dropped_index.has_building_index());
+
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let dropped_collection = Catalog::new()
+            .add_collection("products", 10, 1627846261)
+            .add_index_to_collection(10, 1, &definition, &IndexOptions::default(), 1627846262)
+            .drop_collection(10, 1627846270)
+            .get_collection_by_id(&10)
+            .unwrap();
+        assert!(!dropped_collection.has_building_index());
     }
 
     #[test]

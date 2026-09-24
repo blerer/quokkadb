@@ -17,6 +17,14 @@ struct User {
 }
 
 fn setup() -> (TempDir, QuokkaDB) {
+    setup_with_index(true)
+}
+
+fn setup_without_index() -> (TempDir, QuokkaDB) {
+    setup_with_index(false)
+}
+
+fn setup_with_index(create_index: bool) -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let db = common::open_db(dir.path());
     let collection = db.typed_collection::<User>("users").create_if_missing();
@@ -41,9 +49,11 @@ fn setup() -> (TempDir, QuokkaDB) {
         ])
         .unwrap();
 
-    collection
-        .create_index(|user| user.name.index_asc())
-        .unwrap();
+    if create_index {
+        collection
+            .create_index(|user| user.name.index_asc())
+            .unwrap();
+    }
     (dir, db)
 }
 
@@ -90,7 +100,7 @@ fn document_filters_treat_operator_shaped_strings_as_literals() {
 
 #[test]
 fn typed_filters_cannot_broaden_updates_or_deletes() {
-    let (_dir, db) = setup();
+    let (_dir, db) = setup_without_index();
     let collection = db.typed_collection::<User>("users");
 
     let update = collection
@@ -132,7 +142,7 @@ fn typed_filters_cannot_broaden_updates_or_deletes() {
 
 #[test]
 fn document_filters_cannot_broaden_updates_or_deletes() {
-    let (_dir, db) = setup();
+    let (_dir, db) = setup_without_index();
     let collection = db.collection("users");
 
     let update = collection
@@ -215,7 +225,7 @@ fn document_api_keeps_explicit_operators_and_rejects_unknown_ones() {
 
 #[test]
 fn document_api_can_match_an_operator_shaped_document_with_eq() {
-    let (_dir, db) = setup();
+    let (_dir, db) = setup_without_index();
     let collection = db.collection("users");
     let literal = doc! { "$ne": "Alice" };
 

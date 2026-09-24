@@ -27,6 +27,7 @@ pub struct Options {
     max_open_files: u32,
     block_cache_size: StorageQuantity,
     query_cache_size: StorageQuantity,
+    index_build_batch_size: StorageQuantity,
     wal_durability: WalDurability,
     wal_bytes_per_sync: StorageQuantity,
     max_manifest_file_size: StorageQuantity,
@@ -54,6 +55,7 @@ impl Default for Options {
             max_open_files: 200,
             block_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
+            index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(256, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(256, StorageUnit::Kibibytes),
@@ -89,6 +91,7 @@ impl Options {
             max_open_files: 512,
             block_cache_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(16, StorageUnit::Mebibytes),
+            index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(1, StorageUnit::Mebibytes),
             max_manifest_file_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
@@ -112,6 +115,7 @@ impl Options {
             max_open_files: 1024,
             block_cache_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(64, StorageUnit::Mebibytes),
+            index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::ProcessSafe,
             wal_bytes_per_sync: StorageQuantity::new(512, StorageUnit::Kibibytes),
             max_manifest_file_size: StorageQuantity::new(2, StorageUnit::Mebibytes),
@@ -152,6 +156,12 @@ impl Options {
     /// Override the query cache size.
     pub fn with_query_cache_size(mut self, size: StorageQuantity) -> Self {
         self.query_cache_size = size;
+        self
+    }
+
+    /// Override the target payload size of each index build batch.
+    pub fn with_index_build_batch_size(mut self, size: StorageQuantity) -> Self {
+        self.index_build_batch_size = size;
         self
     }
 
@@ -253,6 +263,10 @@ impl Options {
 
     pub fn query_cache_size(&self) -> StorageQuantity {
         self.query_cache_size
+    }
+
+    pub fn index_build_batch_size(&self) -> StorageQuantity {
+        self.index_build_batch_size
     }
 
     pub fn wal_durability(&self) -> WalDurability {
@@ -389,6 +403,11 @@ impl Options {
                 "query_cache_size must be greater than 0".into(),
             ));
         }
+        if self.index_build_batch_size.to_bytes() == 0 {
+            return Err(Error::InvalidOptions(
+                "index_build_batch_size must be greater than 0".into(),
+            ));
+        }
         if self.max_levels < 2 {
             return Err(Error::InvalidOptions(
                 "max_levels must be at least 2 (L0 + at least one more level)".into(),
@@ -463,6 +482,34 @@ mod tests {
         assert_eq!(
             opts.query_cache_size(),
             StorageQuantity::new(4, StorageUnit::Mebibytes)
+        );
+    }
+
+    #[test]
+    fn index_build_batch_size_defaults_to_one_mebibyte() {
+        let opts = base_options();
+        assert_eq!(
+            opts.index_build_batch_size(),
+            StorageQuantity::new(1, StorageUnit::Mebibytes)
+        );
+    }
+
+    #[test]
+    fn index_build_batch_size_can_be_configured() {
+        let size = StorageQuantity::new(512, StorageUnit::Kibibytes);
+        let opts = base_options().with_index_build_batch_size(size);
+        assert_eq!(opts.index_build_batch_size(), size);
+    }
+
+    #[test]
+    fn validate_rejects_zero_index_build_batch_size() {
+        let err = Options::default()
+            .with_index_build_batch_size(StorageQuantity::new(0, StorageUnit::Bytes))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid options: index_build_batch_size must be greater than 0"
         );
     }
 
@@ -558,6 +605,11 @@ impl fmt::Display for Options {
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  Query Cache Size: {:?}", self.query_cache_size)?;
+        writeln!(
+            f,
+            "  Index Build Batch Size: {:?}",
+            self.index_build_batch_size
+        )?;
         writeln!(f, "  WAL Durability: {:?}", self.wal_durability)?;
         writeln!(f, "  WAL Bytes Per Sync: {:?}", self.wal_bytes_per_sync)?;
         writeln!(

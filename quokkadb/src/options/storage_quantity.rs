@@ -44,6 +44,11 @@ impl StorageQuantity {
         Self { value, unit }
     }
 
+    /// Creates a `StorageQuantity` representing the given number of bytes.
+    pub fn from_bytes(value: usize) -> Self {
+        Self::new(value, StorageUnit::Bytes)
+    }
+
     /// Converts the storage quantity to bytes.
     ///
     /// # Returns

@@ -172,6 +172,19 @@ impl WriteExecutor {
         Error::InvalidRequest(format!("Duplicate key error. dup key: {{ _id: {} }}", id))
     }
 
+    fn ensure_writes_allowed(
+        &self,
+        metadata: &Arc<CollectionMetadata>,
+    ) -> std::result::Result<(), StorageError> {
+        if metadata.has_building_index() {
+            return Err(StorageError::IndexBuildInProgress {
+                collection: metadata.id,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     pub(super) fn primary_key_exists(
         storage_engine: &StorageEngine,
         collection: u32,
@@ -803,6 +816,7 @@ impl WriteExecutor {
 
         loop {
             let metadata = self.collection_metadata(collection)?;
+            self.ensure_writes_allowed(&metadata)?;
             let mut operations = Vec::new();
             let mut count_stats = CountStatsBuilder::new();
             operations.push(Operation::new_put(
@@ -872,6 +886,7 @@ impl WriteExecutor {
         }
 
         let metadata = self.collection_metadata(collection)?;
+        self.ensure_writes_allowed(&metadata)?;
         let id_strategy = metadata.options.id_creation_strategy.clone();
 
         let mut documents_with_ids: Vec<(Vec<u8>, Bson, Vec<u8>)> =
@@ -994,6 +1009,7 @@ impl WriteExecutor {
         let mut count_stats = CountStatsBuilder::new();
 
         let metadata = self.collection_metadata(collection)?;
+        self.ensure_writes_allowed(&metadata)?;
         let indices = Indexes::from_collection(&metadata);
 
         if let Some(doc) = old_doc.as_ref() {
@@ -1039,6 +1055,7 @@ impl WriteExecutor {
         let mut count_stats = CountStatsBuilder::new();
 
         let metadata = self.collection_metadata(collection)?;
+        self.ensure_writes_allowed(&metadata)?;
         let indices = Indexes::from_collection(&metadata);
         indices.append_delete_ops(&mut operations, old_doc, &mut count_stats)?;
         operations.push(Operation::new_delete(collection, 0, user_key.clone()));

@@ -529,7 +529,7 @@ mod tests {
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
         let collection_id = storage_engine.create_collection("test_upsert_index_scan", true)?;
-        let index = storage_engine.create_index(
+        let index = storage_engine.create_queryable_index(
             collection_id,
             IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
             IndexOptions::default(),
@@ -687,7 +687,7 @@ mod tests {
         let storage_engine = runtime.storage_engine.clone();
         let executor = runtime.executor.clone();
         let collection_id = storage_engine.create_collection("test_replace_index_scan", true)?;
-        let index = storage_engine.create_index(
+        let index = storage_engine.create_queryable_index(
             collection_id,
             IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
             IndexOptions::default(),

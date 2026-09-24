@@ -5,6 +5,7 @@ mod compaction;
 pub(crate) mod count_stats;
 mod files;
 mod flush_manager;
+pub(crate) mod index_build_state;
 pub(crate) mod internal_key;
 mod iterators;
 mod lsm_tree;
@@ -20,6 +21,19 @@ pub(crate) mod storage_engine;
 pub(crate) mod test_utils;
 mod wal;
 pub(crate) mod write_batch;
+
+/// Number of collection IDs reserved for QuokkaDB's internal collections.
+///
+/// User-created collections start at [`FIRST_USER_COLLECTION_ID`]. Internal
+/// collections are stored directly by their reserved ID and are not catalog
+/// entries exposed through the public collection APIs.
+pub(crate) const RESERVED_COLLECTION_ID_COUNT: u32 = 10;
+
+/// The first collection ID available to user-created collections.
+pub(crate) const FIRST_USER_COLLECTION_ID: u32 = RESERVED_COLLECTION_ID_COUNT;
+
+/// Reserved collection used for persisted index-build state.
+pub(crate) const INTERNAL_INDEX_BUILD_COLLECTION_ID: u32 = 0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Direction {

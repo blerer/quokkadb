@@ -241,7 +241,7 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_index_eq", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
         IndexOptions::default(),
@@ -284,7 +284,7 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_index_compound", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![
             OrderedIndexField::asc("a"),
@@ -332,7 +332,7 @@ fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<(
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_index_reverse", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
         IndexOptions::default(),

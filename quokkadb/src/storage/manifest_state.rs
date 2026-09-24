@@ -158,6 +158,17 @@ impl ManifestState {
                     *created_at,
                 ));
             }
+            ManifestEdit::MarkIndexQueryable {
+                collection_id,
+                index_id,
+                queryable_at,
+            } => {
+                self.catalog = Arc::new(self.catalog.mark_index_queryable(
+                    *collection_id,
+                    *index_id,
+                    *queryable_at,
+                ));
+            }
             ManifestEdit::DropIndex {
                 collection_id,
                 index_id,
@@ -195,6 +206,7 @@ impl ManifestState {
             | ManifestEdit::DropCollection { .. }
             | ManifestEdit::RenameCollection { .. }
             | ManifestEdit::CreateIndex { .. }
+            | ManifestEdit::MarkIndexQueryable { .. }
             | ManifestEdit::DropIndex { .. }) => self.queue_catalog_edit(edit),
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => ManifestState {
                 lsm: Arc::new(self.lsm.adjust_file_number(*next_file_number)),
@@ -299,7 +311,233 @@ mod tags {
     pub const CREATE_INDEX: u8 = 10;
     pub const DROP_INDEX: u8 = 11;
     pub const DISCARD_PENDING_CATALOG_EDITS_AFTER: u8 = 12;
+    pub const MARK_INDEX_QUERYABLE: u8 = 13;
 }
+
+fn apply_count_stats_delta(current: &CountStats, delta: &CountStats) -> CountStats {
+    let mut merged = current.deltas.clone();
+
+    for (key, value) in &delta.deltas {
+        let new_value = merged.get(key).copied().unwrap_or_default() + value;
+        if new_value == 0 {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), new_value);
+        }
+    }
+
+    CountStats::new(merged)
+}
+
+fn without_collection_count_stats(current: &CountStats, collection: u32) -> CountStats {
+    CountStats::new(
+        current
+            .deltas
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(key, CountStatsKey::Collection(id) if *id == collection)
+                    && !matches!(
+                        key,
+                        CountStatsKey::Index {
+                            collection: id,
+                            ..
+                        } if *id == collection
+                    )
+            })
+            .map(|(key, delta)| (key.clone(), *delta))
+            .collect(),
+    )
+}
+
+fn without_index_count_stats(current: &CountStats, collection: u32, index: u32) -> CountStats {
+    CountStats::new(
+        current
+            .deltas
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key,
+                    CountStatsKey::Index {
+                        collection: c,
+                        index: i
+                    } if *c == collection && *i == index
+                )
+            })
+            .map(|(key, delta)| (key.clone(), *delta))
+            .collect(),
+    )
+}
+
+/// Represents a single atomic change to the manifest state.
+///
+/// This enum is logged in the manifest and replayed at startup to reconstruct
+/// the full `ManifestState`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestEdit {
+    /// A full snapshot of the current manifest state.
+    Snapshot(Arc<ManifestState>),
+
+    /// Adds a new collection to the catalog.
+    CreateCollection {
+        name: String,
+        id: u32,
+        created_at: u64,
+        options: CollectionOptions,
+    },
+
+    /// Removes a collection from the catalog.
+    DropCollection { id: u32, dropped_at: u64 },
+
+    /// Renames a collection in the catalog.
+    RenameCollection {
+        id: u32,
+        new_name: String,
+        renamed_at: u64,
+    },
+
+    /// Indicates a new WAL file has been created.
+    WalRotation { log_number: u64, next_seq: u64 },
+
+    /// Indicates a new manifest file has been created.
+    ManifestRotation { manifest_number: u64 },
+
+    /// Records a flush of a memtable into an SSTable.
+    Flush {
+        oldest_log_number: u64,
+        sst: Arc<SSTableMetadata>,
+        count_stats: CountStats,
+    },
+
+    /// Updates file number tracking based on files detected during recovery.
+    FilesDetectedOnRestart { next_file_number: u64 },
+
+    /// On replay if a WAL was corrupted and did not result in any update we need to skip it
+    /// and drop the empty memtable.
+    IgnoringEmptyMemtable { oldest_log_number: u64 },
+
+    /// Records a compaction that has been performed, the SSTables removed and added, and any drops
+    /// that were applied.
+    Compaction {
+        output_level: usize,
+        removed_sstables: Vec<Arc<SSTableMetadata>>,
+        added_sstables: Vec<Arc<SSTableMetadata>>,
+        drops: Vec<Arc<DropMetadata>>,
+    },
+
+    /// Add a new index to a collection
+    CreateIndex {
+        collection_id: u32,
+        index_id: u32,
+        definition: IndexDefinition,
+        options: IndexOptions,
+        created_at: u64,
+    },
+
+    /// Marks an index as queryable in a collection.
+    MarkIndexQueryable {
+        collection_id: u32,
+        index_id: u32,
+        queryable_at: u64,
+    },
+
+    /// Marks an index as dropped in a collection.
+    DropIndex {
+        collection_id: u32,
+        index_id: u32,
+        dropped_at: u64,
+    },
+
+    /// Removes queued schema mutations after a WAL recovery boundary.
+    DiscardPendingCatalogEditsAfter { sequence: u64 },
+}
+
+impl ManifestEdit {
+    fn catalog_edit_sequence(&self) -> Option<u64> {
+        match self {
+            ManifestEdit::CreateCollection { created_at, .. }
+            | ManifestEdit::CreateIndex { created_at, .. } => Some(*created_at),
+            ManifestEdit::DropCollection { dropped_at, .. }
+            | ManifestEdit::DropIndex { dropped_at, .. } => Some(*dropped_at),
+            ManifestEdit::MarkIndexQueryable { queryable_at, .. } => Some(*queryable_at),
+            ManifestEdit::RenameCollection { renamed_at, .. } => Some(*renamed_at),
+            _ => None,
+        }
+    }
+
+    fn apply_to_catalog(&self, catalog: &Catalog) -> Catalog {
+        match self {
+            ManifestEdit::CreateCollection {
+                name,
+                id,
+                created_at,
+                options,
+            } => catalog.add_collection_with_options(name, *id, *created_at, options.clone()),
+            ManifestEdit::DropCollection { id, dropped_at } => {
+                catalog.drop_collection(*id, *dropped_at)
+            }
+            ManifestEdit::RenameCollection { id, new_name, .. } => {
+                catalog.rename_collection(*id, new_name)
+            }
+            ManifestEdit::CreateIndex {
+                collection_id,
+                index_id,
+                definition,
+                options,
+                created_at,
+            } => catalog.add_index_to_collection(
+                *collection_id,
+                *index_id,
+                definition,
+                options,
+                *created_at,
+            ),
+            ManifestEdit::MarkIndexQueryable {
+                collection_id,
+                index_id,
+                queryable_at,
+            } => catalog.mark_index_queryable(*collection_id, *index_id, *queryable_at),
+            ManifestEdit::DropIndex {
+                collection_id,
+                index_id,
+                dropped_at,
+            } => catalog.drop_index(*collection_id, *index_id, *dropped_at),
+            _ => unreachable!("Only catalog edits can be applied to the catalog"),
+        }
+    }
+
+    fn drop_metadata(&self) -> Option<Arc<DropMetadata>> {
+        match self {
+            ManifestEdit::DropCollection { id, dropped_at } => {
+                Some(DropMetadata::new_collection_drop(*id, *dropped_at))
+            }
+            ManifestEdit::DropIndex {
+                collection_id,
+                index_id,
+                dropped_at,
+            } => Some(DropMetadata::new_index_drop(
+                *collection_id,
+                *index_id,
+                *dropped_at,
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn to_vec(&self, version: u32) -> Vec<u8> {
+        let mut writer = ByteWriter::new();
+        self.write_to(&mut writer, version);
+        writer.take_buffer()
+    }
+
+    pub fn try_from_vec(input: &[u8], version: u32) -> Result<ManifestEdit> {
+        let reader = ByteReader::new(input);
+        Self::read_from(&reader, version)
+    }
+}
+
+use crate::io::invalid_data;
+use crate::io::serializable::Serializable;
+use std::fmt;
 
 impl Serializable for ManifestEdit {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
@@ -411,6 +649,11 @@ impl Serializable for ManifestEdit {
                     dropped_at,
                 })
             }
+            tags::MARK_INDEX_QUERYABLE => Ok(ManifestEdit::MarkIndexQueryable {
+                collection_id: reader.read_varint_u32()?,
+                index_id: reader.read_varint_u32()?,
+                queryable_at: reader.read_varint_u64()?,
+            }),
             tags::DISCARD_PENDING_CATALOG_EDITS_AFTER => {
                 Ok(ManifestEdit::DiscardPendingCatalogEditsAfter {
                     sequence: reader.read_varint_u64()?,
@@ -534,6 +777,16 @@ impl Serializable for ManifestEdit {
                 writer.write_varint_u32(*index_id);
                 writer.write_varint_u64(*dropped_at);
             }
+            ManifestEdit::MarkIndexQueryable {
+                collection_id,
+                index_id,
+                queryable_at,
+            } => {
+                writer.write_u8(tags::MARK_INDEX_QUERYABLE);
+                writer.write_varint_u32(*collection_id);
+                writer.write_varint_u32(*index_id);
+                writer.write_varint_u64(*queryable_at);
+            }
             ManifestEdit::DiscardPendingCatalogEditsAfter { sequence } => {
                 writer
                     .write_u8(tags::DISCARD_PENDING_CATALOG_EDITS_AFTER)
@@ -542,218 +795,6 @@ impl Serializable for ManifestEdit {
         }
     }
 }
-
-fn apply_count_stats_delta(current: &CountStats, delta: &CountStats) -> CountStats {
-    let mut merged = current.deltas.clone();
-
-    for (key, value) in &delta.deltas {
-        let new_value = merged.get(key).copied().unwrap_or_default() + value;
-        if new_value == 0 {
-            merged.remove(key);
-        } else {
-            merged.insert(key.clone(), new_value);
-        }
-    }
-
-    CountStats::new(merged)
-}
-
-fn without_collection_count_stats(current: &CountStats, collection: u32) -> CountStats {
-    CountStats::new(
-        current
-            .deltas
-            .iter()
-            .filter(|(key, _)| {
-                !matches!(key, CountStatsKey::Collection(id) if *id == collection)
-                    && !matches!(
-                        key,
-                        CountStatsKey::Index {
-                            collection: id,
-                            ..
-                        } if *id == collection
-                    )
-            })
-            .map(|(key, delta)| (key.clone(), *delta))
-            .collect(),
-    )
-}
-
-fn without_index_count_stats(current: &CountStats, collection: u32, index: u32) -> CountStats {
-    CountStats::new(
-        current
-            .deltas
-            .iter()
-            .filter(|(key, _)| {
-                !matches!(
-                    key,
-                    CountStatsKey::Index {
-                        collection: c,
-                        index: i
-                    } if *c == collection && *i == index
-                )
-            })
-            .map(|(key, delta)| (key.clone(), *delta))
-            .collect(),
-    )
-}
-
-/// Represents a single atomic change to the manifest state.
-///
-/// This enum is logged in the manifest and replayed at startup to reconstruct
-/// the full `ManifestState`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ManifestEdit {
-    /// A full snapshot of the current manifest state.
-    Snapshot(Arc<ManifestState>),
-
-    /// Adds a new collection to the catalog.
-    CreateCollection {
-        name: String,
-        id: u32,
-        created_at: u64,
-        options: CollectionOptions,
-    },
-
-    /// Removes a collection from the catalog.
-    DropCollection { id: u32, dropped_at: u64 },
-
-    /// Renames a collection in the catalog.
-    RenameCollection {
-        id: u32,
-        new_name: String,
-        renamed_at: u64,
-    },
-
-    /// Indicates a new WAL file has been created.
-    WalRotation { log_number: u64, next_seq: u64 },
-
-    /// Indicates a new manifest file has been created.
-    ManifestRotation { manifest_number: u64 },
-
-    /// Records a flush of a memtable into an SSTable.
-    Flush {
-        oldest_log_number: u64,
-        sst: Arc<SSTableMetadata>,
-        count_stats: CountStats,
-    },
-
-    /// Updates file number tracking based on files detected during recovery.
-    FilesDetectedOnRestart { next_file_number: u64 },
-
-    /// On replay if a WAL was corrupted and did not result in any update we need to skip it
-    /// and drop the empty memtable.
-    IgnoringEmptyMemtable { oldest_log_number: u64 },
-
-    /// Records a compaction that has been performed, the SSTables removed and added, and any drops
-    /// that were applied.
-    Compaction {
-        output_level: usize,
-        removed_sstables: Vec<Arc<SSTableMetadata>>,
-        added_sstables: Vec<Arc<SSTableMetadata>>,
-        drops: Vec<Arc<DropMetadata>>,
-    },
-
-    /// Add a new index to a collection
-    CreateIndex {
-        collection_id: u32,
-        index_id: u32,
-        definition: IndexDefinition,
-        options: IndexOptions,
-        created_at: u64,
-    },
-
-    /// Marks an index as dropped in a collection.
-    DropIndex {
-        collection_id: u32,
-        index_id: u32,
-        dropped_at: u64,
-    },
-
-    /// Removes queued schema mutations after a WAL recovery boundary.
-    DiscardPendingCatalogEditsAfter { sequence: u64 },
-}
-
-impl ManifestEdit {
-    fn catalog_edit_sequence(&self) -> Option<u64> {
-        match self {
-            ManifestEdit::CreateCollection { created_at, .. }
-            | ManifestEdit::CreateIndex { created_at, .. } => Some(*created_at),
-            ManifestEdit::DropCollection { dropped_at, .. }
-            | ManifestEdit::DropIndex { dropped_at, .. } => Some(*dropped_at),
-            ManifestEdit::RenameCollection { renamed_at, .. } => Some(*renamed_at),
-            _ => None,
-        }
-    }
-
-    fn apply_to_catalog(&self, catalog: &Catalog) -> Catalog {
-        match self {
-            ManifestEdit::CreateCollection {
-                name,
-                id,
-                created_at,
-                options,
-            } => catalog.add_collection_with_options(name, *id, *created_at, options.clone()),
-            ManifestEdit::DropCollection { id, dropped_at } => {
-                catalog.drop_collection(*id, *dropped_at)
-            }
-            ManifestEdit::RenameCollection { id, new_name, .. } => {
-                catalog.rename_collection(*id, new_name)
-            }
-            ManifestEdit::CreateIndex {
-                collection_id,
-                index_id,
-                definition,
-                options,
-                created_at,
-            } => catalog.add_index_to_collection(
-                *collection_id,
-                *index_id,
-                definition,
-                options,
-                *created_at,
-            ),
-            ManifestEdit::DropIndex {
-                collection_id,
-                index_id,
-                dropped_at,
-            } => catalog.drop_index(*collection_id, *index_id, *dropped_at),
-            _ => unreachable!("Only catalog edits can be applied to the catalog"),
-        }
-    }
-
-    fn drop_metadata(&self) -> Option<Arc<DropMetadata>> {
-        match self {
-            ManifestEdit::DropCollection { id, dropped_at } => {
-                Some(DropMetadata::new_collection_drop(*id, *dropped_at))
-            }
-            ManifestEdit::DropIndex {
-                collection_id,
-                index_id,
-                dropped_at,
-            } => Some(DropMetadata::new_index_drop(
-                *collection_id,
-                *index_id,
-                *dropped_at,
-            )),
-            _ => None,
-        }
-    }
-
-    pub fn to_vec(&self, version: u32) -> Vec<u8> {
-        let mut writer = ByteWriter::new();
-        self.write_to(&mut writer, version);
-        writer.take_buffer()
-    }
-
-    pub fn try_from_vec(input: &[u8], version: u32) -> Result<ManifestEdit> {
-        let reader = ByteReader::new(input);
-        Self::read_from(&reader, version)
-    }
-}
-
-use crate::io::invalid_data;
-use crate::io::serializable::Serializable;
-use std::fmt;
 
 impl fmt::Display for ManifestEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -852,6 +893,15 @@ impl fmt::Display for ManifestEdit {
                 f,
                 "DropIndex {{ collection_id: {}, index_id: {}, dropped_at: {} }}",
                 collection_id, index_id, dropped_at
+            ),
+            ManifestEdit::MarkIndexQueryable {
+                collection_id,
+                index_id,
+                queryable_at,
+            } => write!(
+                f,
+                "MarkIndexQueryable {{ collection_id: {}, index_id: {}, queryable_at: {} }}",
+                collection_id, index_id, queryable_at
             ),
             ManifestEdit::DiscardPendingCatalogEditsAfter { sequence } => write!(
                 f,
@@ -1343,6 +1393,39 @@ mod tests {
         };
 
         check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn test_mark_index_queryable_serialization_and_application() {
+        let edit = ManifestEdit::MarkIndexQueryable {
+            collection_id: 10,
+            index_id: 1,
+            queryable_at: 100,
+        };
+        check_edit_serialization_roundtrip(edit.clone(), MANIFEST_FORMAT_VERSION);
+
+        let state = ManifestState::new(1, 2, 3)
+            .apply(&ManifestEdit::CreateCollection {
+                name: "docs".to_string(),
+                id: 10,
+                created_at: 100,
+                options: CollectionOptions::default(),
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 10,
+                index_id: 1,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
+                options: IndexOptions::default(),
+                created_at: 100,
+            })
+            .apply(&edit);
+
+        let collection = state.visible_catalog().get_collection_by_id(&10).unwrap();
+        assert_eq!(collection.queryable_indexes().len(), 1);
+        assert_eq!(
+            collection.get_index_by_id(1).unwrap().queryable_at,
+            Some(100)
+        );
     }
 
     #[test]

@@ -18,12 +18,26 @@ use std::sync::{Arc, LazyLock};
 
 static ID_PATH: LazyLock<Vec<PathComponent>> = LazyLock::new(|| vec!["_id".into()]);
 
+pub struct OperationsCountAndSize {
+    pub count: usize,
+    pub size_bytes: usize,
+}
+
 pub struct Indexes {
     indices: Vec<Index>,
 }
 
 impl Indexes {
+    pub(crate) fn for_index(collection_id: u32, index: &IndexMetadata) -> Self {
+        Self {
+            indices: vec![Index::from(collection_id, index)],
+        }
+    }
+
     pub fn from_collection(collection: &CollectionMetadata) -> Self {
+        // Keep all active indexes here, including indexes that are still being
+        // built. The background builder relies on ordinary writes maintaining
+        // those indexes while query planning uses queryable_indexes().
         let indices = collection
             .active_indexes()
             .iter()
@@ -37,13 +51,16 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &Document,
         count_stats: &mut CountStatsBuilder,
-    ) -> Result<()> {
+    ) -> Result<OperationsCountAndSize> {
         let key_source = &DocumentKeySource::BsonDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
+        let mut count = 0;
+        let mut size_bytes = 0;
         for index in self.indices.iter() {
-            index.append_put_op(operations, key_source, &doc_id, count_stats)?;
+            size_bytes += index.append_put_op(operations, key_source, &doc_id, count_stats)?;
+            count += 1;
         }
-        Ok(())
+        Ok(OperationsCountAndSize { count, size_bytes })
     }
 
     pub fn append_put_ops_raw(
@@ -51,13 +68,16 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &RawDocument,
         count_stats: &mut CountStatsBuilder,
-    ) -> Result<()> {
+    ) -> Result<OperationsCountAndSize> {
         let key_source = &DocumentKeySource::RawDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
+        let mut count = 0;
+        let mut size_bytes = 0;
         for index in self.indices.iter() {
-            index.append_put_op(operations, key_source, &doc_id, count_stats)?;
+            size_bytes += index.append_put_op(operations, key_source, &doc_id, count_stats)?;
+            count += 1;
         }
-        Ok(())
+        Ok(OperationsCountAndSize { count, size_bytes })
     }
 
     pub fn append_delete_ops(
@@ -65,13 +85,16 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &Document,
         count_stats: &mut CountStatsBuilder,
-    ) -> Result<()> {
+    ) -> Result<OperationsCountAndSize> {
         let key_source = &DocumentKeySource::BsonDocument(document);
         let doc_id = Self::extract_id_key(key_source)?;
+        let mut count = 0;
+        let mut size_bytes = 0;
         for index in self.indices.iter() {
-            index.append_delete_op(operations, key_source, &doc_id, count_stats)?;
+            size_bytes += index.append_delete_op(operations, key_source, &doc_id, count_stats)?;
+            count += 1;
         }
-        Ok(())
+        Ok(OperationsCountAndSize { count, size_bytes })
     }
 
     fn extract_id_key(key_source: &DocumentKeySource) -> Result<TypedKey> {
@@ -151,12 +174,13 @@ impl Index {
         key_source: &DocumentKeySource,
         doc_id: &TypedKey,
         count_stats: &mut CountStatsBuilder,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let IndexKeyValue { key, value } = self.extract_index_entry(key_source, doc_id)?;
         let op = Operation::new_put(self.collection_id, self.id, key, value);
+        let size_bytes = op.payload_size_bytes();
         operations.push(op);
         count_stats.inc_index(self.collection_id, self.id, 1);
-        Ok(())
+        Ok(size_bytes)
     }
 
     fn append_delete_op(
@@ -165,12 +189,13 @@ impl Index {
         key_source: &DocumentKeySource,
         doc_id: &TypedKey,
         count_stats: &mut CountStatsBuilder,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let IndexKeyValue { key, value: _ } = self.extract_index_entry(key_source, doc_id)?;
         let op = Operation::new_delete(self.collection_id, self.id, key);
+        let size_bytes = op.payload_size_bytes();
         operations.push(op);
         count_stats.inc_index(self.collection_id, self.id, -1);
-        Ok(())
+        Ok(size_bytes)
     }
 
     fn extract_index_entry(

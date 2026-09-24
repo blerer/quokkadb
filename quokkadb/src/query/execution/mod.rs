@@ -3,7 +3,7 @@ use bson::{Bson, Document};
 
 mod executor;
 mod filters;
-mod indexes;
+pub(crate) mod indexes;
 mod projections;
 pub(crate) mod query_executor;
 pub(crate) mod sorts;

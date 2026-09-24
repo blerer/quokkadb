@@ -251,13 +251,13 @@ impl Manifest {
     }
 
     #[cfg(test)]
-    pub fn return_error_on_append(&self, value: bool) {
-        self.append_log.return_error_on_append(value);
+    pub fn fail_append_after(&self, counter: usize) {
+        self.append_log.fail_append_after(counter);
     }
 
     #[cfg(test)]
-    pub fn return_error_on_rotate(&self, value: bool) {
-        self.append_log.return_error_on_rotate(value);
+    pub fn fail_rotate_after(&self, counter: usize) {
+        self.append_log.fail_rotate_after(counter);
     }
 }
 

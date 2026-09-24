@@ -186,7 +186,7 @@ mod tests {
     fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
         let dir = tempdir()?;
         let mut metric_registry = MetricRegistry::new();
-        let storage_engine = StorageEngine::new(
+        let (storage_engine, _pending_builds) = StorageEngine::new(
             &mut metric_registry,
             Arc::new(Options::lightweight()),
             dir.path(),

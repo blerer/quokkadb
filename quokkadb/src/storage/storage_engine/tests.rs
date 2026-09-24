@@ -3,6 +3,7 @@ use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
 use crate::options::options::WalDurability;
 use crate::options::storage_quantity::StorageUnit::Mebibytes;
 use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
+use crate::storage::FIRST_USER_COLLECTION_ID;
 use crate::storage::catalog::{
     IndexDefinition, IndexDirection, IndexOptions, IndexPath, OrderedIndexField,
 };
@@ -72,12 +73,10 @@ fn put_rec_at(
     (op.internal_key(sequence_num), op.value().to_vec())
 }
 
-fn compactable_options() -> Arc<Options> {
-    Arc::new(
-        Options::lightweight()
-            .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes))
-            .with_level0_file_num_compaction_trigger(2),
-    )
+fn compactable_options() -> Options {
+    Options::lightweight()
+        .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes))
+        .with_level0_file_num_compaction_trigger(2)
 }
 
 mod scan_tests {
@@ -156,7 +155,7 @@ fn test_read() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &&path);
 
     let col = engine.create_collection("test_read", true).unwrap();
     let idx = 0;
@@ -307,7 +306,7 @@ fn test_acquire_snapshot_registers_and_releases_lease() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &&path);
 
     let snapshot0 = engine.acquire_snapshot();
     assert_eq!(snapshot0.sequence(), 0);
@@ -340,7 +339,7 @@ fn test_range_scan() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &&path);
 
     let col = engine.create_collection("test_range_scan", true).unwrap();
     let idx = 0;
@@ -478,6 +477,12 @@ fn test_range_scan() {
     assert!(iter.next().is_none());
 }
 
+fn new_engine(registry: &mut MetricRegistry, options: Options, path: &Path) -> Arc<StorageEngine> {
+    StorageEngine::new(registry, Arc::new(options), &path)
+        .unwrap()
+        .0
+}
+
 #[test]
 fn test_read_and_scan_with_immutable_memtables() {
     let dir = tempdir().unwrap();
@@ -485,7 +490,7 @@ fn test_read_and_scan_with_immutable_memtables() {
     let registry = &mut MetricRegistry::default();
     let options =
         Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes));
-    let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
+    let engine = new_engine(registry, options, &path);
 
     let col = engine
         .create_collection("test_immutable_memtables", true)
@@ -654,9 +659,8 @@ fn test_replay_with_multiple_wals() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes)),
-    );
+    let options =
+        Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes));
 
     let idx = 0;
 
@@ -664,7 +668,7 @@ fn test_replay_with_multiple_wals() {
     let val_1mb = doc! { "v": val_1mb_string }.to_vec().unwrap();
 
     let col = {
-        let old_engine = StorageEngine::new(registry, options.clone(), &path).unwrap();
+        let old_engine = new_engine(registry, options.clone(), &path);
 
         // Pause the flush manager to keep immutable memtables around.
         old_engine.flush_manager.pause();
@@ -700,7 +704,7 @@ fn test_replay_with_multiple_wals() {
         col
     };
 
-    let engine = StorageEngine::new(registry, options, &path).unwrap();
+    let engine = new_engine(registry, options, &path);
 
     let new_wal_path = path.join("000006.sst");
     assert!(new_wal_path.exists());
@@ -729,12 +733,10 @@ fn test_manifest_rotation() {
     let registry = &mut MetricRegistry::default();
     // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
     // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
-    let options = Arc::new(
-        Options::lightweight()
-            .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes)),
-    );
+    let options = Options::lightweight()
+        .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes));
 
-    let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
+    let engine = new_engine(registry, options.clone(), path);
 
     engine.disable_auto_compaction();
 
@@ -783,8 +785,7 @@ fn test_manifest_rotation() {
     let db_path = path.to_path_buf();
     drop(engine);
 
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // Verify data is readable after restart.
     let snapshot = engine_restarted.acquire_snapshot();
@@ -806,12 +807,10 @@ fn test_manifest_rotation_error() {
     let registry = &mut MetricRegistry::default();
     // Each flush generates two edits (WalRotation, Flush). A new manifest starts with a 4KiB
     // block. We set the limit to 5KiB to ensure a rotation occurs within our test loop.
-    let options = Arc::new(
-        Options::lightweight()
-            .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes)),
-    );
+    let options = Options::lightweight()
+        .with_max_manifest_file_size(StorageQuantity::new(5, StorageUnit::Kibibytes));
 
-    let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
+    let engine = new_engine(registry, options, path);
 
     let col = engine
         .create_collection("test_manifest_rotation_error", true)
@@ -826,7 +825,7 @@ fn test_manifest_rotation_error() {
             .contains("MANIFEST-000001")
     );
 
-    engine.manifest_return_error_on_rotate(true);
+    engine.manifest_fail_rotate_after(1);
 
     // Each flush generates two edits (WalRotation, Flush), consuming space in the manifest.
     // The initial manifest is ~4KiB. Each pair of edits for a flush is ~40 bytes.
@@ -853,9 +852,7 @@ fn test_obsolete_wal_deletion() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Options::lightweight();
-
-    let engine = StorageEngine::new(registry, Arc::new(options.clone()), path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), path);
 
     let col = engine
         .create_collection("test_obsolete_wal_deletion", true)
@@ -920,13 +917,11 @@ fn test_obsolete_sst_deletion_after_compaction() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight()
-            .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes))
-            .with_level0_file_num_compaction_trigger(2),
-    );
+    let options = Options::lightweight()
+        .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes))
+        .with_level0_file_num_compaction_trigger(2);
 
-    let engine = StorageEngine::new(registry, options, &path).unwrap();
+    let engine = new_engine(registry, options, &path);
     engine.disable_auto_compaction();
     let col = engine
         .create_collection("test_obsolete_sst_deletion_after_compaction", true)
@@ -985,7 +980,7 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
+    let engine = new_engine(registry, compactable_options(), &path);
     engine.disable_auto_compaction();
 
     let col = engine
@@ -1033,7 +1028,7 @@ fn test_snapshot_point_read_survives_compaction_after_delete() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
+    let engine = new_engine(registry, compactable_options(), &path);
     engine.disable_auto_compaction();
 
     let col = engine
@@ -1081,7 +1076,7 @@ fn test_snapshot_range_scan_survives_compaction() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
+    let engine = new_engine(registry, compactable_options(), &path);
     engine.disable_auto_compaction();
 
     let col = engine
@@ -1139,7 +1134,7 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
+    let engine = new_engine(registry, compactable_options(), &path);
     engine.disable_auto_compaction();
 
     let options = CollectionOptions::default();
@@ -1200,7 +1195,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, compactable_options(), &path).unwrap();
+    let engine = new_engine(registry, compactable_options(), &path);
     engine.disable_auto_compaction();
 
     let options = CollectionOptions::default();
@@ -1290,12 +1285,10 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
 fn test_orphaned_sst_cleanup_on_startup() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     let (col, real_sst_paths) = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
-
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
         let col = engine
             .create_collection("test_orphaned_sst_cleanup_on_startup", true)
             .unwrap();
@@ -1325,8 +1318,7 @@ fn test_orphaned_sst_cleanup_on_startup() {
     assert!(orphan_1.exists());
     assert!(orphan_2.exists());
 
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &path);
 
     assert!(!orphan_1.exists());
     assert!(!orphan_2.exists());
@@ -1363,7 +1355,7 @@ fn test_concurrent_writes(with_concurrent_flushes: bool) {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let num_threads = 5;
     let writes_per_thread = 200;
@@ -1423,13 +1415,13 @@ fn test_shutdown_and_restart() {
     let registry = &mut MetricRegistry::default();
     let options =
         Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)); // force syncs for each write
-    let options = Arc::new(options);
+    let options = options;
 
     let idx = 0;
 
     // --- First run ---
     let col = {
-        let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
+        let engine = new_engine(registry, options.clone(), &db_path);
 
         let col = engine
             .create_collection("test_shutdown_and_restart", true)
@@ -1459,8 +1451,7 @@ fn test_shutdown_and_restart() {
     };
 
     // --- Second run (restart) ---
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // Verify all data is present and correct after restart.
     let user_key1 = &user_key(1);
@@ -1503,15 +1494,14 @@ fn test_wal_replay_on_restart() {
     let path = dir.path();
     let db_path = path.to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)),
-    ); // force syncs for each write
+    let options =
+        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)); // force syncs for each write
 
     let idx = 0;
 
     // --- First run (simulating a crash) ---
     let col = {
-        let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
+        let engine = new_engine(registry, options.clone(), &db_path);
 
         let col = engine
             .create_collection("test_wal_replay_on_restart", true)
@@ -1544,8 +1534,7 @@ fn test_wal_replay_on_restart() {
     };
 
     // --- Second run (restart and replay) ---
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // The WAL should be replayed, restoring the memtable state.
     // Verify all data is present and correct after restart.
@@ -1591,13 +1580,11 @@ fn test_wal_replay_on_restart() {
 fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().to_path_buf();
-    let options = Arc::new(
-        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)),
-    );
+    let options =
+        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes));
 
     let (collection_id, index_id) = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &db_path);
 
         let collection_id = engine
             .create_collection("test_count_stats_restart", true)
@@ -1673,8 +1660,7 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
         (collection_id, index_id)
     };
 
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     assert_eq!(
         engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -1693,13 +1679,11 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
 fn test_count_stats_delete_delta_replayed_on_restart() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().to_path_buf();
-    let options = Arc::new(
-        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)),
-    );
+    let options =
+        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes));
 
     let (collection_id, index_id) = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &db_path);
 
         let collection_id = engine
             .create_collection("test_count_stats_delete_restart", true)
@@ -1770,8 +1754,7 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
         (collection_id, index_id)
     };
 
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     assert_eq!(
         engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -1792,16 +1775,15 @@ fn test_wal_replay_with_last_log_partially_written() {
     let path = dir.path();
     let db_path = path.to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)),
-    ); // force syncs for each write
+    let options =
+        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)); // force syncs for each write
 
     let idx = 0;
 
     let wal_path;
     // --- First run (simulating a crash) ---
     let col = {
-        let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
+        let engine = new_engine(registry, options.clone(), &db_path);
 
         let col = engine
             .create_collection("test_wal_replay_with_partial_log", true)
@@ -1827,8 +1809,7 @@ fn test_wal_replay_with_last_log_partially_written() {
     drop(file);
 
     // --- Second run (restart and replay) ---
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // WAL replay should have truncated the file and recovered the valid records.
     let user_key1 = &user_key(1);
@@ -1876,16 +1857,15 @@ fn test_wal_replay_with_header_corruption() {
     let path = dir.path();
     let db_path = path.to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes)),
-    );
+    let options =
+        Options::lightweight().with_wal_bytes_per_sync(StorageQuantity::new(0, StorageUnit::Bytes));
 
     let idx = 0;
 
     let original_wal_path;
     // --- First run ---
     let col = {
-        let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
+        let engine = new_engine(registry, options.clone(), &db_path);
 
         let col = engine
             .create_collection("test_wal_replay_with_header_corruption", true)
@@ -1910,8 +1890,7 @@ fn test_wal_replay_with_header_corruption() {
     drop(file);
 
     // --- Second run (restart) ---
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // The corrupted WAL should have been renamed.
     let corrupted_path = db_path.join(format!(
@@ -1968,17 +1947,15 @@ fn test_restart_fails_with_corrupted_old_wal() {
     let db_path = path.to_path_buf();
     let registry = &mut MetricRegistry::default();
     // Set a small buffer size to trigger memtable rotation easily.
-    let options = Arc::new(
-        Options::lightweight()
-            .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes)),
-    );
+    let options = Options::lightweight()
+        .with_file_write_buffer_size(StorageQuantity::new(1, StorageUnit::Kibibytes));
 
     let idx = 0;
 
     let old_wal_path;
     // --- First run ---
     {
-        let engine = StorageEngine::new(registry, options.clone(), &db_path).unwrap();
+        let engine = new_engine(registry, options.clone(), &db_path);
 
         old_wal_path = db_path.join("000002.log");
         assert!(old_wal_path.exists());
@@ -2031,7 +2008,7 @@ fn test_restart_fails_with_corrupted_old_wal() {
     drop(file);
 
     // --- Second run (restart) ---
-    let result = StorageEngine::new(&mut MetricRegistry::default(), options, &db_path);
+    let result = StorageEngine::new(&mut MetricRegistry::default(), Arc::new(options), &db_path);
 
     // Restart should fail because an old (non-terminal) WAL is corrupted.
     assert!(result.is_err());
@@ -2044,12 +2021,11 @@ fn test_restart_with_stale_files() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let db_path = path.to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     // --- First run ---
     let col = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &db_path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &db_path);
 
         // After initialization: MANIFEST-000001, 000002.log are created. Next file is 3.
         let next_file_num_before = engine.next_file_number.load(Ordering::Relaxed);
@@ -2085,8 +2061,7 @@ fn test_restart_with_stale_files() {
     fs::File::create(&stale_log_path).unwrap();
 
     // --- Second run (restart) ---
-    let engine_restarted =
-        StorageEngine::new(&mut MetricRegistry::default(), options, &db_path).unwrap();
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
 
     // The engine should have detected the "000012.log" file and marked it as corrupted.
     assert!(db_path.join("000012.log.corrupted").exists());
@@ -2118,20 +2093,84 @@ fn test_restart_with_stale_files() {
 }
 
 #[test]
+fn test_failed_wal_group_sync_does_not_publish_writes() {
+    let dir = tempdir().unwrap();
+    let registry = &mut MetricRegistry::default();
+    let options = Options::lightweight()
+        .with_wal_durability(WalDurability::Buffered)
+        .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
+    let engine = new_engine(registry, options, dir.path());
+    let col = engine
+        .create_collection("failed_group_visibility", true)
+        .unwrap();
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), true)
+        .unwrap();
+    let before = engine.acquire_snapshot();
+    let expected = engine
+        .read_at_snapshot(col, 0, &user_key(1), &before)
+        .unwrap();
+
+    // Both small appends stay below the automatic sync threshold. The forced
+    // sync therefore fails in finish_append_group, after all appends succeed.
+    engine
+        .db_mutex
+        .lock()
+        .unwrap()
+        .wal
+        .return_error_on_sync(true);
+    let writers = [
+        Arc::new(Writer::new(write_batch(vec![put_op(col, 1, 2)]), false)),
+        Arc::new(Writer::new(write_batch(vec![put_op(col, 2, 1)]), true)),
+    ];
+    engine.queue.lock().unwrap().extend(writers.iter().cloned());
+    engine.perform_writes();
+
+    for writer in &writers {
+        let error = writer.result().unwrap_err();
+        assert_eq!(
+            error.as_io_error().unwrap().to_string(),
+            "Injected error on WAL sync"
+        );
+    }
+    assert!(engine.error_mode.load(Ordering::Relaxed));
+
+    // An old snapshot would hide the failed writes even with premature
+    // publication. A newly acquired snapshot must also retain the old state.
+    let after = engine.acquire_snapshot();
+    assert_eq!(
+        engine
+            .read_at_snapshot(col, 0, &user_key(1), &after)
+            .unwrap(),
+        expected,
+        "a fresh snapshot must not expose an update from a failed WAL group"
+    );
+    assert!(
+        engine
+            .read_at_snapshot(col, 0, &user_key(2), &after)
+            .unwrap()
+            .is_none(),
+        "a fresh snapshot must not expose an insert from a failed WAL group"
+    );
+    assert_eq!(after.sequence(), before.sequence());
+}
+
+#[test]
 fn test_error_mode_activation_and_rejection() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
-    let engine = StorageEngine::new(registry, options.clone(), path).unwrap();
+    let engine = new_engine(registry, options.clone(), path);
 
     let col = engine
         .create_collection("test_error_mode_activation_and_rejection", true)
         .unwrap();
 
     // 1. Inject an error into the WAL write path.
-    engine.wal_return_error_on_write(true);
+    engine.wal_fail_write_after(0);
 
     // 2. Perform a write operation that is expected to fail.
     let write_result = engine.write(write_batch(vec![put_op(col, 1, 1)]), false);
@@ -2142,7 +2181,7 @@ fn test_error_mode_activation_and_rejection() {
     assert!(io_error.to_string().contains("Injected error on append"));
 
     // 3. Disable error injection to ensure subsequent failures are due to error_mode.
-    engine.wal_return_error_on_write(false);
+    engine.wal_fail_write_after(usize::MAX);
     assert!(engine.error_mode.load(Ordering::Relaxed));
 
     // 4. Verify that subsequent operations are rejected.
@@ -2154,17 +2193,16 @@ fn test_wal_rotation_on_write_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes)),
-    );
-    let engine = StorageEngine::new(registry, options, &path).unwrap();
+    let options =
+        Options::lightweight().with_file_write_buffer_size(StorageQuantity::new(4, Mebibytes));
+    let engine = new_engine(registry, options, &path);
 
     let col = engine
         .create_collection("test_wal_rotation_on_write_error", true)
         .unwrap();
     let idx = 0;
 
-    engine.wal_return_error_on_rotate(true);
+    engine.wal_fail_rotate_after(0);
 
     // Write enough data to trigger a memtable rotation.
     // We write five ~1MB values to fill up the 4MB memtable.
@@ -2190,7 +2228,7 @@ fn test_wal_rotation_on_write_error() {
         }
     }
 
-    engine.wal_return_error_on_rotate(false);
+    engine.wal_fail_rotate_after(usize::MAX);
     assert!(engine.error_mode.load(Ordering::Relaxed));
 
     check_error_mode(engine.clone(), col);
@@ -2201,14 +2239,13 @@ fn test_wal_rotation_on_flush_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Options::lightweight();
-    let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let col = engine
         .create_collection("test_wal_rotation_on_flush_error", true)
         .unwrap();
 
-    engine.wal_return_error_on_rotate(true);
+    engine.wal_fail_rotate_after(0);
 
     let inserts = vec![
         put_op(col, 1, 1),
@@ -2229,7 +2266,7 @@ fn test_wal_rotation_on_flush_error() {
         );
     }
 
-    engine.wal_return_error_on_rotate(false);
+    engine.wal_fail_rotate_after(usize::MAX);
     assert!(engine.error_mode.load(Ordering::Relaxed));
 
     check_error_mode(engine.clone(), col);
@@ -2240,14 +2277,13 @@ fn test_manifest_write_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Options::lightweight();
-    let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let col = engine
         .create_collection("test_manifest_write_error", true)
         .unwrap();
 
-    engine.manifest_return_error_on_write(true);
+    engine.manifest_fail_write_after(0);
 
     let inserts = vec![
         put_op(col, 1, 1),
@@ -2268,7 +2304,7 @@ fn test_manifest_write_error() {
         );
     }
 
-    engine.manifest_return_error_on_write(false);
+    engine.manifest_fail_write_after(usize::MAX);
     assert!(engine.error_mode.load(Ordering::Relaxed));
 
     check_error_mode(engine.clone(), col);
@@ -2279,8 +2315,7 @@ fn test_memtable_flush_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let options = Options::lightweight();
-    let engine = StorageEngine::new(registry, Arc::new(options), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let col = engine
         .create_collection("test_memtable_flush_error", true)
@@ -2307,7 +2342,7 @@ fn test_memtable_flush_error() {
         );
     }
 
-    engine.manifest_return_error_on_write(false);
+    engine.manifest_fail_write_after(usize::MAX);
     assert!(engine.error_mode.load(Ordering::Relaxed));
 
     check_error_mode(engine.clone(), col);
@@ -2344,14 +2379,14 @@ fn test_create_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a new collection
     let options = CollectionOptions::default();
     let col_id = engine
         .create_collection_with_options("test_collection", options, false)
         .unwrap();
-    assert_eq!(col_id, 10); // First user collection ID
+    assert_eq!(col_id, FIRST_USER_COLLECTION_ID);
 
     // Verify collection exists in catalog
     let catalog = engine.catalog();
@@ -2380,10 +2415,9 @@ fn test_create_collection() {
 fn test_explicit_flush_does_not_commit_pending_catalog_edits_without_data() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
-    let engine =
-        StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
     let collection_id = engine
         .create_collection("pending_collection", true)
         .unwrap();
@@ -2422,7 +2456,7 @@ fn test_create_collection_already_exists() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection
     let options = CollectionOptions::default();
@@ -2444,7 +2478,7 @@ fn test_create_collection_if_not_exists() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection
     let col_id_1 = engine.create_collection("test_collection", true).unwrap();
@@ -2473,7 +2507,7 @@ fn test_create_index() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2502,11 +2536,82 @@ fn test_create_index() {
 }
 
 #[test]
-fn test_create_index_is_noop_when_same_name_and_equivalent_spec_exist() {
+fn test_create_index_starts_non_queryable_for_background_building() {
+    let dir = tempdir().unwrap();
+    let registry = &mut MetricRegistry::default();
+    let engine = new_engine(registry, Options::lightweight(), dir.path());
+
+    let collection_id = engine.create_collection("test_collection", true).unwrap();
+    let created_index = engine
+        .create_index(
+            collection_id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap();
+
+    let collection = engine
+        .catalog()
+        .get_collection_by_id(&collection_id)
+        .unwrap();
+    let index = collection.get_index_by_id(created_index.id).unwrap();
+
+    assert!(index.queryable_at.is_none());
+    assert_eq!(collection.active_indexes().len(), 1);
+    assert!(collection.queryable_indexes().is_empty());
+}
+
+#[test]
+fn test_create_index_rejects_equivalent_index_while_building() {
+    let dir = tempdir().unwrap();
+    let engine = new_engine(
+        &mut MetricRegistry::default(),
+        Options::lightweight(),
+        dir.path(),
+    );
+    let collection_id = engine.create_collection("test_collection", true).unwrap();
+    for name in [None, Some("by_name".to_string())] {
+        let options = IndexOptions { name };
+        let created_index = engine
+            .create_index(collection_id, simple_index_definition(), options.clone())
+            .unwrap();
+        let error = engine
+            .create_index(collection_id, simple_index_definition(), options.clone())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StorageError::IndexBuildInProgress { collection } if collection == collection_id
+        ));
+        assert!(matches!(
+            crate::error::Error::from(error),
+            crate::error::Error::VersionConflict(reason) if reason.contains("index is being built")
+        ));
+        let collection = engine
+            .catalog()
+            .get_collection_by_id(&collection_id)
+            .unwrap();
+        assert_eq!(collection.active_indexes().len(), 1);
+        assert!(collection.queryable_indexes().is_empty());
+        assert_eq!(collection.next_index_id, created_index.id + 1);
+
+        engine
+            .mark_index_queryable(collection_id, created_index.id)
+            .unwrap();
+        let existing_index = engine
+            .create_index(collection_id, simple_index_definition(), options)
+            .unwrap();
+        assert_eq!(existing_index.id, created_index.id);
+        assert!(existing_index.build_snapshot.is_none());
+        engine.drop_index(collection_id, created_index.id).unwrap();
+    }
+}
+
+#[test]
+fn test_create_index_is_noop_when_same_name_and_equivalent_spec_are_queryable() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2523,6 +2628,10 @@ fn test_create_index_is_noop_when_same_name_and_equivalent_spec_exist() {
         )
         .unwrap();
 
+    engine
+        .mark_index_queryable(collection_id, created_index.id)
+        .unwrap();
+
     let second_created_index = engine
         .create_index(
             collection_id,
@@ -2533,7 +2642,10 @@ fn test_create_index_is_noop_when_same_name_and_equivalent_spec_exist() {
         )
         .unwrap();
 
-    assert_eq!(second_created_index, created_index);
+    assert_eq!(second_created_index.id, created_index.id);
+    assert_eq!(second_created_index.name, created_index.name);
+    assert!(created_index.build_snapshot.is_some());
+    assert!(second_created_index.build_snapshot.is_none());
 
     let collection = engine
         .catalog()
@@ -2548,7 +2660,7 @@ fn test_create_index_rejects_equivalent_spec_under_different_name() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2582,7 +2694,7 @@ fn test_create_index_rejects_same_name_with_different_definition() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2623,7 +2735,7 @@ fn test_drop_index() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2682,7 +2794,7 @@ fn test_drop_index_not_found() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2701,7 +2813,7 @@ fn test_drop_index_is_noop_when_index_already_dropped() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2735,7 +2847,7 @@ fn test_drop_index_is_noop_when_collection_already_dropped() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2769,7 +2881,7 @@ fn test_drop_index_collection_not_found() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let result = engine.drop_index(999, 1);
     let err = result.err().unwrap();
@@ -2782,7 +2894,7 @@ fn test_create_index_collection_not_found() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let result = engine.create_index(
         999,
@@ -2802,7 +2914,7 @@ fn test_create_index_on_dropped_collection_returns_error() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let options = CollectionOptions::default();
     let collection_id = engine
@@ -2829,7 +2941,7 @@ fn test_drop_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection
     let options = CollectionOptions::default();
@@ -2892,7 +3004,7 @@ fn test_drop_collection_not_found() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Drop a non-existent collection - should succeed (no-op)
     let result = engine.drop_collection("non_existent");
@@ -2904,7 +3016,7 @@ fn test_write_to_dropped_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create and then drop a collection
     let options = CollectionOptions::default();
@@ -2932,7 +3044,7 @@ fn test_write_rejects_stale_collection_schema_precondition() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
     let collection = engine
         .create_collection("schema_precondition", true)
         .unwrap();
@@ -2976,7 +3088,7 @@ fn test_write_rejects_stale_schema_for_any_collection_precondition() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
     let first_collection = engine
         .create_collection("first_schema_precondition", true)
         .unwrap();
@@ -3037,12 +3149,11 @@ fn test_write_rejects_stale_schema_for_any_collection_precondition() {
 fn test_collection_persistence_across_restart() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     // First run - create collections
     let (col_id_1, col_id_2) = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let options1 = CollectionOptions::default();
         let col_id_1 = engine
@@ -3068,8 +3179,7 @@ fn test_collection_persistence_across_restart() {
 
     // Second run - verify collections persist
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let catalog = engine.catalog();
         assert!(catalog.get_collection_by_name("collection_1").is_some());
@@ -3102,12 +3212,11 @@ fn test_collection_persistence_across_restart() {
 fn test_drop_collection_persistence_across_restart() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     // First run - create and drop a collection
     let (col_id, drop_seq) = {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let options1 = CollectionOptions::default();
         let col_id = engine
@@ -3141,8 +3250,7 @@ fn test_drop_collection_persistence_across_restart() {
 
     // Second run - verify drop persisted
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let catalog = engine.catalog();
         assert!(catalog.get_collection_by_name("to_drop").is_none());
@@ -3172,7 +3280,7 @@ fn test_drop_and_recreate_collection_data_isolation() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection and write data to it
     let options = CollectionOptions::default();
@@ -3267,7 +3375,7 @@ fn test_drop_and_recreate_collection_with_flush() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection and write data to it
     let options = CollectionOptions::default();
@@ -3414,13 +3522,12 @@ fn test_drop_and_recreate_collection_with_flush() {
 fn test_drop_and_recreate_collection_persistence() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     let col_id_2;
     // First run - create, populate, drop, recreate, repopulate
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         // Create first collection
         let options1 = CollectionOptions::default();
@@ -3455,8 +3562,7 @@ fn test_drop_and_recreate_collection_persistence() {
 
     // Second run - verify only new data is visible after restart
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         // Collection should exist with the new ID
         let catalog = engine.catalog();
@@ -3513,7 +3619,7 @@ fn test_rename_collection() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection and write data
     let options = CollectionOptions::default();
@@ -3553,7 +3659,7 @@ fn test_rename_collection_not_found() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let result = engine.rename_collection("non_existent", "new_name");
     assert!(result.is_err());
@@ -3570,7 +3676,7 @@ fn test_rename_collection_target_exists() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create two collections
     let options = CollectionOptions::default();
@@ -3594,13 +3700,12 @@ fn test_rename_collection_target_exists() {
 fn test_rename_collection_persistence() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let options = Arc::new(Options::lightweight());
+    let options = Options::lightweight();
 
     let col_id;
     // First run - create and rename
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let options1 = CollectionOptions::default();
         col_id = engine
@@ -3618,8 +3723,7 @@ fn test_rename_collection_persistence() {
 
     // Second run - verify rename persisted
     {
-        let engine =
-            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), &path).unwrap();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
 
         let catalog = engine.catalog();
         assert!(catalog.get_collection_by_name("original").is_none());
@@ -3646,7 +3750,7 @@ fn test_optimistic_locking_must_not_exist() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let col = engine
         .create_collection("test_optimistic_locking", true)
@@ -3716,11 +3820,90 @@ fn test_optimistic_locking_must_not_exist() {
 }
 
 #[test]
+fn test_optimistic_locking_rejects_conflicting_writers_in_same_group() {
+    assert_conflicting_writers_in_same_group(false);
+}
+
+#[test]
+fn test_optimistic_locking_rejects_conflicting_writers_in_same_group_with_older_snapshot() {
+    assert_conflicting_writers_in_same_group(true);
+}
+
+fn assert_conflicting_writers_in_same_group(advance_sequence: bool) {
+    let dir = tempdir().unwrap();
+    let registry = &mut MetricRegistry::default();
+    let engine = new_engine(registry, Options::lightweight(), dir.path());
+    let col = engine.create_collection("group_conflict", true).unwrap();
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
+    let snapshot = engine.acquire_snapshot();
+
+    if advance_sequence {
+        // Exercise the storage lookup as well as the latest-snapshot fast path.
+        // This unrelated write must not invalidate either writer's precondition.
+        engine
+            .write(write_batch(vec![put_op(col, 2, 1)]), false)
+            .unwrap();
+    }
+
+    let preconditions = || {
+        version_match_preconditions(
+            snapshot.clone(),
+            vec![Precondition::VersionMatch {
+                collection: col,
+                index: 0,
+                user_key: user_key(1),
+            }],
+        )
+    };
+    let first = Arc::new(Writer::new(
+        write_batch_with_preconditions(vec![put_op(col, 1, 2)], preconditions()),
+        false,
+    ));
+    let second = Arc::new(Writer::new(
+        write_batch_with_preconditions(vec![put_op(col, 1, 3), put_op(col, 3, 1)], preconditions()),
+        false,
+    ));
+
+    // Queue both writers before running the leader so they deterministically
+    // share a commit group, without depending on thread scheduling or sleeps.
+    engine
+        .queue
+        .lock()
+        .unwrap()
+        .extend([first.clone(), second.clone()]);
+    engine.perform_writes();
+
+    first.result().unwrap();
+    let result = second.result();
+    assert!(
+        matches!(&result, Err(StorageError::VersionConflict { user_key: key, .. }) if *key == user_key(1)),
+        "the second writer must see the first writer's update in the same commit group, got {result:?}"
+    );
+
+    let current = engine.acquire_snapshot();
+    let (_, value) = engine
+        .read_at_snapshot(col, 0, &user_key(1), &current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(value, document(1, 2).to_vec().unwrap());
+    assert!(
+        engine
+            .read_at_snapshot(col, 0, &user_key(3), &current)
+            .unwrap()
+            .is_none(),
+        "rejecting the second writer must reject all of its operations"
+    );
+}
+
+#[test]
 fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visible_sequence() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let registry = &mut MetricRegistry::default();
-    let engine = StorageEngine::new(registry, Arc::new(Options::lightweight()), &path).unwrap();
+    let engine = new_engine(registry, Options::lightweight(), &path);
 
     let col = engine
         .create_collection("test_optimistic_locking_skip_reads", true)
@@ -3767,12 +3950,10 @@ fn assert_write_sync_forces_wal_sync_before_return(
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight()
-            .with_wal_durability(wal_durability)
-            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
-    );
-    let engine = StorageEngine::new(registry, options, path).unwrap();
+    let options = Options::lightweight()
+        .with_wal_durability(wal_durability)
+        .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
+    let engine = new_engine(registry, options, path);
 
     let col = engine.create_collection("test_write_sync", true).unwrap();
 
@@ -3809,12 +3990,10 @@ fn test_grouped_writes_with_one_forced_sync_only_sync_once() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight()
-            .with_wal_durability(WalDurability::Buffered)
-            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
-    );
-    let engine = StorageEngine::new(registry, options, path).unwrap();
+    let options = Options::lightweight()
+        .with_wal_durability(WalDurability::Buffered)
+        .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
+    let engine = new_engine(registry, options, path);
 
     let writers = vec![
         Arc::new(Writer::new(write_batch(vec![put_op(1, 1, 1)]), false)),
@@ -3822,9 +4001,11 @@ fn test_grouped_writes_with_one_forced_sync_only_sync_once() {
         Arc::new(Writer::new(write_batch(vec![put_op(1, 3, 3)]), false)),
     ];
 
-    let mut wal_and_manifest = engine.db_mutex.lock().unwrap();
-    StorageEngine::append_to_wal(&writers, &mut wal_and_manifest, 1).unwrap();
-    drop(wal_and_manifest);
+    for writer in &writers {
+        engine.queue.lock().unwrap().push_back(writer.clone());
+    }
+
+    engine.perform_writes();
 
     assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 2); // header + one forced group sync
     assert_eq!(registry.gauge_value(metrics::names::wal::BYTES_BUFFERED), 0);
@@ -3835,12 +4016,10 @@ fn test_default_writes_follow_buffered_wal_durability() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight()
-            .with_wal_durability(WalDurability::Buffered)
-            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
-    );
-    let engine = StorageEngine::new(registry, options, path).unwrap();
+    let options = Options::lightweight()
+        .with_wal_durability(WalDurability::Buffered)
+        .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
+    let engine = new_engine(registry, options, path);
 
     let col = engine
         .create_collection("test_default_writes_follow_buffered_wal_durability", true)
@@ -3862,12 +4041,10 @@ fn test_default_writes_follow_durable_wal_durability() {
     let dir = tempdir().unwrap();
     let path = dir.path();
     let registry = &mut MetricRegistry::default();
-    let options = Arc::new(
-        Options::lightweight()
-            .with_wal_durability(WalDurability::Durable)
-            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
-    );
-    let engine = StorageEngine::new(registry, options, path).unwrap();
+    let options = Options::lightweight()
+        .with_wal_durability(WalDurability::Durable)
+        .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
+    let engine = new_engine(registry, options, path);
 
     let col = engine
         .create_collection("test_default_writes_follow_durable_wal_durability", true)

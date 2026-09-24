@@ -213,11 +213,11 @@ impl SSTablePropertiesBuilder {
         self.raw_value_size += value_size;
 
         let record_key = extract_record_key(key);
-        if record_key < &self.min_key {
+        if record_key < self.min_key.as_slice() {
             self.min_key = record_key.to_vec();
         }
 
-        if record_key > &self.max_key {
+        if record_key > self.max_key.as_slice() {
             self.max_key = record_key.to_vec();
         }
 

@@ -15,6 +15,10 @@ pub enum Precondition {
         collection: u32,
         version: u32,
     },
+    IndexNotDropped {
+        collection: u32,
+        index: u32,
+    },
     VersionMatch {
         collection: u32,
         index: u32,
@@ -24,7 +28,7 @@ pub enum Precondition {
 #[derive(Debug)]
 pub struct Preconditions {
     snapshot: Snapshot,
-    collection_version_matches: Vec<Precondition>,
+    schema: Vec<Precondition>,
     version_matches: Vec<Precondition>,
 }
 
@@ -32,24 +36,44 @@ impl Preconditions {
     pub fn new(snapshot: Snapshot) -> Self {
         Preconditions {
             snapshot,
-            collection_version_matches: Vec::new(),
+            schema: Vec::new(),
             version_matches: Vec::new(),
         }
     }
 
     pub fn add_collection_version_match(&mut self, collection: u32, version: u32) {
-        self.collection_version_matches
-            .push(Precondition::CollectionVersionMatch {
-                collection,
-                version,
-            });
+        assert!(
+            self.schema.is_empty()
+                || matches!(
+                    self.schema.first(),
+                    Some(Precondition::CollectionVersionMatch { .. })
+                ),
+            "schema preconditions must use one kind per write batch"
+        );
+        self.schema.push(Precondition::CollectionVersionMatch {
+            collection,
+            version,
+        });
+    }
+
+    pub fn add_index_not_dropped(&mut self, collection: u32, index: u32) {
+        assert!(
+            self.schema.is_empty()
+                || matches!(
+                    self.schema.first(),
+                    Some(Precondition::IndexNotDropped { .. })
+                ),
+            "schema preconditions must use one kind per write batch"
+        );
+        self.schema
+            .push(Precondition::IndexNotDropped { collection, index });
     }
 
     pub fn extend_version_matches(&mut self, conditions: impl IntoIterator<Item = Precondition>) {
         for condition in conditions {
             assert!(
                 matches!(condition, Precondition::VersionMatch { .. }),
-                "collection version preconditions must be added with add_collection_version_match"
+                "record version preconditions must be VersionMatch"
             );
             self.version_matches.push(condition);
         }
@@ -60,9 +84,7 @@ impl Preconditions {
     }
 
     pub fn conditions(&self) -> impl Iterator<Item = &Precondition> {
-        self.collection_version_matches
-            .iter()
-            .chain(self.version_matches.iter())
+        self.schema.iter().chain(self.version_matches.iter())
     }
 }
 
@@ -75,6 +97,15 @@ pub struct WriteBatch {
 }
 
 impl WriteBatch {
+    pub(crate) fn new(operations: Vec<Operation>, count_stats: CountStats) -> WriteBatch {
+        WriteBatch {
+            operations,
+            preconditions: None,
+            count_stats,
+            precomputed_wal_record: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(operations: Vec<Operation>, count_stats: CountStats) -> WriteBatch {
         let precomputed_wal_record = Some(Self::precompute_wal_record(&operations, &count_stats));
@@ -171,7 +202,7 @@ impl PartialEq for WriteBatch {
 impl PartialEq for Preconditions {
     fn eq(&self, other: &Self) -> bool {
         self.since() == other.since()
-            && self.collection_version_matches == other.collection_version_matches
+            && self.schema == other.schema
             && self.version_matches == other.version_matches
     }
 }
@@ -187,7 +218,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn test_collection_version_matches_precede_version_matches() {
+    fn test_schema_preconditions_precede_version_matches() {
         let snapshot = Arc::new(SnapshotManager::new()).acquire(1);
         let mut preconditions = Preconditions::new(snapshot);
         preconditions.extend_version_matches(vec![Precondition::VersionMatch {
@@ -213,6 +244,15 @@ mod tests {
                 Precondition::VersionMatch { .. },
             ]
         ));
+    }
+
+    #[test]
+    #[should_panic(expected = "schema preconditions must use one kind per write batch")]
+    fn test_schema_preconditions_cannot_mix_kinds() {
+        let snapshot = Arc::new(SnapshotManager::new()).acquire(1);
+        let mut preconditions = Preconditions::new(snapshot);
+        preconditions.add_collection_version_match(3, 4);
+        preconditions.add_index_not_dropped(3, 2);
     }
 
     #[test]

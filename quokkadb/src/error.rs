@@ -124,6 +124,10 @@ impl From<StorageError> for Error {
                 "Schema version conflict for collection {}: expected {}, found {:?}",
                 collection, expected, actual
             )),
+            StorageError::IndexBuildInProgress { collection } => Error::VersionConflict(format!(
+                "Cannot write to collection {} while an index is being built",
+                collection
+            )),
             StorageError::LogCorruption {
                 record_offset,
                 reason,

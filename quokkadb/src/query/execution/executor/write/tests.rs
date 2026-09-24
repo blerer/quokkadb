@@ -176,7 +176,7 @@ fn test_delete_one_removes_index_entries() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_delete_one_indexes", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -208,7 +208,7 @@ fn test_delete_many_removes_index_entries() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_delete_many_indexes", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -242,7 +242,7 @@ fn test_find_one_and_delete_removes_index_entries() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection("test_find_one_and_delete_indexes", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -275,7 +275,7 @@ fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection("test_find_one_and_update_indexes", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -471,7 +471,7 @@ fn test_find_one_and_replace_rewrites_index_entries() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id =
         storage_engine.create_collection("test_find_one_and_replace_indexes", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -1312,7 +1312,7 @@ fn test_delete_many_commits_each_document_before_continuing() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_delete_many_per_document", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
@@ -1659,7 +1659,7 @@ fn test_update_many_commits_each_document_before_continuing() -> Result<()> {
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_update_many_per_document", true)?;
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("status")]),
         IndexOptions::default(),
@@ -2082,7 +2082,99 @@ fn test_update_many_does_not_retry_after_schema_change() -> Result<()> {
 }
 
 #[test]
-fn test_update_one_retries_after_schema_change() -> Result<()> {
+fn test_deletes_reject_writes_during_index_build() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage_engine = &runtime.storage_engine;
+    let executor = &runtime.executor;
+    let collection_id =
+        storage_engine.create_collection("test_deletes_during_index_build", true)?;
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(executor, collection_id, &initial_doc)?;
+    let index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+
+    for result in [
+        execute_delete_one(executor, collection_id, 1),
+        execute_delete_many(executor, collection_id, full_scan_plan(collection_id)),
+        execute_find_one_and_delete(executor, collection_id, 1),
+    ] {
+        match result {
+            Err(Error::VersionConflict(reason)) => {
+                assert!(reason.contains("index is being built"), "{reason}");
+            }
+            other => panic!("Expected index-build VersionConflict, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        read_stored_doc(storage_engine, collection_id, 1)?,
+        initial_doc
+    );
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Collection(collection_id)),
+        Some(1)
+    );
+    assert_eq!(
+        storage_engine.count_stat(&CountStatsKey::Index {
+            collection: collection_id,
+            index: index.id,
+        }),
+        None
+    );
+
+    crate::index_builder::IndexBuilder::new(
+        &crate::options::options::Options::lightweight(),
+        storage_engine.clone(),
+    )
+    .build_index(
+        crate::storage::index_build_state::IndexBuildKey::new(collection_id, index.id),
+        &index.build_snapshot.unwrap(),
+    )?;
+    assert_delete_result(execute_delete_one(executor, collection_id, 1)?, 1);
+    insert_one(executor, collection_id, &doc! { "_id": 1, "value": "new" })?;
+    assert!(index_scan_eq(executor, collection_id, index.id, "initial")?.is_empty());
+    assert_eq!(
+        index_scan_eq(executor, collection_id, index.id, "new")?,
+        vec![doc! { "_id": 1, "value": "new" }]
+    );
+    Ok(())
+}
+
+#[test]
+fn test_delete_one_rejects_write_after_index_build_starts() -> Result<()> {
+    let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine.create_collection("test_delete_one_schema_change", true)?;
+    let initial_doc = doc! { "_id": 1, "value": "initial" };
+    insert_one(&executor, collection_id, &initial_doc)?;
+    let paused_handle = spawn_paused_delete_one(executor, hook.clone(), collection_id, 1);
+    hook.wait_until_hit();
+    let _index = storage_engine.create_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    hook.release();
+
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(reason)) => {
+            assert!(reason.contains("index is being built"), "{reason}");
+        }
+        other => panic!("Expected index-build VersionConflict, got {other:?}"),
+    }
+    assert_eq!(
+        read_stored_doc(&storage_engine, collection_id, 1)?,
+        initial_doc
+    );
+    Ok(())
+}
+
+#[test]
+fn test_update_one_rejects_write_after_index_build_starts() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
@@ -2093,28 +2185,30 @@ fn test_update_one_retries_after_schema_change() -> Result<()> {
     let paused_handle =
         spawn_paused_update_one(executor.clone(), hook.clone(), collection_id, 1, "updated");
     hook.wait_until_hit();
-    let index = storage_engine.create_index(
+    storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
         IndexOptions::default(),
     )?;
     hook.release();
 
-    assert_update_result(paused_handle.join().unwrap()?, 1, 1, Option::<Bson>::None);
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(reason)) => {
+            assert!(reason.contains("index is being built"), "{reason}");
+        }
+        Err(error) => panic!("Expected index-build VersionConflict, got {error:?}"),
+        Ok(result) => panic!("Expected update to be rejected, got {result:?}"),
+    }
     assert_eq!(
         read_stored_doc(&storage_engine, collection_id, 1)?,
-        doc! { "_id": 1, "value": "updated" }
-    );
-    assert_eq!(
-        index_scan_eq(&executor, collection_id, index.id, "updated")?,
-        vec![doc! { "_id": 1, "value": "updated" }]
+        initial_doc
     );
 
     Ok(())
 }
 
 #[test]
-fn test_insert_one_retries_after_schema_change() -> Result<()> {
+fn test_insert_one_rejects_write_after_index_build_starts() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::BeforeCommit));
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
@@ -2127,22 +2221,28 @@ fn test_insert_one_retries_after_schema_change() -> Result<()> {
         doc! { "_id": 1, "schema_value": "value" },
     );
     hook.wait_until_hit();
-    let index = storage_engine.create_index(
+    storage_engine.create_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("schema_value")]),
         IndexOptions::default(),
     )?;
     hook.release();
 
-    assert_insert_one_result(paused_handle.join().unwrap()?, 1);
-    assert_eq!(
-        read_stored_doc(&storage_engine, collection_id, 1)?,
-        doc! { "_id": 1, "schema_value": "value" }
-    );
-    assert_eq!(
-        index_scan_eq(&executor, collection_id, index.id, "value")?,
-        vec![doc! { "_id": 1, "schema_value": "value" }]
-    );
+    match paused_handle.join().unwrap() {
+        Err(Error::VersionConflict(reason)) => {
+            assert!(reason.contains("index is being built"), "{reason}");
+        }
+        Err(error) => panic!("Expected index-build VersionConflict, got {error:?}"),
+        Ok(result) => panic!("Expected insert to be rejected, got {result:?}"),
+    }
+    let user_key = Bson::Int32(1).try_into_key()?;
+    let snapshot = storage_engine.acquire_snapshot();
+    assert!(!WriteExecutor::primary_key_exists(
+        &storage_engine,
+        collection_id,
+        &user_key,
+        &snapshot,
+    )?);
 
     Ok(())
 }

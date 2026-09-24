@@ -12,6 +12,7 @@ use crate::storage::compaction::compaction_picker::CompactionJob;
 use crate::storage::count_stats::{CountStatSource, CountStats, CountStatsKey};
 use crate::storage::files::{DbFile, FileType};
 use crate::storage::flush_manager::{FlushManager, FlushTask};
+use crate::storage::index_build_state::IndexBuildKey;
 use crate::storage::lsm_tree::LsmTree;
 use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
 use crate::storage::manifest::Manifest;
@@ -38,6 +39,21 @@ struct WalAndManifest {
     manifest: Manifest,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CreatedIndex {
+    pub id: u32,
+    pub name: String,
+    /// Snapshot of the collection contents at the index-creation boundary.
+    pub build_snapshot: Option<Snapshot>,
+}
+
+/// A build recovered from the catalog together with its re-instantiated
+/// source snapshot lease.
+pub(crate) struct IndexBuildSnapshot {
+    pub key: IndexBuildKey,
+    pub snapshot: Snapshot,
+}
+
 pub(crate) struct StorageEngine {
     db_dir: PathBuf,
     options: Arc<Options>,
@@ -60,18 +76,27 @@ pub(crate) struct StorageEngine {
     fail_next_precondition_checks: AtomicU8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatedIndex {
-    pub id: u32,
-    pub name: String,
-}
-
 impl StorageEngine {
+    fn restore_index_build_snapshots(
+        catalog: &Catalog,
+        snapshot_manager: &Arc<SnapshotManager>,
+    ) -> Vec<IndexBuildSnapshot> {
+        catalog
+            .indexes_being_built()
+            .map(
+                |(collection_id, index_id, snapshot_sequence)| IndexBuildSnapshot {
+                    key: IndexBuildKey::new(collection_id, index_id),
+                    snapshot: snapshot_manager.acquire(snapshot_sequence),
+                },
+            )
+            .collect()
+    }
+
     pub fn new(
         metric_registry: &mut MetricRegistry,
         options: Arc<Options>,
         db_dir: &Path,
-    ) -> StorageResult<Arc<Self>> {
+    ) -> StorageResult<(Arc<Self>, Vec<IndexBuildSnapshot>)> {
         let sst_cache = Arc::new(SSTableCache::new(metric_registry, &options));
 
         tracing::debug!(path = %db_dir.display(), "starting storage engine");
@@ -351,6 +376,12 @@ impl StorageEngine {
                 sync_dir(db_dir)?;
             }
 
+            // Restore unfinished-build leases before starting compaction, so
+            // it retains source versions from each index's creation boundary.
+            let snapshot_manager = Arc::new(SnapshotManager::new());
+            let index_build_snapshots =
+                Self::restore_index_build_snapshots(lsm_tree.catalog().as_ref(), &snapshot_manager);
+
             let flush_manager =
                 FlushManager::new(metric_registry, options.clone(), db_dir, sst_cache.clone())?;
 
@@ -376,7 +407,7 @@ impl StorageEngine {
                 last_visible_seq: AtomicU64::new(last_seq_nbr),
                 sst_cache,
                 snapshot_registration_mutex: Mutex::new(()),
-                snapshot_manager: Arc::new(SnapshotManager::new()),
+                snapshot_manager,
                 flush_manager,
                 compaction_manager,
                 async_callback: OnceLock::new(),
@@ -391,7 +422,7 @@ impl StorageEngine {
 
             engine.schedule_compaction_if_needed();
 
-            Ok(engine)
+            Ok((engine, index_build_snapshots))
         } else {
             let next_file_number = Arc::new(AtomicU64::new(1));
             let next_seq_number = AtomicU64::new(1);
@@ -428,27 +459,30 @@ impl StorageEngine {
 
             tracing::debug!("storage engine started");
 
-            Ok(Arc::new(StorageEngine {
-                db_dir: db_dir.to_path_buf(),
-                options,
-                queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
-                db_mutex: Mutex::new(WalAndManifest { wal, manifest }),
-                lsm_tree,
-                next_file_number,
-                next_seq_number,
-                last_visible_seq: AtomicU64::new(0),
-                sst_cache,
-                snapshot_registration_mutex: Mutex::new(()),
-                snapshot_manager: Arc::new(SnapshotManager::new()),
-                flush_manager,
-                compaction_manager,
-                async_callback: OnceLock::new(),
-                obsolete_sstables: Mutex::new(VecDeque::new()),
-                error_mode: AtomicBool::new(false),
-                disable_auto_compaction: AtomicBool::new(false),
-                #[cfg(test)]
-                fail_next_precondition_checks: AtomicU8::new(0),
-            }))
+            Ok((
+                Arc::new(StorageEngine {
+                    db_dir: db_dir.to_path_buf(),
+                    options,
+                    queue: Mutex::new(VecDeque::new()), // TODO: limit unbounded queue
+                    db_mutex: Mutex::new(WalAndManifest { wal, manifest }),
+                    lsm_tree,
+                    next_file_number,
+                    next_seq_number,
+                    last_visible_seq: AtomicU64::new(0),
+                    sst_cache,
+                    snapshot_registration_mutex: Mutex::new(()),
+                    snapshot_manager: Arc::new(SnapshotManager::new()),
+                    flush_manager,
+                    compaction_manager,
+                    async_callback: OnceLock::new(),
+                    obsolete_sstables: Mutex::new(VecDeque::new()),
+                    error_mode: AtomicBool::new(false),
+                    disable_auto_compaction: AtomicBool::new(false),
+                    #[cfg(test)]
+                    fail_next_precondition_checks: AtomicU8::new(0),
+                }),
+                Vec::new(),
+            ))
         }
     }
 
@@ -636,13 +670,14 @@ impl StorageEngine {
     ) -> StorageResult<CreatedIndex> {
         self.check_error_mode()?;
 
-        let snapshot = self.next_seq_number.load(Ordering::Relaxed);
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        let catalog_sequence = self.next_seq_number.load(Ordering::Relaxed);
+        let build_snapshot = self.acquire_snapshot();
 
         let lsm_tree = self.lsm_tree.load();
         let catalog = lsm_tree.catalog();
         let collection = catalog
-            .get_collection_at(collection_id, snapshot)
+            .get_collection_at(collection_id, catalog_sequence)
             .ok_or_else(|| StorageError::CollectionNotFound {
                 name: catalog
                     .get_collection_by_id(&collection_id)
@@ -658,9 +693,15 @@ impl StorageEngine {
 
         if let Some(existing_index) = collection.get_index_by_name(&resolved_name) {
             if existing_index.is_equivalent_to(&definition, &options) {
+                if !existing_index.is_queryable() {
+                    return Err(StorageError::IndexBuildInProgress {
+                        collection: collection_id,
+                    });
+                }
                 return Ok(CreatedIndex {
                     id: existing_index.id,
                     name: existing_index.name(),
+                    build_snapshot: None,
                 });
             }
 
@@ -684,12 +725,15 @@ impl StorageEngine {
         }
 
         let index_id = collection.next_index_id;
+        // Writes and catalog edits are ordered by `db_mutex`. The snapshot was
+        // captured before registering the index; the executor blocks application
+        // writes until publication, so this backfill only needs to scan that snapshot.
         let edit = ManifestEdit::CreateIndex {
             collection_id,
             index_id,
             definition,
             options,
-            created_at: snapshot,
+            created_at: catalog_sequence,
         };
 
         wal_and_manifest.wal.sync()?;
@@ -703,6 +747,7 @@ impl StorageEngine {
         Ok(CreatedIndex {
             id: index_id,
             name: resolved_name,
+            build_snapshot: Some(build_snapshot),
         })
     }
 
@@ -761,6 +806,27 @@ impl StorageEngine {
             id = index.id,
             "dropping index"
         );
+        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        Ok(())
+    }
+
+    pub fn mark_index_queryable(
+        self: &Arc<Self>,
+        collection_id: u32,
+        index_id: u32,
+    ) -> StorageResult<()> {
+        self.check_error_mode()?;
+
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        let lsm_tree = self.lsm_tree.load();
+        let queryable_at = self.next_seq_number.load(Ordering::Relaxed);
+        let edit = ManifestEdit::MarkIndexQueryable {
+            collection_id,
+            index_id,
+            queryable_at,
+        };
+
+        wal_and_manifest.wal.sync()?;
         let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
@@ -862,32 +928,33 @@ impl StorageEngine {
         drop(queue);
 
         let lsm_tree = self.lsm_tree.load().clone();
+        let catalog = lsm_tree.catalog();
+        let mut next_seq = self.next_seq_number.load(Ordering::Relaxed);
+        let mut should_sync = false;
 
-        // Check the preconditions for each writer
-        let writers = self.check_preconditions(lsm_tree.catalog(), &mut writers);
+        let mut with_results = Vec::with_capacity(writers.len());
 
-        if writers.is_empty() {
-            tracing::trace!("write finished without applying batches due to preconditions");
-            return;
-        }
+        for writer in &writers {
+            // Check the preconditions
+            if let Some(preconditions) = writer.batch().preconditions() {
+                let rs = self.check_writer_preconditions(&catalog, next_seq, preconditions);
+                if let Err(error) = rs {
+                    with_results.push((writer, Err(error)));
+                    continue;
+                }
+            }
 
-        // Grab the sequence numbers for the set of batches
-        let seq = self
-            .next_seq_number
-            .fetch_add(writers.len() as u64, Ordering::Relaxed);
+            // Grab the sequence number for this batch
+            let seq = self.next_seq_number.fetch_add(1u64, Ordering::Relaxed);
+            next_seq = seq + 1;
 
-        let res = Self::append_to_wal(&writers, &mut wal_and_manifest, seq);
+            let batch = writer.batch();
+            if let Err(error) = wal_and_manifest.wal.append(seq, batch) {
+                self.handle_write_error(&StorageError::Io(error), &writers);
+                return;
+            }
+            should_sync |= writer.sync();
 
-        if let Err(error) = res {
-            self.handle_write_error(&StorageError::Io(error), &writers);
-            return;
-        }
-
-        let with_sequence = res.unwrap();
-
-        let mut with_results = Vec::with_capacity(with_sequence.len());
-
-        for (writer, seq) in with_sequence {
             tracing::trace!(
                 seq,
                 memtable = lsm_tree.memtable.log_number,
@@ -895,19 +962,18 @@ impl StorageEngine {
                 "memtable write started"
             );
 
-            lsm_tree.memtable.write(seq, writer.batch());
+            lsm_tree.memtable.write(seq, batch);
             with_results.push((writer, Ok(())));
-            let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
-            let compare = self.last_visible_seq.compare_exchange(
-                seq - 1,
-                seq,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
-            if compare.is_err() {
-                panic!("Last visible sequence number out of order");
-            }
         }
+
+        if let Err(error) = wal_and_manifest.wal.finish_append_group(should_sync) {
+            self.handle_write_error(&StorageError::Io(error), &writers);
+            return;
+        }
+
+        let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
+        let seq = next_seq - 1;
+        self.last_visible_seq.store(seq, Ordering::Relaxed);
 
         drop(wal_and_manifest); // release the lock as soon as possible
 
@@ -921,28 +987,6 @@ impl StorageEngine {
             writer.done(result);
         }
         tracing::trace!("write finished");
-    }
-
-    fn check_preconditions(
-        self: &Arc<Self>,
-        catalog: Arc<Catalog>,
-        writers: &mut Vec<Arc<Writer>>,
-    ) -> Vec<Arc<Writer>> {
-        let seq = self.next_seq_number.load(Ordering::Relaxed);
-
-        let mut successful_writers = Vec::with_capacity(writers.len());
-
-        for writer in writers {
-            if let Some(preconditions) = writer.batch().preconditions() {
-                let rs = self.check_writer_preconditions(&catalog, seq, preconditions);
-                if let Err(error) = rs {
-                    writer.done(Err(error));
-                    continue;
-                }
-            }
-            successful_writers.push(writer.clone());
-        }
-        successful_writers
     }
 
     fn check_writer_preconditions(
@@ -974,6 +1018,27 @@ impl StorageEngine {
                         return Err(Self::schema_version_conflict_error(
                             collection, version, metadata,
                         ));
+                    }
+                }
+                Precondition::IndexNotDropped { collection, index } => {
+                    let collection_metadata = catalog
+                        .get_collection_at(*collection, seq)
+                        .ok_or_else(|| StorageError::CollectionNotFound {
+                            name: catalog
+                                .get_collection_by_id(collection)
+                                .map(|metadata| metadata.name.clone())
+                                .unwrap_or_default(),
+                            id: Some(*collection),
+                        })?;
+                    if collection_metadata.get_index_at(*index, seq).is_none() {
+                        return Err(StorageError::IndexNotFound {
+                            collection_name: collection_metadata.name.clone(),
+                            index_name: collection_metadata
+                                .get_index_by_id(*index)
+                                .map(|metadata| metadata.name())
+                                .unwrap_or_default(),
+                            id: Some(*index),
+                        });
                     }
                 }
                 Precondition::VersionMatch {
@@ -1127,32 +1192,14 @@ impl StorageEngine {
         Ok(Box::new(result_iterator))
     }
 
-    fn append_to_wal(
-        writers: &Vec<Arc<Writer>>,
-        wal_and_manifest: &mut MutexGuard<WalAndManifest>,
-        mut seq: u64,
-    ) -> Result<Vec<(Arc<Writer>, u64)>> {
-        let mut with_sequence = Vec::with_capacity(writers.len());
-        let mut should_sync = false;
-
-        for writer in writers {
-            let batch = writer.batch();
-            wal_and_manifest.wal.append(seq, batch)?;
-            with_sequence.push((writer.clone(), seq));
-            should_sync |= writer.sync();
-
-            seq += 1;
-        }
-
-        wal_and_manifest.wal.finish_append_group(should_sync)?;
-        Ok(with_sequence)
-    }
-
     pub fn shutdown(self: &Arc<Self>) -> StorageResult<()> {
         // This code should be only called once when the database instance is dropped.
         self.disable_auto_compaction.store(true, Ordering::Relaxed);
         tracing::debug!("shutting down storage engine");
-        self.flush()?;
+        if !self.error_mode.load(Ordering::Relaxed) {
+            tracing::warn!("storage engine is in error mode, skipping flush");
+            self.flush()?;
+        }
         self.compaction_manager.shutdown();
         Ok(())
     }
@@ -1548,36 +1595,47 @@ impl CountStatSource for StorageEngine {
 
 #[cfg(test)]
 impl StorageEngine {
-    pub fn wal_return_error_on_write(&self, value: bool) {
+    pub(crate) fn create_queryable_index(
+        self: &Arc<Self>,
+        collection_id: u32,
+        definition: IndexDefinition,
+        options: IndexOptions,
+    ) -> StorageResult<CreatedIndex> {
+        let index = self.create_index(collection_id, definition, options)?;
+        self.mark_index_queryable(collection_id, index.id)?;
+        Ok(index)
+    }
+
+    pub fn wal_fail_write_after(&self, counter: usize) {
         self.db_mutex
             .lock()
             .unwrap()
             .wal
-            .return_error_on_append(value);
+            .fail_append_after(counter);
     }
 
-    pub fn manifest_return_error_on_write(&self, value: bool) {
+    pub fn manifest_fail_write_after(&self, counter: usize) {
         self.db_mutex
             .lock()
             .unwrap()
             .manifest
-            .return_error_on_append(value);
+            .fail_append_after(counter);
     }
 
-    pub fn wal_return_error_on_rotate(&self, value: bool) {
+    pub fn wal_fail_rotate_after(&self, counter: usize) {
         self.db_mutex
             .lock()
             .unwrap()
             .wal
-            .return_error_on_rotate(value);
+            .fail_rotate_after(counter);
     }
 
-    pub fn manifest_return_error_on_rotate(&self, value: bool) {
+    pub fn manifest_fail_rotate_after(&self, counter: usize) {
         self.db_mutex
             .lock()
             .unwrap()
             .manifest
-            .return_error_on_rotate(value);
+            .fail_rotate_after(counter);
     }
 
     pub fn lsm_tree(&self) -> Arc<LsmTree> {
@@ -1804,6 +1862,9 @@ pub enum StorageError {
         expected: u32,
         actual: Option<u32>,
     },
+    IndexBuildInProgress {
+        collection: u32,
+    },
     LogCorruption {
         record_offset: u64,
         reason: String,
@@ -1874,6 +1935,11 @@ impl Clone for StorageError {
                 expected: *expected,
                 actual: *actual,
             },
+            StorageError::IndexBuildInProgress { collection } => {
+                StorageError::IndexBuildInProgress {
+                    collection: *collection,
+                }
+            }
             StorageError::CollectionNotFound { name, id } => StorageError::CollectionNotFound {
                 name: name.clone(),
                 id: *id,
@@ -1929,6 +1995,11 @@ impl fmt::Display for StorageError {
                 f,
                 "Schema version conflict for collection {}: expected {}, found {:?}",
                 collection, expected, actual
+            ),
+            StorageError::IndexBuildInProgress { collection } => write!(
+                f,
+                "Cannot write to collection {} while an index is being built",
+                collection
             ),
             StorageError::CollectionNotFound { name, id } => {
                 if let Some(col_id) = id {

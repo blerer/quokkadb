@@ -9,6 +9,7 @@ use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::internal_key::encode_internal_key_range;
 
 use crate::storage::Direction;
+use crate::storage::FIRST_USER_COLLECTION_ID;
 use crate::storage::iterators::{ForwardIterator, MergeIterator, ReverseIterator};
 #[cfg(test)]
 use crate::storage::lsm_version::DropMetadata;
@@ -68,6 +69,7 @@ impl LsmTree {
             | ManifestEdit::DropCollection { .. }
             | ManifestEdit::RenameCollection { .. }
             | ManifestEdit::CreateIndex { .. }
+            | ManifestEdit::MarkIndexQueryable { .. }
             | ManifestEdit::DropIndex { .. }
             | ManifestEdit::Flush { .. }
             | ManifestEdit::DiscardPendingCatalogEditsAfter { .. }
@@ -153,10 +155,10 @@ impl LsmTree {
         snapshot: u64,
         min_snapshot: Option<u64>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        if self
-            .catalog()
-            .collection_or_index_exist_at(collection, index, snapshot)
-            == false
+        if collection >= FIRST_USER_COLLECTION_ID
+            && !self
+                .catalog()
+                .collection_or_index_exist_at(collection, index, snapshot)
         {
             return Ok(None);
         }
@@ -235,10 +237,10 @@ impl LsmTree {
     where
         R: RangeBounds<Vec<u8>>,
     {
-        if self
-            .catalog()
-            .collection_or_index_exist_at(collection, index, snapshot)
-            == false
+        if collection >= FIRST_USER_COLLECTION_ID
+            && !self
+                .catalog()
+                .collection_or_index_exist_at(collection, index, snapshot)
         {
             // Return an empty iterator if the collection or index does not exist
             let empty_iter = std::iter::empty();

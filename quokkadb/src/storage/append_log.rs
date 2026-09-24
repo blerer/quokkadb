@@ -7,8 +7,9 @@ use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{fmt, mem, result};
+
 
 /// The size ot the block used in the log file. The 4KB block optimize write efficiency by
 /// aligning with disk block sizes.
@@ -21,9 +22,9 @@ pub struct AppendLog<F: LogFileCreator> {
     buffer: Buffer,
     observer: Arc<F::Observer>,
     #[cfg(test)]
-    return_error_on_append: AtomicBool,
+    fail_append_after: AtomicUsize,
     #[cfg(test)]
-    return_error_on_rotate: AtomicBool,
+    fail_rotate_after: AtomicUsize,
 }
 
 impl<F: LogFileCreator> AppendLog<F> {
@@ -43,9 +44,9 @@ impl<F: LogFileCreator> AppendLog<F> {
             buffer: Buffer::with_capacity(BUFFER_SIZE_IN_BYTES),
             observer,
             #[cfg(test)]
-            return_error_on_append: AtomicBool::new(false),
+            fail_append_after: AtomicUsize::new(usize::MAX),
             #[cfg(test)]
-            return_error_on_rotate: AtomicBool::new(false),
+            fail_rotate_after: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -71,9 +72,9 @@ impl<F: LogFileCreator> AppendLog<F> {
             buffer: Buffer::with_capacity(BUFFER_SIZE_IN_BYTES),
             observer,
             #[cfg(test)]
-            return_error_on_append: AtomicBool::new(false),
+            fail_append_after: AtomicUsize::new(usize::MAX),
             #[cfg(test)]
-            return_error_on_rotate: AtomicBool::new(false),
+            fail_rotate_after: AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -94,12 +95,7 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     pub fn rotate(&mut self, new_log: DbFile) -> Result<(PathBuf, PathBuf)> {
         #[cfg(test)]
-        if self
-            .return_error_on_rotate
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(Error::new(ErrorKind::Other, "Injected error on rotate"));
-        }
+        may_be_fail(&self.fail_rotate_after, "Injected error on rotate")?;
 
         if !self.buffer.is_empty() {
             // Before syncing to the disk we want to pad the buffer to ensure that we fill the last block.
@@ -118,12 +114,7 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     pub fn append(&mut self, data: &[u8]) -> Result<usize> {
         #[cfg(test)]
-        if self
-            .return_error_on_append
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(Error::new(ErrorKind::Other, "Injected error on append"));
-        }
+        may_be_fail(&self.fail_append_after, "Injected error on append")?;
 
         let mut bytes_written = 0;
         let len = data.len();
@@ -250,16 +241,27 @@ impl<F: LogFileCreator> AppendLog<F> {
     }
 
     #[cfg(test)]
-    pub fn return_error_on_append(&self, value: bool) {
-        self.return_error_on_append
-            .store(value, std::sync::atomic::Ordering::SeqCst);
+    pub fn fail_append_after(&self, counter: usize) {
+        self.fail_append_after
+            .store(counter, Ordering::SeqCst);
     }
 
     #[cfg(test)]
-    pub fn return_error_on_rotate(&self, value: bool) {
-        self.return_error_on_rotate
-            .store(value, std::sync::atomic::Ordering::SeqCst);
+    pub fn fail_rotate_after(&self, counter: usize) {
+        self.fail_rotate_after
+            .store(counter, Ordering::SeqCst);
     }
+}
+
+#[cfg(test)]
+fn may_be_fail(counter: &AtomicUsize, msg: &str) -> Result<()> {
+    let remaining = counter.fetch_sub(1, Ordering::Relaxed);
+
+    if remaining == 0 {
+        return Err(Error::new(ErrorKind::Other, msg));
+    }
+
+    Ok(())
 }
 
 impl<F: LogFileCreator> Drop for AppendLog<F> {
@@ -866,7 +868,7 @@ mod tests {
         }
 
         // Truncate the file and check that it can be safely replayed after
-        truncate_file(&log_file_path, expected_offset as u64).unwrap();
+        truncate_file(&log_file_path, expected_offset).unwrap();
     }
 
     #[test]

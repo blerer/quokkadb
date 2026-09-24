@@ -6,6 +6,7 @@ mod collection_state;
 pub mod document;
 pub mod error;
 mod id;
+mod index_builder;
 mod io;
 pub mod metrics;
 pub mod obs;
@@ -29,6 +30,7 @@ pub use quokkadb_derive::{QuokkaDocument, QuokkaType};
 pub use crate::collection::Collection;
 use crate::collection::QueryOutput;
 use crate::error::Error;
+use crate::index_builder::IndexBuilder;
 use crate::metrics::Metrics;
 use crate::obs::metrics::MetricRegistry;
 use crate::obs::observability::Observability;
@@ -44,7 +46,8 @@ use crate::storage::catalog::{
     IdCreationStrategy as InternalIdCreationStrategy, IndexOptions,
 };
 use crate::storage::count_stats::CountStatsKey;
-use crate::storage::storage_engine::StorageEngine;
+use crate::storage::index_build_state::IndexBuildKey;
+use crate::storage::storage_engine::{IndexBuildSnapshot, StorageEngine};
 use crate::typed_collection::TypedCollection;
 use query::execution::QueryExecutor;
 use query::logical_plan::LogicalPlan;
@@ -79,7 +82,10 @@ impl QuokkaDB {
         let observability = Observability::new(path);
         let _instance_span = observability.instance_span().clone().entered();
         let mut metric_registry = MetricRegistry::new();
-        let storage_engine = StorageEngine::new(&mut metric_registry, options.clone(), path)?;
+        let (storage_engine, pending_builds) =
+            StorageEngine::new(&mut metric_registry, options.clone(), path)?;
+        let index_builder = IndexBuilder::new(&options, storage_engine.clone());
+        index_builder.cleanup_stale_index_build_states(&pending_builds)?;
         let optimizer = Arc::new(Optimizer::new()); // Add normalization rules as needed
         let query_cache = Arc::new(QueryCache::new(
             &mut metric_registry,
@@ -95,12 +101,26 @@ impl QuokkaDB {
             optimizer,
             query_cache,
             executor,
+            index_builder,
             storage_engine,
         });
+        Self::resume_pending_index_builds(&db_impl, pending_builds)?;
 
         tracing::debug!(event = "db.opened");
 
         Ok(QuokkaDB { options, db_impl })
+    }
+
+    fn resume_pending_index_builds(
+        db_impl: &Arc<DbImpl>,
+        pending_builds: Vec<IndexBuildSnapshot>,
+    ) -> Result<(), Error> {
+        for build in pending_builds {
+            db_impl
+                .index_builder
+                .build_index(build.key, &build.snapshot)?;
+        }
+        Ok(())
     }
 
     pub fn options(&self) -> &Options {
@@ -248,6 +268,7 @@ struct DbImpl {
     optimizer: Arc<Optimizer>,
     query_cache: Arc<QueryCache>,
     executor: Arc<QueryExecutor>,
+    index_builder: IndexBuilder,
     storage_engine: Arc<StorageEngine>,
 }
 
@@ -326,12 +347,15 @@ impl DbImpl {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_index").entered(),
         };
-        let index_name = self
-            .storage_engine
-            .create_index(collection_id, spec.into(), options.into())?
-            .name;
+        let created_index =
+            self.storage_engine
+                .create_index(collection_id, spec.into(), options.into())?;
+        if let Some(build_snapshot) = created_index.build_snapshot {
+            let key = IndexBuildKey::new(collection_id, created_index.id);
+            self.index_builder.build_index(key, &build_snapshot)?;
+        }
         self.query_cache.invalidate_collection(collection_id);
-        Ok(index_name)
+        Ok(created_index.name)
     }
 
     pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {

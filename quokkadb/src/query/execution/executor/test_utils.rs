@@ -33,7 +33,8 @@ pub(crate) fn executor_test_runtime() -> Result<ExecutorTestRuntime> {
     let dir = tempdir()?;
     let options = Arc::new(Options::lightweight());
     let mut metric_registry = MetricRegistry::new();
-    let storage_engine = StorageEngine::new(&mut metric_registry, options, dir.path())?;
+    let (storage_engine, _pending_builds) =
+        StorageEngine::new(&mut metric_registry, options, dir.path())?;
     let executor = Arc::new(QueryExecutor::new_with_metrics(
         storage_engine.clone(),
         &mut metric_registry,

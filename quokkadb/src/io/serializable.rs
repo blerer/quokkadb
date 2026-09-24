@@ -6,15 +6,28 @@ use std::io::Result;
 use std::ops::Bound;
 use std::sync::Arc;
 
-/// A component that can be serialized using the write_to method and deserialized using
-/// the read_from method.
+/// A component that can be serialized with [`Serializable::write_to`] and deserialized with
+/// [`Serializable::read_from`].
+///
+/// This trait is used for data produced and consumed internally by the database. Storage
+/// callers must validate record framing and checksums before passing bytes to a deserializer.
+/// Once that boundary has been passed, a malformed tag, impossible variant, unsupported version,
+/// or trailing bytes violates the serialization contract and is a programming error. Implementations
+/// should panic for those invariant violations rather than handle them as `ErrorKind::InvalidData`.
+/// Ordinary byte-reader errors may still propagate through the `Result` return value.
+///
+/// The `Result` return type remains part of the trait so implementations can compose with the
+/// `ByteReader` API and shared serialization helpers.
 pub trait Serializable {
-    /// Deserialized the component from the specified ByteReader
+    /// Deserializes the component from the specified [`ByteReader`].
+    ///
+    /// The reader must contain bytes produced by the matching [`write_to`](Self::write_to)
+    /// implementation after the storage layer has validated their framing and checksum.
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self>
     where
         Self: Sized;
 
-    /// Serialize the component into the specified ByteWriter
+    /// Serializes the component into the specified [`ByteWriter`].
     fn write_to(&self, writer: &mut ByteWriter, version: u32);
 }
 
