@@ -463,7 +463,7 @@ impl EntryReader for IndexEntryReader {
     }
 }
 
-/// Reader implementation for data blocks, returning BSON document bytes for `Put` operations.
+/// Reader implementation for data blocks, returning value bytes for `Put` operations.
 #[derive(Clone)]
 pub struct DataEntryReader;
 
@@ -481,12 +481,10 @@ impl EntryReader for DataEntryReader {
         _prev_value: &Option<Self::Output>,
     ) -> Result<Self::Output> {
         let op = extract_operation_type(key);
+        let value = data.read_length_prefixed_slice()?;
 
         if OperationType::Put == op {
-            // Read the document length (first 4 bytes) without moving the underlying cursor
-            let doc_length = data.peek_i32_le()? as usize;
-            data.read_fixed_slice(doc_length)
-                .map(|bytes| bytes.to_vec())
+            Ok(value.to_vec())
         } else {
             Ok(Vec::new())
         }
@@ -916,6 +914,30 @@ mod tests {
             .scan_forward_from(&inc_start(2, MAX_SEQUENCE_NUMBER))
             .unwrap();
         assert_iter_eq(&mut iter, &vec![(key.clone(), value.clone())]);
+    }
+
+    #[test]
+    fn test_scan_data_with_arbitrary_values() {
+        let mut builder = BlockBuilder::new(3, DataEntryWriter);
+        let entries = vec![
+            (put(1, 3), vec![0xff, 0x00, 0x01]),
+            (delete(2, 2), Vec::new()),
+            (put(3, 1), (0..200).map(|value| value as u8).collect()),
+        ];
+
+        for (key, value) in &entries {
+            builder.add(key, value.clone()).unwrap();
+        }
+
+        let block_data = Arc::from(builder.finish().unwrap().1);
+        let block = BlockReader::new(block_data, DataEntryReader).unwrap();
+
+        let mut forward = block.scan_all_forward().unwrap();
+        assert_iter_eq(&mut forward, &entries);
+
+        let reverse_entries: Vec<_> = entries.iter().rev().cloned().collect();
+        let mut reverse = block.scan_all_reverse().unwrap();
+        assert_iter_eq(&mut reverse, &reverse_entries);
     }
 
     #[test]

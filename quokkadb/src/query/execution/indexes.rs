@@ -211,9 +211,8 @@ impl Index {
         doc_id: &TypedKey,
     ) -> Vec<u8> {
         // The index value is:
-        // [value_len u32 LE][_id_len varint][_id_key_type bytes]([key_len varint][key_type bytes])*
-        // * value_len: the value length is necessary because the sstable reader expects the
-        //     length to be the first 4 bytes of a value (same as for Bson documents).
+        // [_id_len varint][_id_key_type_len varint][_id_key_type bytes]
+        //     ([key_len varint][key_type bytes])*
         // * _id_length: having the _id length allows for fast extraction of the _id from the key
         //     without having to perform some parsing or repeating the information in the value.
         // * _id_key_type bytes: the key_type bytes for the _id value, length-delimited by a
@@ -226,14 +225,11 @@ impl Index {
         //      to take advantage of covering indexes or to perform some filtering at the index
         //      level.
         let mut value = Vec::new();
-        value.extend_from_slice(&[0u8; 4]);
         varint::write_u32(doc_id.key.len() as u32, &mut value);
         varint::write_u32(doc_id.key_type.len() as u32, &mut value);
         value.extend_from_slice(&doc_id.key_type);
         encoded_prefix.write_key_metadata_to(&mut value);
 
-        let value_size = (value.len() as u32).to_le_bytes();
-        value[0..4].copy_from_slice(&value_size);
         value
     }
 
@@ -321,11 +317,11 @@ impl Index {
     }
 
     pub(crate) fn extract_id_from_entry_bytes<'a>(key: &'a [u8], value: &[u8]) -> Result<&'a [u8]> {
-        if value.len() < 5 {
+        if value.is_empty() {
             return Err(unexpected_eof("index entry value is truncated"));
         }
 
-        let (id_len, _) = varint::read_u32(value, 4);
+        let (id_len, _) = varint::read_u32(value, 0);
         let id_len = id_len as usize;
         if key.len() < id_len {
             return Err(unexpected_eof(
@@ -342,15 +338,14 @@ impl Index {
         let key = &index_key_value.key;
         let value = &index_key_value.value;
 
-        if value.len() < 5 {
+        if value.len() < 2 {
             return Err(unexpected_eof("index entry value is truncated"));
         }
 
         // Parse the value buffer.
-        // Layout: [value_len u32 LE][_id_len varint][_id_key_type_len varint][_id_key_type bytes]
+        // Layout: [_id_len varint][_id_key_type_len varint][_id_key_type bytes]
         //         ([key_len varint][key_type bytes])*
         let value_reader = ByteReader::new(value.as_slice());
-        value_reader.skip(4)?; // skip u32 value_len prefix
 
         let _id_len = value_reader.read_varint_u32()? as usize;
         let id_key_type_len = value_reader.read_varint_u32()? as usize;

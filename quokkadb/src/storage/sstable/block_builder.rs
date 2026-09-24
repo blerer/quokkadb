@@ -132,9 +132,9 @@ pub trait EntryWriter<T> {
 /// Writes key-value entries for data blocks.
 ///
 /// # Data block entry Format
-/// +--------------------------+------------------------------+------------+-----------------+-------+
-/// | Shared key prefix length | Non-shared key suffix length | Key Suffix | Value type (u8) | Value |
-/// +--------------------------+------------------------------+-- ---------+-----------------+-------+
+/// +--------------------------+------------------------------+------------+---------------+-------+
+/// | Shared key prefix length | Non-shared key suffix length | Key Suffix | Value length  | Value |
+/// +--------------------------+------------------------------+------------+---------------+-------+
 pub struct DataEntryWriter;
 
 impl EntryWriter<Vec<u8>> for DataEntryWriter {
@@ -152,17 +152,10 @@ impl EntryWriter<Vec<u8>> for DataEntryWriter {
         varint::write_u64(shared as u64, data);
         varint::write_u64(non_shared as u64, data);
 
-        // Add non-shared key and value to the block.
+        // Add the non-shared key and length-prefixed value to the block.
         data.extend(&key[shared..]);
-
-        if value.len() > 0 {
-            // No need to store the value length as the value is a BSON document which starts with its length:
-            // +-------------------------+--------------   -+-------------------+
-            // | Document length (int32) | Element list ... | unsigned byte (0) |
-            // +-------------------------+--------------   -+-- ----------------+
-            //
-            data.extend(value);
-        }
+        varint::write_u64(value.len() as u64, data);
+        data.extend(value);
     }
 }
 

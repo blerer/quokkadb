@@ -369,8 +369,7 @@ fn value_layout_id_length_matches_key_suffix() {
     let key_source = DocumentKeySource::BsonDocument(&document);
     let entry = index.extract_index_entry(&key_source, &id_key).unwrap();
 
-    // Skip the u32 value_len prefix.
-    let (id_len, _) = varint::read_u32(&entry.value, 4);
+    let (id_len, _) = varint::read_u32(&entry.value, 0);
     let id_len = id_len as usize;
 
     // The last `id_len` bytes of the key should equal the id_key bytes.
@@ -404,17 +403,14 @@ fn nested_field_round_trip() {
 }
 
 #[test]
-fn value_layout_prefix_and_id_key_type_bytes_are_stored() {
+fn value_layout_id_key_type_bytes_are_stored() {
     let index = make_index(vec![("x", IndexDirection::Ascending)]);
     let id = "user-42";
     let id_key = Bson::String(id.to_string()).try_into_typed_key().unwrap();
     let key_source = DocumentKeySource::BsonDocument(&doc! { "_id": id, "x": 1_i32 });
     let entry = index.extract_index_entry(&key_source, &id_key).unwrap();
 
-    let stored_len = u32::from_le_bytes(entry.value[0..4].try_into().unwrap()) as usize;
-    assert_eq!(stored_len, entry.value.len());
-
-    let (id_len, offset) = varint::read_u32(&entry.value, 4);
+    let (id_len, offset) = varint::read_u32(&entry.value, 0);
     assert_eq!(id_len as usize, id_key.key.len());
 
     let (id_key_type_len, offset) = varint::read_u32(&entry.value, offset);
@@ -772,7 +768,7 @@ fn decode_index_entry_returns_error_for_truncated_value() {
     let key_source = DocumentKeySource::BsonDocument(&document);
     let id_key = Indexes::extract_id_key(&key_source).unwrap();
     let mut entry = index.extract_index_entry(&key_source, &id_key).unwrap();
-    entry.value.truncate(4);
+    entry.value.truncate(1);
 
     let result = index.decode_index_entry(entry);
 
@@ -784,7 +780,7 @@ fn decode_index_entry_returns_error_for_invalid_id_key_type_length() {
     let index = make_index(vec![("name", IndexDirection::Ascending)]);
     let entry = IndexKeyValue {
         key: vec![1, 2, 3],
-        value: vec![6, 0, 0, 0, 3, 10],
+        value: vec![3, 10],
     };
 
     let result = index.decode_index_entry(entry);
