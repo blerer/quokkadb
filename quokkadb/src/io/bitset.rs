@@ -25,14 +25,14 @@ impl BitSet {
 }
 
 impl Serializable for BitSet {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> std::io::Result<Self>
     where
         Self: Sized,
     {
         reader.read_varint_u64().map(BitSet)
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_u64(self.0);
     }
 }
@@ -81,11 +81,11 @@ mod tests {
         bs.insert(31);
         bs.insert(63);
 
-        check_serialization_round_trip(bs);
+        check_serialization_round_trip(bs, 1);
     }
 
     #[test]
     fn serialization_empty() {
-        check_serialization_round_trip(BitSet::new());
+        check_serialization_round_trip(BitSet::new(), 1);
     }
 }

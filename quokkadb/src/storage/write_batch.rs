@@ -1,10 +1,13 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
+use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::storage::count_stats::CountStats;
 use crate::storage::operation::Operation;
 use crate::storage::snapshot_manager::Snapshot;
 use std::io::Result;
+
+pub(crate) const WAL_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, PartialEq)]
 pub enum Precondition {
@@ -109,14 +112,13 @@ impl WriteBatch {
     }
 
     pub fn to_wal_record(&self, seq: u64) -> Vec<u8> {
-        let precomputed_wal_record = if self.precomputed_wal_record.is_none() {
-            &Self::precompute_wal_record(&self.operations, &self.count_stats)
-        } else {
-            self.precomputed_wal_record.as_ref().unwrap()
-        };
+        let precomputed_wal_record = self.precomputed_wal_record.as_deref().map_or_else(
+            || Self::precompute_wal_record(&self.operations, &self.count_stats),
+            ToOwned::to_owned,
+        );
         let mut vec = Vec::with_capacity(8 + precomputed_wal_record.len());
         vec.extend_from_slice(&seq.to_be_bytes());
-        vec.extend_from_slice(precomputed_wal_record);
+        vec.extend_from_slice(&precomputed_wal_record);
         vec
     }
 
@@ -124,26 +126,33 @@ impl WriteBatch {
         let mut writer = ByteWriter::new();
         writer.write_varint_u64(operations.len() as u64);
         for operation in operations {
-            operation.write_to(&mut writer);
+            operation.write_to(&mut writer, WAL_FORMAT_VERSION);
         }
-        count_stats.write_to(&mut writer);
+        count_stats.write_to(&mut writer, WAL_FORMAT_VERSION);
         writer.take_buffer()
     }
 
-    pub fn from_wal_record(bytes: &[u8]) -> Result<Self> {
-        let reader = ByteReader::new(bytes);
-        let nbr_operations = reader.read_varint_u64()? as usize;
-        let mut operations = Vec::with_capacity(nbr_operations);
-        for _ in 0..nbr_operations {
-            operations.push(Operation::read_from(&reader)?);
+    pub fn from_wal_record(bytes: &[u8], version: u32) -> Result<Self> {
+        match version {
+            WAL_FORMAT_VERSION => {
+                let reader = ByteReader::new(bytes);
+                let nbr_operations = reader.read_varint_u64()? as usize;
+                let mut operations = Vec::with_capacity(nbr_operations);
+                for _ in 0..nbr_operations {
+                    operations.push(Operation::read_from(&reader, version)?);
+                }
+                let count_stats = CountStats::read_from(&reader, version)?;
+                Ok(WriteBatch {
+                    operations,
+                    preconditions: None,
+                    count_stats,
+                    precomputed_wal_record: None,
+                })
+            }
+            version => Err(invalid_data(format!(
+                "Unsupported WAL format version {version}"
+            ))),
         }
-        let count_stats = CountStats::read_from(&reader)?;
-        Ok(WriteBatch {
-            operations,
-            preconditions: None,
-            count_stats,
-            precomputed_wal_record: None,
-        })
     }
 
     pub fn len(&self) -> usize {
@@ -174,6 +183,7 @@ mod tests {
     use crate::storage::operation::Operation;
     use crate::storage::snapshot_manager::SnapshotManager;
     use std::collections::BTreeMap;
+    use std::io::ErrorKind;
     use std::sync::Arc;
 
     #[test]
@@ -227,7 +237,8 @@ mod tests {
         );
 
         let wal = batch.to_wal_record(12345);
-        let decoded = WriteBatch::from_wal_record(&wal[8..]).expect("Deserialization failed");
+        let decoded = WriteBatch::from_wal_record(&wal[8..], WAL_FORMAT_VERSION)
+            .expect("Deserialization failed");
 
         assert_eq!(decoded.operations(), batch.operations());
         assert_eq!(decoded.count_stats(), batch.count_stats());
@@ -248,7 +259,8 @@ mod tests {
         let wal = batch.to_wal_record(seq);
 
         // Decode skipping the first 8 bytes (sequence number)
-        let decoded = WriteBatch::from_wal_record(&wal[8..]).expect("Deserialization failed");
+        let decoded = WriteBatch::from_wal_record(&wal[8..], WAL_FORMAT_VERSION)
+            .expect("Deserialization failed");
 
         assert_eq!(batch, decoded);
     }
@@ -260,9 +272,16 @@ mod tests {
         let seq = 0;
         let wal = batch.to_wal_record(seq);
 
-        let decoded = WriteBatch::from_wal_record(&wal[8..]).expect("Deserialization failed");
+        let decoded = WriteBatch::from_wal_record(&wal[8..], WAL_FORMAT_VERSION)
+            .expect("Deserialization failed");
 
         assert_eq!(batch, decoded);
+    }
+
+    #[test]
+    fn test_write_batch_rejects_unsupported_version() {
+        let error = WriteBatch::from_wal_record(&[0], 2).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 
     #[test]
@@ -287,7 +306,8 @@ mod tests {
         );
 
         let wal = batch.to_wal_record(99);
-        let decoded = WriteBatch::from_wal_record(&wal[8..]).expect("Deserialization failed");
+        let decoded = WriteBatch::from_wal_record(&wal[8..], WAL_FORMAT_VERSION)
+            .expect("Deserialization failed");
 
         assert_eq!(batch, decoded);
     }

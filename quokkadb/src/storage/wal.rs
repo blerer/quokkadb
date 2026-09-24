@@ -4,7 +4,7 @@ use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::{Options, WalDurability};
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
-use crate::storage::write_batch::WriteBatch;
+use crate::storage::write_batch::{WAL_FORMAT_VERSION, WriteBatch};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
@@ -14,9 +14,28 @@ use std::time::Instant;
 use tracing::{debug_span, trace_span};
 
 /// The current version of the write-ahead log format.
-const WAL_VERSION: u32 = 1;
+const WAL_VERSION: u32 = WAL_FORMAT_VERSION;
 
 const MAGIC_NUMBER: u32 = 0x51756F6B; //"Quok" in ASCII hex
+
+pub struct WalReplay {
+    version: u32,
+    records: Box<dyn Iterator<Item = result::Result<(u64, WriteBatch), LogReplayError>>>,
+}
+
+impl WalReplay {
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+impl Iterator for WalReplay {
+    type Item = result::Result<(u64, WriteBatch), LogReplayError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.records.next()
+    }
+}
 
 pub struct WriteAheadLog {
     /// The wal metrics
@@ -34,6 +53,10 @@ pub struct WriteAheadLog {
 }
 
 impl WriteAheadLog {
+    pub(crate) fn current_format_version() -> u32 {
+        WAL_VERSION
+    }
+
     pub fn new(
         metric_registry: &mut MetricRegistry,
         options: &Options,
@@ -223,17 +246,38 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    pub fn replay(
-        wal_file: &Path,
-    ) -> result::Result<
-        impl Iterator<Item = result::Result<(u64, WriteBatch), LogReplayError>>,
-        LogReplayError,
-    > {
+    pub fn replay(wal_file: &Path) -> result::Result<WalReplay, LogReplayError> {
         const HEADER_SIZE: usize = 4 + 4 + 8; // MAGIC (u32) + VERSION (u32) + ID (u64)
 
         let (header, iter) =
             AppendLog::<WalFileCreator>::read_log_file(wal_file.to_path_buf(), HEADER_SIZE)?;
-        let reader = ByteReader::new(&header);
+        let (version, _id) = Self::parse_header(&header)?;
+
+        let records = iter.map(move |rs| match rs {
+            Ok(bytes) => {
+                if bytes.len() < 8 {
+                    return Err(LogReplayError::Corruption {
+                        record_offset: 0,
+                        reason: "WAL record is missing its sequence number".to_string(),
+                    });
+                }
+                let seq = bytes[..8].read_u64_be(0);
+                match WriteBatch::from_wal_record(&bytes[8..], version) {
+                    Ok(batch) => Ok((seq, batch)),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            Err(e) => Err(e),
+        });
+
+        Ok(WalReplay {
+            version,
+            records: Box::new(records),
+        })
+    }
+
+    fn parse_header(header: &[u8]) -> result::Result<(u32, u64), LogReplayError> {
+        let reader = ByteReader::new(header);
 
         let magic = reader.read_u32_be()?;
         if magic != MAGIC_NUMBER {
@@ -243,21 +287,9 @@ impl WriteAheadLog {
             });
         }
 
-        let _version = reader.read_u32_be()?; // Could be needed one day.
-        let _id = reader.read_u64_be()?;
-
-        let records = iter.map(move |rs| match rs {
-            Ok(bytes) => {
-                let seq = bytes[..8].read_u64_be(0);
-                match WriteBatch::from_wal_record(&bytes[8..]) {
-                    Ok(batch) => Ok((seq, batch)),
-                    Err(e) => Err(e.into()),
-                }
-            }
-            Err(e) => Err(e),
-        });
-
-        Ok(records)
+        let version = reader.read_u32_be()?;
+        let id = reader.read_u64_be()?;
+        Ok((version, id))
     }
 
     #[cfg(test)]

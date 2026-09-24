@@ -8,6 +8,8 @@ use std::fmt::Debug;
 use std::io::Result;
 use std::sync::Arc;
 
+pub(crate) const MANIFEST_FORMAT_VERSION: u32 = 1;
+
 /// Represents a full snapshot of the database's durable state at a point in time.
 ///
 /// `ManifestState` includes both physical state (`LsmVersion`) and logical schema
@@ -266,20 +268,20 @@ impl ManifestState {
 }
 
 impl Serializable for ManifestState {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         Ok(ManifestState {
-            lsm: Arc::new(LsmVersion::read_from(reader)?),
-            catalog: Arc::new(Catalog::read_from(reader)?),
-            count_stats: CountStats::read_from(reader)?,
-            pending_catalog_edits: Arc::new(Vec::<ManifestEdit>::read_from(reader)?),
+            lsm: Arc::new(LsmVersion::read_from(reader, version)?),
+            catalog: Arc::new(Catalog::read_from(reader, version)?),
+            count_stats: CountStats::read_from(reader, version)?,
+            pending_catalog_edits: Arc::new(Vec::<ManifestEdit>::read_from(reader, version)?),
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.lsm.write_to(writer);
-        self.catalog.write_to(writer);
-        self.count_stats.write_to(writer);
-        self.pending_catalog_edits.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.lsm.write_to(writer, version);
+        self.catalog.write_to(writer, version);
+        self.count_stats.write_to(writer, version);
+        self.pending_catalog_edits.write_to(writer, version);
     }
 }
 
@@ -300,17 +302,23 @@ mod tags {
 }
 
 impl Serializable for ManifestEdit {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        if version != MANIFEST_FORMAT_VERSION {
+            return Err(invalid_data(format!(
+                "Unsupported manifest version {version}"
+            )));
+        }
+
         let edit = reader.read_u8()?;
         match edit {
             tags::SNAPSHOT => Ok(ManifestEdit::Snapshot(Arc::new(ManifestState::read_from(
-                &reader,
+                &reader, version,
             )?))),
             tags::CREATE_COLLECTION => {
                 let name = reader.read_str()?.to_string();
                 let id = reader.read_varint_u32()?;
                 let created_at = reader.read_varint_u64()?;
-                let options = CollectionOptions::read_from(&reader)?;
+                let options = CollectionOptions::read_from(&reader, version)?;
                 Ok(ManifestEdit::CreateCollection {
                     name,
                     id,
@@ -347,9 +355,9 @@ impl Serializable for ManifestEdit {
             }
             tags::FLUSH => {
                 let oldest_log_number = reader.read_varint_u64()?;
-                let sst = Arc::new(SSTableMetadata::read_from(&reader)?);
+                let sst = Arc::new(SSTableMetadata::read_from(&reader, version)?);
                 let count_stats = if reader.has_remaining() {
-                    CountStats::read_from(&reader)?
+                    CountStats::read_from(&reader, version)?
                 } else {
                     CountStats::default()
                 };
@@ -369,9 +377,9 @@ impl Serializable for ManifestEdit {
             }
             tags::COMPACTION => {
                 let output_level = reader.read_u8()? as usize;
-                let removed_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
-                let added_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader)?;
-                let drops = Vec::<Arc<DropMetadata>>::read_from(&reader)?;
+                let removed_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader, version)?;
+                let added_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader, version)?;
+                let drops = Vec::<Arc<DropMetadata>>::read_from(&reader, version)?;
                 Ok(ManifestEdit::Compaction {
                     output_level,
                     removed_sstables,
@@ -382,8 +390,8 @@ impl Serializable for ManifestEdit {
             tags::CREATE_INDEX => {
                 let collection_id = reader.read_varint_u32()?;
                 let index_id = reader.read_varint_u32()?;
-                let definition = IndexDefinition::read_from(&reader)?;
-                let options = IndexOptions::read_from(&reader)?;
+                let definition = IndexDefinition::read_from(&reader, version)?;
+                let options = IndexOptions::read_from(&reader, version)?;
                 let created_at = reader.read_varint_u64()?;
                 Ok(ManifestEdit::CreateIndex {
                     collection_id,
@@ -412,11 +420,15 @@ impl Serializable for ManifestEdit {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        if version != MANIFEST_FORMAT_VERSION {
+            panic!("Unsupported manifest version {version}");
+        }
+
         match self {
             ManifestEdit::Snapshot(tree) => {
                 writer.write_u8(tags::SNAPSHOT);
-                tree.write_to(writer);
+                tree.write_to(writer, version);
             }
             ManifestEdit::CreateCollection {
                 name,
@@ -429,7 +441,7 @@ impl Serializable for ManifestEdit {
                     .write_str(&name)
                     .write_varint_u32(*id)
                     .write_varint_u64(*created_at);
-                options.write_to(writer);
+                options.write_to(writer, version);
             }
             ManifestEdit::DropCollection {
                 id,
@@ -473,8 +485,8 @@ impl Serializable for ManifestEdit {
                 writer
                     .write_u8(tags::FLUSH)
                     .write_varint_u64(*oldest_log_number);
-                sst.write_to(writer);
-                count_stats.write_to(writer);
+                sst.write_to(writer, version);
+                count_stats.write_to(writer, version);
             }
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => {
                 writer
@@ -494,9 +506,9 @@ impl Serializable for ManifestEdit {
             } => {
                 writer.write_u8(tags::COMPACTION);
                 writer.write_u8(*output_level as u8);
-                Vec::<Arc<SSTableMetadata>>::write_to(removed_sstables, writer);
-                Vec::<Arc<SSTableMetadata>>::write_to(added_sstables, writer);
-                Vec::<Arc<DropMetadata>>::write_to(drops, writer);
+                Vec::<Arc<SSTableMetadata>>::write_to(removed_sstables, writer, version);
+                Vec::<Arc<SSTableMetadata>>::write_to(added_sstables, writer, version);
+                Vec::<Arc<DropMetadata>>::write_to(drops, writer, version);
             }
             ManifestEdit::CreateIndex {
                 collection_id,
@@ -508,8 +520,8 @@ impl Serializable for ManifestEdit {
                 writer.write_u8(tags::CREATE_INDEX);
                 writer.write_varint_u32(*collection_id);
                 writer.write_varint_u32(*index_id);
-                definition.write_to(writer);
-                options.write_to(writer);
+                definition.write_to(writer, version);
+                options.write_to(writer, version);
                 writer.write_varint_u64(*created_at);
             }
             ManifestEdit::DropIndex {
@@ -727,15 +739,15 @@ impl ManifestEdit {
         }
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
+    pub fn to_vec(&self, version: u32) -> Vec<u8> {
         let mut writer = ByteWriter::new();
-        self.write_to(&mut writer);
+        self.write_to(&mut writer, version);
         writer.take_buffer()
     }
 
-    pub fn try_from_vec(input: &[u8]) -> Result<ManifestEdit> {
+    pub fn try_from_vec(input: &[u8], version: u32) -> Result<ManifestEdit> {
         let reader = ByteReader::new(input);
-        Self::read_from(&reader)
+        Self::read_from(&reader, version)
     }
 }
 
@@ -870,13 +882,13 @@ mod tests {
             created_at: 1627846261,
             options: CollectionOptions::default(),
         };
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
 
         let edit = ManifestEdit::DropCollection {
             id: 42,
             dropped_at: 1627846262,
         };
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -886,14 +898,15 @@ mod tests {
             new_name: "new_name".to_string(),
             renamed_at: 1627846261,
         };
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
     fn test_discard_pending_catalog_edits_serialization() {
-        check_edit_serialization_roundtrip(ManifestEdit::DiscardPendingCatalogEditsAfter {
-            sequence: 42,
-        });
+        check_edit_serialization_roundtrip(
+            ManifestEdit::DiscardPendingCatalogEditsAfter { sequence: 42 },
+            MANIFEST_FORMAT_VERSION,
+        );
     }
 
     #[test]
@@ -905,7 +918,10 @@ mod tests {
             options: CollectionOptions::default(),
         });
 
-        check_edit_serialization_roundtrip(ManifestEdit::Snapshot(Arc::new(state)));
+        check_edit_serialization_roundtrip(
+            ManifestEdit::Snapshot(Arc::new(state)),
+            MANIFEST_FORMAT_VERSION,
+        );
     }
 
     #[test]
@@ -940,20 +956,39 @@ mod tests {
 
     #[test]
     fn test_wal_and_manifest_rotation_serialization() {
-        check_edit_serialization_roundtrip(ManifestEdit::WalRotation {
-            log_number: 123,
-            next_seq: 456,
-        });
-        check_edit_serialization_roundtrip(ManifestEdit::ManifestRotation {
+        check_edit_serialization_roundtrip(
+            ManifestEdit::WalRotation {
+                log_number: 123,
+                next_seq: 456,
+            },
+            MANIFEST_FORMAT_VERSION,
+        );
+        check_edit_serialization_roundtrip(
+            ManifestEdit::ManifestRotation {
+                manifest_number: 456,
+            },
+            MANIFEST_FORMAT_VERSION,
+        );
+    }
+
+    #[test]
+    fn test_manifest_edit_rejects_unsupported_version() {
+        let edit = ManifestEdit::ManifestRotation {
             manifest_number: 456,
-        });
+        };
+        let bytes = edit.to_vec(MANIFEST_FORMAT_VERSION);
+
+        assert!(ManifestEdit::try_from_vec(&bytes, 2).is_err());
     }
 
     #[test]
     fn test_files_detected_on_restart_serialization() {
-        check_edit_serialization_roundtrip(ManifestEdit::FilesDetectedOnRestart {
-            next_file_number: 789,
-        });
+        check_edit_serialization_roundtrip(
+            ManifestEdit::FilesDetectedOnRestart {
+                next_file_number: 789,
+            },
+            MANIFEST_FORMAT_VERSION,
+        );
     }
 
     #[test]
@@ -976,7 +1011,7 @@ mod tests {
             count_stats: CountStats::default(),
         };
 
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1270,7 +1305,7 @@ mod tests {
             drops: vec![drop1, drop2],
         };
 
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1296,7 +1331,7 @@ mod tests {
             created_at: 1627846261,
         };
 
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1307,7 +1342,7 @@ mod tests {
             dropped_at: 1627846262,
         };
 
-        check_edit_serialization_roundtrip(edit);
+        check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1393,9 +1428,10 @@ mod tests {
         })
     }
 
-    pub fn check_edit_serialization_roundtrip(edit: ManifestEdit) {
-        let bytes = edit.to_vec();
-        let parsed = ManifestEdit::try_from_vec(&bytes).expect("Deserialization should succeed");
+    pub fn check_edit_serialization_roundtrip(edit: ManifestEdit, version: u32) {
+        let bytes = edit.to_vec(version);
+        let parsed =
+            ManifestEdit::try_from_vec(&bytes, version).expect("Deserialization should succeed");
         assert_eq!(&edit, &parsed);
     }
 }

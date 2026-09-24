@@ -112,6 +112,8 @@ pub enum LogicalPlan {
     },
 }
 
+const LOGICAL_PLAN_SERIALIZATION_VERSION: u32 = 1;
+
 impl TreeNode for LogicalPlan {
     type Child = LogicalPlan;
 
@@ -247,26 +249,35 @@ impl LogicalPlan {
         const HASH_SEED: u64 = 20250309;
 
         let mut writer = ByteWriter::new();
-        self.write_to(&mut writer);
+        self.write_to(&mut writer, LOGICAL_PLAN_SERIALIZATION_VERSION);
         let bytes = writer.take_buffer();
         murmur_hash64a(&bytes, HASH_SEED)
     }
 }
 
+mod flags {
+    pub const NO_OP: u8 = 0;
+    pub const COLLECTION_SCAN: u8 = 1;
+    pub const FILTER: u8 = 2;
+    pub const PROJECTION: u8 = 3;
+    pub const SORT: u8 = 4;
+    pub const LIMIT: u8 = 5;
+}
+
 impl Serializable for LogicalPlan {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
-            0 => {
+            flags::NO_OP => {
                 // NoOp
                 Ok(LogicalPlan::NoOp)
             }
-            1 => {
+            flags::COLLECTION_SCAN => {
                 // CollectionScan
                 let collection = reader.read_varint_u32()?;
-                let projection = Option::<Arc<Projection>>::read_from(reader)?;
-                let filter = Option::<Arc<Expr>>::read_from(reader)?;
-                let sort = Option::<Arc<Vec<SortField>>>::read_from(reader)?;
+                let projection = Option::<Arc<Projection>>::read_from(reader, version)?;
+                let filter = Option::<Arc<Expr>>::read_from(reader, version)?;
+                let sort = Option::<Arc<Vec<SortField>>>::read_from(reader, version)?;
                 Ok(LogicalPlan::CollectionScan {
                     collection,
                     projection,
@@ -274,30 +285,30 @@ impl Serializable for LogicalPlan {
                     sort,
                 })
             }
-            2 => {
+            flags::FILTER => {
                 // Filter
-                let input = Arc::<LogicalPlan>::read_from(reader)?;
-                let condition = Arc::<Expr>::read_from(reader)?;
+                let input = Arc::<LogicalPlan>::read_from(reader, version)?;
+                let condition = Arc::<Expr>::read_from(reader, version)?;
                 Ok(LogicalPlan::Filter { input, condition })
             }
-            3 => {
+            flags::PROJECTION => {
                 // Projection
-                let input = Arc::<LogicalPlan>::read_from(reader)?;
-                let projection = Arc::<Projection>::read_from(reader)?;
+                let input = Arc::<LogicalPlan>::read_from(reader, version)?;
+                let projection = Arc::<Projection>::read_from(reader, version)?;
                 Ok(LogicalPlan::Projection { input, projection })
             }
-            4 => {
+            flags::SORT => {
                 // Sort
-                let input = Arc::<LogicalPlan>::read_from(reader)?;
-                let sort_fields = Arc::<Vec<SortField>>::read_from(reader)?;
+                let input = Arc::<LogicalPlan>::read_from(reader, version)?;
+                let sort_fields = Arc::<Vec<SortField>>::read_from(reader, version)?;
                 Ok(LogicalPlan::Sort { input, sort_fields })
             }
-            5 => {
+            flags::LIMIT => {
                 // Limit
-                let input = Arc::<LogicalPlan>::read_from(reader)?;
+                let input = Arc::<LogicalPlan>::read_from(reader, version)?;
                 let limit = Limit {
-                    skip: Option::<usize>::read_from(reader)?,
-                    limit: Option::<usize>::read_from(reader)?,
+                    skip: Option::<usize>::read_from(reader, version)?,
+                    limit: Option::<usize>::read_from(reader, version)?,
                 };
                 Ok(LogicalPlan::Limit { input, limit })
             }
@@ -308,10 +319,10 @@ impl Serializable for LogicalPlan {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         match self {
             LogicalPlan::NoOp => {
-                writer.write_u8(0);
+                writer.write_u8(flags::NO_OP);
             }
             LogicalPlan::CollectionScan {
                 collection,
@@ -319,31 +330,31 @@ impl Serializable for LogicalPlan {
                 filter,
                 sort,
             } => {
-                writer.write_u8(1);
+                writer.write_u8(flags::COLLECTION_SCAN);
                 writer.write_varint_u32(*collection);
-                projection.write_to(writer);
-                filter.write_to(writer);
-                sort.write_to(writer);
+                projection.write_to(writer, version);
+                filter.write_to(writer, version);
+                sort.write_to(writer, version);
             }
             LogicalPlan::Filter { input, condition } => {
-                writer.write_u8(2);
-                input.write_to(writer);
-                condition.write_to(writer);
+                writer.write_u8(flags::FILTER);
+                input.write_to(writer, version);
+                condition.write_to(writer, version);
             }
             LogicalPlan::Projection { input, projection } => {
-                writer.write_u8(3);
-                input.write_to(writer);
-                projection.write_to(writer);
+                writer.write_u8(flags::PROJECTION);
+                input.write_to(writer, version);
+                projection.write_to(writer, version);
             }
             LogicalPlan::Sort { input, sort_fields } => {
-                writer.write_u8(4);
-                input.write_to(writer);
-                sort_fields.write_to(writer);
+                writer.write_u8(flags::SORT);
+                input.write_to(writer, version);
+                sort_fields.write_to(writer, version);
             }
             LogicalPlan::Limit { input, limit } => {
-                writer.write_u8(5);
-                input.write_to(writer);
-                limit.write_to(writer);
+                writer.write_u8(flags::LIMIT);
+                input.write_to(writer, version);
+                limit.write_to(writer, version);
             }
             _ => {
                 // For the other variants, serialization is not implemented as serialization is
@@ -775,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_logical_plan_serialization_round_trip() {
-        check_serialization_round_trip(LogicalPlan::NoOp);
+        check_serialization_round_trip(LogicalPlan::NoOp, LOGICAL_PLAN_SERIALIZATION_VERSION);
 
         let plan = LogicalPlan::CollectionScan {
             collection: 32,
@@ -789,7 +800,7 @@ mod tests {
                 order: SortOrder::Ascending,
             }])),
         };
-        check_serialization_round_trip(plan);
+        check_serialization_round_trip(plan, LOGICAL_PLAN_SERIALIZATION_VERSION);
 
         let plan_arc = LogicalPlanBuilder::scan(32)
             .filter(Arc::new(Expr::Comparison {
@@ -801,7 +812,7 @@ mod tests {
             .limit(Some(10), Some(20))
             .build_arc();
 
-        check_serialization_round_trip(plan_arc.clone());
+        check_serialization_round_trip(plan_arc.clone(), LOGICAL_PLAN_SERIALIZATION_VERSION);
     }
 
     #[test]

@@ -10,80 +10,80 @@ use std::sync::Arc;
 /// the read_from method.
 pub trait Serializable {
     /// Deserialized the component from the specified ByteReader
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self>
     where
         Self: Sized;
 
     /// Serialize the component into the specified ByteWriter
-    fn write_to(&self, writer: &mut ByteWriter);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32);
 }
 
 impl Serializable for u8 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         reader.read_u8()
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_u8(*self);
     }
 }
 
 impl Serializable for i32 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         reader.read_varint_i32()
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_i32(*self);
     }
 }
 
 impl Serializable for i64 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         reader.read_varint_i64()
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_i64(*self);
     }
 }
 
 impl Serializable for u32 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         reader.read_varint_u32()
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_u32(*self);
     }
 }
 
 impl Serializable for u64 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         reader.read_varint_u64()
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_u64(*self);
     }
 }
 
 impl Serializable for usize {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         Ok(reader.read_varint_u64()? as usize)
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_u64(*self as u64);
     }
 }
 
 impl Serializable for String {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         Ok(reader.read_str()?.to_string())
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_str(self);
     }
 }
@@ -92,10 +92,10 @@ impl<T> Serializable for Option<T>
 where
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let presence = reader.read_u8()?;
         if presence == 1 {
-            let value = T::read_from(reader)?;
+            let value = T::read_from(reader, version)?;
             Ok(Some(value))
         } else if presence == 0 {
             Ok(None)
@@ -104,11 +104,11 @@ where
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         match self {
             Some(value) => {
                 writer.write_u8(1); // Indicate presence
-                value.write_to(writer);
+                value.write_to(writer, version);
             }
             None => {
                 writer.write_u8(0); // Indicate absence
@@ -121,19 +121,19 @@ impl<T> Serializable for Vec<T>
 where
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let length = reader.read_varint_u64()? as usize;
         let mut vec = Vec::with_capacity(length);
         for _ in 0..length {
-            vec.push(T::read_from(reader)?);
+            vec.push(T::read_from(reader, version)?);
         }
         Ok(vec)
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u64(self.len() as u64);
         for item in self {
-            item.write_to(writer);
+            item.write_to(writer, version);
         }
     }
 }
@@ -143,20 +143,23 @@ where
     K: Eq + Hash + Ord + Serializable,
     V: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let length = reader.read_varint_u64()? as usize;
         let mut map = BTreeMap::new();
         for _ in 0..length {
-            map.insert(K::read_from(reader)?, V::read_from(reader)?);
+            map.insert(
+                K::read_from(reader, version)?,
+                V::read_from(reader, version)?,
+            );
         }
         Ok(map)
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u64(self.len() as u64);
         for (key, value) in self {
-            key.write_to(writer);
-            value.write_to(writer);
+            key.write_to(writer, version);
+            value.write_to(writer, version);
         }
     }
 }
@@ -165,12 +168,12 @@ impl<T> Serializable for Arc<T>
 where
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        Ok(Arc::new(T::read_from(reader)?))
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        Ok(Arc::new(T::read_from(reader, version)?))
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        (**self).write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        (**self).write_to(writer, version);
     }
 }
 
@@ -179,15 +182,15 @@ where
     S: Serializable,
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let s = S::read_from(reader)?;
-        let t = T::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let s = S::read_from(reader, version)?;
+        let t = T::read_from(reader, version)?;
         Ok((s, t))
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.0.write_to(writer);
-        self.1.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.0.write_to(writer, version);
+        self.1.write_to(writer, version);
     }
 }
 
@@ -195,52 +198,52 @@ impl<T> Serializable for Bound<T>
 where
     T: Serializable,
 {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let bound_type = reader.read_u8()?;
         match bound_type {
             0 => Ok(Bound::Unbounded),
-            1 => Ok(Bound::Included(T::read_from(reader)?)),
-            2 => Ok(Bound::Excluded(T::read_from(reader)?)),
+            1 => Ok(Bound::Included(T::read_from(reader, version)?)),
+            2 => Ok(Bound::Excluded(T::read_from(reader, version)?)),
             _ => unreachable!("Invalid Bound type"),
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         match self {
             Bound::Unbounded => {
                 writer.write_u8(0);
             }
             Bound::Included(value) => {
                 writer.write_u8(1);
-                value.write_to(writer);
+                value.write_to(writer, version);
             }
             Bound::Excluded(value) => {
                 writer.write_u8(2);
-                value.write_to(writer);
+                value.write_to(writer, version);
             }
         }
     }
 }
 
 #[cfg(test)]
-pub fn check_serialization_round_trip<T>(element: T)
+pub fn check_serialization_round_trip<T>(element: T, version: u32)
 where
     T: std::fmt::Debug + PartialEq + Serializable,
 {
     // Serialize the element.
     let mut writer = ByteWriter::new();
-    element.write_to(&mut writer);
+    element.write_to(&mut writer, version);
     let bytes = writer.take_buffer();
 
     // Deserialize the element from the serialized bytes.
     let reader = ByteReader::new(&bytes);
-    let deserialized = Serializable::read_from(&reader).unwrap();
+    let deserialized = Serializable::read_from(&reader, version).unwrap();
 
     assert_eq!(element, deserialized);
 
     // Re-serialize the deserialized element.
     let mut writer2 = ByteWriter::new();
-    deserialized.write_to(&mut writer2);
+    deserialized.write_to(&mut writer2, version);
     let bytes2 = writer2.take_buffer();
 
     // Verify that the round-trip serialization is lossless.

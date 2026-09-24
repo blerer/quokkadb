@@ -282,7 +282,7 @@ impl<'a> SSTableWriter<'a> {
 
     /// Writes the SSTable properties to the SSTable.
     fn write_properties(&mut self, properties: &SSTableProperties) -> Result<BlockHandle> {
-        let data = properties.to_vec()?;
+        let data = properties.to_vec(SSTABLE_CURRENT_VERSION as u32)?;
         self.finalize_and_write_block(data)
     }
 

@@ -83,26 +83,33 @@ impl SSTableProperties {
         compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size)
     }
 
-    pub fn to_vec(&self) -> std::io::Result<Vec<u8>> {
+    pub fn to_vec(&self, version: u32) -> std::io::Result<Vec<u8>> {
         let mut writer = ByteWriter::new();
-        self.write_to(&mut writer);
+        self.write_to(&mut writer, version);
         Ok(writer.take_buffer())
     }
 
-    pub fn from_slice(slice: &[u8]) -> std::io::Result<Self> {
+    pub fn from_slice(slice: &[u8], version: u32) -> std::io::Result<Self> {
         let reader = ByteReader::new(slice);
-        let properties = Self::read_from(&reader)?;
+        let properties = Self::read_from(&reader, version)?;
         Ok(properties)
     }
 }
 
 impl Serializable for SSTableProperties {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> std::io::Result<Self> {
+        if version != 1 {
+            return Err(invalid_data(format!(
+                "Unsupported SSTable properties version {version}"
+            )));
+        }
+
         let creation_time = UNIX_EPOCH
             .checked_add(Duration::from_millis(reader.read_varint_u64()?))
             .ok_or_else(|| invalid_data("SSTableProperties creation_time overflow"))?;
 
         let sstable_version = reader.read_u8()?;
+        assert_eq!(sstable_version as u32, version);
         let compression_type = reader.read_u8()?;
         let min_key = reader.read_length_prefixed_slice()?.to_vec();
         let max_key = reader.read_length_prefixed_slice()?.to_vec();
@@ -131,7 +138,7 @@ impl Serializable for SSTableProperties {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         let creation_millis = self
             .creation_time
             .duration_since(UNIX_EPOCH)
@@ -154,6 +161,12 @@ impl Serializable for SSTableProperties {
             .write_varint_u64(self.data_size as u64)
             .write_varint_u64(self.index_size as u64)
             .write_varint_u64(self.filter_size as u64);
+        if self.sstable_version as u32 != version {
+            panic!(
+                "SSTable properties version {} does not match expected version {}",
+                self.sstable_version, version
+            );
+        }
     }
 }
 
@@ -318,6 +331,25 @@ mod tests {
             sstable_properties.raw_value_size, 115,
             "Raw value size should be 115 (50 + 40 + 25)"
         );
+    }
+
+    #[test]
+    fn test_versioned_properties_round_trip_and_rejects_unknown_version() {
+        let mut properties = SSTablePropertiesBuilder::new(1, 0).build();
+        let creation_time = properties
+            .creation_time
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        properties.creation_time = UNIX_EPOCH + Duration::from_millis(creation_time);
+        let bytes = properties.to_vec(1).unwrap();
+
+        let reader = ByteReader::new(&bytes);
+        let decoded = SSTableProperties::read_from(&reader, 1).unwrap();
+        assert_eq!(decoded, properties);
+
+        let reader = ByteReader::new(&bytes);
+        assert!(SSTableProperties::read_from(&reader, 2).is_err());
     }
 
     #[test]

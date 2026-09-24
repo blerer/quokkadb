@@ -4,7 +4,7 @@ use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
 use crate::storage::files::DbFile;
-use crate::storage::manifest_state::{ManifestEdit, ManifestState};
+use crate::storage::manifest_state::{MANIFEST_FORMAT_VERSION, ManifestEdit, ManifestState};
 use std::fs;
 use std::fs::{File, remove_file};
 use std::io::{Error, ErrorKind, Read, Result, Write};
@@ -23,6 +23,8 @@ pub struct Manifest {
     rotation_threshold: u64,
     /// The underlying append only log file manager
     append_log: AppendLog<ManifestFileCreator>,
+    /// The format version of the current manifest file.
+    format_version: u32,
 }
 
 impl Manifest {
@@ -54,6 +56,7 @@ impl Manifest {
             db_dir: db_dir.to_path_buf(),
             rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
             append_log,
+            format_version: MANIFEST_FORMAT_VERSION,
         };
         manifest.append_edit(&snapshot)?;
         Self::update_current_file(db_dir, &log_filename)?;
@@ -69,6 +72,7 @@ impl Manifest {
         options: &Options,
         manifest_path: PathBuf,
     ) -> Result<Self> {
+        let format_version = Self::read_header_version(&manifest_path)?;
         let db_dir = manifest_path
             .parent()
             .ok_or(Error::new(ErrorKind::NotFound, "Invalid manifest path"))?
@@ -91,6 +95,7 @@ impl Manifest {
             db_dir,
             rotation_threshold: options.max_manifest_file_size().to_bytes() as u64,
             append_log,
+            format_version,
         })
     }
 
@@ -98,7 +103,9 @@ impl Manifest {
     pub fn append_edit(&mut self, edit: &ManifestEdit) -> Result<()> {
         let _span = trace_span!("manifest.append_edit", edit = %edit).entered();
 
-        self.append_log.append(&edit.to_vec())?;
+        assert_eq!(self.format_version, MANIFEST_FORMAT_VERSION);
+
+        self.append_log.append(&edit.to_vec(self.format_version))?;
         self.append_log.sync()?;
         self.metrics.manifest_writes.inc();
 
@@ -117,6 +124,7 @@ impl Manifest {
         let (new_file, old_file) = self
             .append_log
             .rotate(DbFile::new_manifest(new_manifest_number))?;
+        self.format_version = MANIFEST_FORMAT_VERSION;
         self.append_edit(snapshot)?;
 
         // Update the CURRENT pointer file to point to the new manifest.
@@ -177,23 +185,12 @@ impl Manifest {
             manifest_path.to_path_buf(),
             HEADER_SIZE,
         )?;
-        let reader = ByteReader::new(&header);
-
-        let magic = reader.read_u32_be()?;
-        if magic != MANIFEST_MAGIC_NUMBER {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "Invalid manifest magic number",
-            ));
-        }
-
-        let _version = reader.read_u32_be()?; // Could be needed one day.
-        let _id = reader.read_u64_be()?;
+        let version = Self::parse_header(&header)?;
 
         let mut tree: Option<ManifestState> = None;
 
         for bytes in iter {
-            let edit = ManifestEdit::try_from_vec(&bytes?)?;
+            let edit = ManifestEdit::try_from_vec(&bytes?, version)?;
             match edit {
                 ManifestEdit::Snapshot(snapshot) => {
                     tree = Some(Arc::try_unwrap(snapshot).unwrap()); // We know that we are the only owner.
@@ -210,6 +207,47 @@ impl Manifest {
             ErrorKind::UnexpectedEof,
             format!("Invalid manifest file: {}", manifest_path.display()),
         ))
+    }
+
+    pub(crate) fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    pub(crate) fn current_format_version() -> u32 {
+        MANIFEST_FORMAT_VERSION
+    }
+
+    fn read_header_version(manifest_path: &Path) -> Result<u32> {
+        const HEADER_SIZE: usize = 4 + 4 + 8;
+        let (header, _records) = AppendLog::<ManifestFileCreator>::read_log_file(
+            manifest_path.to_path_buf(),
+            HEADER_SIZE,
+        )
+        .map_err(Error::from)?;
+        Self::parse_header(&header)
+    }
+
+    fn parse_header(header: &[u8]) -> Result<u32> {
+        let reader = ByteReader::new(header);
+
+        let magic = reader.read_u32_be()?;
+        if magic != MANIFEST_MAGIC_NUMBER {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Invalid manifest magic number",
+            ));
+        }
+
+        let version = reader.read_u32_be()?;
+        if version != MANIFEST_FORMAT_VERSION {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Unsupported manifest version {version}"),
+            ));
+        }
+
+        reader.read_u64_be()?;
+        Ok(version)
     }
 
     #[cfg(test)]
@@ -235,12 +273,9 @@ impl LogFileCreator for ManifestFileCreator {
     type Observer = ManifestObserver;
 
     fn header(&self, id: u64) -> Vec<u8> {
-        /// The current version of the write-ahead log format.
-        const MANIFEST_VERSION: u32 = 1;
-
         let mut vec = Vec::with_capacity(4 + 1 + 8);
         vec.extend_from_slice(&MANIFEST_MAGIC_NUMBER.to_be_bytes());
-        vec.extend_from_slice(&MANIFEST_VERSION.to_be_bytes());
+        vec.extend_from_slice(&MANIFEST_FORMAT_VERSION.to_be_bytes());
         vec.extend_from_slice(&id.to_be_bytes());
         vec
     }

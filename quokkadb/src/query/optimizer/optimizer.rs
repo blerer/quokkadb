@@ -134,7 +134,7 @@ impl LogicalPlanKey {
                     collection: *collection,
                     projection: projection.as_ref().map(|p| {
                         let mut writer = ByteWriter::new();
-                        p.write_to(&mut writer);
+                        p.write_to(&mut writer, 1);
                         writer.take_buffer()
                     }),
                     filter: filter.clone(),
@@ -151,7 +151,7 @@ impl LogicalPlanKey {
             LogicalPlan::Projection { projection, .. } => {
                 assert_eq!(child_groups.len(), 1);
                 let mut writer = ByteWriter::new();
-                projection.write_to(&mut writer);
+                projection.write_to(&mut writer, 1);
                 LogicalPlanKey::Projection {
                     input: child_groups[0],
                     projection: writer.take_buffer(),

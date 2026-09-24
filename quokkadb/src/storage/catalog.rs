@@ -24,14 +24,14 @@ pub struct Catalog {
 }
 
 impl Serializable for Catalog {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let next_collection_id = reader.read_varint_u32()?;
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
         let mut id_by_name = HashMap::new();
         for _ in 0..size {
             let id = reader.read_varint_u32()?;
-            let collection = Arc::new(CollectionMetadata::read_from(reader)?);
+            let collection = Arc::new(CollectionMetadata::read_from(reader, version)?);
             let name = collection.name.clone();
             let include_in_name_lookup = collection.dropped_at.is_none();
             collections.insert(id, collection);
@@ -46,12 +46,12 @@ impl Serializable for Catalog {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u32(self.next_collection_id);
         writer.write_varint_u32(self.collections.len() as u32);
         self.collections.iter().for_each(|(id, col)| {
             writer.write_varint_u32(*id);
-            col.write_to(writer)
+            col.write_to(writer, version)
         });
     }
 }
@@ -275,7 +275,7 @@ impl Default for IdCreationStrategy {
 }
 
 impl Serializable for IdCreationStrategy {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
             id_creation_strategy_tags::GENERATED => Ok(IdCreationStrategy::Generated),
@@ -288,7 +288,7 @@ impl Serializable for IdCreationStrategy {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         let byte = match self {
             IdCreationStrategy::Generated => id_creation_strategy_tags::GENERATED,
             IdCreationStrategy::Manual => id_creation_strategy_tags::MANUAL,
@@ -326,25 +326,25 @@ impl fmt::Display for CollectionOptions {
 }
 
 impl Serializable for CollectionOptions {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
-        let bitset = BitSet::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let bitset = BitSet::read_from(reader, version)?;
         Ok(CollectionOptions {
             id_creation_strategy: if bitset.contains(0) {
-                IdCreationStrategy::read_from(reader)?
+                IdCreationStrategy::read_from(reader, version)?
             } else {
                 IdCreationStrategy::default()
             },
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         // We want to use a BitSet to indicate which options are set to non-default values.
         // It also allows us to easily add new options in the future.
         let bitset = self.create_bitset();
-        bitset.write_to(writer);
+        bitset.write_to(writer, version);
 
         if bitset.contains(0) {
-            self.id_creation_strategy.write_to(writer);
+            self.id_creation_strategy.write_to(writer, version);
         }
     }
 }
@@ -376,22 +376,22 @@ impl IndexOptions {
 }
 
 impl Serializable for IndexOptions {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let bitset = BitSet::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let bitset = BitSet::read_from(reader, version)?;
         Ok(IndexOptions {
             name: if bitset.contains(0) {
-                Some(String::read_from(reader)?)
+                Some(String::read_from(reader, version)?)
             } else {
                 None
             },
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         let bitset = self.create_bitset();
-        bitset.write_to(writer);
+        bitset.write_to(writer, version);
         if bitset.contains(0) {
-            self.name.as_ref().unwrap().write_to(writer);
+            self.name.as_ref().unwrap().write_to(writer, version);
         }
     }
 }
@@ -580,12 +580,12 @@ impl CollectionMetadata {
 }
 
 impl Serializable for CollectionMetadata {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let next_index_id = reader.read_varint_u32()?;
         let id = reader.read_varint_u64()? as u32;
         let name = reader.read_str()?.to_string();
         let created_at = reader.read_varint_u64()?;
-        let version = reader.read_varint_u32()?;
+        let collection_version = reader.read_varint_u32()?;
         let dropped_at = if reader.read_u8()? == 1 {
             Some(reader.read_varint_u64()?)
         } else {
@@ -596,7 +596,7 @@ impl Serializable for CollectionMetadata {
         let mut index_id_by_name = HashMap::new();
         for _ in 0..size {
             let index_id = reader.read_varint_u32()?;
-            let index = Arc::new(IndexMetadata::read_from(reader)?);
+            let index = Arc::new(IndexMetadata::read_from(reader, version)?);
             let include_in_name_lookup = index.dropped_at.is_none();
             if include_in_name_lookup {
                 let index_name = index.name();
@@ -604,14 +604,14 @@ impl Serializable for CollectionMetadata {
             }
             indexes.insert(index_id, index);
         }
-        let options = CollectionOptions::read_from(reader)?;
+        let options = CollectionOptions::read_from(reader, version)?;
 
         Ok(CollectionMetadata {
             next_index_id,
             id,
             name,
             created_at,
-            version,
+            version: collection_version,
             dropped_at,
             indexes,
             index_id_by_name,
@@ -619,7 +619,7 @@ impl Serializable for CollectionMetadata {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u32(self.next_index_id);
         writer.write_varint_u32(self.id);
         writer.write_str(&self.name);
@@ -637,9 +637,9 @@ impl Serializable for CollectionMetadata {
         writer.write_varint_u32(self.indexes.len() as u32);
         self.indexes.iter().for_each(|(id, index)| {
             writer.write_varint_u32(*id);
-            index.write_to(writer);
+            index.write_to(writer, version);
         });
-        self.options.write_to(writer);
+        self.options.write_to(writer, version);
     }
 }
 
@@ -673,7 +673,7 @@ mod index_direction_tags {
 }
 
 impl Serializable for IndexDirection {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         let byte = reader.read_u8()?;
         match byte {
             index_direction_tags::ASCENDING => Ok(IndexDirection::Ascending),
@@ -682,7 +682,7 @@ impl Serializable for IndexDirection {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         let byte = match self {
             IndexDirection::Ascending => index_direction_tags::ASCENDING,
             IndexDirection::Descending => index_direction_tags::DESCENDING,
@@ -724,18 +724,18 @@ impl fmt::Display for OrderedIndexField {
 }
 
 impl Serializable for OrderedIndexField {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let path = IndexPath::read_from(reader)?;
-        let order = IndexDirection::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let path = IndexPath::read_from(reader, version)?;
+        let order = IndexDirection::read_from(reader, version)?;
         Ok(OrderedIndexField {
             path,
             direction: order,
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.path.write_to(writer);
-        self.direction.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.path.write_to(writer, version);
+        self.direction.write_to(writer, version);
     }
 }
 
@@ -773,7 +773,7 @@ impl Into<IndexPath> for Vec<&str> {
 }
 
 impl Serializable for IndexPath {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         let size = reader.read_varint_u64()? as usize;
         let mut components = Vec::with_capacity(size);
         for _ in 0..size {
@@ -782,7 +782,7 @@ impl Serializable for IndexPath {
         Ok(IndexPath { components })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_varint_u64(self.components.len() as u64);
         for component in &self.components {
             writer.write_str(component);
@@ -826,11 +826,11 @@ mod index_definition_tags {
 }
 
 impl Serializable for IndexDefinition {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
             index_definition_tags::REGULAR => Ok(IndexDefinition::Regular(
-                Vec::<OrderedIndexField>::read_from(reader)?,
+                Vec::<OrderedIndexField>::read_from(reader, version)?,
             )),
             _ => Err(invalid_data(format!(
                 "Invalid IndexDefinition tag: {}",
@@ -839,11 +839,11 @@ impl Serializable for IndexDefinition {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         match self {
             IndexDefinition::Regular(keys) => {
                 writer.write_u8(index_definition_tags::REGULAR);
-                keys.write_to(writer);
+                keys.write_to(writer, version);
             }
         }
     }
@@ -901,13 +901,13 @@ impl IndexMetadata {
 }
 
 impl Serializable for IndexMetadata {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let id = reader.read_varint_u32()?;
-        let definition = IndexDefinition::read_from(reader)?;
+        let definition = IndexDefinition::read_from(reader, version)?;
         let created_at = reader.read_varint_u64()?;
-        let queryable_at = Option::<u64>::read_from(&reader)?;
-        let dropped_at = Option::<u64>::read_from(&reader)?;
-        let config = IndexOptions::read_from(reader)?;
+        let queryable_at = Option::<u64>::read_from(&reader, version)?;
+        let dropped_at = Option::<u64>::read_from(&reader, version)?;
+        let config = IndexOptions::read_from(reader, version)?;
         Ok(IndexMetadata {
             id,
             definition,
@@ -918,13 +918,13 @@ impl Serializable for IndexMetadata {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u32(self.id);
-        self.definition.write_to(writer);
+        self.definition.write_to(writer, version);
         writer.write_varint_u64(self.created_at);
-        self.queryable_at.write_to(writer);
-        self.dropped_at.write_to(writer);
-        self.options.write_to(writer);
+        self.queryable_at.write_to(writer, version);
+        self.dropped_at.write_to(writer, version);
+        self.options.write_to(writer, version);
     }
 }
 
@@ -995,51 +995,63 @@ mod tests {
 
     #[test]
     fn test_index_metadata_serialization() {
-        check_serialization_round_trip(IndexMetadata {
-            id: 11,
-            definition: IndexDefinition::Regular(vec![
-                OrderedIndexField::asc("name"),
-                OrderedIndexField::desc("age"),
-            ]),
-            created_at: 1627846261,
-            queryable_at: None,
-            dropped_at: None,
-            options: IndexOptions {
-                name: Some("by_name".to_string()),
+        check_serialization_round_trip(
+            IndexMetadata {
+                id: 11,
+                definition: IndexDefinition::Regular(vec![
+                    OrderedIndexField::asc("name"),
+                    OrderedIndexField::desc("age"),
+                ]),
+                created_at: 1627846261,
+                queryable_at: None,
+                dropped_at: None,
+                options: IndexOptions {
+                    name: Some("by_name".to_string()),
+                },
             },
-        });
+            1,
+        );
 
-        check_serialization_round_trip(IndexMetadata {
-            id: 12,
-            definition: IndexDefinition::Regular(vec![OrderedIndexField::desc("age")]),
-            created_at: 1627846261,
-            queryable_at: Some(1627846270),
-            dropped_at: Some(1627846300),
-            options: IndexOptions::default(),
-        });
+        check_serialization_round_trip(
+            IndexMetadata {
+                id: 12,
+                definition: IndexDefinition::Regular(vec![OrderedIndexField::desc("age")]),
+                created_at: 1627846261,
+                queryable_at: Some(1627846270),
+                dropped_at: Some(1627846300),
+                options: IndexOptions::default(),
+            },
+            1,
+        );
     }
 
     #[test]
     fn test_index_config_serialization() {
-        check_serialization_round_trip(IndexOptions::default());
+        check_serialization_round_trip(IndexOptions::default(), 1);
     }
 
     #[test]
     fn test_collections_metadata_serialization() {
         let metadata = create_collections_with_indexes();
         assert_eq!(metadata.version, 3);
-        check_serialization_round_trip(metadata);
+        check_serialization_round_trip(metadata, 1);
     }
 
     #[test]
     fn test_collection_options_serialization() {
-        check_serialization_round_trip(CollectionOptions::default());
-        check_serialization_round_trip(CollectionOptions {
-            id_creation_strategy: IdCreationStrategy::Generated,
-        });
-        check_serialization_round_trip(CollectionOptions {
-            id_creation_strategy: IdCreationStrategy::Manual,
-        });
+        check_serialization_round_trip(CollectionOptions::default(), 1);
+        check_serialization_round_trip(
+            CollectionOptions {
+                id_creation_strategy: IdCreationStrategy::Generated,
+            },
+            1,
+        );
+        check_serialization_round_trip(
+            CollectionOptions {
+                id_creation_strategy: IdCreationStrategy::Manual,
+            },
+            1,
+        );
     }
 
     #[test]
@@ -1052,7 +1064,7 @@ mod tests {
                 id_creation_strategy: IdCreationStrategy::Generated,
             },
         );
-        check_serialization_round_trip(metadata);
+        check_serialization_round_trip(metadata, 1);
     }
 
     #[test]
@@ -1098,7 +1110,7 @@ mod tests {
             .add_index_to_collection(11, 1, &products_definition, &IndexOptions::default(), 210)
             .drop_collection(11, 300);
 
-        check_serialization_round_trip(catalog);
+        check_serialization_round_trip(catalog, 1);
     }
 
     #[test]

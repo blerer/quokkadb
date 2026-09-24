@@ -96,7 +96,7 @@ impl Operation {
 }
 
 impl Serializable for Operation {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> std::io::Result<Self> {
         let op_byte = reader.read_u8()?;
         let operation_type =
             OperationType::try_from(op_byte).map_err(|_| invalid_data("Invalid operation type"))?;
@@ -119,7 +119,7 @@ impl Serializable for Operation {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer.write_u8(u8::from(self.operation_type));
         writer.write_varint_u32(self.collection);
         writer.write_varint_u32(self.index);
@@ -136,12 +136,12 @@ mod tests {
     #[test]
     fn test_operation_wal_round_trip_put() {
         let original = Operation::new_put(42, 7, b"key123".to_vec(), b"value456".to_vec());
-        check_serialization_round_trip(original);
+        check_serialization_round_trip(original, 1);
     }
 
     #[test]
     fn test_operation_wal_round_trip_delete() {
         let original = Operation::new_delete(99, 3, b"delete_me".to_vec());
-        check_serialization_round_trip(original);
+        check_serialization_round_trip(original, 1);
     }
 }

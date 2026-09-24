@@ -183,12 +183,12 @@ impl LsmVersion {
 }
 
 impl Serializable for LsmVersion {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let current_log_number = reader.read_varint_u64()?;
         let oldest_log_number = reader.read_varint_u64()?;
         let next_file_number = reader.read_varint_u64()?;
         let last_sequence_number = reader.read_varint_u64()?;
-        let sst_levels = Arc::new(Levels::read_from(reader)?);
+        let sst_levels = Arc::new(Levels::read_from(reader, version)?);
         Ok(LsmVersion {
             current_log_number,
             oldest_log_number,
@@ -198,12 +198,12 @@ impl Serializable for LsmVersion {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u64(self.current_log_number);
         writer.write_varint_u64(self.oldest_log_number);
         writer.write_varint_u64(self.next_file_number);
         writer.write_varint_u64(self.last_sequence_number);
-        self.sst_levels.write_to(writer);
+        self.sst_levels.write_to(writer, version);
     }
 }
 
@@ -293,13 +293,13 @@ impl Levels {
 }
 
 impl Serializable for Levels {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let levels = Vec::<Arc<Level>>::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let levels = Vec::<Arc<Level>>::read_from(reader, version)?;
         Ok(Levels { levels })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.levels.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.levels.write_to(writer, version);
     }
 }
 
@@ -673,10 +673,10 @@ fn overlaps(interval: &Interval<Vec<u8>>, sst: &SSTableMetadata) -> bool {
 }
 
 impl Serializable for Level {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let level = reader.read_u8()?;
-        let sstables = Vec::<Arc<SSTableMetadata>>::read_from(reader)?;
-        let drops = Vec::<Arc<DropMetadata>>::read_from(reader)?;
+        let sstables = Vec::<Arc<SSTableMetadata>>::read_from(reader, version)?;
+        let drops = Vec::<Arc<DropMetadata>>::read_from(reader, version)?;
         let size = sstables.iter().map(|sst| sst.size).sum();
         match level {
             0 => Ok(Overlapping {
@@ -694,7 +694,7 @@ impl Serializable for Level {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         match &self {
             Overlapping {
                 level,
@@ -709,8 +709,8 @@ impl Serializable for Level {
                 size: _size,
             } => {
                 writer.write_u8(*level);
-                sstables.write_to(writer);
-                drops.write_to(writer);
+                sstables.write_to(writer, version);
+                drops.write_to(writer, version);
             }
         }
     }
@@ -804,7 +804,7 @@ impl fmt::Display for SSTableMetadata {
 }
 
 impl Serializable for SSTableMetadata {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<SSTableMetadata> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<SSTableMetadata> {
         Ok(SSTableMetadata {
             number: reader.read_varint_u64()?,
             level: reader.read_u8()?,
@@ -816,7 +816,7 @@ impl Serializable for SSTableMetadata {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         writer
             .write_varint_u64(self.number)
             .write_u8(self.level)
@@ -886,7 +886,7 @@ mod drop_kind_tags {
     pub const INDEX: u8 = 1;
 }
 impl Serializable for DropKind {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self>
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self>
     where
         Self: Sized,
     {
@@ -901,7 +901,7 @@ impl Serializable for DropKind {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         match self {
             DropKind::Collection => writer.write_u8(drop_kind_tags::COLLECTION),
             DropKind::Index(index_id) => writer
@@ -1100,11 +1100,11 @@ impl fmt::Display for DropMetadata {
 }
 
 impl Serializable for DropMetadata {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let collection = reader.read_varint_u32()?;
-        let kind = DropKind::read_from(reader)?;
+        let kind = DropKind::read_from(reader, version)?;
         let drop_sequence_number = reader.read_varint_u64()?;
-        let key_range = Interval::read_from(reader)?;
+        let key_range = Interval::read_from(reader, version)?;
 
         Ok(DropMetadata {
             collection,
@@ -1114,11 +1114,11 @@ impl Serializable for DropMetadata {
         })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
         writer.write_varint_u32(self.collection);
-        self.kind.write_to(writer);
+        self.kind.write_to(writer, version);
         writer.write_varint_u64(self.drop_sequence_number);
-        self.key_range.write_to(writer);
+        self.key_range.write_to(writer, version);
     }
 }
 
@@ -1394,22 +1394,22 @@ mod tests {
 
     #[test]
     fn test_sst_metadata_serialization() {
-        check_serialization_round_trip(create_level_0_sstable());
+        check_serialization_round_trip(create_level_0_sstable(), 1);
     }
 
     #[test]
     fn test_level_serialization() {
-        check_serialization_round_trip(create_level_1());
+        check_serialization_round_trip(create_level_1(), 1);
     }
 
     #[test]
     fn test_levels_tree_serialization() {
-        check_serialization_round_trip(create_levels());
+        check_serialization_round_trip(create_levels(), 1);
     }
 
     #[test]
     fn test_lsm_version_serialization() {
-        check_serialization_round_trip(create_lsm_version());
+        check_serialization_round_trip(create_lsm_version(), 1);
     }
 
     fn record_key(number: i32) -> Vec<u8> {

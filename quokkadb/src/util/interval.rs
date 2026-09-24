@@ -443,18 +443,18 @@ impl<T> RangeBounds<T> for Interval<T> {
 }
 
 impl<T: Serializable> Serializable for Interval<T> {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> std::io::Result<Self>
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let start = Bound::<T>::read_from(reader)?;
-        let end = Bound::<T>::read_from(reader)?;
+        let start = Bound::<T>::read_from(reader, version)?;
+        let end = Bound::<T>::read_from(reader, version)?;
         Ok(Self { start, end })
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.start.write_to(writer);
-        self.end.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.start.write_to(writer, version);
+        self.end.write_to(writer, version);
     }
 }
 

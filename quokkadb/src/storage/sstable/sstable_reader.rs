@@ -2,6 +2,7 @@ use crate::io::ZeroCopy;
 use crate::io::byte_reader::ByteReader;
 use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::{Compressor, CompressorType};
+use crate::io::serializable::Serializable;
 use crate::storage::Direction;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
@@ -49,6 +50,15 @@ impl SSTableReader {
 
         // The footer is stored in the last 48 bytes at the end of the file.
         let file_size = file.len()?;
+        if file_size < SSTABLE_FOOTER_LENGTH {
+            return Err(Error::new(
+                InvalidData,
+                format!(
+                    "SSTable is too short to contain a footer: {} bytes",
+                    file_size
+                ),
+            ));
+        }
         let footer_handle =
             BlockHandle::new(file_size - SSTABLE_FOOTER_LENGTH, SSTABLE_FOOTER_LENGTH);
 
@@ -67,31 +77,36 @@ impl SSTableReader {
         }
 
         let mut reader = ByteReader::new(&buf[..40]);
-
-        // Read the SSTable version
-        let _sstable_version = reader.read_u8();
-
-        // Read the Meta-Index block handle
-        let metadata_handle = Self::read_block_handle(&mut reader)?;
-
-        // Read the Index block handle
-        let index_handle = Self::read_block_handle(&mut reader)?;
-
-        // Create the compressor
-        let compressor_type = CompressorType::try_from(reader.read_u8()?).map_err(|_| {
-            Error::new(InvalidData, format!("Invalid compressor byte {:?}", buf[0]))
-        })?;
+        let (sstable_version, metadata_handle, index_handle, compressor_type) =
+            Self::read_footer(&mut reader)?;
         let compressor = compressor_type.new_compressor();
 
         let checksum_strategy: Arc<dyn ChecksumStrategy> = Arc::new(Crc32ChecksumStrategy {});
 
         let mut handles =
             Self::read_meta_index(&file, &compressor, &checksum_strategy, &metadata_handle)?;
-        let filter_handle = handles.remove("filter.quokkadb.BloomFilter").unwrap();
-        let properties_handle = handles.remove("properties").unwrap();
+        let filter_handle = handles
+            .remove("filter.quokkadb.BloomFilter")
+            .ok_or_else(|| {
+                Error::new(
+                    InvalidData,
+                    "SSTable meta-index is missing the Bloom filter block",
+                )
+            })?;
+        let properties_handle = handles.remove("properties").ok_or_else(|| {
+            Error::new(
+                InvalidData,
+                "SSTable meta-index is missing the properties block",
+            )
+        })?;
 
-        let properties =
-            Self::read_properties(&file, &compressor, &checksum_strategy, &properties_handle)?;
+        let properties = Self::read_properties(
+            &file,
+            &compressor,
+            &checksum_strategy,
+            &properties_handle,
+            sstable_version,
+        )?;
 
         let duration = start.elapsed();
         tracing::debug!(
@@ -114,6 +129,30 @@ impl SSTableReader {
             index_handle,
             filter_handle,
         })
+    }
+
+    fn read_footer<B: AsRef<[u8]>>(
+        reader: &mut ByteReader<B>,
+    ) -> Result<(u8, BlockHandle, BlockHandle, CompressorType)> {
+        let version = reader.read_u8()?;
+        match version {
+            1 => {
+                let metadata_handle = Self::read_block_handle(reader)?;
+                let index_handle = Self::read_block_handle(reader)?;
+                let compressor_byte = reader.read_u8()?;
+                let compressor_type = CompressorType::try_from(compressor_byte).map_err(|_| {
+                    Error::new(
+                        InvalidData,
+                        format!("Invalid compressor byte {compressor_byte}"),
+                    )
+                })?;
+                Ok((version, metadata_handle, index_handle, compressor_type))
+            }
+            version => Err(Error::new(
+                InvalidData,
+                format!("Unsupported SSTable version {version}"),
+            )),
+        }
     }
 
     /// Read the block handle from the byte reader
@@ -160,9 +199,11 @@ impl SSTableReader {
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
         handle: &BlockHandle,
+        sstable_version: u8,
     ) -> Result<SSTableProperties> {
         let data = Self::read_block(file, compressor, checksum_strategy, handle)?;
-        SSTableProperties::from_slice(&data)
+        let reader = ByteReader::new(&data);
+        SSTableProperties::read_from(&reader, sstable_version as u32)
     }
 
     /// Read a block of data from the file, decompress it, and verify its checksum
@@ -593,6 +634,12 @@ mod tests {
     use bson::Bson;
     use std::ops::{Bound, RangeBounds};
     use tempfile::tempdir;
+
+    #[test]
+    fn test_read_footer_rejects_unsupported_version() {
+        let mut reader = ByteReader::new([2_u8]);
+        assert!(SSTableReader::read_footer(&mut reader).is_err());
+    }
 
     #[test]
     fn test_open() {

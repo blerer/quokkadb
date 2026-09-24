@@ -16,7 +16,7 @@ pub(crate) enum CountStatsKey {
 }
 
 impl Serializable for CountStatsKey {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> Result<Self> {
         match reader.read_u8()? {
             code::COLLECTION => Ok(CountStatsKey::Collection(reader.read_varint_u32()?)),
             code::INDEX => Ok(CountStatsKey::Index {
@@ -27,7 +27,7 @@ impl Serializable for CountStatsKey {
         }
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
         match self {
             CountStatsKey::Collection(collection) => {
                 writer
@@ -111,13 +111,13 @@ impl CountStatsBuilder {
 }
 
 impl Serializable for CountStats {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>) -> Result<Self> {
-        let deltas = BTreeMap::<CountStatsKey, i64>::read_from(reader)?;
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
+        let deltas = BTreeMap::<CountStatsKey, i64>::read_from(reader, version)?;
         Ok(CountStats::new(deltas))
     }
 
-    fn write_to(&self, writer: &mut ByteWriter) {
-        self.deltas.write_to(writer);
+    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
+        self.deltas.write_to(writer, version);
     }
 }
 
@@ -128,11 +128,14 @@ mod tests {
 
     #[test]
     fn count_stats_key_round_trip() {
-        check_serialization_round_trip(CountStatsKey::Collection(12));
-        check_serialization_round_trip(CountStatsKey::Index {
-            collection: 12,
-            index: 4,
-        });
+        check_serialization_round_trip(CountStatsKey::Collection(12), 1);
+        check_serialization_round_trip(
+            CountStatsKey::Index {
+                collection: 12,
+                index: 4,
+            },
+            1,
+        );
     }
 
     #[test]
@@ -156,7 +159,7 @@ mod tests {
             ),
         ]);
 
-        check_serialization_round_trip(CountStats::new(deltas));
+        check_serialization_round_trip(CountStats::new(deltas), 1);
     }
 
     #[test]

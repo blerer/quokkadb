@@ -120,6 +120,19 @@ impl StorageEngine {
                 },
             ));
 
+            // If the manifest format version is not the current one, we need to rotate it
+            // and create a new one with the current format version.
+            if manifest.format_version() != Manifest::current_format_version() {
+                let new_manifest_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+                manifest.rotate(
+                    new_manifest_number,
+                    &ManifestEdit::Snapshot(lsm_tree.manifest.clone()),
+                )?;
+                lsm_tree = lsm_tree.apply(&ManifestEdit::ManifestRotation {
+                    manifest_number: new_manifest_number,
+                });
+            }
+
             // We will keep track of the rotated log files while replaying the wal files.
             let mut rotated_log_files =
                 VecDeque::from_iter(scan_results.obsolete_wal_files.iter().rev().cloned());
@@ -162,6 +175,7 @@ impl StorageEngine {
 
                 match rs {
                     Ok(iter) => {
+                        let wal_version = iter.version();
                         let mut count = 0;
                         for rs in iter {
                             match rs {
@@ -180,7 +194,8 @@ impl StorageEngine {
                                                     "corruption detected in WAL record; truncating file"
                                                 );
                                                 truncate_file(wal_path, record_offset)?;
-                                                reusable_wal = Some(wal_path);
+                                                reusable_wal =
+                                                    Some((wal_path.to_path_buf(), wal_version));
                                             }
                                         }
                                     } else {
@@ -192,7 +207,7 @@ impl StorageEngine {
                                     lsm_tree.memtable.write(seq, &batch);
                                     last_seq_nbr = seq;
                                     if is_last_wal_file {
-                                        reusable_wal = Some(wal_path)
+                                        reusable_wal = Some((wal_path.to_path_buf(), wal_version))
                                     }
                                 }
                             }
@@ -239,8 +254,28 @@ impl StorageEngine {
             // If the last wal file can be reused, either because it was fine or because it has been
             // corrected by truncation, we will reuse it. If not, it should have been marked as corrupted,
             // and we need to create a new one and update the Lsm tree.
-            let wal = if let Some(wal_path) = reusable_wal {
-                WriteAheadLog::load_from(metric_registry, &options, &wal_path, rotated_log_files)?
+            let wal = if let Some((wal_path, wal_version)) = reusable_wal {
+                if wal_version == WriteAheadLog::current_format_version() {
+                    WriteAheadLog::load_from(
+                        metric_registry,
+                        &options,
+                        &wal_path,
+                        rotated_log_files,
+                    )?
+                } else {
+                    let old_log_number = DbFile::new(&wal_path).unwrap().number;
+                    rotated_log_files.push_back((old_log_number, wal_path));
+
+                    let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
+                    let wal = WriteAheadLog::new(metric_registry, &options, db_dir, log_number)?;
+                    let edit = ManifestEdit::WalRotation {
+                        log_number,
+                        next_seq: last_seq_nbr + 1,
+                    };
+                    lsm_tree = lsm_tree.apply(&edit);
+                    manifest.append_edit(&edit)?;
+                    wal
+                }
             } else {
                 let log_number = next_file_number.fetch_add(1, Ordering::Relaxed);
 
