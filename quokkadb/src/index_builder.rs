@@ -306,9 +306,9 @@ impl IndexBuilder {
         if operations.is_empty() {
             return Ok(());
         }
-        // After publication, this write anchors the catalog edit's sequence in
-        // the WAL, even when an empty collection produced no backfill batches.
-        // Sync it before reporting success so recovery retains the index.
+        // Sync checkpoint cleanup before reporting success. Index publication
+        // is retained on recovery even if this write fails, in which case startup
+        // cleanup removes the stale checkpoint.
         self.storage_engine
             .write(WriteBatch::new(operations, CountStats::default()), true)
             .map_err(|error| {
@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_after_final_batch_publishes_index_without_rebuilding_entries() {
+    fn restart_after_checkpoint_cleanup_failure_retains_published_index() {
         let options = test_options();
         let (directory, storage_engine, collection_id) = index_build_test_storage(&options);
         for id in 1..=3 {
@@ -709,10 +709,10 @@ mod tests {
         drop(storage_engine);
 
         let (restarted, pending_builds) = reopen_index_build_test_storage(&directory);
-        assert_eq!(pending_builds.len(), 1);
-        let pending = pending_builds.into_iter().next().unwrap();
+        assert!(pending_builds.is_empty());
+        assert_index_queryable(&restarted, collection_id, index_id);
         IndexBuilder::new(&options, restarted.clone())
-            .build_index(pending.key, &pending.snapshot)
+            .cleanup_stale_index_build_states(&pending_builds)
             .unwrap();
 
         assert_index_queryable(&restarted, collection_id, index_id);

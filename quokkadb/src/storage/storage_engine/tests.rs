@@ -1914,12 +1914,12 @@ fn test_wal_replay_with_header_corruption() {
             .is_none()
     );
 
-    // The pending collection creation was discarded with the corrupt WAL tail.
+    // Collection creation precedes the corrupt WAL write and remains valid.
     assert!(
         engine_restarted
             .catalog()
             .get_collection_by_id(&col)
-            .is_none()
+            .is_some()
     );
     let recovered_col = engine_restarted
         .create_collection("test_wal_replay_with_header_corruption", true)
@@ -2409,6 +2409,155 @@ fn test_create_collection() {
             .get_collection_by_name("test_collection_2")
             .is_some()
     );
+}
+
+#[test]
+fn test_recovery_retains_collection_edits_without_following_write() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let collection_id;
+    {
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        collection_id = engine.create_collection("original", false).unwrap();
+        let dropped_id = engine.create_collection("dropped", false).unwrap();
+        engine
+            .write(write_batch(vec![put_op(collection_id, 1, 1)]), true)
+            .unwrap();
+        engine.rename_collection("original", "renamed").unwrap();
+        engine.drop_collection("dropped").unwrap();
+        engine.create_collection("empty", false).unwrap();
+        assert!(
+            engine
+                .catalog()
+                .get_collection_by_id(&dropped_id)
+                .unwrap()
+                .is_dropped()
+        );
+        engine.shutdown().unwrap();
+    }
+
+    let engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+    let catalog = engine.catalog();
+    assert!(catalog.get_collection_by_name("original").is_none());
+    assert_eq!(
+        catalog.get_collection_by_name("renamed").unwrap().id,
+        collection_id
+    );
+    assert!(catalog.get_collection_by_name("dropped").is_none());
+    assert!(catalog.get_collection_by_name("empty").is_some());
+    let snapshot = engine.acquire_snapshot();
+    assert!(
+        engine
+            .read_at_snapshot(collection_id, 0, &user_key(1), &snapshot)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        engine.next_seq_number.load(Ordering::Relaxed),
+        snapshot.sequence() + 1
+    );
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn test_recovery_retains_index_edits_without_following_write() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let (collection_id, dropped_index_id, pending_index_id);
+    {
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        collection_id = engine.create_collection("docs", false).unwrap();
+        dropped_index_id = engine
+            .create_queryable_index(
+                collection_id,
+                simple_index_definition(),
+                IndexOptions::default(),
+            )
+            .unwrap()
+            .id;
+        engine
+            .write(write_batch(vec![put_op(collection_id, 1, 1)]), true)
+            .unwrap();
+        engine.drop_index(collection_id, dropped_index_id).unwrap();
+        pending_index_id = engine
+            .create_index(
+                collection_id,
+                simple_index_definition(),
+                IndexOptions::default(),
+            )
+            .unwrap()
+            .id;
+        engine.shutdown().unwrap();
+    }
+
+    let (engine, builds) = StorageEngine::new(
+        &mut MetricRegistry::default(),
+        Arc::new(options),
+        dir.path(),
+    )
+    .unwrap();
+    let collection = engine
+        .catalog()
+        .get_collection_by_id(&collection_id)
+        .unwrap();
+    assert!(
+        collection
+            .get_index_by_id(dropped_index_id)
+            .unwrap()
+            .is_dropped()
+    );
+    assert!(
+        !collection
+            .get_index_by_id(pending_index_id)
+            .unwrap()
+            .is_queryable()
+    );
+    assert_eq!(builds.len(), 1);
+    assert_eq!(builds[0].key.collection_id, collection_id);
+    assert_eq!(builds[0].key.index_id, pending_index_id);
+    assert_eq!(
+        builds[0].snapshot.sequence(),
+        engine.acquire_snapshot().sequence()
+    );
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn test_recovery_discards_catalog_edits_beyond_next_sequence() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    {
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        engine.create_collection("retained", false).unwrap();
+        // Model a manifest edit whose preceding WAL write was lost during recovery.
+        let mut wal_and_manifest = engine.db_mutex.lock().unwrap();
+        wal_and_manifest
+            .manifest
+            .append_edit(&ManifestEdit::CreateCollection {
+                name: "discarded".to_string(),
+                id: engine.catalog().next_collection_id,
+                created_at: engine.next_seq_number.load(Ordering::Relaxed) + 1,
+                options: CollectionOptions::default(),
+            })
+            .unwrap();
+        drop(wal_and_manifest);
+        engine.shutdown().unwrap();
+    }
+
+    let engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_name("retained")
+            .is_some()
+    );
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_name("discarded")
+            .is_none()
+    );
+    engine.shutdown().unwrap();
 }
 
 #[test]

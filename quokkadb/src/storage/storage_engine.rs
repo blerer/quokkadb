@@ -349,12 +349,16 @@ impl StorageEngine {
                 wal
             };
 
+            // Catalog edits at the next sequence depend only on preceding writes,
+            // which are synced before the edit is persisted. Retain these edits
+            // even when no write at their sequence was recovered.
+            let next_seq_nbr = last_seq_nbr + 1;
             if lsm_tree
                 .manifest
-                .has_pending_catalog_edits_after(last_seq_nbr)
+                .has_pending_catalog_edits_after(next_seq_nbr)
             {
                 let edit = ManifestEdit::DiscardPendingCatalogEditsAfter {
-                    sequence: last_seq_nbr,
+                    sequence: next_seq_nbr,
                 };
                 lsm_tree = lsm_tree.apply(&edit);
                 manifest.append_edit(&edit)?;
