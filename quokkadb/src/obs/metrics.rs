@@ -183,6 +183,14 @@ pub mod names {
         pub const EXTERNAL_MERGE_SORTS: &str = "executor.external_merge_sorts";
         pub const TOP_K_SORTS: &str = "executor.top_k_sorts";
     }
+
+    pub mod index_build {
+        pub const ACTIVE: &str = "index_build.active";
+        pub const SUCCEEDED: &str = "index_build.succeeded";
+        pub const FAILED: &str = "index_build.failed";
+        pub const CANCELLED: &str = "index_build.cancelled";
+        pub const RESUMED: &str = "index_build.resumed";
+    }
 }
 
 #[derive(Default)]

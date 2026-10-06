@@ -2125,6 +2125,7 @@ fn test_deletes_reject_writes_during_index_build() -> Result<()> {
     );
 
     crate::index_builder::IndexBuilder::new(
+        &mut crate::obs::metrics::MetricRegistry::default(),
         &crate::options::options::Options::lightweight(),
         storage_engine.clone(),
     )

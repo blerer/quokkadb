@@ -84,7 +84,8 @@ impl QuokkaDB {
         let mut metric_registry = MetricRegistry::new();
         let (storage_engine, pending_builds) =
             StorageEngine::new(&mut metric_registry, options.clone(), path)?;
-        let index_builder = IndexBuilder::new(&options, storage_engine.clone());
+        let index_builder =
+            IndexBuilder::new(&mut metric_registry, &options, storage_engine.clone());
         index_builder.cleanup_stale_index_build_states(&pending_builds)?;
         let optimizer = Arc::new(Optimizer::new()); // Add normalization rules as needed
         let query_cache = Arc::new(QueryCache::new(

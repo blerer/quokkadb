@@ -1,6 +1,7 @@
+use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
+use crate::obs::metrics::names::index_build;
 use crate::options::options::Options;
 use crate::query::execution::indexes::{Indexes, OperationsCountAndSize};
-use crate::storage::Direction;
 use crate::storage::count_stats::{CountStats, CountStatsBuilder};
 use crate::storage::index_build_state::{IndexBuildKey, IndexBuildState};
 use crate::storage::internal_key::{extract_operation_type, extract_user_key};
@@ -8,6 +9,7 @@ use crate::storage::operation::{Operation, OperationType};
 use crate::storage::snapshot_manager::Snapshot;
 use crate::storage::storage_engine::{IndexBuildSnapshot, StorageEngine, StorageError};
 use crate::storage::write_batch::{Preconditions, WriteBatch};
+use crate::storage::Direction;
 use bson::RawDocument;
 #[cfg(test)]
 use std::cell::RefCell;
@@ -31,16 +33,24 @@ enum BatchCommitStatus {
 pub(crate) struct IndexBuilder {
     storage_engine: Arc<StorageEngine>,
     max_payload_bytes: usize,
+    metrics: Metrics,
     #[cfg(test)]
     test_hook: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl IndexBuilder {
-    pub(crate) fn new(options: &Options, storage_engine: Arc<StorageEngine>) -> Self {
+    pub(crate) fn new(
+        metric_registry: &mut MetricRegistry,
+        options: &Options,
+        storage_engine: Arc<StorageEngine>,
+    ) -> Self {
         let max_payload_bytes = options.index_build_batch_size().to_bytes();
+        let metrics = Metrics::new();
+        metrics.register_to(metric_registry);
         Self {
             storage_engine,
             max_payload_bytes,
+            metrics,
             #[cfg(test)]
             test_hook: RefCell::new(None),
         }
@@ -91,9 +101,22 @@ impl IndexBuilder {
         key: IndexBuildKey,
         snapshot: &Snapshot,
     ) -> crate::error::Result<()> {
-        match self.backfill_index(key, snapshot) {
-            Ok(()) => Ok(()),
+        let Some(indexes) = self.pending_index_for_build(key) else {
+            self.delete_state(key)?;
+            return Ok(());
+        };
+        let _active_build = self.metrics.start_build();
+        match self.backfill_index(key, snapshot, indexes) {
+            Ok(BackfillOutcome::Completed) => {
+                self.metrics.succeeded.inc();
+                Ok(())
+            }
+            Ok(BackfillOutcome::Cancelled) => {
+                self.metrics.cancelled.inc();
+                Ok(())
+            }
             Err(build_error) => {
+                self.metrics.failed.inc();
                 tracing::error!(
                     collection_id = key.collection_id,
                     index_id = key.index_id,
@@ -141,12 +164,16 @@ impl IndexBuilder {
         }
     }
 
-    fn backfill_index(&self, key: IndexBuildKey, snapshot: &Snapshot) -> Result<()> {
-        let Some(indexes) = self.pending_index_for_build(key) else {
-            self.delete_state(key)?;
-            return Ok(());
-        };
+    fn backfill_index(
+        &self,
+        key: IndexBuildKey,
+        snapshot: &Snapshot,
+        indexes: Indexes,
+    ) -> Result<BackfillOutcome> {
         let mut state = self.load_state(key)?;
+        if state.processed_document_count > 0 {
+            self.metrics.resumed.inc();
+        }
         let user_key_range = match state.last_processed_primary_key.as_ref() {
             Some(primary_key) => (Bound::Excluded(primary_key.clone()), Bound::Unbounded),
             None => (Bound::Unbounded, Bound::Unbounded),
@@ -175,19 +202,27 @@ impl IndexBuilder {
                         "index build stopped because its collection or index was dropped"
                     );
                     self.delete_state(key)?;
-                    return Ok(());
+                    return Ok(BackfillOutcome::Cancelled);
                 }
             }
         }
 
-        self.storage_engine
+        match self
+            .storage_engine
             .mark_index_queryable(key.collection_id, key.index_id)
-            .map_err(|error| {
-                Error::new(
+        {
+            Ok(()) => {}
+            Err(StorageError::CollectionNotFound { .. } | StorageError::IndexNotFound { .. }) => {
+                self.delete_state(key)?;
+                return Ok(BackfillOutcome::Cancelled);
+            }
+            Err(error) => {
+                return Err(Error::new(
                     error.as_io_error().map_or(ErrorKind::Other, Error::kind),
                     error.to_string(),
-                )
-            })?;
+                ));
+            }
+        }
         self.delete_state(key)?;
         tracing::debug!(
             collection_id = key.collection_id,
@@ -196,7 +231,7 @@ impl IndexBuilder {
             indexed_entry_count = state.indexed_entry_count,
             "index build scan completed and index is queryable"
         );
-        Ok(())
+        Ok(BackfillOutcome::Completed)
     }
 
     fn load_state(&self, key: IndexBuildKey) -> Result<IndexBuildState> {
@@ -346,6 +381,53 @@ impl IndexBuilder {
     }
 }
 
+enum BackfillOutcome {
+    Completed,
+    Cancelled,
+}
+
+struct Metrics {
+    active: Arc<AtomicGauge>,
+    succeeded: Arc<Counter>,
+    failed: Arc<Counter>,
+    cancelled: Arc<Counter>,
+    resumed: Arc<Counter>,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        Self {
+            active: AtomicGauge::new(),
+            succeeded: Counter::new(),
+            failed: Counter::new(),
+            cancelled: Counter::new(),
+            resumed: Counter::new(),
+        }
+    }
+
+    fn register_to(&self, registry: &mut MetricRegistry) {
+        registry
+            .register_gauge(index_build::ACTIVE, self.active.clone())
+            .register_counter(index_build::SUCCEEDED, self.succeeded.clone())
+            .register_counter(index_build::FAILED, self.failed.clone())
+            .register_counter(index_build::CANCELLED, self.cancelled.clone())
+            .register_counter(index_build::RESUMED, self.resumed.clone());
+    }
+
+    fn start_build(&self) -> ActiveBuild<'_> {
+        self.active.inc();
+        ActiveBuild(&self.active)
+    }
+}
+
+struct ActiveBuild<'a>(&'a AtomicGauge);
+
+impl Drop for ActiveBuild<'_> {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
+}
+
 fn new_put_state_operation(key: IndexBuildKey, state: &IndexBuildState) -> Operation {
     Operation::new_put(
         crate::storage::INTERNAL_INDEX_BUILD_COLLECTION_ID,
@@ -370,7 +452,7 @@ mod tests {
     use crate::storage::storage_engine::{CreatedIndex, StorageEngine};
     use crate::storage::write_batch::WriteBatch;
     use crate::util::bson_utils::BsonKey;
-    use bson::{Bson, doc};
+    use bson::{doc, Bson};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
@@ -408,11 +490,12 @@ mod tests {
     }
 
     fn index_build_test_storage(
+        metric_registry: &mut MetricRegistry,
         options: &Arc<Options>,
     ) -> (tempfile::TempDir, Arc<StorageEngine>, u32) {
         let directory = tempdir().unwrap();
         let (storage_engine, _pending_builds) = StorageEngine::new(
-            &mut MetricRegistry::default(),
+            metric_registry,
             options.clone(),
             directory.path(),
         )
@@ -522,7 +605,8 @@ mod tests {
     #[test]
     fn index_build_writes_entries_and_checkpoint() {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         insert_document(&storage_engine, collection_id, 1, "one");
         insert_document(&storage_engine, collection_id, 2, "two");
         insert_document(&storage_engine, collection_id, 3, "three");
@@ -531,8 +615,11 @@ mod tests {
         let created_index = create_index(&storage_engine, collection_id);
         let build_snapshot = created_index.build_snapshot.unwrap();
         let build_key = IndexBuildKey::new(collection_id, created_index.id);
-        let builder = IndexBuilder::new(&options, storage_engine.clone());
+        let builder = IndexBuilder::new(&mut registry, &options, storage_engine.clone());
         builder.build_index(build_key, &build_snapshot).unwrap();
+
+        assert_eq!(registry.gauge_value(index_build::ACTIVE), 0);
+        assert_eq!(registry.counter_value(index_build::SUCCEEDED), 1);
 
         assert_index_queryable(&storage_engine, collection_id, created_index.id);
         assert_record_count(&storage_engine, collection_id, created_index.id, 2);
@@ -542,13 +629,18 @@ mod tests {
     #[test]
     fn index_build_on_empty_collection_publishes_index_and_deletes_checkpoint() {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         let created_index = create_index(&storage_engine, collection_id);
         let key = IndexBuildKey::new(collection_id, created_index.id);
 
-        IndexBuilder::new(&options, storage_engine.clone())
-            .build_index(key, &created_index.build_snapshot.unwrap())
-            .unwrap();
+        IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        )
+        .build_index(key, &created_index.build_snapshot.unwrap())
+        .unwrap();
 
         assert_index_queryable(&storage_engine, collection_id, key.index_id);
         assert_record_count(&storage_engine, collection_id, key.index_id, 0);
@@ -574,16 +666,16 @@ mod tests {
         let collection_id = storage_engine.create_collection("empty", true).unwrap();
         let created_index = create_index(&storage_engine, collection_id);
         let key = IndexBuildKey::new(collection_id, created_index.id);
-        let syncs_before_build = metrics.counter_value(crate::obs::metrics::names::wal::SYNCS);
+        let syncs_before_build = metrics.counter_value(metrics::names::wal::SYNCS);
 
-        IndexBuilder::new(&options, storage_engine.clone())
+        IndexBuilder::new(&mut metrics, &options, storage_engine.clone())
             .build_index(key, &created_index.build_snapshot.unwrap())
             .unwrap();
 
         // There are no backfill writes: the checkpoint deletion must sync the
         // WAL sequence that anchors creation and publication in the catalog.
         assert_eq!(
-            metrics.counter_value(crate::obs::metrics::names::wal::SYNCS),
+            metrics.counter_value(metrics::names::wal::SYNCS),
             syncs_before_build + 1
         );
         assert_index_queryable(&storage_engine, collection_id, key.index_id);
@@ -601,7 +693,8 @@ mod tests {
     #[test]
     fn cleanup_stale_index_build_states_preserves_pending_and_deletes_stale_states() {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         let pending_index = create_index(&storage_engine, collection_id);
         let stale_index = storage_engine
             .create_index(
@@ -630,9 +723,13 @@ mod tests {
             key: pending_key,
             snapshot: pending_index.build_snapshot.unwrap(),
         }];
-        IndexBuilder::new(&options, storage_engine.clone())
-            .cleanup_stale_index_build_states(&pending_builds)
-            .unwrap();
+        IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        )
+        .cleanup_stale_index_build_states(&pending_builds)
+        .unwrap();
 
         assert_checkpoint_type(&storage_engine, pending_key, OperationType::Put);
         assert_checkpoint_type(&storage_engine, stale_key, OperationType::Delete);
@@ -641,7 +738,8 @@ mod tests {
     #[test]
     fn interrupted_index_build_resumes_from_checkpoint_after_storage_restart() {
         let options = test_options();
-        let (directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         for id in 1..=3 {
             insert_document(&storage_engine, collection_id, id, "same");
         }
@@ -650,7 +748,11 @@ mod tests {
         let key = IndexBuildKey::new(collection_id, index_id);
         let build_snapshot = created_index.build_snapshot.unwrap();
         storage_engine.wal_fail_write_after(1);
-        let mut builder = IndexBuilder::new(&options, storage_engine.clone());
+        let builder = IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        );
         let result = builder.build_index(key, &build_snapshot);
         assert!(result.is_err());
 
@@ -669,9 +771,11 @@ mod tests {
         assert_eq!(pending_builds.len(), 1);
         let pending = pending_builds.into_iter().next().unwrap();
         assert_eq!(pending.key, key);
-        IndexBuilder::new(&options, restarted.clone())
+        let mut registry = MetricRegistry::default();
+        IndexBuilder::new(&mut registry, &options, restarted.clone())
             .build_index(pending.key, &pending.snapshot)
             .unwrap();
+        assert_eq!(registry.counter_value(index_build::RESUMED), 1);
 
         assert_index_queryable(&restarted, collection_id, index_id);
         assert_record_count(&restarted, collection_id, index_id, 3);
@@ -683,7 +787,8 @@ mod tests {
     #[test]
     fn restart_after_checkpoint_cleanup_failure_retains_published_index() {
         let options = test_options();
-        let (directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         for id in 1..=3 {
             insert_document(&storage_engine, collection_id, id, "same");
         }
@@ -693,7 +798,11 @@ mod tests {
         let build_snapshot = created_index.build_snapshot.unwrap();
         // We want the writes to succeed, but not the deletion of the checkpoint, so we fail after 3 writes (the number of documents).
         storage_engine.wal_fail_write_after(3);
-        let mut builder = IndexBuilder::new(&options, storage_engine.clone());
+        let builder = IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        );
         let result = builder.build_index(key, &build_snapshot);
         assert!(result.is_err());
         assert_record_count(&storage_engine, collection_id, index_id, 3);
@@ -711,7 +820,7 @@ mod tests {
         let (restarted, pending_builds) = reopen_index_build_test_storage(&directory);
         assert!(pending_builds.is_empty());
         assert_index_queryable(&restarted, collection_id, index_id);
-        IndexBuilder::new(&options, restarted.clone())
+        IndexBuilder::new(&mut MetricRegistry::default(), &options, restarted.clone())
             .cleanup_stale_index_build_states(&pending_builds)
             .unwrap();
 
@@ -725,7 +834,8 @@ mod tests {
     #[test]
     fn failed_backfill_drops_the_index_and_returns_the_backfill_error() {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         let operation = Operation::new_put(collection_id, 0, vec![1], vec![0xff]);
         storage_engine
             .write(
@@ -744,10 +854,12 @@ mod tests {
                 false,
             )
             .unwrap();
-        let error = IndexBuilder::new(&options, storage_engine.clone())
+        let error = IndexBuilder::new(&mut registry, &options, storage_engine.clone())
             .build_index(key, &created_index.build_snapshot.unwrap())
             .unwrap_err();
 
+        assert_eq!(registry.gauge_value(index_build::ACTIVE), 0);
+        assert_eq!(registry.counter_value(index_build::FAILED), 1);
         assert!(matches!(error, crate::error::Error::Io(_)));
         assert!(get_collection(&storage_engine, collection_id).is_index_dropped(created_index.id));
         assert_checkpoint_type(&storage_engine, key, OperationType::Delete);
@@ -756,14 +868,19 @@ mod tests {
     #[test]
     fn failed_index_drop_error_takes_precedence_over_backfill_error() {
         let options = test_options();
-        let (_directory, storage_engine, _collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, _collection_id) = index_build_test_storage(&mut registry, &options);
         let key = IndexBuildKey::new(crate::storage::FIRST_USER_COLLECTION_ID, 1);
         let build_error = Error::new(ErrorKind::InvalidData, "backfill failed");
         let drop_error = StorageError::ErrorMode("storage failed".to_string());
 
-        let error = IndexBuilder::new(&options, storage_engine.clone())
-            .handle_build_failure(key, build_error, Err(drop_error))
-            .unwrap_err();
+        let error = IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        )
+        .handle_build_failure(key, build_error, Err(drop_error))
+        .unwrap_err();
 
         assert!(
             matches!(error, crate::error::Error::ErrorMode(message) if message == "storage failed")
@@ -773,7 +890,8 @@ mod tests {
     #[test]
     fn failed_checkpoint_cleanup_error_takes_precedence_over_backfill_error() {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         let created_index = create_index(&storage_engine, collection_id);
         let key = IndexBuildKey::new(collection_id, created_index.id);
         storage_engine
@@ -790,13 +908,17 @@ mod tests {
             .unwrap();
         storage_engine.wal_fail_write_after(0);
 
-        let error = IndexBuilder::new(&options, storage_engine.clone())
-            .handle_build_failure(
-                key,
-                Error::new(ErrorKind::InvalidData, "backfill failed"),
-                Ok(()),
-            )
-            .unwrap_err();
+        let error = IndexBuilder::new(
+            &mut registry,
+            &options,
+            storage_engine.clone(),
+        )
+        .handle_build_failure(
+            key,
+            Error::new(ErrorKind::InvalidData, "backfill failed"),
+            Ok(()),
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("Injected error on append"));
         assert_checkpoint_type(&storage_engine, key, OperationType::Put);
@@ -804,7 +926,8 @@ mod tests {
 
     fn assert_batch_is_cancelled_by_drop(drop_collection: bool) {
         let options = test_options();
-        let (_directory, storage_engine, collection_id) = index_build_test_storage(&options);
+        let mut registry = MetricRegistry::default();
+        let (_directory, storage_engine, collection_id) = index_build_test_storage(&mut registry, &options);
         for id in 1..=3 {
             insert_document(&storage_engine, collection_id, id, "one");
         }
@@ -814,8 +937,9 @@ mod tests {
         let hook_storage = storage_engine.clone();
         let dropped = Arc::new(AtomicBool::new(false));
         let hook_dropped = dropped.clone();
-        let builder =
-            IndexBuilder::new(&options, storage_engine.clone()).with_test_hook(move || {
+        let mut registry = MetricRegistry::default();
+        let builder = IndexBuilder::new(&mut registry, &options, storage_engine.clone())
+            .with_test_hook(move || {
                 if drop_collection {
                     hook_storage.drop_collection("index_build").unwrap();
                 } else {
@@ -827,6 +951,9 @@ mod tests {
             });
         builder.build_index(key, &snapshot).unwrap();
 
+        assert_eq!(registry.gauge_value(index_build::ACTIVE), 0);
+        assert_eq!(registry.counter_value(index_build::CANCELLED), 1);
+        assert_eq!(registry.counter_value(index_build::SUCCEEDED), 0);
         assert!(dropped.load(Ordering::Relaxed));
         assert_checkpoint_type(&storage_engine, key, OperationType::Delete);
         if !drop_collection {

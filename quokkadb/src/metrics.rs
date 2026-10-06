@@ -70,6 +70,11 @@ pub struct ExecutorMetrics<'a> {
     registry: &'a MetricRegistry,
 }
 
+/// Metrics for index backfills.
+pub struct IndexBuildMetrics<'a> {
+    registry: &'a MetricRegistry,
+}
+
 /// Read-only view over a histogram metric.
 pub struct HistogramMetrics {
     histogram: Arc<obs_metrics::Histogram>,
@@ -137,6 +142,45 @@ impl<'a> Metrics<'a> {
         ExecutorMetrics {
             registry: self.registry,
         }
+    }
+
+    /// Returns index-build metrics.
+    pub fn index_build(&self) -> IndexBuildMetrics<'a> {
+        IndexBuildMetrics {
+            registry: self.registry,
+        }
+    }
+}
+
+impl<'a> IndexBuildMetrics<'a> {
+    /// Returns the number of index builds currently running.
+    pub fn active(&self) -> u64 {
+        self.registry
+            .gauge_value(obs_metrics::names::index_build::ACTIVE)
+    }
+
+    /// Returns the number of index builds completed successfully since open.
+    pub fn succeeded(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::index_build::SUCCEEDED)
+    }
+
+    /// Returns the number of index builds that failed since open.
+    pub fn failed(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::index_build::FAILED)
+    }
+
+    /// Returns the number of index builds cancelled by a collection or index drop since open.
+    pub fn cancelled(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::index_build::CANCELLED)
+    }
+
+    /// Returns the number of index builds resumed from a checkpoint since open.
+    pub fn resumed(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::index_build::RESUMED)
     }
 }
 
@@ -583,6 +627,11 @@ mod tests {
         assert_eq!(metrics.executor().documents_written(), 2);
         assert_eq!(metrics.executor().rows_returned(), 1);
         assert_eq!(metrics.executor().point_searches(), 1);
+        assert_eq!(metrics.index_build().active(), 0);
+        assert_eq!(metrics.index_build().succeeded(), 0);
+        assert_eq!(metrics.index_build().failed(), 0);
+        assert_eq!(metrics.index_build().cancelled(), 0);
+        assert_eq!(metrics.index_build().resumed(), 0);
         assert_eq!(metrics.executor().write_query_duration().count(), 2);
         assert_eq!(metrics.executor().read_query_duration().count(), 1);
     }
