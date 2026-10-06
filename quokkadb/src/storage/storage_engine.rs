@@ -888,7 +888,7 @@ impl StorageEngine {
     fn perform_writes(self: &Arc<Self>) {
         // Only a single leader should reach that point at a given time as queue locking logic will
         // block other writers until the leader as empty the queue.
-        self.perform_wal_and_memtable_rotation_if_needed();
+        let rotation_result = self.perform_wal_and_memtable_rotation_if_needed();
 
         // We lock the queue to retrieve the pending writes. It prevents new incoming writes,
         // avoiding the issue of an infinite loop with the drain.
@@ -912,6 +912,22 @@ impl StorageEngine {
 
         // Release the queue lock
         drop(queue);
+
+        if let Err(error) = rotation_result {
+            drop(wal_and_manifest);
+            self.handle_write_error(&error, &writers);
+            return;
+        }
+
+        // A writer can pass the initial error-mode check, wait for db_mutex, and
+        // then reach the front of the queue after another write has failed.
+        if let Err(error) = self.check_error_mode() {
+            drop(wal_and_manifest);
+            for writer in &writers {
+                writer.done(Err(error.clone()));
+            }
+            return;
+        }
 
         let lsm_tree = self.lsm_tree.load().clone();
         let catalog = lsm_tree.catalog();
@@ -1211,7 +1227,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) {
+    fn perform_wal_and_memtable_rotation_if_needed(self: &Arc<Self>) -> StorageResult<()> {
         let write_buffer_size = self.options.file_write_buffer_size().to_bytes();
         let memtable_size = self.lsm_tree.load().memtable.size();
         if memtable_size >= write_buffer_size {
@@ -1220,13 +1236,10 @@ impl StorageEngine {
                 write_buffer_size,
                 "memtable size exceeded write buffer"
             );
-            match self.perform_wal_and_memtable_rotation(false) {
-                Err(error) => {
-                    tracing::error!(error = %error, "WAL and memtable rotation failed");
-                }
-                Ok(_) => (),
-            }
+            self.perform_wal_and_memtable_rotation(false)
+                .map_err(StorageError::Io)?;
         }
+        Ok(())
     }
 
     fn get_async_callback(self: &Arc<Self>) -> &Arc<Callback<Result<SSTableOperation>>> {
