@@ -1,6 +1,5 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::storage::count_stats::CountStats;
 use crate::storage::operation::Operation;
@@ -180,9 +179,7 @@ impl WriteBatch {
                     precomputed_wal_record: None,
                 })
             }
-            version => Err(invalid_data(format!(
-                "Unsupported WAL format version {version}"
-            ))),
+            version => unreachable!("Unsupported WAL format version {version}"),
         }
     }
 
@@ -214,7 +211,6 @@ mod tests {
     use crate::storage::operation::Operation;
     use crate::storage::snapshot_manager::SnapshotManager;
     use std::collections::BTreeMap;
-    use std::io::ErrorKind;
     use std::sync::Arc;
 
     #[test]
@@ -319,9 +315,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Unsupported WAL format version 2")]
     fn test_write_batch_rejects_unsupported_version() {
-        let error = WriteBatch::from_wal_record(&[0], 2).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let _ = WriteBatch::from_wal_record(&[0], 2);
     }
 
     #[test]

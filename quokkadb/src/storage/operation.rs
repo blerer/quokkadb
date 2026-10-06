@@ -1,6 +1,5 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::storage::internal_key::{encode_internal_key, encode_record_key};
 
@@ -102,8 +101,8 @@ impl Operation {
 impl Serializable for Operation {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> std::io::Result<Self> {
         let op_byte = reader.read_u8()?;
-        let operation_type =
-            OperationType::try_from(op_byte).map_err(|_| invalid_data("Invalid operation type"))?;
+        let operation_type = OperationType::try_from(op_byte)
+            .unwrap_or_else(|_| unreachable!("Invalid operation type: {op_byte}"));
 
         let collection = reader.read_varint_u32()?;
         let index = reader.read_varint_u32()?;
@@ -136,6 +135,12 @@ impl Serializable for Operation {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
+
+    #[test]
+    fn test_truncated_operation_propagates_reader_error() {
+        let error = Operation::read_from(&ByteReader::new([0x50, 0, 0, 1]), 1).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 
     #[test]
     fn test_operation_wal_round_trip_put() {

@@ -535,16 +535,13 @@ impl ManifestEdit {
     }
 }
 
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use std::fmt;
 
 impl Serializable for ManifestEdit {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         if version != MANIFEST_FORMAT_VERSION {
-            return Err(invalid_data(format!(
-                "Unsupported manifest version {version}"
-            )));
+            unreachable!("Unsupported manifest version {version}");
         }
 
         let edit = reader.read_u8()?;
@@ -659,7 +656,7 @@ impl Serializable for ManifestEdit {
                     sequence: reader.read_varint_u64()?,
                 })
             }
-            _ => Err(invalid_data(format!("ManifestEdit: {}", edit))),
+            _ => unreachable!("ManifestEdit: {}", edit),
         }
     }
 
@@ -925,6 +922,12 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    #[should_panic(expected = "ManifestEdit:")]
+    fn test_manifest_edit_rejects_invalid_tag() {
+        let _ = ManifestEdit::read_from(&ByteReader::new([0xfe]), 1);
+    }
+
+    #[test]
     fn test_create_and_drop_collection_serialization() {
         let edit = ManifestEdit::CreateCollection {
             name: "my_collection".to_string(),
@@ -1022,13 +1025,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Unsupported manifest version 2")]
     fn test_manifest_edit_rejects_unsupported_version() {
         let edit = ManifestEdit::ManifestRotation {
             manifest_number: 456,
         };
         let bytes = edit.to_vec(MANIFEST_FORMAT_VERSION);
 
-        assert!(ManifestEdit::try_from_vec(&bytes, 2).is_err());
+        let _ = ManifestEdit::try_from_vec(&bytes, 2);
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use crate::io::bitset::BitSet;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::storage::FIRST_USER_COLLECTION_ID;
 use std::collections::{BTreeMap, HashMap};
@@ -29,10 +28,7 @@ impl Serializable for Catalog {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let next_collection_id = reader.read_varint_u32()?;
         if next_collection_id < FIRST_USER_COLLECTION_ID {
-            return Err(invalid_data(format!(
-                "Invalid next user collection ID: {}",
-                next_collection_id
-            )));
+            unreachable!("Invalid next user collection ID: {}", next_collection_id);
         }
         let size = reader.read_varint_u64()? as usize;
         let mut collections = BTreeMap::new();
@@ -40,10 +36,7 @@ impl Serializable for Catalog {
         for _ in 0..size {
             let id = reader.read_varint_u32()?;
             if id < FIRST_USER_COLLECTION_ID {
-                return Err(invalid_data(format!(
-                    "Catalog contains reserved collection ID: {}",
-                    id
-                )));
+                unreachable!("Catalog contains reserved collection ID: {}", id);
             }
             let collection = Arc::new(CollectionMetadata::read_from(reader, version)?);
             let name = collection.name.clone();
@@ -320,10 +313,7 @@ impl Serializable for IdCreationStrategy {
             id_creation_strategy_tags::GENERATED => Ok(IdCreationStrategy::Generated),
             id_creation_strategy_tags::MANUAL => Ok(IdCreationStrategy::Manual),
             id_creation_strategy_tags::MIXED => Ok(IdCreationStrategy::Mixed),
-            _ => Err(invalid_data(format!(
-                "Invalid IdCreationStrategy byte: {}",
-                byte
-            ))),
+            _ => unreachable!("Invalid IdCreationStrategy byte: {}", byte),
         }
     }
 
@@ -744,7 +734,7 @@ impl Serializable for IndexDirection {
         match byte {
             index_direction_tags::ASCENDING => Ok(IndexDirection::Ascending),
             index_direction_tags::DESCENDING => Ok(IndexDirection::Descending),
-            _ => Err(invalid_data(format!("Invalid SortOrder byte: {}", byte))),
+            _ => unreachable!("Invalid IndexDirection byte: {}", byte),
         }
     }
 
@@ -898,10 +888,7 @@ impl Serializable for IndexDefinition {
             index_definition_tags::REGULAR => Ok(IndexDefinition::Regular(
                 Vec::<OrderedIndexField>::read_from(reader, version)?,
             )),
-            _ => Err(invalid_data(format!(
-                "Invalid IndexDefinition tag: {}",
-                tag
-            ))),
+            _ => unreachable!("Invalid IndexDefinition tag: {}", tag),
         }
     }
 

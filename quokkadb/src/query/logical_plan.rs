@@ -6,7 +6,7 @@ use crate::query::update::UpdateExpr;
 use crate::query::{Expr, Limit, Projection, ProjectionExpr, ReturnDocument, SortField};
 use crate::util::murmur_hash64::murmur_hash64a;
 use bson::Document;
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::sync::Arc;
 
 /// Represents the LogicalPlan for MongoDB-like operations
@@ -312,10 +312,7 @@ impl Serializable for LogicalPlan {
                 };
                 Ok(LogicalPlan::Limit { input, limit })
             }
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "Invalid tag for LogicalPlan",
-            )),
+            _ => unreachable!("Invalid tag for LogicalPlan"),
         }
     }
 
@@ -783,6 +780,12 @@ mod tests {
         proj_field, proj_fields, sort_asc,
     };
     use crate::query::{ComparisonOperator, SortOrder};
+
+    #[test]
+    #[should_panic(expected = "Invalid tag for LogicalPlan")]
+    fn test_logical_plan_rejects_invalid_tag() {
+        let _ = LogicalPlan::read_from(&ByteReader::new([0xfe]), 1);
+    }
 
     #[test]
     fn test_logical_plan_serialization_round_trip() {

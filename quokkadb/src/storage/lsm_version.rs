@@ -1,6 +1,5 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::options::options::Options;
 use crate::storage::internal_key::encode_record_key;
@@ -897,7 +896,7 @@ impl Serializable for DropKind {
                 let index_id = reader.read_varint_u32()?;
                 Ok(DropKind::Index(index_id))
             }
-            _ => Err(invalid_data(format!("Invalid DropKind tag: {}", tag))),
+            _ => unreachable!("Invalid DropKind tag: {}", tag),
         }
     }
 
@@ -1130,6 +1129,12 @@ mod tests {
     use crate::util::bson_utils::BsonKey;
     use bson::Bson;
     use std::sync::Arc;
+
+    #[test]
+    #[should_panic(expected = "Invalid DropKind tag")]
+    fn test_drop_kind_rejects_invalid_tag() {
+        let _ = DropKind::read_from(&ByteReader::new([0xfe]), 1);
+    }
 
     #[test]
     fn test_find_sstables_overlapping() {

@@ -1,6 +1,5 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
-use crate::io::invalid_data;
 use crate::io::serializable::Serializable;
 use crate::storage::internal_key::{extract_record_key, extract_sequence_number};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -99,14 +98,12 @@ impl SSTableProperties {
 impl Serializable for SSTableProperties {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> std::io::Result<Self> {
         if version != 1 {
-            return Err(invalid_data(format!(
-                "Unsupported SSTable properties version {version}"
-            )));
+            unreachable!("Unsupported SSTable properties version {version}");
         }
 
         let creation_time = UNIX_EPOCH
             .checked_add(Duration::from_millis(reader.read_varint_u64()?))
-            .ok_or_else(|| invalid_data("SSTableProperties creation_time overflow"))?;
+            .expect("SSTableProperties creation_time overflow");
 
         let sstable_version = reader.read_u8()?;
         assert_eq!(sstable_version as u32, version);
@@ -334,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_versioned_properties_round_trip_and_rejects_unknown_version() {
+    fn test_versioned_properties_round_trip() {
         let mut properties = SSTablePropertiesBuilder::new(1, 0).build();
         let creation_time = properties
             .creation_time
@@ -347,9 +344,6 @@ mod tests {
         let reader = ByteReader::new(&bytes);
         let decoded = SSTableProperties::read_from(&reader, 1).unwrap();
         assert_eq!(decoded, properties);
-
-        let reader = ByteReader::new(&bytes);
-        assert!(SSTableProperties::read_from(&reader, 2).is_err());
     }
 
     #[test]

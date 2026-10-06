@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
@@ -787,10 +787,7 @@ impl Serializable for SortOrder {
         match tag {
             0 => Ok(SortOrder::Ascending),
             1 => Ok(SortOrder::Descending),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "Invalid tag for SortOrder",
-            )),
+            _ => unreachable!("Invalid tag for SortOrder"),
         }
     }
 
@@ -1006,10 +1003,7 @@ impl Serializable for ComparisonOperator {
             5 => Ok(ComparisonOperator::Lte),
             6 => Ok(ComparisonOperator::In),
             7 => Ok(ComparisonOperator::Nin),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "Unknown comparison operator byte",
-            )),
+            _ => unreachable!("Unknown comparison operator byte"),
         }
     }
 
@@ -1065,10 +1059,7 @@ impl Serializable for PathComponent {
                 let index = reader.read_varint_u32()? as usize;
                 Ok(PathComponent::ArrayElement(index))
             }
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "Unknown path component type",
-            )),
+            _ => unreachable!("Unknown path component type"),
         }
     }
 
