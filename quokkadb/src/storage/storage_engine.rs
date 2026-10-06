@@ -616,32 +616,17 @@ impl StorageEngine {
     ) -> StorageResult<()> {
         self.check_error_mode()?;
 
-        let catalog = self.catalog();
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        let lsm_tree = self.lsm_tree.load();
+        let catalog = lsm_tree.catalog();
         let id = catalog
             .get_collection_by_name(old_name)
-            .map(|c| c.id)
+            .map(|collection| collection.id)
             .ok_or_else(|| StorageError::CollectionNotFound {
                 name: old_name.to_string(),
                 id: None,
             })?;
 
-        // Check that new name is not already taken
-        if catalog.get_collection_by_name(new_name).is_some() {
-            return Err(StorageError::CollectionAlreadyExists(new_name.to_string()));
-        }
-
-        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
-
-        // Re-check under lock to avoid TOCTOU
-        let lsm_tree = self.lsm_tree.load();
-        let catalog = lsm_tree.catalog();
-
-        if catalog.get_collection_by_name(old_name).is_none() {
-            return Err(StorageError::CollectionNotFound {
-                name: old_name.to_string(),
-                id: None,
-            });
-        }
         if catalog.get_collection_by_name(new_name).is_some() {
             return Err(StorageError::CollectionAlreadyExists(new_name.to_string()));
         }
