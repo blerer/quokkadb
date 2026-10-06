@@ -325,27 +325,13 @@ impl StorageEngine {
 
                 // If the corrupted wal contained some data we need to flush them to disk otherwise
                 // we can just drop the memtable.
-                if lsm_tree.imm_memtables[0].size() > 0 {
-                    lsm_tree = Self::flush_replayed_data(
-                        &options,
-                        &db_dir,
-                        &mut manifest,
-                        &mut lsm_tree,
-                        &next_file_number,
-                    )?;
-                } else {
-                    tracing::debug!(
-                        log_number = lsm_tree.imm_memtables[0].log_number,
-                        "ignoring empty memtable"
-                    );
-
-                    // Drop the empty memtable
-                    let edit = ManifestEdit::IgnoringEmptyMemtable {
-                        oldest_log_number: lsm_tree.imm_memtables[0].log_number,
-                    };
-                    lsm_tree = lsm_tree.apply(&edit);
-                    manifest.append_edit(&edit)?;
-                }
+                lsm_tree = Self::flush_replayed_data(
+                    &options,
+                    &db_dir,
+                    &mut manifest,
+                    &mut lsm_tree,
+                    &next_file_number,
+                )?;
                 wal
             };
 
@@ -497,6 +483,22 @@ impl StorageEngine {
         lsm_tree: &mut LsmTree,
         next_file_number: &AtomicU64,
     ) -> StorageResult<LsmTree> {
+        let imm_memtable = lsm_tree.imm_memtables[0].clone();
+        if imm_memtable.size() == 0 {
+            tracing::debug!(
+                log_number = imm_memtable.log_number,
+                "ignoring empty memtable"
+            );
+
+            // Drop the empty memtable
+            let edit = ManifestEdit::IgnoringEmptyMemtable {
+                oldest_log_number: imm_memtable.log_number,
+            };
+            let lsm_tree = lsm_tree.apply(&edit);
+            manifest.append_edit(&edit)?;
+            return Ok(lsm_tree);
+        }
+
         tracing::debug!(
             log_number = lsm_tree.imm_memtables[0].log_number,
             "flushing replayed data"
@@ -506,7 +508,6 @@ impl StorageEngine {
         // wal file.
         let sst_file = DbFile::new_sst(next_file_number.fetch_add(1, Ordering::Relaxed));
 
-        let imm_memtable = lsm_tree.imm_memtables[0].clone();
         let count_stats = imm_memtable.count_stats_for_flush();
 
         let sst = Arc::new(imm_memtable.flush(&db_dir, &sst_file, &options)?);

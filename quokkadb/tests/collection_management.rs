@@ -29,6 +29,38 @@ fn test_create_collection() {
 }
 
 #[test]
+fn test_drop_collection_survives_repeated_restarts_without_following_write() {
+    let dir = tempdir().unwrap();
+    {
+        let db = common::open_db(dir.path());
+        db.collection("users")
+            .create_if_missing()
+            .insert_one(doc! { "_id": 1, "name": "Alice" })
+            .unwrap();
+    }
+    {
+        let db = common::open_db(dir.path());
+        db.collection("users").drop_collection().unwrap();
+        assert!(db.list_collections().is_empty());
+    }
+    {
+        let db = common::open_db(dir.path());
+        assert!(db.list_collections().is_empty());
+        db.collection("users")
+            .create_if_missing()
+            .insert_one(doc! { "_id": 2, "name": "Bob" })
+            .unwrap();
+    }
+    let db = common::open_db(dir.path());
+    let collection = db.collection("users");
+    assert!(collection.find_one(doc! { "_id": 1 }).unwrap().is_none());
+    assert_eq!(
+        collection.find_one(doc! { "_id": 2 }).unwrap(),
+        Some(doc! { "_id": 2, "name": "Bob" })
+    );
+}
+
+#[test]
 fn test_create_collection_already_exists() {
     let dir = tempdir().unwrap();
     let db = common::open_db(dir.path());
