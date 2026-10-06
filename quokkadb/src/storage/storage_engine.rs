@@ -590,17 +590,14 @@ impl StorageEngine {
 
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<Option<u32>> {
         self.check_error_mode()?;
-        let id = self.catalog().get_collection_by_name(name).map(|c| c.id);
-
-        if id.is_none() {
-            // Collection does not exist, nothing to do
-            return Ok(None);
-        }
-
-        let id = id.unwrap();
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
         let lsm_tree = self.lsm_tree.load();
+        let Some(collection) = lsm_tree.catalog().get_collection_by_name(name) else {
+            // Collection does not exist, nothing to do
+            return Ok(None);
+        };
+        let id = collection.id;
         let edit = ManifestEdit::DropCollection {
             id,
             dropped_at: self.next_seq_number.load(Ordering::Relaxed),
