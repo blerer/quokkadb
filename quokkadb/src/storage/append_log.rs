@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{fmt, mem, result};
 
-
 /// The size ot the block used in the log file. The 4KB block optimize write efficiency by
 /// aligning with disk block sizes.
 pub const BUFFER_SIZE_IN_BYTES: usize = 4096;
@@ -242,14 +241,12 @@ impl<F: LogFileCreator> AppendLog<F> {
 
     #[cfg(test)]
     pub fn fail_append_after(&self, counter: usize) {
-        self.fail_append_after
-            .store(counter, Ordering::SeqCst);
+        self.fail_append_after.store(counter, Ordering::SeqCst);
     }
 
     #[cfg(test)]
     pub fn fail_rotate_after(&self, counter: usize) {
-        self.fail_rotate_after
-            .store(counter, Ordering::SeqCst);
+        self.fail_rotate_after.store(counter, Ordering::SeqCst);
     }
 }
 

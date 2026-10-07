@@ -2,7 +2,9 @@ mod common;
 
 use bson::doc;
 use quokkadb::error::Error;
-use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType, not};
+use quokkadb::{
+    ExplainDirection, ExplainNode, ExplainOperator, QuokkaDB, QuokkaDocument, QuokkaType, not,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -106,6 +108,57 @@ fn setup() -> (TempDir, QuokkaDB) {
         ])
         .unwrap();
     (dir, db)
+}
+
+fn explain_index_scan(node: &ExplainNode) -> Option<(&str, ExplainDirection, usize, bool)> {
+    if let ExplainOperator::IndexScan {
+        index_name,
+        direction,
+        equality_prefix_len,
+        has_range,
+    } = &node.operator
+    {
+        return Some((index_name, *direction, *equality_prefix_len, *has_range));
+    }
+
+    node.children.iter().find_map(explain_index_scan)
+}
+
+#[test]
+fn typed_equality_query_uses_typed_index() {
+    let dir = TempDir::new().unwrap();
+    let db = common::open_db(dir.path());
+    let collection = db.typed_collection::<User>("users").create_if_missing();
+    collection
+        .insert_many((0..40).map(|id| User {
+            id,
+            name: format!("user-{id}"),
+            age: id as i32,
+            active: id % 2 == 0,
+        }))
+        .unwrap();
+    let index_name = collection
+        .create_index(|user| user.age.index_asc())
+        .unwrap();
+    let query = collection.find(|user| user.age.eq(37));
+
+    let explain = query.explain().unwrap();
+    assert_eq!(
+        explain_index_scan(&explain.root),
+        Some((index_name.as_str(), ExplainDirection::Forward, 1, false)),
+        "unexpected typed explain plan: {explain:?}"
+    );
+
+    let users = query.execute_collect().unwrap();
+    assert_eq!(
+        users,
+        vec![User {
+            id: 37,
+            name: "user-37".to_string(),
+            age: 37,
+            active: false,
+        }]
+    );
 }
 
 #[test]

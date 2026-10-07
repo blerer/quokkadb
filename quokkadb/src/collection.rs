@@ -1,5 +1,6 @@
 use crate::collection_state::CollectionState;
 use crate::error::Error;
+use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
 pub use crate::query::ReturnDocument;
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
@@ -1083,22 +1084,40 @@ impl<'a> Find<'a> {
         self
     }
 
+    fn build_logical_plan(&self, collection_id: u32) -> Result<Arc<LogicalPlan>> {
+        let conditions = parser::parse_conditions(&self.filter)?;
+        let projection = parser::parse_optional_projection(self.options.projection.clone())?;
+        let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
+
+        Ok(LogicalPlanBuilder::scan(collection_id)
+            .filter(conditions)
+            .project(projection)
+            .sort(sort)
+            .limit(self.options.skip, self.options.limit)
+            .build_arc())
+    }
+
     /// Executes the query and returns an iterator over the resulting documents.
     /// Returns a `Result` containing an iterator of documents or an error.
     pub fn execute(&self) -> Result<QueryOutput> {
-        let build_plan = |collection_id| {
-            let conditions = parser::parse_conditions(&self.filter)?;
-            let projection = parser::parse_optional_projection(self.options.projection.clone())?;
-            let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
-            Ok(LogicalPlanBuilder::scan(collection_id)
-                .filter(conditions)
-                .project(projection)
-                .sort(sort)
-                .limit(self.options.skip, self.options.limit)
-                .build_arc())
-        };
+        self.state
+            .execute_query(|collection_id| self.build_logical_plan(collection_id))
+    }
 
-        self.state.execute_query(build_plan)
+    /// Returns the planned operators for this query without executing it.
+    ///
+    /// The operators are a diagnostic view of the current plan; optimizer
+    /// choices may change as the optimizer evolves. For typed queries, see
+    /// [`TypedFind::explain`](crate::typed_collection::TypedFind::explain).
+    pub fn explain(&self) -> Result<ExplainPlan> {
+        let planned = self
+            .state
+            .plan_query(|collection_id| self.build_logical_plan(collection_id))?;
+
+        Ok(match planned {
+            Some((plan, catalog)) => ExplainPlan::from_physical_plan(&plan, &catalog),
+            None => ExplainPlan::new(ExplainNode::new(ExplainOperator::NoOp, vec![])),
+        })
     }
 
     /// Executes the query and collects all matching documents.

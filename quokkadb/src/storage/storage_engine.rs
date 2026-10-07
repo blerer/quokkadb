@@ -1607,11 +1607,7 @@ impl StorageEngine {
     }
 
     pub fn wal_fail_write_after(&self, counter: usize) {
-        self.db_mutex
-            .lock()
-            .unwrap()
-            .wal
-            .fail_append_after(counter);
+        self.db_mutex.lock().unwrap().wal.fail_append_after(counter);
     }
 
     pub fn manifest_fail_write_after(&self, counter: usize) {
@@ -1623,11 +1619,7 @@ impl StorageEngine {
     }
 
     pub fn wal_fail_rotate_after(&self, counter: usize) {
-        self.db_mutex
-            .lock()
-            .unwrap()
-            .wal
-            .fail_rotate_after(counter);
+        self.db_mutex.lock().unwrap().wal.fail_rotate_after(counter);
     }
 
     pub fn manifest_fail_rotate_after(&self, counter: usize) {

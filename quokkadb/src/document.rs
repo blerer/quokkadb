@@ -1270,6 +1270,10 @@ impl<D> Filter<D> {
     pub(crate) fn into_expr(self) -> Arc<Expr> {
         self.expr
     }
+
+    pub(crate) fn as_expr(&self) -> Arc<Expr> {
+        self.expr.clone()
+    }
 }
 
 /// Builds a filter that excludes documents matching `filter`.

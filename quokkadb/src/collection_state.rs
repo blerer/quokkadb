@@ -3,6 +3,8 @@ use crate::error::{Error, collection_not_found_error, index_not_found_error};
 use crate::query::IndexKeySpec;
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::LogicalPlan;
+use crate::query::physical_plan::PhysicalPlan;
+use crate::storage::catalog::Catalog;
 use crate::{CollectionPolicy, CreateIndexOptions, DbImpl};
 use std::sync::Arc;
 
@@ -146,6 +148,21 @@ impl CollectionState {
 
         let plan = build_plan(collection_id)?;
         self.db.execute_query(collection_id, plan)
+    }
+
+    pub(crate) fn plan_query(
+        &self,
+        build_plan: impl FnOnce(u32) -> Result<Arc<LogicalPlan>>,
+    ) -> Result<Option<(Arc<PhysicalPlan>, Arc<Catalog>)>> {
+        let Some(collection_id) = self.db.get_collection_id(&self.name) else {
+            return match self.policy {
+                CollectionPolicy::Strict => Err(collection_not_found_error(&self.name)),
+                CollectionPolicy::CreateIfMissing => Ok(None),
+            };
+        };
+
+        let logical_plan = build_plan(collection_id)?;
+        Ok(Some(self.db.plan_query(collection_id, logical_plan)))
     }
 }
 

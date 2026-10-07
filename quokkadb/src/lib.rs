@@ -5,6 +5,7 @@ pub mod collection;
 mod collection_state;
 pub mod document;
 pub mod error;
+pub mod explain;
 mod id;
 mod index_builder;
 mod io;
@@ -24,6 +25,9 @@ pub use crate::document::{
     OptionalField, PushOptions, QueryFieldType, QuokkaDocument, QuokkaScalar, QuokkaType, Sort,
     TypedPath, TypedQueryField, TypedSelection, Update, not,
 };
+pub use crate::explain::{
+    ExplainDirection, ExplainNode, ExplainOperator, ExplainOperatorKind, ExplainPlan,
+};
 pub use crate::id::QuokkaId;
 pub use quokkadb_derive::{QuokkaDocument, QuokkaType};
 
@@ -40,7 +44,7 @@ use crate::query::optimizer::optimizer::Optimizer;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::query_cache::QueryCache;
 use crate::query::{IndexKeySpec, Parameters};
-use crate::storage::catalog::CollectionMetadata;
+use crate::storage::catalog::{Catalog, CollectionMetadata};
 use crate::storage::catalog::{
     CollectionOptions as InternalCollectionOptions,
     IdCreationStrategy as InternalIdCreationStrategy, IndexOptions,
@@ -556,11 +560,31 @@ impl DbImpl {
         self.executor.execute_cached(physical_plan, &parameters)
     }
 
+    /// Plans a read query using the same optimizer and cache as execution,
+    /// without running the resulting physical plan.
+    pub(crate) fn plan_query(
+        &self,
+        collection: u32,
+        logical_plan: Arc<LogicalPlan>,
+    ) -> (Arc<PhysicalPlan>, Arc<Catalog>) {
+        let (_, physical_plan, catalog) = self.build_optimized_query(collection, logical_plan);
+        (physical_plan, catalog)
+    }
+
     fn optimize_query(
         &self,
         collection: u32,
         logical_plan: Arc<LogicalPlan>,
     ) -> (Parameters, Arc<PhysicalPlan>) {
+        let (parameters, physical_plan, _) = self.build_optimized_query(collection, logical_plan);
+        (parameters, physical_plan)
+    }
+
+    fn build_optimized_query(
+        &self,
+        collection: u32,
+        logical_plan: Arc<LogicalPlan>,
+    ) -> (Parameters, Arc<PhysicalPlan>, Arc<Catalog>) {
         // First, normalize the logical plan
         let normalized_plan = self.optimizer.normalize(logical_plan);
         // Then, parametrize the plan to collect parameters
@@ -571,10 +595,13 @@ impl DbImpl {
         let physical_plan =
             self.query_cache
                 .get_or_insert_with(collection, logical_plan_for_cache, || {
-                    self.optimizer
-                        .optimize(logical_plan, catalog, self.storage_engine.as_ref())
+                    self.optimizer.optimize(
+                        logical_plan,
+                        catalog.clone(),
+                        self.storage_engine.as_ref(),
+                    )
                 });
-        (parameters, physical_plan)
+        (parameters, physical_plan, catalog)
     }
 }
 
