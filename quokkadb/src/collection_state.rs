@@ -14,6 +14,12 @@ pub(crate) struct CollectionState {
     policy: CollectionPolicy,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum Hint {
+    Index(String),
+    CollectionScan,
+}
+
 impl CollectionState {
     pub(crate) fn new(db: Arc<DbImpl>, name: String) -> Self {
         Self {
@@ -38,6 +44,18 @@ impl CollectionState {
             }
         } else {
             Ok(collection_id.unwrap())
+        }
+    }
+
+    fn resolve_hint_id(&self, collection_id: u32, hint: Option<&Hint>) -> Result<Option<u32>> {
+        match hint {
+            None => Ok(None),
+            Some(Hint::CollectionScan) => Ok(Some(0)),
+            Some(Hint::Index(index_name)) => self
+                .db
+                .get_index_id(collection_id, index_name)
+                .map(Some)
+                .ok_or_else(|| index_not_found_error(&self.name, index_name)),
         }
     }
 
@@ -106,17 +124,20 @@ impl CollectionState {
 
     pub(crate) fn execute_write(
         &self,
-        build_plan: impl FnOnce(u32) -> Result<LogicalPlan>,
+        hint: Option<&Hint>,
+        build_plan: impl FnOnce(u32, Option<u32>) -> Result<LogicalPlan>,
         sync: bool,
     ) -> Result<WriteResult> {
         let collection_id = self.resolve_collection_id()?;
-        let plan = build_plan(collection_id)?;
+        let hint_id = self.resolve_hint_id(collection_id, hint)?;
+        let plan = build_plan(collection_id, hint_id)?;
         self.db.execute_write(collection_id, plan, sync)
     }
 
     pub(crate) fn execute_delete(
         &self,
-        build_plan: impl FnOnce(u32) -> Result<LogicalPlan>,
+        hint: Option<&Hint>,
+        build_plan: impl FnOnce(u32, Option<u32>) -> Result<LogicalPlan>,
         sync: bool,
         return_document: bool,
     ) -> Result<WriteResult> {
@@ -131,13 +152,15 @@ impl CollectionState {
             };
         };
 
-        let plan = build_plan(collection_id)?;
+        let hint_id = self.resolve_hint_id(collection_id, hint)?;
+        let plan = build_plan(collection_id, hint_id)?;
         self.db.execute_write(collection_id, plan, sync)
     }
 
     pub(crate) fn execute_query(
         &self,
-        build_plan: impl FnOnce(u32) -> Result<Arc<LogicalPlan>>,
+        hint: Option<&Hint>,
+        build_plan: impl FnOnce(u32, Option<u32>) -> Result<Arc<LogicalPlan>>,
     ) -> Result<QueryOutput> {
         let Some(collection_id) = self.db.get_collection_id(&self.name) else {
             return match self.policy {
@@ -146,13 +169,15 @@ impl CollectionState {
             };
         };
 
-        let plan = build_plan(collection_id)?;
+        let hint_id = self.resolve_hint_id(collection_id, hint)?;
+        let plan = build_plan(collection_id, hint_id)?;
         self.db.execute_query(collection_id, plan)
     }
 
     pub(crate) fn plan_query(
         &self,
-        build_plan: impl FnOnce(u32) -> Result<Arc<LogicalPlan>>,
+        hint: Option<&Hint>,
+        build_plan: impl FnOnce(u32, Option<u32>) -> Result<Arc<LogicalPlan>>,
     ) -> Result<Option<(Arc<PhysicalPlan>, Arc<Catalog>)>> {
         let Some(collection_id) = self.db.get_collection_id(&self.name) else {
             return match self.policy {
@@ -161,8 +186,9 @@ impl CollectionState {
             };
         };
 
-        let logical_plan = build_plan(collection_id)?;
-        Ok(Some(self.db.plan_query(collection_id, logical_plan)))
+        let hint_id = self.resolve_hint_id(collection_id, hint)?;
+        let logical_plan = build_plan(collection_id, hint_id)?;
+        Ok(Some(self.db.plan_query(collection_id, logical_plan)?))
     }
 }
 

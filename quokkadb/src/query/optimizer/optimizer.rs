@@ -1,3 +1,4 @@
+use crate::error::{Error, Result};
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter};
@@ -94,6 +95,7 @@ enum LogicalPlanKey {
     NoOp,
     CollectionScan {
         collection: u32,
+        hint: Option<u32>,
         projection: Option<Vec<u8>>,
         filter: Option<Arc<Expr>>,
         sort: Option<Arc<Vec<SortField>>>,
@@ -125,6 +127,7 @@ impl LogicalPlanKey {
             }
             LogicalPlan::CollectionScan {
                 collection,
+                hint,
                 projection,
                 filter,
                 sort,
@@ -132,6 +135,7 @@ impl LogicalPlanKey {
                 assert!(child_groups.is_empty());
                 LogicalPlanKey::CollectionScan {
                     collection: *collection,
+                    hint: hint.clone(),
                     projection: projection.as_ref().map(|p| {
                         let mut writer = ByteWriter::new();
                         p.write_to(&mut writer, 1);
@@ -266,12 +270,12 @@ impl Optimizer {
         plan: Arc<LogicalPlan>,
         catalog: Arc<Catalog>,
         count_stats: &dyn CountStatSource,
-    ) -> Arc<PhysicalPlan> {
+    ) -> Result<Arc<PhysicalPlan>> {
         let _span = trace_span!("optimization").entered();
         let start = Instant::now();
 
         if matches!(plan.as_ref(), &LogicalPlan::NoOp) {
-            return Arc::new(PhysicalPlan::NoOp);
+            return Ok(Arc::new(PhysicalPlan::NoOp));
         }
 
         let mut memo = Memo::new();
@@ -286,7 +290,7 @@ impl Optimizer {
                 &mut memo,
                 root_group_id,
                 &required_props,
-            )
+            )?
             .plan
             .clone();
 
@@ -297,7 +301,7 @@ impl Optimizer {
             "optimization finished"
         );
 
-        physical_plan
+        Ok(physical_plan)
     }
 
     pub fn normalize(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
@@ -359,10 +363,10 @@ impl Optimizer {
         memo: &mut Memo,
         group_id: GroupId,
         req: &ReqProps,
-    ) -> Arc<Best> {
+    ) -> Result<Arc<Best>> {
         // 1. Check memoized best for this (group, req)
         if let Some(best) = memo.groups[group_id].best_plans.get(req) {
-            return best.clone();
+            return Ok(best.clone());
         }
 
         let logical_plan = memo.groups[group_id].logical[0].clone();
@@ -375,7 +379,8 @@ impl Optimizer {
         let mut child_bests: Vec<Arc<Best>> = Vec::with_capacity(child_nodes.len());
         for child_node in child_nodes.into_iter() {
             let child_group = memo.add_group(child_node);
-            let child_best = self.best_expr(catalog, count_stats, memo, child_group, &child_reqs);
+            let child_best =
+                self.best_expr(catalog, count_stats, memo, child_group, &child_reqs)?;
             child_bests.push(child_best);
         }
 
@@ -386,7 +391,7 @@ impl Optimizer {
             logical_plan.as_ref(),
             &child_bests,
             req,
-        );
+        )?;
 
         // 5. Select best candidate based on cost
         let mut best: Option<Candidate> = None;
@@ -396,7 +401,9 @@ impl Optimizer {
             }
         }
 
-        let best = best.expect("Failed to produce a physical plan");
+        let best = best.ok_or_else(|| {
+            Error::InvalidRequest("The requested index cannot be used for this query".to_string())
+        })?;
         let best = Arc::new(Best {
             plan: best.plan,
             cost: best.cost,
@@ -407,7 +414,7 @@ impl Optimizer {
         memo.groups[group_id]
             .best_plans
             .insert(req.clone(), best.clone());
-        best
+        Ok(best)
     }
 
     fn implement_node(
@@ -417,29 +424,39 @@ impl Optimizer {
         node: &LogicalPlan,
         child_bests: &[Arc<Best>],
         req: &ReqProps,
-    ) -> Vec<Candidate> {
+    ) -> Result<Vec<Candidate>> {
         match node {
             LogicalPlan::CollectionScan {
-                collection, filter, ..
+                collection,
+                hint,
+                filter,
+                ..
             } => {
                 assert!(child_bests.is_empty());
-                self.implement_collection_scan_node(catalog, count_stats, *collection, filter, req)
+                self.implement_collection_scan_node(
+                    catalog,
+                    count_stats,
+                    *collection,
+                    *hint,
+                    filter,
+                    req,
+                )
             }
             LogicalPlan::Filter { condition, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_filter_node(count_stats, &child_bests, condition)
+                Ok(self.implement_filter_node(count_stats, &child_bests, condition))
             }
             LogicalPlan::Projection { projection, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_projection_node(count_stats, &child_bests, projection)
+                Ok(self.implement_projection_node(count_stats, &child_bests, projection))
             }
             LogicalPlan::Sort { sort_fields, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_sort_node(count_stats, &child_bests, sort_fields, req)
+                Ok(self.implement_sort_node(count_stats, &child_bests, sort_fields, req))
             }
             LogicalPlan::Limit { limit, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                self.implement_limit_node(count_stats, &child_bests, limit)
+                Ok(self.implement_limit_node(count_stats, &child_bests, limit))
             }
             _ => panic!(
                 "Unsupported logical plan node in implementation: {:?}",
@@ -532,138 +549,196 @@ impl Optimizer {
         catalog: &Catalog,
         count_stats: &dyn CountStatSource,
         collection: u32,
+        hint: Option<u32>,
         filter: &Option<Arc<Expr>>,
         req: &ReqProps,
-    ) -> Vec<Candidate> {
-        let primary_key = Expr::Field(vec!["_id".into()]);
-        let mut candidates = vec![self.create_pk_range_scan_candidate(
-            count_stats,
-            collection,
-            primary_key.clone(),
-            Interval::all(),
-            filter.clone(),
-            req,
-        )];
+    ) -> Result<Vec<Candidate>> {
+        let hinted_index = Self::get_hint_info(catalog, &collection, hint)?;
 
-        let Some(expr) = filter else {
+        let primary_key = Expr::Field(vec!["_id".into()]);
+        let mut candidates = if hint.is_some_and(|index_id| index_id != 0) {
+            Vec::new()
+        } else {
+            vec![self.create_pk_range_scan_candidate(
+                count_stats,
+                collection,
+                primary_key.clone(),
+                Interval::all(),
+                filter.clone(),
+                req,
+            )]
+        };
+
+        if let Some(expr) = filter {
+            // Flatten the expression into a list of conjuncts
+            let mut conjuncts = Vec::new();
+            if let Expr::And(conditions) = expr.as_ref() {
+                for cond in conditions {
+                    conjuncts.push(cond.as_ref());
+                }
+            } else {
+                conjuncts.push(expr);
+            }
+
+            // Map field names to their corresponding filter expressions
+            let field_filters_map: HashMap<&Expr, &Expr> = conjuncts
+                .iter()
+                .filter_map(|e| {
+                    if let Expr::FieldFilters { field, .. } = e {
+                        Some((field.as_ref(), *e))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Handle primary-key lookups when no secondary index was explicitly requested.
+            if hint.is_none() || hint == Some(0) {
+                if let Some(Expr::FieldFilters {
+                    field: _field,
+                    filters,
+                }) = field_filters_map.get(&primary_key).map(|e| *e)
+                {
+                    // After normalization, we know that:
+                    // * if the field filters exists it must contain at least one filter
+                    // * if there is a sargable filter it will be the first filter
+                    assert!(!filters.is_empty(), "There should be at least one filter");
+
+                    let first_filter = filters.first().unwrap();
+
+                    if is_sargable(first_filter) {
+                        let sargable = first_filter;
+                        let residual = compute_residual_filter(expr.clone(), &primary_key);
+
+                        match sargable.as_ref() {
+                            Expr::Comparison { operator, value } => match operator {
+                                ComparisonOperator::In => {
+                                    let residual =
+                                        compute_residual_filter(expr.clone(), &primary_key);
+                                    let candidate = self.create_multipoint_search_candidate(
+                                        count_stats,
+                                        collection,
+                                        value.clone(),
+                                        residual,
+                                        req,
+                                    );
+                                    // This is likely the best plan, so we can just return it.
+                                    return Ok(vec![candidate]);
+                                }
+                                _ => unreachable!(), // Should be filtered by is_sargable_leaf
+                            },
+                            Expr::Interval(interval) => {
+                                if interval.is_point() {
+                                    // Point search
+                                    let key = interval.start_bound_value().unwrap().clone();
+                                    let candidate = self.create_point_search_candidate(
+                                        count_stats,
+                                        collection,
+                                        key,
+                                        residual,
+                                    );
+                                    // If we can answer to the query with a point search, we know
+                                    // that it is the fastest that we can use. So, instead of
+                                    // exploring other alternatives, we can return it directly.
+                                    return Ok(vec![candidate]);
+                                } else {
+                                    // Range scan
+                                    candidates[0] = self.create_pk_range_scan_candidate(
+                                        count_stats,
+                                        collection,
+                                        primary_key.clone(),
+                                        interval.clone(),
+                                        residual,
+                                        req,
+                                    );
+                                }
+                            }
+                            Expr::Exists(true) => {
+                                candidates[0] = self.create_pk_range_scan_candidate(
+                                    count_stats,
+                                    collection,
+                                    primary_key.clone(),
+                                    Interval::all(),
+                                    residual,
+                                    req,
+                                );
+                            }
+                            _ => unreachable!(), // Should be filtered by is_sargable_leaf
+                        }
+                    }
+                }
+            }
+
+            self.add_index_scan_candidates(
+                count_stats,
+                catalog,
+                collection,
+                filter,
+                Some(&field_filters_map),
+                hint,
+                req,
+                &mut candidates,
+            );
+        } else {
             self.add_index_scan_candidates(
                 count_stats,
                 catalog,
                 collection,
                 filter,
                 None,
+                hint,
                 req,
                 &mut candidates,
             );
-            return candidates;
-        };
+        }
 
-        // Flatten the expression into a list of conjuncts
-        let mut conjuncts = Vec::new();
-        if let Expr::And(conditions) = expr.as_ref() {
-            for cond in conditions {
-                conjuncts.push(cond.as_ref());
+        if let Some((index_name, collection_name)) = hinted_index {
+            if candidates.is_empty() {
+                return Err(Error::InvalidRequest(format!(
+                    "Cannot use hinted index '{}' on collection '{}': no candidate scan can use it for this query",
+                    index_name, collection_name
+                )));
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    fn get_hint_info(
+        catalog: &Catalog,
+        collection: &u32,
+        hint: Option<u32>,
+    ) -> Result<Option<(String, String)>> {
+        let hinted_index = if let Some(index_id) = hint {
+            let metadata = catalog
+                .get_collection_by_id(&collection)
+                .expect("The collection should exist");
+            if index_id == 0 {
+                Some(("collection scan".to_string(), metadata.name.clone()))
+            } else {
+                let index =
+                    metadata
+                        .get_index_by_id(index_id)
+                        .ok_or_else(|| Error::IndexNotFound {
+                            collection_name: metadata.name.clone(),
+                            index_name: format!("index id {index_id}"),
+                            id: Some(index_id),
+                        })?;
+
+                if !index.is_queryable() {
+                    return Err(Error::InvalidRequest(format!(
+                        "Cannot use hinted index '{}' on collection '{}': the index is not queryable",
+                        index.name(),
+                        metadata.name
+                    )));
+                }
+
+                Some((index.name().to_string(), metadata.name.clone()))
             }
         } else {
-            conjuncts.push(expr);
-        }
-
-        // Map field names to their corresponding filter expressions
-        let field_filters_map: HashMap<&Expr, &Expr> = conjuncts
-            .iter()
-            .filter_map(|e| {
-                if let Expr::FieldFilters { field, .. } = e {
-                    Some((field.as_ref(), *e))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Handle primary key separately
-        if let Some(Expr::FieldFilters {
-            field: _field,
-            filters,
-        }) = field_filters_map.get(&primary_key).map(|e| *e)
-        {
-            // After normalization, we know that:
-            // * if the field filters exists it must contain at least one filter
-            // * if there is a sargable filter it will be the first filter
-            assert!(!filters.is_empty(), "There should be at least one filter");
-
-            let first_filter = filters.first().unwrap();
-
-            if is_sargable(first_filter) {
-                let sargable = first_filter;
-                let residual = compute_residual_filter(expr.clone(), &primary_key);
-
-                match sargable.as_ref() {
-                    Expr::Comparison { operator, value } => match operator {
-                        ComparisonOperator::In => {
-                            let residual = compute_residual_filter(expr.clone(), &primary_key);
-                            let candidate = self.create_multipoint_search_candidate(
-                                count_stats,
-                                collection,
-                                value.clone(),
-                                residual,
-                                req,
-                            );
-                            // This is likely the best plan, so we can just return it.
-                            return vec![candidate];
-                        }
-                        _ => unreachable!(), // Should be filtered by is_sargable_leaf
-                    },
-                    Expr::Interval(interval) => {
-                        if interval.is_point() {
-                            // Point search
-                            let key = interval.start_bound_value().unwrap().clone();
-                            let candidate = self.create_point_search_candidate(
-                                count_stats,
-                                collection,
-                                key,
-                                residual,
-                            );
-                            // If we can answer to the query with a point search, we know that it is
-                            // the fastest that we can use. So, instead of exploring other alternative
-                            // we can directly return it
-                            return vec![candidate];
-                        } else {
-                            // Range scan
-                            candidates[0] = self.create_pk_range_scan_candidate(
-                                count_stats,
-                                collection,
-                                primary_key,
-                                interval.clone(),
-                                residual,
-                                req,
-                            );
-                        }
-                    }
-                    Expr::Exists(true) => {
-                        candidates[0] = self.create_pk_range_scan_candidate(
-                            count_stats,
-                            collection,
-                            primary_key.clone(),
-                            Interval::all(),
-                            residual,
-                            req,
-                        );
-                    }
-                    _ => unreachable!(), // Should be filtered by is_sargable_leaf
-                }
-            }
-        }
-
-        self.add_index_scan_candidates(
-            count_stats,
-            catalog,
-            collection,
-            filter,
-            Some(&field_filters_map),
-            req,
-            &mut candidates,
-        );
-        candidates
+            None
+        };
+        Ok(hinted_index)
     }
 
     fn add_index_scan_candidates(
@@ -673,6 +748,7 @@ impl Optimizer {
         collection: u32,
         filter: &Option<Arc<Expr>>,
         field_filters_map: Option<&HashMap<&Expr, &Expr>>,
+        hint: Option<u32>,
         req: &ReqProps,
         candidates: &mut Vec<Candidate>,
     ) {
@@ -681,6 +757,10 @@ impl Optimizer {
             .expect("The collection should exists");
 
         for index in metadata.queryable_indexes() {
+            if hint.is_some_and(|hinted_index| hinted_index != index.id) {
+                continue;
+            }
+
             let index_fields = match &index.definition {
                 IndexDefinition::Regular(fields) => fields,
             };
@@ -713,6 +793,19 @@ impl Optimizer {
                 .as_ref()
                 .is_some_and(|order| index_scan_direction(index_fields, order.as_slice()).is_some())
             {
+                candidates.push(self.create_index_scan_candidate(
+                    count_stats,
+                    collection,
+                    index.id,
+                    IndexScanRangeExpr {
+                        equal_prefix: vec![],
+                        tail: None,
+                    },
+                    filter.clone(),
+                    req,
+                    index_fields,
+                ));
+            } else if hint == Some(index.id) && filter.is_none() && req.order.is_none() {
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
                     collection,
@@ -886,8 +979,7 @@ impl Optimizer {
         sort_fields: &Arc<Vec<SortField>>,
         req: &ReqProps,
     ) -> Vec<Candidate> {
-        // TODO: the parameter should be exposed at the Options levels as a number of bytes and
-        // we should use cardinality information to deduct the number of rows.
+        // TODO: the parameter should be exposed at the Options levels as a number of bytes and we should use cardinality information to deduct the number of rows.
         const MAX_IN_MEMORY_ROWS: usize = 5000;
 
         let child = &child_bests[0];
@@ -1123,7 +1215,7 @@ mod parametrize_test {
     fn test_parametrize_simple_filter() {
         let optimizer = Optimizer::new();
         let collection = 14;
-        let plan = LogicalPlanBuilder::scan(collection)
+        let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
             .build_arc();
 
@@ -1136,7 +1228,7 @@ mod parametrize_test {
 
         // Check plan
         let expected_filter = field_filters(field(["a"]), vec![eq(placeholder(0))]);
-        let expected_plan = LogicalPlanBuilder::scan(collection)
+        let expected_plan = LogicalPlanBuilder::scan(collection, None)
             .filter(expected_filter)
             .build_arc();
 
@@ -1171,7 +1263,7 @@ mod parametrize_test {
     fn test_parametrize_complex_filter() {
         let optimizer = Optimizer::new();
         let collection = 14;
-        let plan = LogicalPlanBuilder::scan(collection)
+        let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(and(vec![
                 field_filters(field(["a"]), vec![eq(lit(10))]),
                 field_filters(field(["b"]), vec![eq(lit("hello"))]),
@@ -1191,7 +1283,7 @@ mod parametrize_test {
             field_filters(field(["b"]), vec![eq(placeholder(1))]),
         ]);
 
-        let expected_plan = LogicalPlanBuilder::scan(collection)
+        let expected_plan = LogicalPlanBuilder::scan(collection, None)
             .filter(expected_condition)
             .build_arc();
 
@@ -1202,7 +1294,7 @@ mod parametrize_test {
     fn test_parametrize_no_literals() {
         let optimizer = Optimizer::new();
         let collection = 14;
-        let plan = LogicalPlanBuilder::scan(collection)
+        let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(field_filters(field(["a"]), vec![exists(true)]))
             .build_arc();
         let plan_clone = plan.clone();
@@ -1239,7 +1331,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_collection_scan_no_filter() {
-        let input = LogicalPlanBuilder::scan(COLLECTION).build_arc();
+        let input = LogicalPlanBuilder::scan(COLLECTION, None).build_arc();
         let output = full_scan_plan();
 
         check_optimization(input, output);
@@ -1248,7 +1340,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_scan_with_non_pk_filter() {
         let filters = field_filters(field(["a"]), vec![gt(lit(10))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters.clone())
             .build_arc();
 
@@ -1269,7 +1361,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_projection() {
         let projection = include(proj_fields([("name", proj_field())]));
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .project(Some(projection.clone()))
             .build_arc();
 
@@ -1283,7 +1375,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_limit() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .limit(Some(10), Some(20))
             .build_arc();
         let output = PhysicalPlan::Limit {
@@ -1298,7 +1390,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_pk_point_search() {
         let filters = field_filters(field(["_id"]), vec![eq(lit(123))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
 
@@ -1315,7 +1407,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_pk_range_scan() {
         let filters = field_filters(field(["_id"]), vec![gt(lit(123))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
 
@@ -1336,7 +1428,7 @@ mod optimizer_tests {
             field_filters(field(["_id"]), vec![gt(lit(123))]),
             field_filters(field(["a"]), vec![gt(lit(10))]),
         ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
 
@@ -1360,7 +1452,7 @@ mod optimizer_tests {
     #[test]
     fn test_pk_exists_true_is_full_scan() {
         let filters = field_filters(field(["_id"]), vec![exists(true)]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
         let output = full_scan_plan();
@@ -1370,7 +1462,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_sort_elimination_pk_asc() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["_id"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .sort(Some(sort_fields))
             .build_arc();
 
@@ -1383,7 +1475,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_sort_elimination_pk_desc() {
         let sort_fields = Arc::new(vec![SortField::desc(field(["_id"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .sort(Some(sort_fields))
             .build_arc();
 
@@ -1399,7 +1491,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_sort_elimination_point_search() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(field_filters(field(["_id"]), vec![eq(lit(123))]))
             .sort(Some(sort_fields))
             .build_arc();
@@ -1418,7 +1510,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_topk_heap_sort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .sort(Some(sort_fields.clone()))
             .limit(Some(5), Some(10))
             .build_arc();
@@ -1441,7 +1533,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_external_merge_sort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .sort(Some(sort_fields.clone()))
             .build_arc();
 
@@ -1456,7 +1548,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_limit_elimination() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(field_filters(field(["_id"]), vec![eq(lit(123))]))
             .limit(None, Some(10))
             .build_arc();
@@ -1476,7 +1568,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_pk_range_scan_with_sort_and_limit() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(field_filters(field(["_id"]), vec![gt(lit(123))]))
             .sort(Some(sort_fields.clone()))
             .limit(Some(5), Some(10))
@@ -1508,7 +1600,7 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_limit_elimination_with_heapsort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .sort(Some(sort_fields.clone()))
             .limit(None, Some(10))
             .build_arc();
@@ -1526,7 +1618,7 @@ mod optimizer_tests {
     fn test_optimize_pk_multipoint_search() {
         let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
         let filters = field_filters(field(["_id"]), vec![within(lit(values))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
 
@@ -1546,7 +1638,7 @@ mod optimizer_tests {
         let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
         let filters = field_filters(field(["_id"]), vec![within(lit(values))]);
         let sort_fields = Arc::new(vec![SortField::desc(field(["_id"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .sort(Some(sort_fields))
             .build_arc();
@@ -1569,7 +1661,7 @@ mod optimizer_tests {
             field_filters(field(["_id"]), vec![within(lit(values))]),
             field_filters(field(["a"]), vec![gt(lit(10))]),
         ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
             .filter(filters)
             .build_arc();
 
@@ -1598,22 +1690,58 @@ mod optimizer_tests {
         catalog: Arc<Catalog>,
         output: PhysicalPlan,
     ) {
-        check_optimization_with_catalog_and_stats(input, catalog, CountStats::default(), output);
+        check_optimization_with_catalog_and_stats(input, catalog, CountStats::default(), &output);
     }
 
     fn check_optimization_with_catalog_and_stats(
         input: Arc<LogicalPlan>,
         catalog: Arc<Catalog>,
         count_stats: CountStats,
-        output: PhysicalPlan,
+        output: &PhysicalPlan,
     ) {
+        let physical_plan = optimize_with_catalog_and_stats(input, catalog, count_stats)
+            .expect("test logical plan should be optimizable");
+        assert_eq!(physical_plan.as_ref(), output)
+    }
+
+    fn check_optimization_fail(
+        input: Arc<LogicalPlan>,
+        catalog: Arc<Catalog>,
+        count_stats: CountStats,
+        error: &str,
+    ) {
+        let result = optimize_with_catalog_and_stats(input, catalog, count_stats);
+        if let Err(ref e) = result {
+            assert_eq!(e.to_string(), error);
+        } else {
+            panic!("Expected optimization to fail, but it succeeded");
+        }
+    }
+
+    fn optimize_with_catalog_and_stats(
+        input: Arc<LogicalPlan>,
+        catalog: Arc<Catalog>,
+        count_stats: CountStats,
+    ) -> Result<Arc<PhysicalPlan>> {
         let optimizer = Optimizer::new();
         // First, normalize the logical plan
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, _parameters) = optimizer.parametrize(normalized_plan);
-        let physical_plan = optimizer.optimize(logical_plan, catalog, &count_stats);
-        assert_eq!(physical_plan.as_ref(), &output)
+        optimizer.optimize(logical_plan, catalog, &count_stats)
+    }
+
+    fn index_stats(collection_count: i64, index_count: i64) -> CountStats {
+        CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), collection_count),
+            (
+                CountStatsKey::Index {
+                    collection: COLLECTION,
+                    index: 1,
+                },
+                index_count,
+            ),
+        ]))
     }
 
     fn full_scan_plan() -> PhysicalPlan {
@@ -1624,237 +1752,6 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         }
-    }
-
-    #[test]
-    fn test_optimize_sort_elimination_single_field_index() {
-        let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(Some(sort_fields))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 1,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![],
-                tail: None,
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_sort_elimination_compound_index_prefix() {
-        let sort_fields = Arc::new(vec![
-            SortField::asc(field(["a"])),
-            SortField::desc(field(["b"])),
-        ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(Some(sort_fields))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 2,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![],
-                tail: None,
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_sort_elimination_compound_index_prefix_reverse() {
-        let sort_fields = Arc::new(vec![
-            SortField::desc(field(["a"])),
-            SortField::asc(field(["b"])),
-        ]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .sort(Some(sort_fields))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 2,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![],
-                tail: None,
-            },
-            direction: Direction::Reverse,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_single_field_index_equality_uses_index_scan_range() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 1,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![placeholder(0)],
-                tail: None,
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_compound_index_prefix_plus_tail_range_uses_index_scan() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(and(vec![
-                field_filters(field(["a"]), vec![eq(lit(10))]),
-                field_filters(field(["b"]), vec![gt(lit(20))]),
-            ]))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 2,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![placeholder(0)],
-                tail: Some(Interval::greater_than(placeholder(1))),
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_prefers_more_selective_compound_index_for_two_field_equality() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(and(vec![
-                field_filters(field(["a"]), vec![eq(lit(10))]),
-                field_filters(field(["b"]), vec![eq(lit(20))]),
-            ]))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 2,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![placeholder(0), placeholder(1)],
-                tail: None,
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
-    }
-
-    #[test]
-    fn test_optimize_non_indexed_field_still_uses_collection_scan() {
-        let filters = field_filters(field(["z"]), vec![eq(lit(99))]);
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(filters)
-            .build_arc();
-
-        let output = PhysicalPlan::CollectionScan {
-            collection: COLLECTION,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: Some(field_filters(
-                field(["z"]),
-                [interval(Interval::closed(placeholder(0), placeholder(0)))],
-            )),
-            projection: None,
-        };
-
-        check_optimization(input, output);
-    }
-
-    #[test]
-    fn test_optimize_prefers_index_scan_when_count_stats_favor_index() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build_arc();
-
-        let output = PhysicalPlan::IndexScan {
-            collection: COLLECTION,
-            index: 1,
-            range: IndexScanRangeExpr {
-                equal_prefix: vec![placeholder(0)],
-                tail: None,
-            },
-            direction: Direction::Forward,
-            filter: None,
-            projection: None,
-        };
-
-        check_optimization_with_catalog_and_stats(
-            input,
-            indexed_test_catalog(),
-            CountStats::new(BTreeMap::from([
-                (CountStatsKey::Collection(COLLECTION), 10_000),
-                (
-                    CountStatsKey::Index {
-                        collection: COLLECTION,
-                        index: 1,
-                    },
-                    100,
-                ),
-            ])),
-            output,
-        );
-    }
-
-    #[test]
-    fn test_optimize_prefers_collection_scan_when_count_stats_favor_collection() {
-        let input = LogicalPlanBuilder::scan(COLLECTION)
-            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
-            .build_arc();
-
-        let output = PhysicalPlan::CollectionScan {
-            collection: COLLECTION,
-            range: Interval::all(),
-            direction: Direction::Forward,
-            filter: Some(field_filters(
-                field(["a"]),
-                [interval(Interval::closed(placeholder(0), placeholder(0)))],
-            )),
-            projection: None,
-        };
-
-        check_optimization_with_catalog_and_stats(
-            input,
-            indexed_test_catalog(),
-            CountStats::new(BTreeMap::from([
-                (CountStatsKey::Collection(COLLECTION), 10),
-                (
-                    CountStatsKey::Index {
-                        collection: COLLECTION,
-                        index: 1,
-                    },
-                    10_000,
-                ),
-            ])),
-            output,
-        );
     }
 
     fn test_catalog() -> Arc<Catalog> {
@@ -1892,5 +1789,463 @@ mod optimizer_tests {
             .mark_index_queryable(COLLECTION, 1, 5)
             .mark_index_queryable(COLLECTION, 2, 6);
         Arc::new(catalog)
+    }
+
+    #[test]
+    fn test_optimize_sort_elimination_single_field_index() {
+        let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .sort(Some(sort_fields))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_sort_elimination_compound_index_prefix() {
+        let sort_fields = Arc::new(vec![
+            SortField::asc(field(["a"])),
+            SortField::desc(field(["b"])),
+        ]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .sort(Some(sort_fields))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_sort_elimination_compound_index_prefix_reverse() {
+        let sort_fields = Arc::new(vec![
+            SortField::desc(field(["a"])),
+            SortField::asc(field(["b"])),
+        ]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .sort(Some(sort_fields))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Reverse,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_single_field_index_equality_uses_index_scan_range() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_compound_index_prefix_plus_tail_range_uses_index_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and(vec![
+                field_filters(field(["a"]), vec![eq(lit(10))]),
+                field_filters(field(["b"]), vec![gt(lit(20))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: Some(Interval::greater_than(placeholder(1))),
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_prefers_more_selective_compound_index_for_two_field_equality() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and(vec![
+                field_filters(field(["a"]), vec![eq(lit(10))]),
+                field_filters(field(["b"]), vec![eq(lit(20))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0), placeholder(1)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_non_indexed_field_still_uses_collection_scan() {
+        let filters = field_filters(field(["z"]), vec![eq(lit(99))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(filters)
+            .build_arc();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["z"]),
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_optimize_prefers_index_scan_when_count_stats_favor_index() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input,
+            indexed_test_catalog(),
+            index_stats(10_000, 100),
+            &output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_forces_hinted_index_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1))
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input.clone(),
+            indexed_test_catalog(),
+            index_stats(10_000, 1),
+            &output,
+        );
+
+        check_optimization_with_catalog_and_stats(
+            input,
+            indexed_test_catalog(),
+            index_stats(10, 1000),
+            &output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_allows_full_scan_of_hinted_index() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1)).build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_forces_collection_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0))
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["a"]),
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input.clone(),
+            indexed_test_catalog(),
+            index_stats(10_000, 1),
+            &output,
+        );
+    }
+
+    #[test]
+    fn test_collection_scan_hint_excludes_secondary_indexes_without_filter() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0)).build_arc();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog_and_stats(
+            input.clone(),
+            indexed_test_catalog(),
+            index_stats(10_000, 1),
+            &output,
+        );
+    }
+
+    #[test]
+    fn test_collection_scan_hint_allows_primary_key_range_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0))
+            .filter(field_filters(field(["_id"]), vec![gt(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::greater_than(placeholder(0)),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_collection_scan_hint_allows_primary_key_multipoint_search() {
+        let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0))
+            .filter(field_filters(field(["_id"]), vec![within(lit(values))]))
+            .build_arc();
+
+        let output = PhysicalPlan::MultiPointSearch {
+            collection: COLLECTION,
+            keys: placeholder(0),
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_collection_scan_hint_requires_sorting_after_scan() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0))
+            .sort(Some(Arc::new(vec![SortField::asc(field(["a"]))])))
+            .build_arc();
+
+        let output = PhysicalPlan::ExternalMergeSort {
+            input: Arc::new(PhysicalPlan::CollectionScan {
+                collection: COLLECTION,
+                range: Interval::all(),
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            sort_fields: Arc::new(vec![SortField::asc(field(["a"]))]),
+            max_in_memory_rows: 5000,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_hinted_index_can_provide_sort_without_filter() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1))
+            .sort(Some(Arc::new(vec![SortField::asc(field(["a"]))])))
+            .build_arc();
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_collection_scan_hint_allows_primary_key_lookup() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(0))
+            .filter(field_filters(field(["_id"]), vec![eq(lit(10))]))
+            .build_arc();
+        let output = PhysicalPlan::PointSearch {
+            collection: COLLECTION,
+            key: placeholder(0),
+            filter: None,
+            projection: None,
+        };
+        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+    }
+
+    #[test]
+    fn test_optimize_rejects_hinted_index_that_cannot_serve_filter() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1))
+            .filter(field_filters(field(["z"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        check_optimization_fail(
+            input,
+            indexed_test_catalog(),
+            CountStats::default(),
+            "Cannot use hinted index 'a_1' on collection 'test': no candidate scan can use it for this query",
+        )
+    }
+
+    #[test]
+    fn test_optimize_rejects_unqueryable_hinted_index() {
+        let catalog = Catalog::new()
+            .add_collection("test", COLLECTION, 2)
+            .add_index_to_collection(
+                COLLECTION,
+                1,
+                &IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+                &IndexOptions::default(),
+                3,
+            );
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1)).build_arc();
+        check_optimization_fail(
+            input.clone(),
+            Arc::new(catalog),
+            CountStats::default(),
+            "Cannot use hinted index 'a_1' on collection 'test': the index is not queryable",
+        );
+    }
+
+    #[test]
+    fn test_optimize_rejects_missing_hinted_index() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(999)).build_arc();
+        let result =
+            optimize_with_catalog_and_stats(input, indexed_test_catalog(), CountStats::default());
+
+        assert!(matches!(
+            result,
+            Err(Error::IndexNotFound {
+                collection_name,
+                index_name,
+                id: Some(999),
+            }) if collection_name == "test" && index_name == "index id 999"
+        ));
+    }
+
+    #[test]
+    fn test_optimize_rejects_secondary_hint_for_primary_key_lookup() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, Some(1))
+            .filter(field_filters(field(["_id"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        check_optimization_fail(
+            input,
+            indexed_test_catalog(),
+            CountStats::default(),
+            "Cannot use hinted index 'a_1' on collection 'test': no candidate scan can use it for this query",
+        );
+    }
+
+    #[test]
+    fn test_optimize_prefers_collection_scan_when_count_stats_favor_collection() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::CollectionScan {
+            collection: COLLECTION,
+            range: Interval::all(),
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["a"]),
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization_with_catalog_and_stats(
+            input,
+            indexed_test_catalog(),
+            index_stats(10, 10_000),
+            &output,
+        );
     }
 }

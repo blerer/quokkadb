@@ -1,6 +1,6 @@
 use super::*;
 use crate::collection::{DeleteResult, IndexInfo, QueryOutput, UpdateResult};
-use crate::collection_state::CollectionState;
+use crate::collection_state::{CollectionState, Hint};
 use crate::document::ReturnDocument;
 use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
 use crate::query::execution::WriteResult;
@@ -86,6 +86,7 @@ struct FindOptions {
     sort: Option<Arc<Vec<SortField>>>,
     limit: Option<usize>,
     skip: Option<usize>,
+    hint: Option<Hint>,
 }
 
 impl FindOptions {
@@ -218,6 +219,18 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets the maximum number of documents to return.
     pub fn limit(mut self, limit: usize) -> Self {
         self.options.limit = Some(limit);
@@ -265,7 +278,9 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
     pub fn explain(&self) -> Result<ExplainPlan> {
         let planned = self
             .state
-            .plan_query(|collection_id| Ok(self.build_logical_plan(collection_id)))?;
+            .plan_query(self.options.hint.as_ref(), |collection_id, hint_id| {
+                Ok(self.build_logical_plan(collection_id, hint_id))
+            })?;
 
         Ok(match planned {
             Some((plan, catalog)) => ExplainPlan::from_physical_plan(&plan, &catalog),
@@ -280,7 +295,9 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
     {
         let query_output = self
             .state
-            .execute_query(|collection_id| Ok(self.build_logical_plan(collection_id)))?;
+            .execute_query(self.options.hint.as_ref(), |collection_id, hint_id| {
+                Ok(self.build_logical_plan(collection_id, hint_id))
+            })?;
         Ok(deserialize_query_output_with(query_output, self.decoder))
     }
 
@@ -292,8 +309,8 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
         self.execute()?.collect()
     }
 
-    fn build_logical_plan(&self, collection_id: u32) -> Arc<LogicalPlan> {
-        LogicalPlanBuilder::scan(collection_id)
+    fn build_logical_plan(&self, collection_id: u32, hint_id: Option<u32>) -> Arc<LogicalPlan> {
+        LogicalPlanBuilder::scan(collection_id, hint_id)
             .filter(self.filter.as_expr())
             .project(self.options.projection.clone())
             .sort(self.options.sort.clone())
@@ -434,6 +451,18 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOne<'a, T, R, Projectio
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Executes the query and returns the first matching typed document, if any.
     pub fn execute(self) -> Result<Option<R>>
     where
@@ -446,8 +475,8 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOne<'a, T, R, Projectio
             decoder,
             ..
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .project(options.projection)
                 .sort(options.sort)
@@ -455,9 +484,12 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOne<'a, T, R, Projectio
                 .build_arc())
         };
 
-        deserialize_query_output_with(state.execute_query(build_plan)?, decoder)
-            .next()
-            .transpose()
+        deserialize_query_output_with(
+            state.execute_query(options.hint.as_ref(), build_plan)?,
+            decoder,
+        )
+        .next()
+        .transpose()
     }
 }
 
@@ -466,6 +498,7 @@ struct UpdateOptions {
     sync: bool,
     upsert: bool,
     sort: Option<Arc<Vec<SortField>>>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -475,6 +508,7 @@ struct FindOneAndModifyOptions {
     sort: Option<Arc<Vec<SortField>>>,
     upsert: bool,
     return_document: ReturnDocument,
+    hint: Option<Hint>,
 }
 
 fn update_result_from_write_result(result: WriteResult) -> UpdateResult {
@@ -516,6 +550,18 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets whether to insert a document if no documents match the filter.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
@@ -536,17 +582,19 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
             update,
             options,
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort)
                 .update_one(update.into_update_expr(), options.upsert)
                 .build())
         };
 
-        Ok(update_result_from_write_result(
-            state.execute_write(build_plan, options.sync)?,
-        ))
+        Ok(update_result_from_write_result(state.execute_write(
+            options.hint.as_ref(),
+            build_plan,
+            options.sync,
+        )?))
     }
 }
 
@@ -574,6 +622,18 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     pub fn sync(mut self) -> Self {
         self.options.sync = true;
@@ -588,16 +648,18 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
             update,
             options,
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .update_many(update.into_update_expr(), options.upsert)
                 .build())
         };
 
-        Ok(update_result_from_write_result(
-            state.execute_write(build_plan, options.sync)?,
-        ))
+        Ok(update_result_from_write_result(state.execute_write(
+            options.hint.as_ref(),
+            build_plan,
+            options.sync,
+        )?))
     }
 }
 
@@ -730,6 +792,18 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndModify<'a, T, R, 
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets whether to insert a document if no documents match the filter.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
@@ -761,8 +835,8 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndModify<'a, T, R, 
             decoder,
             ..
         } = self;
-        let build_plan = |collection| {
-            let builder = LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            let builder = LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort);
             Ok(match operation {
@@ -785,7 +859,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndModify<'a, T, R, 
             })
         };
 
-        let result = state.execute_write(build_plan, options.sync)?;
+        let result = state.execute_write(options.hint.as_ref(), build_plan, options.sync)?;
         let document = match result {
             WriteResult::SingleDocument { document, .. } => document,
             other => panic!("expected SingleDocument write result, got {other:?}"),
@@ -818,6 +892,18 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets whether to insert a document if no documents match the filter.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
@@ -838,17 +924,19 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
             replacement,
             options,
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort)
                 .replace_one(replacement, options.upsert)
                 .build())
         };
 
-        Ok(update_result_from_write_result(
-            state.execute_write(build_plan, options.sync)?,
-        ))
+        Ok(update_result_from_write_result(state.execute_write(
+            options.hint.as_ref(),
+            build_plan,
+            options.sync,
+        )?))
     }
 }
 
@@ -856,6 +944,7 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
 struct DeleteOptions {
     sync: bool,
     sort: Option<Arc<Vec<SortField>>>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -863,6 +952,7 @@ struct FindOneAndDeleteOptions {
     projection: Option<Arc<Projection>>,
     sync: bool,
     sort: Option<Arc<Vec<SortField>>>,
+    hint: Option<Hint>,
 }
 
 /// Builds a delete operation for one typed document.
@@ -887,6 +977,18 @@ impl<'a, T: QuokkaDocument> TypedDeleteOne<'a, T> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     pub fn sync(mut self) -> Self {
         self.options.sync = true;
@@ -900,15 +1002,16 @@ impl<'a, T: QuokkaDocument> TypedDeleteOne<'a, T> {
             filter,
             options,
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort)
                 .delete_one()
                 .build())
         };
 
-        let result = state.execute_delete(build_plan, options.sync, false)?;
+        let result =
+            state.execute_delete(options.hint.as_ref(), build_plan, options.sync, false)?;
         Ok(match result {
             WriteResult::Delete { deleted_count } => DeleteResult { deleted_count },
             other => panic!("expected Delete write result, got {other:?}"),
@@ -932,6 +1035,18 @@ impl<'a, T: QuokkaDocument> TypedDeleteMany<'a, T> {
         }
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     pub fn sync(mut self) -> Self {
         self.options.sync = true;
@@ -945,14 +1060,15 @@ impl<'a, T: QuokkaDocument> TypedDeleteMany<'a, T> {
             filter,
             options,
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .delete_many()
                 .build())
         };
 
-        let result = state.execute_delete(build_plan, options.sync, false)?;
+        let result =
+            state.execute_delete(options.hint.as_ref(), build_plan, options.sync, false)?;
         Ok(match result {
             WriteResult::Delete { deleted_count } => DeleteResult { deleted_count },
             other => panic!("expected Delete write result, got {other:?}"),
@@ -1104,6 +1220,18 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndDelete<'a, T, R, 
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     pub fn sync(mut self) -> Self {
         self.options.sync = true;
@@ -1122,15 +1250,15 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndDelete<'a, T, R, 
             decoder,
             ..
         } = self;
-        let build_plan = |collection| {
-            Ok(LogicalPlanBuilder::scan(collection)
+        let build_plan = |collection, hint_id| {
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort)
                 .find_one_and_delete(options.projection)
                 .build())
         };
 
-        let result = state.execute_delete(build_plan, options.sync, true)?;
+        let result = state.execute_delete(options.hint.as_ref(), build_plan, options.sync, true)?;
         let document = match result {
             WriteResult::SingleDocument { document, .. } => document,
             other => panic!("expected SingleDocument write result, got {other:?}"),
@@ -1462,14 +1590,16 @@ impl<'a, T: QuokkaDocument> TypedInsertOne<'a, T> {
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<TypedInsertOneResult<T>> {
-        let build_plan = |collection| {
+        let build_plan = |collection, _hint_id| {
             Ok(LogicalPlan::InsertOne {
                 collection,
                 document: self.document,
             })
         };
 
-        TypedInsertOneResult::from_write_result(self.state.execute_write(build_plan, self.sync)?)
+        TypedInsertOneResult::from_write_result(
+            self.state.execute_write(None, build_plan, self.sync)?,
+        )
     }
 }
 
@@ -1504,14 +1634,16 @@ impl<'a, T: QuokkaDocument> TypedInsertMany<'a, T> {
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<TypedInsertManyResult<T>> {
-        let build_plan = |collection| {
+        let build_plan = |collection, _hint_id| {
             Ok(LogicalPlan::InsertMany {
                 collection,
                 documents: self.documents,
             })
         };
 
-        TypedInsertManyResult::from_write_result(self.state.execute_write(build_plan, self.sync)?)
+        TypedInsertManyResult::from_write_result(
+            self.state.execute_write(None, build_plan, self.sync)?,
+        )
     }
 }
 
@@ -1549,8 +1681,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::QuokkaDB;
     use bson::doc;
     use serde::{Deserialize, Serialize};
+    use tempfile::tempdir;
 
     #[derive(Debug, PartialEq, Serialize, Deserialize, quokkadb_derive::QuokkaDocument)]
     struct User {
@@ -1578,5 +1712,90 @@ mod tests {
             }
         );
         assert!(matches!(output.next().unwrap(), Err(Error::BsonError(_))));
+    }
+
+    #[test]
+    fn query_hint_resolves_to_the_current_index_id() {
+        let directory = tempdir().unwrap();
+        let db = QuokkaDB::open(directory.path()).unwrap();
+        db.create_collection("users").unwrap();
+        let users = db.typed_collection::<User>("users");
+        let index_name = users.create_index(|user| user.name.index_asc()).unwrap();
+        let first_index_id = users
+            .list_indexes()
+            .unwrap()
+            .into_iter()
+            .find(|index| index.name == index_name)
+            .unwrap()
+            .id;
+
+        let mut resolved_hint = None;
+        users
+            .state
+            .plan_query(
+                Some(&Hint::Index(index_name.clone())),
+                |collection_id, hint_id| {
+                    resolved_hint = hint_id;
+                    Ok(LogicalPlanBuilder::scan(collection_id, hint_id).build_arc())
+                },
+            )
+            .unwrap();
+        assert_eq!(resolved_hint, Some(first_index_id));
+
+        users.drop_index(&index_name).unwrap();
+        let recreated_name = users.create_index(|user| user.name.index_asc()).unwrap();
+        assert_eq!(recreated_name, index_name);
+        let recreated_index_id = users
+            .list_indexes()
+            .unwrap()
+            .into_iter()
+            .find(|index| index.name == recreated_name)
+            .unwrap()
+            .id;
+        assert_ne!(recreated_index_id, first_index_id);
+
+        let mut resolved_recreated_hint = None;
+        users
+            .state
+            .plan_query(
+                Some(&Hint::Index(recreated_name.clone())),
+                |collection_id, hint_id| {
+                    resolved_recreated_hint = hint_id;
+                    Ok(LogicalPlanBuilder::scan(collection_id, hint_id).build_arc())
+                },
+            )
+            .unwrap();
+        assert_eq!(resolved_recreated_hint, Some(recreated_index_id));
+
+        let error = match users
+            .find(|user| user.name.eq("ada@example.com"))
+            .hint("missing")
+            .explain()
+        {
+            Err(error) => error,
+            Ok(_) => panic!("Expected missing index hint to return an error"),
+        };
+        assert!(matches!(error, Error::IndexNotFound { .. }));
+    }
+
+    #[test]
+    fn collection_scan_hint_forces_collection_scan_plan() {
+        let directory = tempdir().unwrap();
+        let db = QuokkaDB::open(directory.path()).unwrap();
+        db.create_collection("users").unwrap();
+        let users = db.typed_collection::<User>("users");
+        users.create_index(|user| user.name.index_asc()).unwrap();
+
+        let plan = users
+            .find(|user| user.name.eq("ada@example.com"))
+            .hint_collection_scan()
+            .explain()
+            .unwrap();
+
+        assert!(
+            plan.root
+                .contains_operator(ExplainOperatorKind::CollectionScan)
+        );
+        assert!(!plan.root.contains_operator(ExplainOperatorKind::IndexScan));
     }
 }

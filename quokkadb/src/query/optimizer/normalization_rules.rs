@@ -861,6 +861,7 @@ impl NormalisationRule for PushDownFiltersToScan {
             if let LogicalPlan::Filter { input, condition } = node.as_ref() {
                 if let LogicalPlan::CollectionScan {
                     collection,
+                    hint,
                     projection,
                     filter: scan_filter,
                     sort,
@@ -881,6 +882,7 @@ impl NormalisationRule for PushDownFiltersToScan {
 
                     let new_scan = Arc::new(LogicalPlan::CollectionScan {
                         collection: *collection,
+                        hint: hint.clone(),
                         projection: projection.clone(),
                         filter: Some(pushable),
                         sort: sort.clone(),
@@ -1103,7 +1105,7 @@ mod tests {
 
     fn scan_with_filter(filter: Arc<Expr>) -> Arc<LogicalPlan> {
         let collection = 22;
-        LogicalPlanBuilder::scan(collection)
+        LogicalPlanBuilder::scan(collection, None)
             .filter(filter)
             .build_arc()
     }
@@ -1238,7 +1240,7 @@ mod tests {
 
         let projection = Some(include(proj_elem_match(original_filter)));
 
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .project(projection)
             .build_arc();
 
@@ -1249,7 +1251,7 @@ mod tests {
         // Check that the filter inside ElemMatch was simplified
         let expected_filter = Arc::new(Expr::AlwaysTrue);
         let expected_projection = Some(include(proj_elem_match(expected_filter)));
-        let expected_plan = LogicalPlanBuilder::scan(123)
+        let expected_plan = LogicalPlanBuilder::scan(123, None)
             .project(expected_projection)
             .build_arc();
 
@@ -1258,7 +1260,7 @@ mod tests {
 
     #[test]
     fn test_eliminate_always_true_filter() {
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(Arc::new(Expr::AlwaysTrue))
             .build_arc();
 
@@ -1266,14 +1268,14 @@ mod tests {
         let normalized_plan = rule.apply(plan);
 
         // The filter should be removed, leaving only the scan
-        let expected_plan = LogicalPlanBuilder::scan(123).build_arc();
+        let expected_plan = LogicalPlanBuilder::scan(123, None).build_arc();
 
         assert_eq!(normalized_plan, expected_plan);
     }
 
     #[test]
     fn test_eliminate_always_false_filter() {
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(Arc::new(Expr::AlwaysFalse))
             .limit(None, Some(10)) // Adding a limit to ensure we have a non-terminal plan
             .build_arc();
@@ -1290,7 +1292,7 @@ mod tests {
     #[test]
     fn test_push_down_simple_filter() {
         let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1299,6 +1301,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(filter),
             sort: None,
@@ -1307,12 +1310,33 @@ mod tests {
     }
 
     #[test]
+    fn test_push_down_filter_preserves_scan_hint() {
+        let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let plan = LogicalPlanBuilder::scan(123, Some(17))
+            .filter(filter.clone())
+            .build_arc();
+
+        let normalized_plan = PushDownFiltersToScan {}.apply(plan);
+
+        assert!(matches!(
+            normalized_plan.as_ref(),
+            LogicalPlan::CollectionScan {
+                hint: Some(17),
+                filter: Some(scan_filter),
+                ..
+            } if scan_filter == &filter
+        ));
+    }
+
+    #[test]
     fn test_push_down_partial_and() {
         let pushable_filter =
             field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
         let residual_filter = field_filters(field(["b"]), [size(lit(2), false)]);
         let filter = and([pushable_filter.clone(), residual_filter.clone()]);
-        let plan = LogicalPlanBuilder::scan(123).filter(filter).build_arc();
+        let plan = LogicalPlanBuilder::scan(123, None)
+            .filter(filter)
+            .build_arc();
 
         let rule = PushDownFiltersToScan {};
         let normalized_plan = rule.apply(plan);
@@ -1320,6 +1344,7 @@ mod tests {
         let expected_plan = {
             let scan = Arc::new(LogicalPlan::CollectionScan {
                 collection: 123,
+                hint: None,
                 projection: None,
                 filter: Some(pushable_filter),
                 sort: None,
@@ -1338,7 +1363,7 @@ mod tests {
         let filter1 = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
         let filter2 = field_filters(field(["b"]), [interval(Interval::greater_than(lit(10)))]);
         let filter = or([filter1.clone(), filter2.clone()]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1347,6 +1372,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(filter),
             sort: None,
@@ -1359,7 +1385,7 @@ mod tests {
         let filter1 = field_filters(field(["a"]), [eq(lit(1))]);
         let filter2 = field_filters(field(["b"]), [size(lit(2), false)]);
         let filter = or([filter1.clone(), filter2.clone()]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1373,7 +1399,7 @@ mod tests {
     #[test]
     fn test_no_push_down_for_non_scannable_filter() {
         let filter = field_filters(field(["a"]), [size(lit(2), false)]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1389,7 +1415,7 @@ mod tests {
             field_filters(field(["a"]), [exists(true)]),
             field_filters(field(["b"]), [has_type(lit("string"), false)]),
         ]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1405,6 +1431,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(sorted_filter),
             sort: None,
@@ -1522,7 +1549,7 @@ mod tests {
                 size(lit(2), false),
             ],
         );
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
 
@@ -1535,6 +1562,7 @@ mod tests {
         let expected_plan = {
             let scan = Arc::new(LogicalPlan::CollectionScan {
                 collection: 123,
+                hint: None,
                 projection: None,
                 filter: Some(pushable),
                 sort: None,
@@ -1552,14 +1580,14 @@ mod tests {
     fn test_no_push_down_for_non_pushable_exists_and_type() {
         // exists(false) is not pushable
         let filter = field_filters(field(["a"]), [exists(false)]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         assert_eq!(PushDownFiltersToScan {}.apply(plan.clone()), plan);
 
         // negated $type is not pushable
         let filter = field_filters(field(["b"]), [has_type(lit("string"), true)]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         assert_eq!(PushDownFiltersToScan {}.apply(plan.clone()), plan);
@@ -1568,12 +1596,13 @@ mod tests {
     #[test]
     fn test_push_down_in_with_non_empty_array() {
         let filter = field_filters(field(["a"]), [within(lit(vec![1, 2, 3]))]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         let normalized_plan = PushDownFiltersToScan {}.apply(plan);
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(filter),
             sort: None,
@@ -1584,13 +1613,13 @@ mod tests {
     #[test]
     fn test_no_push_down_for_elem_match_and_all() {
         let filter = field_filters(field(["a"]), [elem_match([eq(lit(1))])]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         assert_eq!(PushDownFiltersToScan {}.apply(plan.clone()), plan);
 
         let filter = field_filters(field(["b"]), [all(lit(vec![1, 2]))]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         assert_eq!(PushDownFiltersToScan {}.apply(plan.clone()), plan);
@@ -1604,7 +1633,9 @@ mod tests {
 
         // OR(AND(A, B), C) which is pushable after distribution
         let filter = or([and([a_eq.clone(), b_gt.clone()]), c_eq.clone()]);
-        let plan = LogicalPlanBuilder::scan(123).filter(filter).build_arc();
+        let plan = LogicalPlanBuilder::scan(123, None)
+            .filter(filter)
+            .build_arc();
         let normalized_plan = PushDownFiltersToScan {}.apply(plan);
 
         // Expected distributed form: AND(OR(A, C), OR(B, C))
@@ -1622,6 +1653,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(expected_filter),
             sort: None,
@@ -1641,7 +1673,9 @@ mod tests {
             and([pushable_a.clone(), non_pushable_x.clone()]),
             pushable_b.clone(),
         ]);
-        let plan = LogicalPlanBuilder::scan(123).filter(filter).build_arc();
+        let plan = LogicalPlanBuilder::scan(123, None)
+            .filter(filter)
+            .build_arc();
         let normalized_plan = PushDownFiltersToScan {}.apply(plan);
 
         // OR(A, B) is pushable
@@ -1657,6 +1691,7 @@ mod tests {
         let expected_plan = {
             let scan = Arc::new(LogicalPlan::CollectionScan {
                 collection: 123,
+                hint: None,
                 projection: None,
                 filter: Some(pushable_part),
                 sort: None,
@@ -1683,7 +1718,9 @@ mod tests {
         conjuncts2.push(field_filters(field(["c"]), [size(lit(2), false)]));
 
         let filter = or([and(conjuncts1), and(conjuncts2)]);
-        let plan = LogicalPlanBuilder::scan(123).filter(filter).build_arc();
+        let plan = LogicalPlanBuilder::scan(123, None)
+            .filter(filter)
+            .build_arc();
 
         let rule = PushDownFiltersToScan {};
         let normalized_plan = rule.apply(plan.clone());
@@ -1751,7 +1788,7 @@ mod tests {
 
     #[test]
     fn test_eliminate_always_false_filter_propagation() {
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(Arc::new(Expr::AlwaysFalse))
             .project(Some(include(proj_fields(Vec::<(
                 PathComponent,
@@ -1773,7 +1810,7 @@ mod tests {
     #[test]
     fn test_push_down_for_literal_comparison() {
         let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(0), lit(0)))]);
-        let plan = LogicalPlanBuilder::scan(123)
+        let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
         let rule = PushDownFiltersToScan {};
@@ -1781,6 +1818,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 123,
+            hint: None,
             projection: None,
             filter: Some(filter.clone()),
             sort: None,
@@ -2110,6 +2148,7 @@ mod tests {
 
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 22,
+            hint: None,
             projection: None,
             filter: Some(expected_filter),
             sort: None,
@@ -2135,6 +2174,7 @@ mod tests {
         let expected_filter = field_filters(field(["a"]), [within(lit(vec![8]))]);
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 22,
+            hint: None,
             projection: None,
             filter: Some(expected_filter),
             sort: None,
@@ -2173,6 +2213,7 @@ mod tests {
 
         let expected_scan = Arc::new(LogicalPlan::CollectionScan {
             collection: 22,
+            hint: None,
             projection: None,
             filter: Some(pushable),
             sort: None,

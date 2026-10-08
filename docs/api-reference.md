@@ -91,12 +91,12 @@ let index_name = plants.create_index(|plant| {
 
 | Method | Returns | Purpose |
 | --- | --- | --- |
-| `find(filter)` | `TypedFind<T>` | Builds a query for all matching models. |
+| `find(filter)` | `TypedFind<T>` | Builds a query for all matching models. Use `hint(name)` or `hint_collection_scan()` to control the access path. |
 | `find_all()` | `TypedFind<T>` | Builds a collection scan over every model. |
 | `find_one(filter)` | `Result<Option<T>>` | Returns at most one matching model. |
 | `find_one_with(filter)` | `TypedFindOne<T>` | Builds a one-model query with options. |
 
-`TypedFind` supports `sort`, `skip`, `limit`, `explain`, `execute`, and `execute_collect`. `explain()` returns an `ExplainPlan` without executing the query. Its structured operators help inspect choices such as index use; optimizer choices may change over time. `execute()` returns `TypedQueryOutput<R>`, an iterator of `Result<R>` values for streaming reads. `execute_collect()` returns `Result<Vec<R>>` when the application needs every result.
+`TypedFind` and `TypedFindOne` support `hint`, `hint_collection_scan`, `sort`, `skip`, `limit`, `explain`, `execute`, and `execute_collect`. `hint(index_name)` strictly requires the named index and returns an error when it is missing, unavailable, or unusable for the query. `hint_collection_scan()` forces the collection path while still allowing primary-key lookups and ranges. See [Indexes — Use hints only when needed](guides/indexes.md#use-hints-only-when-needed) before overriding the optimizer. `explain()` returns an `ExplainPlan` without executing the query. Its structured operators help inspect choices such as index use; optimizer choices may change over time. `execute()` returns `TypedQueryOutput<R>`, an iterator of `Result<R>` values for streaming reads. `execute_collect()` returns `Result<Vec<R>>` when the application needs every result.
 
 `ExplainPlan` contains a root `ExplainNode`; each node has an `ExplainOperator` and its input nodes in `children`. Use `contains_operator(ExplainOperatorKind::IndexScan)` to check for a scan without depending on the tree's outer operators. An `IndexScan` includes the selected index name, traversal direction, equality-prefix length, and whether it has a range bound. Sort and limit operators expose their strategy and relevant limits. These details describe the current optimizer plan and are not execution or performance guarantees.
 
@@ -126,14 +126,14 @@ The direct methods execute immediately. The `_with` variants return builders for
 | --- | --- | --- | --- |
 | Insert one | `insert_one(document)` | `insert_one_with(document).sync()` | `TypedInsertOneResult<T>` with `inserted_id: T::Id` |
 | Insert many | `insert_many(documents)` | `insert_many_with(documents).sync()` | `TypedInsertManyResult<T>` with `inserted_ids: Vec<T::Id>` |
-| Update one | `update_one(filter, update)` | `update_one_with(...).sort(...).upsert(bool).sync()` | `UpdateResult` |
-| Update many | `update_many(filter, update)` | `update_many_with(...).upsert(bool).sync()` | `UpdateResult` |
-| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).sort(...).upsert(bool).sync()` | `UpdateResult` |
-| Delete one | `delete_one(filter)` | `delete_one_with(...).sort(...).sync()` | `DeleteResult` |
-| Delete many | `delete_many(filter)` | `delete_many_with(...).sync()` | `DeleteResult` |
-| Find and update | `find_one_and_update(filter, update)` | `find_one_and_update_with(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
-| Find and replace | `find_one_and_replace(filter, replacement)` | `find_one_and_replace_with(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
-| Find and delete | `find_one_and_delete(filter)` | `find_one_and_delete_with(...).sort(...).sync()` | `Result<Option<T>>` |
+| Update one | `update_one(filter, update)` | `update_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `UpdateResult` |
+| Update many | `update_many(filter, update)` | `update_many_with(...).hint(name)`, `.hint_collection_scan()`, `.upsert(bool).sync()` | `UpdateResult` |
+| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `UpdateResult` |
+| Delete one | `delete_one(filter)` | `delete_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).sync()` | `DeleteResult` |
+| Delete many | `delete_many(filter)` | `delete_many_with(...).hint(name)`, `.hint_collection_scan()`, `.sync()` | `DeleteResult` |
+| Find and update | `find_one_and_update(filter, update)` | `find_one_and_update_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
+| Find and replace | `find_one_and_replace(filter, replacement)` | `find_one_and_replace_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
+| Find and delete | `find_one_and_delete(filter)` | `find_one_and_delete_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).sync()` | `Result<Option<T>>` |
 
 `UpdateResult` exposes `matched_count`, `modified_count`, and `upserted_id`. `DeleteResult` exposes `deleted_count`. `ReturnDocument::Before` is the default for find-and-update and find-and-replace; pass `ReturnDocument::After` to return the changed model.
 
@@ -206,22 +206,22 @@ let index_name = plants.create_index(doc! {
 
 | Operation | Direct method | Builder and options | Result |
 | --- | --- | --- | --- |
-| Find many | `find(filter)` | `projection`, `sort`, `skip`, `limit`, `explain`, `execute`, `execute_collect` | `ExplainPlan` from `explain()`, `QueryOutput` from `execute()`, or `Result<Vec<Document>>` from `execute_collect` |
-| Find one | `find_one(filter)` | `find_one_with(filter).projection(...).sort(...).execute()` | `Result<Option<Document>>` |
+| Find many | `find(filter)` | `projection`, `hint`, `hint_collection_scan`, `sort`, `skip`, `limit`, `explain`, `execute`, `execute_collect` | `ExplainPlan` from `explain()`, `QueryOutput` from `execute()`, or `Result<Vec<Document>>` from `execute_collect` |
+| Find one | `find_one(filter)` | `find_one_with(filter).hint(name)`, `.hint_collection_scan()`, `.projection(...).sort(...).execute()` | `Result<Option<Document>>` |
 | Insert one | `insert_one(document)` | `insert_one_with(document).sync()` | `InsertOneResult` with `inserted_id: Bson` |
 | Insert many | `insert_many(documents)` | `insert_many_with(documents).sync()` | `InsertManyResult` with `inserted_ids: Vec<Bson>` |
-| Update one | `update_one(filter, update)` | `update_one_with(...).array_filters(...).sort(...).upsert(bool).sync()` | `UpdateResult` |
-| Update many | `update_many(filter, update)` | `update_many_with(...).array_filters(...).upsert(bool).sync()` | `UpdateResult` |
-| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).sort(...).upsert(bool).sync()` | `UpdateResult` |
-| Delete one | `delete_one(filter)` | `delete_one_with(...).sort(...).sync()` | `DeleteResult` |
-| Delete many | `delete_many(filter)` | `delete_many_with(...).sync()` | `DeleteResult` |
-| Find and update | `find_one_and_update(filter, update)` | `find_one_and_update_with(...).projection(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<Document>>` |
-| Find and replace | `find_one_and_replace(filter, replacement)` | `find_one_and_replace_with(...).projection(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<Document>>` |
-| Find and delete | `find_one_and_delete(filter)` | `find_one_and_delete_with(...).projection(...).sort(...).sync()` | `Result<Option<Document>>` |
+| Update one | `update_one(filter, update)` | `update_one_with(...).hint(name)`, `.hint_collection_scan()`, `.array_filters(...).sort(...).upsert(bool).sync()` | `UpdateResult` |
+| Update many | `update_many(filter, update)` | `update_many_with(...).hint(name)`, `.hint_collection_scan()`, `.array_filters(...).upsert(bool).sync()` | `UpdateResult` |
+| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `UpdateResult` |
+| Delete one | `delete_one(filter)` | `delete_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).sync()` | `DeleteResult` |
+| Delete many | `delete_many(filter)` | `delete_many_with(...).hint(name)`, `.hint_collection_scan()`, `.sync()` | `DeleteResult` |
+| Find and update | `find_one_and_update(filter, update)` | `find_one_and_update_with(...).hint(name)`, `.hint_collection_scan()`, `.projection(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<Document>>` |
+| Find and replace | `find_one_and_replace(filter, replacement)` | `find_one_and_replace_with(...).hint(name)`, `.hint_collection_scan()`, `.projection(...).sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<Document>>` |
+| Find and delete | `find_one_and_delete(filter)` | `find_one_and_delete_with(...).hint(name)`, `.hint_collection_scan()`, `.projection(...).sort(...).sync()` | `Result<Option<Document>>` |
 
 `array_filters` accepts `Vec<Document>` for filtered positional array updates. `projection` changes the returned document; it does not change which document is updated or deleted. See [Update data](guides/update-data.md) for Mongo-like update documents.
 
-`Find::explain()` returns the planned operators for a document query without executing it. It uses the same `ExplainPlan` type as the typed API; treat the output as diagnostic because optimizer choices may change.
+`Find::explain()` returns the planned operators for a document query without executing it. It uses the same `ExplainPlan` type as the typed API; treat the output as diagnostic because optimizer choices may change. Document query and write builders support the same `hint(index_name)` and `hint_collection_scan()` options as their typed counterparts.
 
 ## Configuration
 

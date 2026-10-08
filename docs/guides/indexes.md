@@ -31,6 +31,23 @@ let indexes = plants.list_indexes()?;
 plants.drop_index(&index_name)?;
 ```
 
+## Use hints only when needed
+
+Let the optimizer choose the access path by default. When a query behaves unexpectedly, use `explain()` and executor metrics to inspect the selected plan before forcing one. Add a named-index hint only when the optimizer repeatedly chooses an unsuitable path for a known workload.
+
+Use `.hint_collection_scan()` only when deliberately avoiding secondary indexes. Hints couple application code to an index name and to the query shapes that the index can serve, so changes to index definitions or names may require corresponding code changes. Hints are strict: a missing, unavailable, or unusable named index returns an error instead of falling back.
+
+Use the returned name to force an index for a query when you need a particular access path.
+
+```rust
+let plants = plants
+    .find(|plant| plant.name.eq("Fern"))
+    .hint(&index_name)
+    .execute_collect()?;
+```
+
+The hint is also available on update, replace, delete, and find-and-modify builders. Dropping and recreating an index with the same name resolves the name to the current index definition when the operation is planned.
+
 The document API uses the same field order in a BSON key specification. Use `1` for ascending and `-1` for descending order.
 
 ```rust

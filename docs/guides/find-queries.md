@@ -117,6 +117,28 @@ let page: Vec<Plant> = plants
     .execute_collect()?;
 ```
 
+## Choose the access path
+
+When a query must use a particular named index, give the name to the query builder. See [Indexes — Use hints only when needed](indexes.md#use-hints-only-when-needed) for guidance on when to override the optimizer. The hint is strict: QuokkaDB returns an error if the index is missing, unavailable, or cannot serve the filter or sort.
+
+```rust
+let plants = plants
+    .find(|plant| plant.name.eq("Fern"))
+    .hint("plant_name")
+    .execute_collect()?;
+```
+
+Use `hint_collection_scan` when the query should read the collection path instead of a secondary index. Primary-key lookups and ranges remain available.
+
+```rust
+let plants = plants
+    .find(|plant| plant.needs_water.eq(true))
+    .hint_collection_scan()
+    .execute_collect()?;
+```
+
+Name indexes explicitly with `create_index_with` when application code will refer to them by name. See [Indexes](indexes.md) for index lifecycle and naming guidance.
+
 ## Use BSON query documents when they add value
 
 Use the document API when data or filter shape is dynamic. BSON documents also expose document-only query syntax such as `$type` and direct `$elemMatch` expressions.

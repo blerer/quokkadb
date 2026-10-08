@@ -245,6 +245,59 @@ fn compound_index_uses_equality_prefix_and_range() {
 }
 
 #[test]
+fn query_hint_uses_named_index_and_reports_missing_index() {
+    let (_directory, collection) = setup_index_query_collection();
+    let index_name = collection.create_index(doc! { "status": 1 }).unwrap();
+
+    let explain = collection
+        .find(doc! { "status": "active" })
+        .hint(index_name.clone())
+        .explain()
+        .unwrap();
+    assert_eq!(
+        explain_index_scan(&explain.root),
+        Some((index_name.as_str(), ExplainDirection::Forward, 1, false)),
+        "unexpected explain plan: {explain:?}"
+    );
+
+    let error = collection
+        .find(doc! { "status": "active" })
+        .hint("missing")
+        .explain()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::IndexNotFound {
+            collection_name,
+            index_name,
+            id: _,
+        } if collection_name == "users" && index_name == "missing"
+    ));
+}
+
+#[test]
+fn collection_scan_hint_forces_collection_scan() {
+    let (_directory, collection) = setup_index_query_collection();
+    collection.create_index(doc! { "status": 1 }).unwrap();
+
+    let explain = collection
+        .find(doc! { "status": "active" })
+        .hint_collection_scan()
+        .explain()
+        .unwrap();
+    assert!(
+        explain
+            .root
+            .contains_operator(ExplainOperatorKind::CollectionScan)
+    );
+    assert!(
+        !explain
+            .root
+            .contains_operator(ExplainOperatorKind::IndexScan)
+    );
+}
+
+#[test]
 fn index_scan_provides_forward_and_reverse_sort_order() {
     let (_directory, collection) = setup_index_query_collection();
     let index_name = collection

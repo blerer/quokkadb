@@ -1,4 +1,4 @@
-use crate::collection_state::CollectionState;
+use crate::collection_state::{CollectionState, Hint};
 use crate::error::Error;
 use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
 pub use crate::query::ReturnDocument;
@@ -366,12 +366,14 @@ struct UpdateOptions {
     sync: bool,
     upsert: bool,
     sort: Option<Document>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
 struct DeleteOptions {
     sync: bool,
     sort: Option<Document>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -381,6 +383,7 @@ struct FindOneAndUpdateOptions {
     sort: Option<Document>,
     upsert: bool,
     return_document: ReturnDocument,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -388,6 +391,7 @@ struct FindOneAndDeleteOptions {
     projection: Option<Document>,
     sync: bool,
     sort: Option<Document>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -395,6 +399,7 @@ struct ReplaceOneOptions {
     sync: bool,
     upsert: bool,
     sort: Option<Document>,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -404,6 +409,7 @@ struct FindOneAndReplaceOptions {
     sort: Option<Document>,
     upsert: bool,
     return_document: ReturnDocument,
+    hint: Option<Hint>,
 }
 
 #[derive(Default)]
@@ -412,6 +418,7 @@ struct FindOptions {
     sort: Option<Document>,
     limit: Option<usize>,
     skip: Option<usize>,
+    hint: Option<Hint>,
 }
 
 pub struct InsertOne<'a> {
@@ -440,7 +447,7 @@ impl<'a> InsertOne<'a> {
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<InsertOneResult> {
-        let build_plan = |collection| {
+        let build_plan = |collection, _hint_id| {
             Ok(LogicalPlan::InsertOne {
                 collection,
                 document: self.document,
@@ -448,7 +455,7 @@ impl<'a> InsertOne<'a> {
         };
 
         Ok(InsertOneResult::from_write_result(
-            self.state.execute_write(build_plan, self.sync)?,
+            self.state.execute_write(None, build_plan, self.sync)?,
         ))
     }
 }
@@ -487,7 +494,7 @@ impl<'a> InsertMany<'a> {
 
     /// Executes the insert operation.
     pub fn execute(self) -> Result<InsertManyResult> {
-        let build_plan = |collection: u32| {
+        let build_plan = |collection: u32, _hint_id| {
             Ok(LogicalPlan::InsertMany {
                 collection,
                 documents: self.documents,
@@ -495,7 +502,7 @@ impl<'a> InsertMany<'a> {
         };
 
         Ok(InsertManyResult::from_write_result(
-            self.state.execute_write(build_plan, self.sync)?,
+            self.state.execute_write(None, build_plan, self.sync)?,
         ))
     }
 }
@@ -545,23 +552,37 @@ impl<'a> UpdateOne<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Executes the update operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let update = parser::parse_update(&self.update, self.options.array_filters)?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .update_one(update, self.options.upsert)
                 .build())
         };
 
-        Ok(UpdateResult::from_write_result(
-            self.state.execute_write(build_plan, self.options.sync)?,
-        ))
+        Ok(UpdateResult::from_write_result(self.state.execute_write(
+            self.options.hint.as_ref(),
+            build_plan,
+            self.options.sync,
+        )?))
     }
 }
 
@@ -595,6 +616,18 @@ impl<'a> UpdateMany<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     ///
     /// This overrides the database's configured WAL durability for this operation only. It does
@@ -606,19 +639,21 @@ impl<'a> UpdateMany<'a> {
 
     /// Executes the update operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let update = parser::parse_update(&self.update, self.options.array_filters)?;
             let conditions = parser::parse_conditions(&self.filter)?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .update_many(update, self.options.upsert)
                 .build())
         };
 
-        Ok(UpdateResult::from_write_result(
-            self.state.execute_write(build_plan, self.options.sync)?,
-        ))
+        Ok(UpdateResult::from_write_result(self.state.execute_write(
+            self.options.hint.as_ref(),
+            build_plan,
+            self.options.sync,
+        )?))
     }
 }
 
@@ -643,6 +678,18 @@ impl<'a> DeleteOne<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     ///
     /// This overrides the database's configured WAL durability for this operation only. It does
@@ -654,11 +701,11 @@ impl<'a> DeleteOne<'a> {
 
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .delete_one()
@@ -666,6 +713,7 @@ impl<'a> DeleteOne<'a> {
         };
 
         Ok(DeleteResult::from_write_result(self.state.execute_delete(
+            self.options.hint.as_ref(),
             build_plan,
             self.options.sync,
             false,
@@ -688,6 +736,18 @@ impl<'a> DeleteMany<'a> {
         }
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     ///
     /// This overrides the database's configured WAL durability for this operation only. It does
@@ -699,16 +759,17 @@ impl<'a> DeleteMany<'a> {
 
     /// Executes the delete operation.
     pub fn execute(self) -> Result<DeleteResult> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .delete_many()
                 .build())
         };
 
         Ok(DeleteResult::from_write_result(self.state.execute_delete(
+            self.options.hint.as_ref(),
             build_plan,
             self.options.sync,
             false,
@@ -743,6 +804,18 @@ impl<'a> FindOneAndDelete<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Forces this write to sync its WAL record to durable storage before `execute()` returns.
     ///
     /// This overrides the database's configured WAL durability for this operation only. It does
@@ -754,12 +827,12 @@ impl<'a> FindOneAndDelete<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let projection = parser::parse_optional_projection(self.options.projection)?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .find_one_and_delete(projection)
@@ -767,6 +840,7 @@ impl<'a> FindOneAndDelete<'a> {
         };
 
         Ok(document_from_write_result(self.state.execute_delete(
+            self.options.hint.as_ref(),
             build_plan,
             self.options.sync,
             true,
@@ -779,6 +853,7 @@ pub struct FindOne<'a> {
     filter: Document,
     projection: Option<Document>,
     sort: Option<Document>,
+    hint: Option<Hint>,
 }
 
 impl<'a> FindOne<'a> {
@@ -788,6 +863,7 @@ impl<'a> FindOne<'a> {
             filter,
             projection: None,
             sort: None,
+            hint: None,
         }
     }
 
@@ -803,13 +879,25 @@ impl<'a> FindOne<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Executes the query and returns the first matching document, if any.
     pub fn execute(self) -> Result<Option<Document>> {
-        let build_plan = |collection_id| {
+        let build_plan = |collection_id, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let projection = parser::parse_optional_projection(self.projection.clone())?;
             let sort = parser::parse_optional_sort(self.sort.as_ref())?;
-            Ok(LogicalPlanBuilder::scan(collection_id)
+            Ok(LogicalPlanBuilder::scan(collection_id, hint_id)
                 .filter(conditions)
                 .project(projection)
                 .sort(sort)
@@ -817,7 +905,10 @@ impl<'a> FindOne<'a> {
                 .build_arc())
         };
 
-        self.state.execute_query(build_plan)?.next().transpose()
+        self.state
+            .execute_query(self.hint.as_ref(), build_plan)?
+            .next()
+            .transpose()
     }
 }
 
@@ -850,6 +941,18 @@ impl<'a> FindOneAndUpdate<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
@@ -873,13 +976,13 @@ impl<'a> FindOneAndUpdate<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        let build_plan = |col| {
+        let build_plan = |col, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let update = parser::parse_update(&self.update, None)?;
             let projection = parser::parse_optional_projection(self.options.projection)?;
 
-            Ok(LogicalPlanBuilder::scan(col)
+            Ok(LogicalPlanBuilder::scan(col, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .find_one_and_update(
@@ -891,9 +994,11 @@ impl<'a> FindOneAndUpdate<'a> {
                 .build())
         };
 
-        Ok(document_from_write_result(
-            self.state.execute_write(build_plan, self.options.sync)?,
-        ))
+        Ok(document_from_write_result(self.state.execute_write(
+            self.options.hint.as_ref(),
+            build_plan,
+            self.options.sync,
+        )?))
     }
 }
 
@@ -935,23 +1040,37 @@ impl<'a> ReplaceOne<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Executes the replace operation.
     pub fn execute(self) -> Result<UpdateResult> {
-        let build_plan = |col| {
+        let build_plan = |col, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let replacement = parser::parse_replacement(&self.replacement)?;
 
-            Ok(LogicalPlanBuilder::scan(col)
+            Ok(LogicalPlanBuilder::scan(col, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .replace_one(replacement, self.options.upsert)
                 .build())
         };
 
-        Ok(UpdateResult::from_write_result(
-            self.state.execute_write(build_plan, self.options.sync)?,
-        ))
+        Ok(UpdateResult::from_write_result(self.state.execute_write(
+            self.options.hint.as_ref(),
+            build_plan,
+            self.options.sync,
+        )?))
     }
 }
 
@@ -984,6 +1103,18 @@ impl<'a> FindOneAndReplace<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets whether to perform an upsert if no documents match the query.
     pub fn upsert(mut self, upsert: bool) -> Self {
         self.options.upsert = upsert;
@@ -1007,13 +1138,13 @@ impl<'a> FindOneAndReplace<'a> {
 
     /// Executes the operation.
     pub fn execute(self) -> Result<Option<Document>> {
-        let build_plan = |collection| {
+        let build_plan = |collection, hint_id| {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let projection = parser::parse_optional_projection(self.options.projection)?;
             let replacement = parser::parse_replacement(&self.replacement)?;
 
-            Ok(LogicalPlanBuilder::scan(collection)
+            Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
                 .sort(sort)
                 .find_one_and_replace(
@@ -1025,9 +1156,11 @@ impl<'a> FindOneAndReplace<'a> {
                 .build())
         };
 
-        Ok(document_from_write_result(
-            self.state.execute_write(build_plan, self.options.sync)?,
-        ))
+        Ok(document_from_write_result(self.state.execute_write(
+            self.options.hint.as_ref(),
+            build_plan,
+            self.options.sync,
+        )?))
     }
 }
 
@@ -1066,6 +1199,18 @@ impl<'a> Find<'a> {
         self
     }
 
+    /// Forces the query to use the index with the given name.
+    pub fn hint(mut self, index_name: impl Into<String>) -> Self {
+        self.options.hint = Some(Hint::Index(index_name.into()));
+        self
+    }
+
+    /// Forces the query to use the collection scan.
+    pub fn hint_collection_scan(mut self) -> Self {
+        self.options.hint = Some(Hint::CollectionScan);
+        self
+    }
+
     /// Sets the limit for the number of documents to return.
     /// # Arguments
     /// * `limit` - The maximum number of documents to return.
@@ -1084,12 +1229,16 @@ impl<'a> Find<'a> {
         self
     }
 
-    fn build_logical_plan(&self, collection_id: u32) -> Result<Arc<LogicalPlan>> {
+    fn build_logical_plan(
+        &self,
+        collection_id: u32,
+        hint_id: Option<u32>,
+    ) -> Result<Arc<LogicalPlan>> {
         let conditions = parser::parse_conditions(&self.filter)?;
         let projection = parser::parse_optional_projection(self.options.projection.clone())?;
         let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
 
-        Ok(LogicalPlanBuilder::scan(collection_id)
+        Ok(LogicalPlanBuilder::scan(collection_id, hint_id)
             .filter(conditions)
             .project(projection)
             .sort(sort)
@@ -1101,7 +1250,9 @@ impl<'a> Find<'a> {
     /// Returns a `Result` containing an iterator of documents or an error.
     pub fn execute(&self) -> Result<QueryOutput> {
         self.state
-            .execute_query(|collection_id| self.build_logical_plan(collection_id))
+            .execute_query(self.options.hint.as_ref(), |collection_id, hint_id| {
+                self.build_logical_plan(collection_id, hint_id)
+            })
     }
 
     /// Returns the planned operators for this query without executing it.
@@ -1112,7 +1263,9 @@ impl<'a> Find<'a> {
     pub fn explain(&self) -> Result<ExplainPlan> {
         let planned = self
             .state
-            .plan_query(|collection_id| self.build_logical_plan(collection_id))?;
+            .plan_query(self.options.hint.as_ref(), |collection_id, hint_id| {
+                self.build_logical_plan(collection_id, hint_id)
+            })?;
 
         Ok(match planned {
             Some((plan, catalog)) => ExplainPlan::from_physical_plan(&plan, &catalog),

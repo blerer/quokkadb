@@ -1,3 +1,4 @@
+use crate::error::Result;
 use crate::obs::metrics::{self, Counter, DerivedGauge, HitRatio, MetricRegistry};
 use crate::query::SizeEstimate;
 use crate::query::logical_plan::LogicalPlan;
@@ -33,15 +34,15 @@ impl QueryCache {
         Self { metrics, cache }
     }
 
-    /// Retrieves or inserts a physical plan for the given parameterized logical plan.
+    /// Retrieves or inserts a physical plan, leaving failed optimizations uncached.
     pub fn get_or_insert_with<F>(
         &self,
         collection: u32,
         logical_plan: Arc<LogicalPlan>,
         build: F,
-    ) -> Arc<PhysicalPlan>
+    ) -> Result<Arc<PhysicalPlan>>
     where
-        F: FnOnce() -> Arc<PhysicalPlan>,
+        F: FnOnce() -> Result<Arc<PhysicalPlan>>,
     {
         let key = logical_plan.compute_hash();
         let _span = trace_span!("query_cache.get", hash = key).entered();
@@ -49,23 +50,19 @@ impl QueryCache {
         if let Some(cached_plan) = self.cache.get(&key) {
             self.metrics.hits.inc();
             tracing::trace!(hash = key, collection, "query cache hit");
-            return cached_plan.plan.clone();
+            return Ok(cached_plan.plan.clone());
         }
 
         self.metrics.misses.inc();
         tracing::trace!(hash = key, collection, "query cache miss");
 
-        self.cache
-            .get_with(key, || {
-                let plan = build();
-                Arc::new(CachedPhysicalPlan {
-                    collection,
-                    estimated_size: estimate_cached_plan_size(plan.as_ref()),
-                    plan,
-                })
-            })
-            .plan
-            .clone()
+        let plan = build()?;
+        let cached_plan = Arc::new(CachedPhysicalPlan {
+            collection,
+            estimated_size: estimate_cached_plan_size(plan.as_ref()),
+            plan,
+        });
+        Ok(self.cache.get_with(key, || cached_plan).plan.clone())
     }
 
     /// Invalidates all cached plans for the given collection.
@@ -142,41 +139,91 @@ mod tests {
         (cache, metric_registry)
     }
 
+    fn assert_hits(metric_registry: &MetricRegistry, expected_hits: u64) {
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::HITS),
+            expected_hits
+        );
+    }
+
+    fn assert_misses(metric_registry: &MetricRegistry, expected_misses: u64) {
+        assert_eq!(
+            metric_registry.counter_value(metrics::names::query_cache::MISSES),
+            expected_misses
+        );
+    }
+
     #[test]
     fn get_or_insert_records_hit_and_miss_metrics() {
         let (cache, metric_registry) = new_cache();
-        let logical_plan = Arc::new(LogicalPlanBuilder::scan(7).build());
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(7, None).build());
         let build_count = AtomicUsize::new(0);
 
         let build_plan = || {
             build_count.fetch_add(1, Ordering::Relaxed);
-            Arc::new(PhysicalPlan::NoOp)
+            Ok(Arc::new(PhysicalPlan::NoOp))
         };
 
-        let first = cache.get_or_insert_with(7, logical_plan.clone(), build_plan);
-        let cached_size = metric_registry.gauge_value(metrics::names::query_cache::SIZE);
-        let second = cache.get_or_insert_with(7, logical_plan, build_plan);
+        let first = cache
+            .get_or_insert_with(7, logical_plan.clone(), build_plan)
+            .unwrap();
+        let cached_size = get_cached_size(&metric_registry);
+        let second = cache
+            .get_or_insert_with(7, logical_plan, build_plan)
+            .unwrap();
 
         assert_eq!(*first, PhysicalPlan::NoOp);
         assert_eq!(*second, PhysicalPlan::NoOp);
         assert_eq!(build_count.load(Ordering::Relaxed), 1);
         assert!(cached_size > 0);
-        assert_eq!(
-            metric_registry.gauge_value(metrics::names::query_cache::SIZE),
-            cached_size
-        );
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::HITS),
-            1
-        );
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::MISSES),
-            1
-        );
+        assert_eq!(get_cached_size(&metric_registry), cached_size);
+        assert_hits(&metric_registry, 1);
+        assert_misses(&metric_registry, 1);
         assert_eq!(
             metric_registry.computed_value(metrics::names::query_cache::HIT_RATIO),
             0.5
         );
+    }
+
+    #[test]
+    fn failed_plan_builds_are_not_cached() {
+        let (cache, metric_registry) = new_cache();
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(7, None).build());
+
+        let error = cache
+            .get_or_insert_with(7, logical_plan.clone(), || {
+                Err(crate::error::Error::InvalidRequest(
+                    "unusable hinted index".to_string(),
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(error, crate::error::Error::InvalidRequest(_)));
+
+        let plan = cache
+            .get_or_insert_with(7, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .unwrap();
+
+        assert_eq!(*plan, PhysicalPlan::NoOp);
+        assert_hits(&metric_registry, 0);
+        assert_misses(&metric_registry, 2);
+    }
+
+    #[test]
+    fn different_scan_hints_use_distinct_cache_entries() {
+        let (cache, metric_registry) = new_cache();
+        let hints = [None, Some(0), Some(17)];
+
+        for (expected_misses, expected_hits) in [(3, 0), (3, 3)] {
+            for hint in hints {
+                let logical_plan = Arc::new(LogicalPlanBuilder::scan(7, hint).build());
+                cache
+                    .get_or_insert_with(7, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+                    .unwrap();
+            }
+
+            assert_misses(&metric_registry, expected_misses);
+            assert_hits(&metric_registry, expected_hits);
+        }
     }
 
     #[test]
@@ -186,12 +233,12 @@ mod tests {
         let build_count = AtomicUsize::new(0);
 
         let first_logical_plan = Arc::new(
-            LogicalPlanBuilder::scan(7)
+            LogicalPlanBuilder::scan(7, None)
                 .filter(field_filters(field(["status"]), [eq(lit("A"))]))
                 .build(),
         );
         let second_logical_plan = Arc::new(
-            LogicalPlanBuilder::scan(7)
+            LogicalPlanBuilder::scan(7, None)
                 .filter(field_filters(field(["status"]), [eq(lit("B"))]))
                 .build(),
         );
@@ -203,94 +250,88 @@ mod tests {
 
         let build_plan = || {
             build_count.fetch_add(1, Ordering::Relaxed);
-            Arc::new(PhysicalPlan::NoOp)
+            Ok(Arc::new(PhysicalPlan::NoOp))
         };
 
-        cache.get_or_insert_with(7, first_parameterized_plan, build_plan);
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::MISSES),
-            1
-        );
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::HITS),
-            0
-        );
+        cache
+            .get_or_insert_with(7, first_parameterized_plan, build_plan)
+            .unwrap();
+        assert_misses(&metric_registry, 1);
+        assert_hits(&metric_registry, 0);
 
-        let size_after_first_insert =
-            metric_registry.gauge_value(metrics::names::query_cache::SIZE);
+        let size_after_first_insert = get_cached_size(&metric_registry);
         assert!(size_after_first_insert > 0);
 
-        cache.get_or_insert_with(7, second_parameterized_plan, build_plan);
+        cache
+            .get_or_insert_with(7, second_parameterized_plan, build_plan)
+            .unwrap();
 
         assert_eq!(build_count.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::MISSES),
-            1
-        );
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::HITS),
-            1
-        );
-        assert_eq!(
-            metric_registry.gauge_value(metrics::names::query_cache::SIZE),
-            size_after_first_insert
-        );
+        assert_misses(&metric_registry, 1);
+        assert_hits(&metric_registry, 1);
+        assert_eq!(get_cached_size(&metric_registry), size_after_first_insert);
+    }
+
+    fn get_cached_size(metric_registry: &MetricRegistry) -> u64 {
+        metric_registry.gauge_value(metrics::names::query_cache::SIZE)
     }
 
     #[test]
     fn invalidate_collection_only_removes_matching_entries() {
         let (cache, metric_registry) = new_cache();
-        let collection_one_plan = Arc::new(LogicalPlanBuilder::scan(1).build());
-        let collection_two_plan = Arc::new(LogicalPlanBuilder::scan(2).build());
+        let collection_one_plan = Arc::new(LogicalPlanBuilder::scan(1, None).build());
+        let collection_two_plan = Arc::new(LogicalPlanBuilder::scan(2, None).build());
 
-        cache.get_or_insert_with(1, collection_one_plan.clone(), || {
-            Arc::new(PhysicalPlan::NoOp)
-        });
-        cache.get_or_insert_with(2, collection_two_plan.clone(), || {
-            Arc::new(PhysicalPlan::NoOp)
-        });
+        cache
+            .get_or_insert_with(1, collection_one_plan.clone(), || {
+                Ok(Arc::new(PhysicalPlan::NoOp))
+            })
+            .unwrap();
+        cache
+            .get_or_insert_with(2, collection_two_plan.clone(), || {
+                Ok(Arc::new(PhysicalPlan::NoOp))
+            })
+            .unwrap();
 
-        let size_before_invalidation =
-            metric_registry.gauge_value(metrics::names::query_cache::SIZE);
+        let size_before_invalidation = get_cached_size(&metric_registry);
         assert!(size_before_invalidation > 0);
 
         cache.invalidate_collection(1);
 
-        let size_after_invalidation =
-            metric_registry.gauge_value(metrics::names::query_cache::SIZE);
+        let size_after_invalidation = get_cached_size(&metric_registry);
         assert!(size_after_invalidation < size_before_invalidation);
 
-        cache.get_or_insert_with(1, collection_one_plan, || Arc::new(PhysicalPlan::NoOp));
-        cache.get_or_insert_with(2, collection_two_plan, || Arc::new(PhysicalPlan::NoOp));
+        cache
+            .get_or_insert_with(1, collection_one_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .unwrap();
+        cache
+            .get_or_insert_with(2, collection_two_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .unwrap();
 
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::HITS),
-            1
-        );
-        assert_eq!(
-            metric_registry.counter_value(metrics::names::query_cache::MISSES),
-            3
-        );
+        assert_hits(&metric_registry, 1);
+        assert_misses(&metric_registry, 3);
     }
 
     #[test]
     fn size_metric_reports_weighted_bytes() {
         let (cache, metric_registry) = new_cache();
-        let logical_plan = Arc::new(LogicalPlanBuilder::scan(4).build());
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(4, None).build());
 
-        cache.get_or_insert_with(4, logical_plan, || {
-            Arc::new(PhysicalPlan::Projection {
-                input: Arc::new(PhysicalPlan::CollectionScan {
-                    collection: 4,
-                    range: Interval::all(),
-                    direction: Direction::Forward,
-                    filter: Some(field(["name"])),
-                    projection: None,
-                }),
-                projection: include(proj_fields([("name", proj_field())])),
+        cache
+            .get_or_insert_with(4, logical_plan, || {
+                Ok(Arc::new(PhysicalPlan::Projection {
+                    input: Arc::new(PhysicalPlan::CollectionScan {
+                        collection: 4,
+                        range: Interval::all(),
+                        direction: Direction::Forward,
+                        filter: Some(field(["name"])),
+                        projection: None,
+                    }),
+                    projection: include(proj_fields([("name", proj_field())])),
+                }))
             })
-        });
+            .unwrap();
 
-        assert!(metric_registry.gauge_value(metrics::names::query_cache::SIZE) > 0);
+        assert!(get_cached_size(&metric_registry) > 0);
     }
 }

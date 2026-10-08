@@ -87,6 +87,20 @@ let result = plants
     .execute()?;
 ```
 
+Operation builders also accept access-path hints. Use a named index when the write must use that index, or use `hint_collection_scan()` to force the collection path. See [Indexes — Use hints only when needed](indexes.md#use-hints-only-when-needed) before overriding the optimizer. Hints are strict and return an error when a named index is missing, unavailable, or cannot serve the operation.
+
+```rust
+let result = plants
+    .update_one_with(
+        |plant| plant.name.eq("Fern"),
+        |plant| plant.needs_water.set(false),
+    )
+    .hint("plant_name")
+    .execute()?;
+```
+
+The same options are available on update-many, replace, delete, and find-and-modify builders.
+
 Find-and-modify operations return the affected model. They return the value from before the change by default; choose `ReturnDocument::After` when the caller needs the changed value.
 
 ```rust

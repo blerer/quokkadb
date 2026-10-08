@@ -82,9 +82,10 @@ pub enum LogicalPlan {
     /// Represents a collection scan with optional projection, filtering, and sorting. This is a terminal operator.
     CollectionScan {
         collection: u32,                     // Collection identifier
+        hint: Option<u32>, // Optional index id forced for this scan; 0 forces the collection scan
         projection: Option<Arc<Projection>>, // Fields to include
-        filter: Option<Arc<Expr>>,           // Optional filtering condition
-        sort: Option<Arc<Vec<SortField>>>,   // Optional sorting fields
+        filter: Option<Arc<Expr>>, // Optional filtering condition
+        sort: Option<Arc<Vec<SortField>>>, // Optional sorting fields
     },
 
     /// Represents a filter operation.
@@ -111,8 +112,6 @@ pub enum LogicalPlan {
         limit: Limit,
     },
 }
-
-const LOGICAL_PLAN_SERIALIZATION_VERSION: u32 = 1;
 
 impl TreeNode for LogicalPlan {
     type Child = LogicalPlan;
@@ -249,7 +248,7 @@ impl LogicalPlan {
         const HASH_SEED: u64 = 20250309;
 
         let mut writer = ByteWriter::new();
-        self.write_to(&mut writer, LOGICAL_PLAN_SERIALIZATION_VERSION);
+        self.write_to(&mut writer, 0);
         let bytes = writer.take_buffer();
         murmur_hash64a(&bytes, HASH_SEED)
     }
@@ -268,43 +267,37 @@ impl Serializable for LogicalPlan {
     fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
         let tag = reader.read_u8()?;
         match tag {
-            flags::NO_OP => {
-                // NoOp
-                Ok(LogicalPlan::NoOp)
-            }
+            flags::NO_OP => Ok(LogicalPlan::NoOp),
             flags::COLLECTION_SCAN => {
-                // CollectionScan
                 let collection = reader.read_varint_u32()?;
+                let hint = Option::<u32>::read_from(reader, version)?;
                 let projection = Option::<Arc<Projection>>::read_from(reader, version)?;
                 let filter = Option::<Arc<Expr>>::read_from(reader, version)?;
                 let sort = Option::<Arc<Vec<SortField>>>::read_from(reader, version)?;
                 Ok(LogicalPlan::CollectionScan {
                     collection,
+                    hint,
                     projection,
                     filter,
                     sort,
                 })
             }
             flags::FILTER => {
-                // Filter
                 let input = Arc::<LogicalPlan>::read_from(reader, version)?;
                 let condition = Arc::<Expr>::read_from(reader, version)?;
                 Ok(LogicalPlan::Filter { input, condition })
             }
             flags::PROJECTION => {
-                // Projection
                 let input = Arc::<LogicalPlan>::read_from(reader, version)?;
                 let projection = Arc::<Projection>::read_from(reader, version)?;
                 Ok(LogicalPlan::Projection { input, projection })
             }
             flags::SORT => {
-                // Sort
                 let input = Arc::<LogicalPlan>::read_from(reader, version)?;
                 let sort_fields = Arc::<Vec<SortField>>::read_from(reader, version)?;
                 Ok(LogicalPlan::Sort { input, sort_fields })
             }
             flags::LIMIT => {
-                // Limit
                 let input = Arc::<LogicalPlan>::read_from(reader, version)?;
                 let limit = Limit {
                     skip: Option::<usize>::read_from(reader, version)?,
@@ -323,12 +316,14 @@ impl Serializable for LogicalPlan {
             }
             LogicalPlan::CollectionScan {
                 collection,
+                hint,
                 projection,
                 filter,
                 sort,
             } => {
                 writer.write_u8(flags::COLLECTION_SCAN);
                 writer.write_varint_u32(*collection);
+                hint.write_to(writer, version);
                 projection.write_to(writer, version);
                 filter.write_to(writer, version);
                 sort.write_to(writer, version);
@@ -370,11 +365,12 @@ pub struct LogicalPlanBuilder {
 
 impl LogicalPlanBuilder {
     /// Starts with a `TableScan` plan.
-    pub fn scan(collection: u32) -> Self {
+    pub fn scan(collection: u32, hint: Option<u32>) -> Self {
         Self {
             collection,
             plan: LogicalPlan::CollectionScan {
                 collection,
+                hint,
                 projection: None,
                 filter: None,
                 sort: None,
@@ -393,6 +389,7 @@ impl LogicalPlanBuilder {
             collection,
             plan: LogicalPlan::CollectionScan {
                 collection,
+                hint: None,
                 projection,
                 filter,
                 sort,
@@ -551,12 +548,12 @@ impl LogicalPlanBuilder {
 
     /// Finalizes the build process and returns the `LogicalPlan`.
     pub fn build(self) -> LogicalPlan {
-        self.plan.clone()
+        self.plan
     }
 
     /// Finalizes the build process and returns the `Arc<LogicalPlan>`.
     pub fn build_arc(self) -> Arc<LogicalPlan> {
-        Arc::new(self.plan.clone())
+        Arc::new(self.plan)
     }
 
     fn with_limit_one(plan: LogicalPlan) -> LogicalPlan {
@@ -593,6 +590,7 @@ where
         }
         LogicalPlan::CollectionScan {
             collection,
+            hint,
             projection,
             filter,
             sort,
@@ -615,6 +613,7 @@ where
 
             Arc::new(LogicalPlan::CollectionScan {
                 collection: *collection,
+                hint: hint.clone(),
                 projection,
                 filter,
                 sort: sort.clone(),
@@ -692,6 +691,7 @@ where
         }
         LogicalPlan::CollectionScan {
             collection,
+            hint,
             projection,
             filter,
             sort,
@@ -714,6 +714,7 @@ where
 
             Arc::new(LogicalPlan::CollectionScan {
                 collection: *collection,
+                hint: hint.clone(),
                 projection,
                 filter,
                 sort: sort.clone(),
@@ -789,10 +790,11 @@ mod tests {
 
     #[test]
     fn test_logical_plan_serialization_round_trip() {
-        check_serialization_round_trip(LogicalPlan::NoOp, LOGICAL_PLAN_SERIALIZATION_VERSION);
+        check_serialization_round_trip(LogicalPlan::NoOp, 0);
 
         let plan = LogicalPlan::CollectionScan {
             collection: 32,
+            hint: Some(17),
             projection: Some(include(proj_fields([
                 ("field1", proj_field()),
                 ("field2", proj_field()),
@@ -803,9 +805,9 @@ mod tests {
                 order: SortOrder::Ascending,
             }])),
         };
-        check_serialization_round_trip(plan, LOGICAL_PLAN_SERIALIZATION_VERSION);
+        check_serialization_round_trip(plan, 0);
 
-        let plan_arc = LogicalPlanBuilder::scan(32)
+        let plan_arc = LogicalPlanBuilder::scan(32, None)
             .filter(Arc::new(Expr::Comparison {
                 operator: ComparisonOperator::Eq,
                 value: Arc::new(Expr::Placeholder(0)),
@@ -815,7 +817,18 @@ mod tests {
             .limit(Some(10), Some(20))
             .build_arc();
 
-        check_serialization_round_trip(plan_arc.clone(), LOGICAL_PLAN_SERIALIZATION_VERSION);
+        check_serialization_round_trip(plan_arc.clone(), 0);
+
+        let hinted_plan = LogicalPlanBuilder::scan(32, Some(17))
+            .filter(eq(placeholder(0)))
+            .build_arc();
+        match hinted_plan.as_ref() {
+            LogicalPlan::Filter { input, .. } => assert!(matches!(
+                input.as_ref(),
+                LogicalPlan::CollectionScan { hint: Some(17), .. }
+            )),
+            _ => panic!("Expected filter over a collection scan"),
+        }
     }
 
     #[test]
