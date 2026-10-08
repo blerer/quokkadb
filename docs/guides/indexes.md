@@ -19,6 +19,20 @@ let index_name = plants.create_index(|plant| {
 })?;
 ```
 
+`create_index` completes the initial build before it returns. QuokkaDB takes a
+snapshot of the collection when it registers the index, scans the documents in
+that snapshot, and publishes the index only after all of its entries have been
+written. The optimizer ignores the index until publication, and writes to the
+collection are rejected until the build has completed. After publication, normal
+inserts, updates, and deletes maintain the index.
+
+The scan is split into batches controlled by
+`Options::with_index_build_batch_size`. Each batch writes its index entries and
+the checkpoint for the last processed primary key together. If the process
+stops during a build, opening the database resumes the build from its
+checkpoint before `QuokkaDB::open` returns. A failed build is removed and the
+creation call returns the error.
+
 Use `create_index_with` to assign a stable name. `list_indexes` shows active indexes, and `drop_index` removes one that no longer matches the application workload.
 
 ```rust
