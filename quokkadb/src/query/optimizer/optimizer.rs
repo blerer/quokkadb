@@ -10,7 +10,9 @@ use crate::query::{
     ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder,
 };
 use crate::storage::Direction;
-use crate::storage::catalog::{Catalog, IndexDefinition, IndexDirection, OrderedIndexField};
+use crate::storage::catalog::{
+    CollectionMetadata, IndexDefinition, IndexDirection, OrderedIndexField,
+};
 use crate::storage::count_stats::{CountStatSource, CountStatsKey};
 use std::collections::HashMap;
 use std::convert::Into;
@@ -268,7 +270,7 @@ impl Optimizer {
     pub fn optimize(
         &self,
         plan: Arc<LogicalPlan>,
-        catalog: Arc<Catalog>,
+        metadata: &CollectionMetadata,
         count_stats: &dyn CountStatSource,
     ) -> Result<Arc<PhysicalPlan>> {
         let _span = trace_span!("optimization").entered();
@@ -285,7 +287,7 @@ impl Optimizer {
 
         let physical_plan = self
             .best_expr(
-                catalog.as_ref(),
+                metadata,
                 count_stats,
                 &mut memo,
                 root_group_id,
@@ -358,7 +360,7 @@ impl Optimizer {
 
     fn best_expr(
         &self,
-        catalog: &Catalog,
+        metadata: &CollectionMetadata,
         count_stats: &dyn CountStatSource,
         memo: &mut Memo,
         group_id: GroupId,
@@ -380,13 +382,13 @@ impl Optimizer {
         for child_node in child_nodes.into_iter() {
             let child_group = memo.add_group(child_node);
             let child_best =
-                self.best_expr(catalog, count_stats, memo, child_group, &child_reqs)?;
+                self.best_expr(metadata, count_stats, memo, child_group, &child_reqs)?;
             child_bests.push(child_best);
         }
 
         // 4. Implement this node directly into physical alternatives
         let mut candidates = self.implement_node(
-            catalog,
+            metadata,
             count_stats,
             logical_plan.as_ref(),
             &child_bests,
@@ -419,7 +421,7 @@ impl Optimizer {
 
     fn implement_node(
         &self,
-        catalog: &Catalog,
+        metadata: &CollectionMetadata,
         count_stats: &dyn CountStatSource,
         node: &LogicalPlan,
         child_bests: &[Arc<Best>],
@@ -433,14 +435,11 @@ impl Optimizer {
                 ..
             } => {
                 assert!(child_bests.is_empty());
-                self.implement_collection_scan_node(
-                    catalog,
-                    count_stats,
-                    *collection,
-                    *hint,
-                    filter,
-                    req,
-                )
+                assert_eq!(
+                    collection, &metadata.id,
+                    "Scan collection must match optimizer metadata"
+                );
+                self.implement_collection_scan_node(metadata, count_stats, *hint, filter, req)
             }
             LogicalPlan::Filter { condition, .. } => {
                 assert_eq!(child_bests.len(), 1);
@@ -546,14 +545,13 @@ impl Optimizer {
 
     fn implement_collection_scan_node(
         &self,
-        catalog: &Catalog,
+        metadata: &CollectionMetadata,
         count_stats: &dyn CountStatSource,
-        collection: u32,
         hint: Option<u32>,
         filter: &Option<Arc<Expr>>,
         req: &ReqProps,
     ) -> Result<Vec<Candidate>> {
-        let hinted_index = Self::get_hint_info(catalog, &collection, hint)?;
+        let hinted_index = Self::get_hint_info(metadata, hint)?;
 
         let primary_key = Expr::Field(vec!["_id".into()]);
         let mut candidates = if hint.is_some_and(|index_id| index_id != 0) {
@@ -561,7 +559,7 @@ impl Optimizer {
         } else {
             vec![self.create_pk_range_scan_candidate(
                 count_stats,
-                collection,
+                metadata.id,
                 primary_key.clone(),
                 Interval::all(),
                 filter.clone(),
@@ -617,7 +615,7 @@ impl Optimizer {
                                         compute_residual_filter(expr.clone(), &primary_key);
                                     let candidate = self.create_multipoint_search_candidate(
                                         count_stats,
-                                        collection,
+                                        metadata.id,
                                         value.clone(),
                                         residual,
                                         req,
@@ -633,7 +631,7 @@ impl Optimizer {
                                     let key = interval.start_bound_value().unwrap().clone();
                                     let candidate = self.create_point_search_candidate(
                                         count_stats,
-                                        collection,
+                                        metadata.id,
                                         key,
                                         residual,
                                     );
@@ -645,7 +643,7 @@ impl Optimizer {
                                     // Range scan
                                     candidates[0] = self.create_pk_range_scan_candidate(
                                         count_stats,
-                                        collection,
+                                        metadata.id,
                                         primary_key.clone(),
                                         interval.clone(),
                                         residual,
@@ -656,7 +654,7 @@ impl Optimizer {
                             Expr::Exists(true) => {
                                 candidates[0] = self.create_pk_range_scan_candidate(
                                     count_stats,
-                                    collection,
+                                    metadata.id,
                                     primary_key.clone(),
                                     Interval::all(),
                                     residual,
@@ -671,8 +669,7 @@ impl Optimizer {
 
             self.add_index_scan_candidates(
                 count_stats,
-                catalog,
-                collection,
+                metadata,
                 filter,
                 Some(&field_filters_map),
                 hint,
@@ -682,8 +679,7 @@ impl Optimizer {
         } else {
             self.add_index_scan_candidates(
                 count_stats,
-                catalog,
-                collection,
+                metadata,
                 filter,
                 None,
                 hint,
@@ -705,14 +701,10 @@ impl Optimizer {
     }
 
     fn get_hint_info(
-        catalog: &Catalog,
-        collection: &u32,
+        metadata: &CollectionMetadata,
         hint: Option<u32>,
     ) -> Result<Option<(String, String)>> {
         let hinted_index = if let Some(index_id) = hint {
-            let metadata = catalog
-                .get_collection_by_id(&collection)
-                .expect("The collection should exist");
             if index_id == 0 {
                 Some(("collection scan".to_string(), metadata.name.clone()))
             } else {
@@ -744,19 +736,14 @@ impl Optimizer {
     fn add_index_scan_candidates(
         &self,
         count_stats: &dyn CountStatSource,
-        catalog: &Catalog,
-        collection: u32,
+        collection: &CollectionMetadata,
         filter: &Option<Arc<Expr>>,
         field_filters_map: Option<&HashMap<&Expr, &Expr>>,
         hint: Option<u32>,
         req: &ReqProps,
         candidates: &mut Vec<Candidate>,
     ) {
-        let metadata = catalog
-            .get_collection_by_id(&collection)
-            .expect("The collection should exists");
-
-        for index in metadata.queryable_indexes() {
+        for index in collection.queryable_indexes() {
             if hint.is_some_and(|hinted_index| hinted_index != index.id) {
                 continue;
             }
@@ -781,7 +768,7 @@ impl Optimizer {
 
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
-                    collection,
+                    collection.id,
                     index.id,
                     range,
                     residual,
@@ -795,7 +782,7 @@ impl Optimizer {
             {
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
-                    collection,
+                    collection.id,
                     index.id,
                     IndexScanRangeExpr {
                         equal_prefix: vec![],
@@ -808,7 +795,7 @@ impl Optimizer {
             } else if hint == Some(index.id) && filter.is_none() && req.order.is_none() {
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
-                    collection,
+                    collection.id,
                     index.id,
                     IndexScanRangeExpr {
                         equal_prefix: vec![],
@@ -1317,7 +1304,7 @@ mod optimizer_tests {
         proj_fields, within,
     };
     use crate::query::logical_plan::LogicalPlanBuilder;
-    use crate::storage::catalog::{IndexDefinition, IndexOptions, OrderedIndexField};
+    use crate::storage::catalog::{CollectionBuilder, IndexBuilder};
     use crate::storage::count_stats::{CountStats, CountStatsKey};
     use bson::Bson;
     use std::collections::BTreeMap;
@@ -1682,35 +1669,35 @@ mod optimizer_tests {
     }
 
     fn check_optimization(input: Arc<LogicalPlan>, output: PhysicalPlan) {
-        check_optimization_with_catalog(input, test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata(), output);
     }
 
-    fn check_optimization_with_catalog(
+    fn check_optimization_with_metadata(
         input: Arc<LogicalPlan>,
-        catalog: Arc<Catalog>,
+        metadata: &CollectionMetadata,
         output: PhysicalPlan,
     ) {
-        check_optimization_with_catalog_and_stats(input, catalog, CountStats::default(), &output);
+        check_optimization_with_metadata_and_stats(input, metadata, CountStats::default(), &output);
     }
 
-    fn check_optimization_with_catalog_and_stats(
+    fn check_optimization_with_metadata_and_stats(
         input: Arc<LogicalPlan>,
-        catalog: Arc<Catalog>,
+        metadata: &CollectionMetadata,
         count_stats: CountStats,
         output: &PhysicalPlan,
     ) {
-        let physical_plan = optimize_with_catalog_and_stats(input, catalog, count_stats)
+        let physical_plan = optimize_with_catalog_and_stats(input, metadata, count_stats)
             .expect("test logical plan should be optimizable");
         assert_eq!(physical_plan.as_ref(), output)
     }
 
     fn check_optimization_fail(
         input: Arc<LogicalPlan>,
-        catalog: Arc<Catalog>,
+        metadata: &CollectionMetadata,
         count_stats: CountStats,
         error: &str,
     ) {
-        let result = optimize_with_catalog_and_stats(input, catalog, count_stats);
+        let result = optimize_with_catalog_and_stats(input, metadata, count_stats);
         if let Err(ref e) = result {
             assert_eq!(e.to_string(), error);
         } else {
@@ -1720,7 +1707,7 @@ mod optimizer_tests {
 
     fn optimize_with_catalog_and_stats(
         input: Arc<LogicalPlan>,
-        catalog: Arc<Catalog>,
+        metadata: &CollectionMetadata,
         count_stats: CountStats,
     ) -> Result<Arc<PhysicalPlan>> {
         let optimizer = Optimizer::new();
@@ -1728,7 +1715,7 @@ mod optimizer_tests {
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, _parameters) = optimizer.parametrize(normalized_plan);
-        optimizer.optimize(logical_plan, catalog, &count_stats)
+        optimizer.optimize(logical_plan, metadata, &count_stats)
     }
 
     fn index_stats(collection_count: i64, index_count: i64) -> CountStats {
@@ -1754,41 +1741,15 @@ mod optimizer_tests {
         }
     }
 
-    fn test_catalog() -> Arc<Catalog> {
-        let catalog = Catalog::new()
-            .add_collection("test", COLLECTION, 2)
-            .add_collection_with_options(
-                "tmp",
-                11,
-                2,
-                crate::storage::catalog::CollectionOptions::default(),
-            );
-        Arc::new(catalog)
+    fn test_metadata() -> Arc<CollectionMetadata> {
+        CollectionBuilder::new(COLLECTION, "test", 2).build()
     }
 
-    fn indexed_test_catalog() -> Arc<Catalog> {
-        let catalog = Catalog::new()
-            .add_collection("test", COLLECTION, 2)
-            .add_index_to_collection(
-                COLLECTION,
-                1,
-                &IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
-                &IndexOptions::default(),
-                3,
-            )
-            .add_index_to_collection(
-                COLLECTION,
-                2,
-                &IndexDefinition::Regular(vec![
-                    OrderedIndexField::asc("a"),
-                    OrderedIndexField::desc("b"),
-                ]),
-                &IndexOptions::default(),
-                4,
-            )
-            .mark_index_queryable(COLLECTION, 1, 5)
-            .mark_index_queryable(COLLECTION, 2, 6);
-        Arc::new(catalog)
+    fn test_metadata_with_indexes() -> Arc<CollectionMetadata> {
+        CollectionBuilder::new(COLLECTION, "test", 2)
+            .index(IndexBuilder::new(3).asc("a").queryable_at(5))
+            .index(IndexBuilder::new(4).asc("a").desc("b").queryable_at(6))
+            .build()
     }
 
     #[test]
@@ -1810,7 +1771,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1835,7 +1796,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1860,7 +1821,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1881,7 +1842,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1905,7 +1866,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1929,7 +1890,7 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog(input, indexed_test_catalog(), output);
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -1971,9 +1932,9 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input,
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10_000, 100),
             &output,
         );
@@ -1997,16 +1958,16 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input.clone(),
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10_000, 1),
             &output,
         );
 
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input,
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10, 1000),
             &output,
         );
@@ -2027,7 +1988,7 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2047,9 +2008,9 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input.clone(),
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10_000, 1),
             &output,
         );
@@ -2066,9 +2027,9 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input.clone(),
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10_000, 1),
             &output,
         );
@@ -2087,7 +2048,7 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2104,7 +2065,7 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2124,7 +2085,7 @@ mod optimizer_tests {
             sort_fields: Arc::new(vec![SortField::asc(field(["a"]))]),
             max_in_memory_rows: 5000,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2143,7 +2104,7 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2157,7 +2118,7 @@ mod optimizer_tests {
             filter: None,
             projection: None,
         };
-        check_optimization_with_catalog(input.clone(), indexed_test_catalog(), output);
+        check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }
 
     #[test]
@@ -2168,7 +2129,7 @@ mod optimizer_tests {
 
         check_optimization_fail(
             input,
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             CountStats::default(),
             "Cannot use hinted index 'a_1' on collection 'test': no candidate scan can use it for this query",
         )
@@ -2176,19 +2137,13 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimize_rejects_unqueryable_hinted_index() {
-        let catalog = Catalog::new()
-            .add_collection("test", COLLECTION, 2)
-            .add_index_to_collection(
-                COLLECTION,
-                1,
-                &IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
-                &IndexOptions::default(),
-                3,
-            );
+        let metadata = CollectionBuilder::new(COLLECTION, "test", 2)
+            .index(IndexBuilder::new(3).asc("a"))
+            .build();
         let input = LogicalPlanBuilder::scan(COLLECTION, Some(1)).build_arc();
         check_optimization_fail(
             input.clone(),
-            Arc::new(catalog),
+            &metadata,
             CountStats::default(),
             "Cannot use hinted index 'a_1' on collection 'test': the index is not queryable",
         );
@@ -2197,8 +2152,11 @@ mod optimizer_tests {
     #[test]
     fn test_optimize_rejects_missing_hinted_index() {
         let input = LogicalPlanBuilder::scan(COLLECTION, Some(999)).build_arc();
-        let result =
-            optimize_with_catalog_and_stats(input, indexed_test_catalog(), CountStats::default());
+        let result = optimize_with_catalog_and_stats(
+            input,
+            &test_metadata_with_indexes(),
+            CountStats::default(),
+        );
 
         assert!(matches!(
             result,
@@ -2218,7 +2176,7 @@ mod optimizer_tests {
 
         check_optimization_fail(
             input,
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             CountStats::default(),
             "Cannot use hinted index 'a_1' on collection 'test': no candidate scan can use it for this query",
         );
@@ -2241,9 +2199,9 @@ mod optimizer_tests {
             projection: None,
         };
 
-        check_optimization_with_catalog_and_stats(
+        check_optimization_with_metadata_and_stats(
             input,
-            indexed_test_catalog(),
+            &test_metadata_with_indexes(),
             index_stats(10, 10_000),
             &output,
         );

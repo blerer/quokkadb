@@ -157,7 +157,7 @@ fn test_read() {
     let registry = &mut MetricRegistry::default();
     let engine = new_engine(registry, Options::lightweight(), &&path);
 
-    let col = engine.create_collection("test_read", true).unwrap();
+    let col = engine.create_collection("test_read", true).unwrap().id;
     let idx = 0;
 
     let inserts = vec![
@@ -314,7 +314,8 @@ fn test_acquire_snapshot_registers_and_releases_lease() {
 
     let col = engine
         .create_collection("test_acquire_snapshot_registers_and_releases_lease", true)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
         .unwrap();
@@ -341,7 +342,10 @@ fn test_range_scan() {
     let registry = &mut MetricRegistry::default();
     let engine = new_engine(registry, Options::lightweight(), &&path);
 
-    let col = engine.create_collection("test_range_scan", true).unwrap();
+    let col = engine
+        .create_collection("test_range_scan", true)
+        .unwrap()
+        .id;
     let idx = 0;
 
     // Stage 1: All in memtable
@@ -494,7 +498,8 @@ fn test_read_and_scan_with_immutable_memtables() {
 
     let col = engine
         .create_collection("test_immutable_memtables", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let idx = 0;
 
     // Pause the flush manager to keep immutable memtables around.
@@ -675,7 +680,8 @@ fn test_replay_with_multiple_wals() {
 
         let col = old_engine
             .create_collection("test_replay_with_multiple_wals", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write enough data to trigger 2 memtable rotations.
         // We write four ~1MB values to fill up the 4MB memtable.
@@ -744,7 +750,8 @@ fn test_manifest_rotation() {
 
     let col = engine
         .create_collection("test_manifest_rotation", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let idx = 0;
 
     let initial_manifest_path = Manifest::read_current_file(path).unwrap().unwrap();
@@ -814,7 +821,8 @@ fn test_manifest_rotation_error() {
 
     let col = engine
         .create_collection("test_manifest_rotation_error", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     assert_counter_eq(registry, "manifest_rewrite", 0);
 
@@ -856,7 +864,8 @@ fn test_obsolete_wal_deletion() {
 
     let col = engine
         .create_collection("test_obsolete_wal_deletion", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let idx = 0;
 
     // The first WAL file should be 000002.log.
@@ -925,7 +934,8 @@ fn test_obsolete_sst_deletion_after_compaction() {
     engine.disable_auto_compaction();
     let col = engine
         .create_collection("test_obsolete_sst_deletion_after_compaction", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -985,7 +995,8 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
 
     let col = engine
         .create_collection("snapshot_overwrite_visibility", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1033,7 +1044,8 @@ fn test_snapshot_point_read_survives_compaction_after_delete() {
 
     let col = engine
         .create_collection("snapshot_delete_visibility", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1081,7 +1093,8 @@ fn test_snapshot_range_scan_survives_compaction() {
 
     let col = engine
         .create_collection("snapshot_range_visibility", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     for key in 1..=3 {
         engine
@@ -1140,7 +1153,8 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
     let options = CollectionOptions::default();
     let col = engine
         .create_collection_with_options("snapshot_collection_drop", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1167,7 +1181,8 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
     let options = CollectionOptions::default();
     let survivor = engine
         .create_collection_with_options("snapshot_collection_drop_survivor", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .write(write_batch(vec![put_op(survivor, 1, 1)]), false)
         .unwrap();
@@ -1201,7 +1216,8 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("snapshot_index_drop", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     let index_id = engine
         .create_index(
             collection_id,
@@ -1291,7 +1307,8 @@ fn test_orphaned_sst_cleanup_on_startup() {
         let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
         let col = engine
             .create_collection("test_orphaned_sst_cleanup_on_startup", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         engine
             .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1359,7 +1376,10 @@ fn test_concurrent_writes(with_concurrent_flushes: bool) {
 
     let num_threads = 5;
     let writes_per_thread = 200;
-    let col = engine.create_collection("concurrent_writes", true).unwrap();
+    let col = engine
+        .create_collection("concurrent_writes", true)
+        .unwrap()
+        .id;
     let idx = 0;
 
     std::thread::scope(|s| {
@@ -1425,7 +1445,8 @@ fn test_shutdown_and_restart() {
 
         let col = engine
             .create_collection("test_shutdown_and_restart", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write some data and flush it to an SSTable.
         engine
@@ -1505,7 +1526,8 @@ fn test_wal_replay_on_restart() {
 
         let col = engine
             .create_collection("test_wal_replay_on_restart", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write some data and flush it to an SSTable.
         engine
@@ -1588,7 +1610,8 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
 
         let collection_id = engine
             .create_collection("test_count_stats_restart", true)
-            .unwrap();
+            .unwrap()
+            .id;
         let created_index = engine
             .create_index(
                 collection_id,
@@ -1687,7 +1710,8 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
 
         let collection_id = engine
             .create_collection("test_count_stats_delete_restart", true)
-            .unwrap();
+            .unwrap()
+            .id;
         let created_index = engine
             .create_index(
                 collection_id,
@@ -1787,7 +1811,8 @@ fn test_wal_replay_with_last_log_partially_written() {
 
         let col = engine
             .create_collection("test_wal_replay_with_partial_log", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         engine
             .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1869,7 +1894,8 @@ fn test_wal_replay_with_header_corruption() {
 
         let col = engine
             .create_collection("test_wal_replay_with_header_corruption", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         engine
             .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -1923,7 +1949,8 @@ fn test_wal_replay_with_header_corruption() {
     );
     let recovered_col = engine_restarted
         .create_collection("test_wal_replay_with_header_corruption", true)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(recovered_col, col);
 
     // The database should be usable.
@@ -1965,7 +1992,8 @@ fn test_restart_fails_with_corrupted_old_wal() {
 
         let col = engine
             .create_collection("test_restart_fails_with_corrupted_old_wal", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write enough data to trigger memtable rotation, which also rotates the WAL.
         let large_val = vec![0; 1024];
@@ -2033,7 +2061,8 @@ fn test_restart_with_stale_files() {
 
         let col = engine
             .create_collection("test_restart_with_stale_files", true)
-            .unwrap();
+            .unwrap()
+            .id;
 
         let inserts = vec![
             put_op(col, 1, 1),
@@ -2102,7 +2131,8 @@ fn test_failed_wal_group_sync_does_not_publish_writes() {
     let engine = new_engine(registry, options, dir.path());
     let col = engine
         .create_collection("failed_group_visibility", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), true)
@@ -2167,7 +2197,8 @@ fn test_error_mode_activation_and_rejection() {
 
     let col = engine
         .create_collection("test_error_mode_activation_and_rejection", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     // 1. Inject an error into the WAL write path.
     engine.wal_fail_write_after(0);
@@ -2199,7 +2230,8 @@ fn test_wal_rotation_on_write_error() {
 
     let col = engine
         .create_collection("test_wal_rotation_on_write_error", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let idx = 0;
 
     engine.wal_fail_rotate_after(0);
@@ -2243,7 +2275,8 @@ fn test_wal_rotation_on_flush_error() {
 
     let col = engine
         .create_collection("test_wal_rotation_on_flush_error", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine.wal_fail_rotate_after(0);
 
@@ -2281,7 +2314,8 @@ fn test_manifest_write_error() {
 
     let col = engine
         .create_collection("test_manifest_write_error", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine.manifest_fail_write_after(0);
 
@@ -2319,7 +2353,8 @@ fn test_memtable_flush_error() {
 
     let col = engine
         .create_collection("test_memtable_flush_error", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine.lsm_tree().memtable.return_error_on_flush(true);
 
@@ -2385,7 +2420,8 @@ fn test_create_collection() {
     let options = CollectionOptions::default();
     let col_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(col_id, FIRST_USER_COLLECTION_ID);
 
     // Verify collection exists in catalog
@@ -2398,7 +2434,8 @@ fn test_create_collection() {
     let options = CollectionOptions::default();
     let col_id_2 = engine
         .create_collection_with_options("test_collection_2", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(col_id_2, 11);
 
     // Verify both collections exist
@@ -2418,8 +2455,8 @@ fn test_recovery_retains_collection_edits_without_following_write() {
     let collection_id;
     {
         let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
-        collection_id = engine.create_collection("original", false).unwrap();
-        let dropped_id = engine.create_collection("dropped", false).unwrap();
+        collection_id = engine.create_collection("original", false).unwrap().id;
+        let dropped_id = engine.create_collection("dropped", false).unwrap().id;
         engine
             .write(write_batch(vec![put_op(collection_id, 1, 1)]), true)
             .unwrap();
@@ -2466,7 +2503,7 @@ fn test_recovery_retains_index_edits_without_following_write() {
     let (collection_id, dropped_index_id, pending_index_id);
     {
         let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
-        collection_id = engine.create_collection("docs", false).unwrap();
+        collection_id = engine.create_collection("docs", false).unwrap().id;
         dropped_index_id = engine
             .create_queryable_index(
                 collection_id,
@@ -2569,7 +2606,8 @@ fn test_explicit_flush_does_not_commit_pending_catalog_edits_without_data() {
     let engine = new_engine(&mut MetricRegistry::default(), options.clone(), &path);
     let collection_id = engine
         .create_collection("pending_collection", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     assert!(
         engine
@@ -2630,11 +2668,17 @@ fn test_create_collection_if_not_exists() {
     let engine = new_engine(registry, Options::lightweight(), &path);
 
     // Create a collection
-    let col_id_1 = engine.create_collection("test_collection", true).unwrap();
+    let col_id_1 = engine
+        .create_collection("test_collection", true)
+        .unwrap()
+        .id;
     assert_eq!(col_id_1, 10);
 
     // Call again - should return existing ID, not error
-    let col_id_2 = engine.create_collection("test_collection", true).unwrap();
+    let col_id_2 = engine
+        .create_collection("test_collection", true)
+        .unwrap()
+        .id;
     assert_eq!(col_id_2, col_id_1);
 
     // Verify only one collection exists with that name
@@ -2661,7 +2705,8 @@ fn test_create_index() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     let created_index = engine
         .create_index(
             collection_id,
@@ -2690,7 +2735,10 @@ fn test_create_index_starts_non_queryable_for_background_building() {
     let registry = &mut MetricRegistry::default();
     let engine = new_engine(registry, Options::lightweight(), dir.path());
 
-    let collection_id = engine.create_collection("test_collection", true).unwrap();
+    let collection_id = engine
+        .create_collection("test_collection", true)
+        .unwrap()
+        .id;
     let created_index = engine
         .create_index(
             collection_id,
@@ -2718,7 +2766,10 @@ fn test_create_index_rejects_equivalent_index_while_building() {
         Options::lightweight(),
         dir.path(),
     );
-    let collection_id = engine.create_collection("test_collection", true).unwrap();
+    let collection_id = engine
+        .create_collection("test_collection", true)
+        .unwrap()
+        .id;
     for name in [None, Some("by_name".to_string())] {
         let options = IndexOptions { name };
         let created_index = engine
@@ -2765,7 +2816,8 @@ fn test_create_index_is_noop_when_same_name_and_equivalent_spec_are_queryable() 
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     let created_index = engine
         .create_index(
@@ -2814,7 +2866,8 @@ fn test_create_index_rejects_equivalent_spec_under_different_name() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .create_index(
             collection_id,
@@ -2848,7 +2901,8 @@ fn test_create_index_rejects_same_name_with_different_definition() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .create_index(
             collection_id,
@@ -2889,7 +2943,8 @@ fn test_drop_index() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     let created_index = engine
         .create_index(
             collection_id,
@@ -2948,7 +3003,8 @@ fn test_drop_index_not_found() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     let result = engine.drop_index(collection_id, 99);
     let err = result.err().unwrap();
@@ -2967,7 +3023,8 @@ fn test_drop_index_is_noop_when_index_already_dropped() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     let created_index = engine
         .create_index(
             collection_id,
@@ -3001,7 +3058,8 @@ fn test_drop_index_is_noop_when_collection_already_dropped() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     let created_index = engine
         .create_index(
             collection_id,
@@ -3068,7 +3126,8 @@ fn test_create_index_on_dropped_collection_returns_error() {
     let options = CollectionOptions::default();
     let collection_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine.drop_collection("test_collection").unwrap();
 
     let result = engine.create_index(
@@ -3096,7 +3155,8 @@ fn test_drop_collection() {
     let options = CollectionOptions::default();
     let col_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     // Write some data to it
     engine
@@ -3132,7 +3192,8 @@ fn test_drop_collection() {
     );
     let flush_marker_id = engine
         .create_collection_with_options("flush_marker", CollectionOptions::default(), false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .write(write_batch(vec![put_op(flush_marker_id, 1, 1)]), false)
         .unwrap();
@@ -3171,7 +3232,8 @@ fn test_write_to_dropped_collection() {
     let options = CollectionOptions::default();
     let col_id = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine.drop_collection("test_collection").unwrap();
 
     // Try to write to the dropped collection
@@ -3196,7 +3258,8 @@ fn test_write_rejects_stale_collection_schema_precondition() {
     let engine = new_engine(registry, Options::lightweight(), &path);
     let collection = engine
         .create_collection("schema_precondition", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let snapshot = engine.acquire_snapshot();
     let version = engine
         .catalog()
@@ -3245,32 +3308,22 @@ fn test_write_rejects_stale_schema_for_any_collection_precondition() {
         .create_collection("second_schema_precondition", true)
         .unwrap();
     let snapshot = engine.acquire_snapshot();
-    let first_version = engine
-        .catalog()
-        .get_collection_by_id(&first_collection)
-        .unwrap()
-        .version;
-    let second_version = engine
-        .catalog()
-        .get_collection_by_id(&second_collection)
-        .unwrap()
-        .version;
 
     engine
         .create_index(
-            second_collection,
+            second_collection.id,
             IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
             IndexOptions::default(),
         )
         .unwrap();
 
     let mut preconditions = Preconditions::new(snapshot);
-    preconditions.add_collection_version_match(first_collection, first_version);
-    preconditions.add_collection_version_match(second_collection, second_version);
+    preconditions.add_collection_version_match(first_collection.id, first_collection.version);
+    preconditions.add_collection_version_match(second_collection.id, second_collection.version);
     let batch = WriteBatch::new_with_preconditions(
         vec![
-            put_op(first_collection, 1, 1),
-            put_op(second_collection, 1, 2),
+            put_op(first_collection.id, 1, 1),
+            put_op(second_collection.id, 1, 2),
         ],
         CountStats::default(),
         preconditions,
@@ -3282,13 +3335,13 @@ fn test_write_rejects_stale_schema_for_any_collection_precondition() {
     let snapshot = engine.acquire_snapshot();
     assert!(
         engine
-            .read_at_snapshot(first_collection, 0, &user_key(1), &snapshot)
+            .read_at_snapshot(first_collection.id, 0, &user_key(1), &snapshot)
             .unwrap()
             .is_none()
     );
     assert!(
         engine
-            .read_at_snapshot(second_collection, 0, &user_key(2), &snapshot)
+            .read_at_snapshot(second_collection.id, 0, &user_key(2), &snapshot)
             .unwrap()
             .is_none()
     );
@@ -3307,11 +3360,13 @@ fn test_collection_persistence_across_restart() {
         let options1 = CollectionOptions::default();
         let col_id_1 = engine
             .create_collection_with_options("collection_1", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
         let options1 = CollectionOptions::default();
         let col_id_2 = engine
             .create_collection_with_options("collection_2", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write data to both
         engine
@@ -3352,7 +3407,8 @@ fn test_collection_persistence_across_restart() {
         let options1 = CollectionOptions::default();
         let col_id_3 = engine
             .create_collection_with_options("collection_3", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
         assert_eq!(col_id_3, 12);
     }
 }
@@ -3370,11 +3426,13 @@ fn test_drop_collection_persistence_across_restart() {
         let options1 = CollectionOptions::default();
         let col_id = engine
             .create_collection_with_options("to_drop", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
         let options1 = CollectionOptions::default();
         engine
             .create_collection_with_options("to_keep", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
 
         let drop_seq = engine.next_seq_number.load(Ordering::Relaxed);
         engine.drop_collection("to_drop").unwrap();
@@ -3435,7 +3493,8 @@ fn test_drop_and_recreate_collection_data_isolation() {
     let options = CollectionOptions::default();
     let col_id_1 = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(col_id_1, 10);
 
     engine
@@ -3465,7 +3524,8 @@ fn test_drop_and_recreate_collection_data_isolation() {
     let options = CollectionOptions::default();
     let col_id_2 = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(col_id_2, 11); // Should get a new ID
 
     // The old data should NOT be visible when querying with the new collection ID
@@ -3530,7 +3590,8 @@ fn test_drop_and_recreate_collection_with_flush() {
     let options = CollectionOptions::default();
     let col_id_1 = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
@@ -3592,7 +3653,8 @@ fn test_drop_and_recreate_collection_with_flush() {
     );
     let flush_marker_id = engine
         .create_collection_with_options("flush_marker", CollectionOptions::default(), false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .write(write_batch(vec![put_op(flush_marker_id, 1, 1)]), false)
         .unwrap();
@@ -3608,7 +3670,8 @@ fn test_drop_and_recreate_collection_with_flush() {
     let options = CollectionOptions::default();
     let col_id_2 = engine
         .create_collection_with_options("test_collection", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
 
     // Old data (both from SSTable and memtable) should NOT be visible with new collection ID
     let user_key1 = &user_key(1);
@@ -3682,7 +3745,8 @@ fn test_drop_and_recreate_collection_persistence() {
         let options1 = CollectionOptions::default();
         let col_id_1 = engine
             .create_collection_with_options("test_collection", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
         engine
             .write(write_batch(vec![put_op(col_id_1, 1, 100)]), false)
             .unwrap();
@@ -3696,7 +3760,8 @@ fn test_drop_and_recreate_collection_persistence() {
         let options1 = CollectionOptions::default();
         col_id_2 = engine
             .create_collection_with_options("test_collection", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
 
         // Write different data to recreated collection
         engine
@@ -3774,7 +3839,8 @@ fn test_rename_collection() {
     let options = CollectionOptions::default();
     let col_id = engine
         .create_collection_with_options("original_name", options, false)
-        .unwrap();
+        .unwrap()
+        .id;
     engine
         .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
         .unwrap();
@@ -3859,7 +3925,8 @@ fn test_rename_collection_persistence() {
         let options1 = CollectionOptions::default();
         col_id = engine
             .create_collection_with_options("original", options1, false)
-            .unwrap();
+            .unwrap()
+            .id;
         engine
             .write(write_batch(vec![put_op(col_id, 1, 100)]), false)
             .unwrap();
@@ -3903,7 +3970,8 @@ fn test_optimistic_locking_must_not_exist() {
 
     let col = engine
         .create_collection("test_optimistic_locking", true)
-        .unwrap();
+        .unwrap()
+        .id;
     let idx = 0;
     let snapshot0 = engine.acquire_snapshot();
 
@@ -3982,7 +4050,7 @@ fn assert_conflicting_writers_in_same_group(advance_sequence: bool) {
     let dir = tempdir().unwrap();
     let registry = &mut MetricRegistry::default();
     let engine = new_engine(registry, Options::lightweight(), dir.path());
-    let col = engine.create_collection("group_conflict", true).unwrap();
+    let col = engine.create_collection("group_conflict", true).unwrap().id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -4056,7 +4124,8 @@ fn test_optimistic_locking_skips_precondition_reads_when_since_matches_last_visi
 
     let col = engine
         .create_collection("test_optimistic_locking_skip_reads", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 0, 1)]), false)
@@ -4104,7 +4173,10 @@ fn assert_write_sync_forces_wal_sync_before_return(
         .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes));
     let engine = new_engine(registry, options, path);
 
-    let col = engine.create_collection("test_write_sync", true).unwrap();
+    let col = engine
+        .create_collection("test_write_sync", true)
+        .unwrap()
+        .id;
 
     assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 1); // header sync
 
@@ -4172,7 +4244,8 @@ fn test_default_writes_follow_buffered_wal_durability() {
 
     let col = engine
         .create_collection("test_default_writes_follow_buffered_wal_durability", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)
@@ -4197,7 +4270,8 @@ fn test_default_writes_follow_durable_wal_durability() {
 
     let col = engine
         .create_collection("test_default_writes_follow_durable_wal_durability", true)
-        .unwrap();
+        .unwrap()
+        .id;
 
     engine
         .write(write_batch(vec![put_op(col, 1, 1)]), false)

@@ -1268,7 +1268,7 @@ impl<'a> Find<'a> {
             })?;
 
         Ok(match planned {
-            Some((plan, catalog)) => ExplainPlan::from_physical_plan(&plan, &catalog),
+            Some((plan, collection)) => ExplainPlan::from_physical_plan(&plan, &collection),
             None => ExplainPlan::new(ExplainNode::new(ExplainOperator::NoOp, vec![])),
         })
     }

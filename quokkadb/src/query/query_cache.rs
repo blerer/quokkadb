@@ -11,7 +11,7 @@ use tracing::trace_span;
 /// A cache of optimized physical plans keyed by the hash of a parameterized logical plan.
 pub struct QueryCache {
     metrics: Metrics,
-    cache: Cache<u64, Arc<CachedPhysicalPlan>>,
+    cache: Cache<(u32, u32, u64), Arc<CachedPhysicalPlan>>,
 }
 
 #[derive(Debug)]
@@ -25,7 +25,9 @@ impl QueryCache {
     /// Creates a new query cache with a maximum weighted size in bytes.
     pub fn new(metric_registry: &mut MetricRegistry, max_size_bytes: u64) -> Self {
         let cache = CacheBuilder::new(max_size_bytes)
-            .weigher(|_key: &u64, cached: &Arc<CachedPhysicalPlan>| cached.estimated_size)
+            .weigher(|_key: &(u32, u32, u64), cached: &Arc<CachedPhysicalPlan>| {
+                cached.estimated_size
+            })
             .build();
         let metrics = Metrics::new(cache.clone());
         metrics.register_to(metric_registry);
@@ -38,23 +40,40 @@ impl QueryCache {
     pub fn get_or_insert_with<F>(
         &self,
         collection: u32,
+        collection_version: u32,
         logical_plan: Arc<LogicalPlan>,
         build: F,
     ) -> Result<Arc<PhysicalPlan>>
     where
         F: FnOnce() -> Result<Arc<PhysicalPlan>>,
     {
-        let key = logical_plan.compute_hash();
-        let _span = trace_span!("query_cache.get", hash = key).entered();
+        let key = (collection, collection_version, logical_plan.compute_hash());
+        let _span = trace_span!(
+            "query_cache.get",
+            hash = key.2,
+            collection,
+            collection_version
+        )
+        .entered();
 
         if let Some(cached_plan) = self.cache.get(&key) {
             self.metrics.hits.inc();
-            tracing::trace!(hash = key, collection, "query cache hit");
+            tracing::trace!(
+                hash = key.2,
+                collection,
+                collection_version,
+                "query cache hit"
+            );
             return Ok(cached_plan.plan.clone());
         }
 
         self.metrics.misses.inc();
-        tracing::trace!(hash = key, collection, "query cache miss");
+        tracing::trace!(
+            hash = key.2,
+            collection,
+            collection_version,
+            "query cache miss"
+        );
 
         let plan = build()?;
         let cached_plan = Arc::new(CachedPhysicalPlan {
@@ -67,7 +86,7 @@ impl QueryCache {
 
     /// Invalidates all cached plans for the given collection.
     pub fn invalidate_collection(&self, collection: u32) {
-        let keys_to_invalidate: Vec<u64> = self
+        let keys_to_invalidate: Vec<(u32, u32, u64)> = self
             .cache
             .iter()
             .filter_map(|(key, cached)| (cached.collection == collection).then_some(*key))
@@ -90,7 +109,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn new(cache: Cache<u64, Arc<CachedPhysicalPlan>>) -> Self {
+    fn new(cache: Cache<(u32, u32, u64), Arc<CachedPhysicalPlan>>) -> Self {
         let hits = Counter::new();
         let misses = Counter::new();
 
@@ -165,11 +184,11 @@ mod tests {
         };
 
         let first = cache
-            .get_or_insert_with(7, logical_plan.clone(), build_plan)
+            .get_or_insert_with(7, 1, logical_plan.clone(), build_plan)
             .unwrap();
         let cached_size = get_cached_size(&metric_registry);
         let second = cache
-            .get_or_insert_with(7, logical_plan, build_plan)
+            .get_or_insert_with(7, 1, logical_plan, build_plan)
             .unwrap();
 
         assert_eq!(*first, PhysicalPlan::NoOp);
@@ -191,7 +210,7 @@ mod tests {
         let logical_plan = Arc::new(LogicalPlanBuilder::scan(7, None).build());
 
         let error = cache
-            .get_or_insert_with(7, logical_plan.clone(), || {
+            .get_or_insert_with(7, 1, logical_plan.clone(), || {
                 Err(crate::error::Error::InvalidRequest(
                     "unusable hinted index".to_string(),
                 ))
@@ -200,7 +219,7 @@ mod tests {
         assert!(matches!(error, crate::error::Error::InvalidRequest(_)));
 
         let plan = cache
-            .get_or_insert_with(7, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .get_or_insert_with(7, 1, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
             .unwrap();
 
         assert_eq!(*plan, PhysicalPlan::NoOp);
@@ -217,7 +236,7 @@ mod tests {
             for hint in hints {
                 let logical_plan = Arc::new(LogicalPlanBuilder::scan(7, hint).build());
                 cache
-                    .get_or_insert_with(7, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+                    .get_or_insert_with(7, 1, logical_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
                     .unwrap();
             }
 
@@ -254,7 +273,7 @@ mod tests {
         };
 
         cache
-            .get_or_insert_with(7, first_parameterized_plan, build_plan)
+            .get_or_insert_with(7, 1, first_parameterized_plan, build_plan)
             .unwrap();
         assert_misses(&metric_registry, 1);
         assert_hits(&metric_registry, 0);
@@ -263,7 +282,7 @@ mod tests {
         assert!(size_after_first_insert > 0);
 
         cache
-            .get_or_insert_with(7, second_parameterized_plan, build_plan)
+            .get_or_insert_with(7, 1, second_parameterized_plan, build_plan)
             .unwrap();
 
         assert_eq!(build_count.load(Ordering::Relaxed), 1);
@@ -283,12 +302,12 @@ mod tests {
         let collection_two_plan = Arc::new(LogicalPlanBuilder::scan(2, None).build());
 
         cache
-            .get_or_insert_with(1, collection_one_plan.clone(), || {
+            .get_or_insert_with(1, 1, collection_one_plan.clone(), || {
                 Ok(Arc::new(PhysicalPlan::NoOp))
             })
             .unwrap();
         cache
-            .get_or_insert_with(2, collection_two_plan.clone(), || {
+            .get_or_insert_with(2, 1, collection_two_plan.clone(), || {
                 Ok(Arc::new(PhysicalPlan::NoOp))
             })
             .unwrap();
@@ -302,10 +321,14 @@ mod tests {
         assert!(size_after_invalidation < size_before_invalidation);
 
         cache
-            .get_or_insert_with(1, collection_one_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .get_or_insert_with(1, 1, collection_one_plan, || {
+                Ok(Arc::new(PhysicalPlan::NoOp))
+            })
             .unwrap();
         cache
-            .get_or_insert_with(2, collection_two_plan, || Ok(Arc::new(PhysicalPlan::NoOp)))
+            .get_or_insert_with(2, 1, collection_two_plan, || {
+                Ok(Arc::new(PhysicalPlan::NoOp))
+            })
             .unwrap();
 
         assert_hits(&metric_registry, 1);
@@ -318,7 +341,7 @@ mod tests {
         let logical_plan = Arc::new(LogicalPlanBuilder::scan(4, None).build());
 
         cache
-            .get_or_insert_with(4, logical_plan, || {
+            .get_or_insert_with(4, 1, logical_plan, || {
                 Ok(Arc::new(PhysicalPlan::Projection {
                     input: Arc::new(PhysicalPlan::CollectionScan {
                         collection: 4,

@@ -5,7 +5,7 @@
 
 use crate::query::physical_plan::PhysicalPlan;
 use crate::storage::Direction;
-use crate::storage::catalog::Catalog;
+use crate::storage::catalog::CollectionMetadata;
 
 /// A structured, read-only description of a planned query.
 ///
@@ -29,12 +29,12 @@ impl ExplainPlan {
     /// Keeping this conversion in the explanation layer prevents query
     /// execution internals from depending on the public API. Index metadata is
     /// resolved here so the result exposes names rather than catalog IDs.
-    pub(crate) fn from_physical_plan(plan: &PhysicalPlan, catalog: &Catalog) -> Self {
-        Self::new(explain_node(plan, catalog))
+    pub(crate) fn from_physical_plan(plan: &PhysicalPlan, metadata: &CollectionMetadata) -> Self {
+        Self::new(explain_node(plan, metadata))
     }
 }
 
-fn explain_node(plan: &PhysicalPlan, catalog: &Catalog) -> ExplainNode {
+fn explain_node(plan: &PhysicalPlan, metadata: &CollectionMetadata) -> ExplainNode {
     let (operator, children) = match plan {
         PhysicalPlan::NoOp => (ExplainOperator::NoOp, vec![]),
         PhysicalPlan::CollectionScan { direction, .. } => (
@@ -51,14 +51,9 @@ fn explain_node(plan: &PhysicalPlan, catalog: &Catalog) -> ExplainNode {
             direction,
             ..
         } => {
-            let metadata = catalog
-                .get_collection_by_id(collection)
-                .and_then(|collection| collection.get_index_by_id(*index))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "physical plan references missing index {index} in collection {collection}"
-                    )
-                });
+            let metadata = metadata.get_index_by_id(*index).unwrap_or_else(|| {
+                panic!("physical plan references missing index {index} in collection {collection}")
+            });
             (
                 ExplainOperator::IndexScan {
                     index_name: metadata.name(),
@@ -76,15 +71,15 @@ fn explain_node(plan: &PhysicalPlan, catalog: &Catalog) -> ExplainNode {
             vec![],
         ),
         PhysicalPlan::Filter { input, .. } => {
-            (ExplainOperator::Filter, vec![explain_node(input, catalog)])
+            (ExplainOperator::Filter, vec![explain_node(input, metadata)])
         }
         PhysicalPlan::Projection { input, .. } => (
             ExplainOperator::Projection,
-            vec![explain_node(input, catalog)],
+            vec![explain_node(input, metadata)],
         ),
         PhysicalPlan::InMemorySort { input, .. } => (
             ExplainOperator::InMemorySort,
-            vec![explain_node(input, catalog)],
+            vec![explain_node(input, metadata)],
         ),
         PhysicalPlan::ExternalMergeSort {
             input,
@@ -94,18 +89,18 @@ fn explain_node(plan: &PhysicalPlan, catalog: &Catalog) -> ExplainNode {
             ExplainOperator::ExternalMergeSort {
                 max_in_memory_rows: *max_in_memory_rows,
             },
-            vec![explain_node(input, catalog)],
+            vec![explain_node(input, metadata)],
         ),
         PhysicalPlan::TopKHeapSort { input, k, .. } => (
             ExplainOperator::TopKHeapSort { k: *k },
-            vec![explain_node(input, catalog)],
+            vec![explain_node(input, metadata)],
         ),
         PhysicalPlan::Limit { input, skip, limit } => (
             ExplainOperator::Limit {
                 skip: *skip,
                 limit: *limit,
             },
-            vec![explain_node(input, catalog)],
+            vec![explain_node(input, metadata)],
         ),
         PhysicalPlan::InsertOne { .. }
         | PhysicalPlan::InsertMany { .. }

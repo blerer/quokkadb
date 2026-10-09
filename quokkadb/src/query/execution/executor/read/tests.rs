@@ -25,7 +25,7 @@ fn test_execution_roundtrip() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test", true)?;
+    let collection_id = storage_engine.create_collection("test", true)?.id;
 
     // 2. InsertOne
     let doc1 = doc! { "name": "doc1", "value": 1 };
@@ -101,7 +101,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_edge", true)?;
+    let collection_id = storage_engine.create_collection("test_edge", true)?.id;
 
     // Insert some docs with known integer _id's for predictable range scans
     let doc1 = doc! { "_id": 10i32, "name": "doc10" };
@@ -240,7 +240,7 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_index_eq", true)?;
+    let collection_id = storage_engine.create_collection("test_index_eq", true)?.id;
     let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
@@ -283,7 +283,9 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_index_compound", true)?;
+    let collection_id = storage_engine
+        .create_collection("test_index_compound", true)?
+        .id;
     let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![
@@ -331,7 +333,9 @@ fn test_index_scan_reverse_direction_and_residual_filter_execution() -> Result<(
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_index_reverse", true)?;
+    let collection_id = storage_engine
+        .create_collection("test_index_reverse", true)?
+        .id;
     let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
@@ -378,7 +382,7 @@ fn test_limit_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_limit", true)?;
+    let collection_id = storage_engine.create_collection("test_limit", true)?.id;
 
     // 2. Insert 5 documents
     let docs: Vec<Document> = (1..=5)
@@ -496,7 +500,7 @@ fn test_sort_plans_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_sorts", true)?;
+    let collection_id = storage_engine.create_collection("test_sorts", true)?.id;
 
     // 2. Insert test data
     let docs = vec![
@@ -597,7 +601,7 @@ fn test_filter_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_filters", true)?;
+    let collection_id = storage_engine.create_collection("test_filters", true)?.id;
 
     // 2. Insert test data
     let docs = vec![
@@ -777,7 +781,9 @@ fn test_projection_plan_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_projections", true)?;
+    let collection_id = storage_engine
+        .create_collection("test_projections", true)?
+        .id;
 
     // 2. Insert test data
     let test_doc = doc! {
@@ -963,7 +969,9 @@ fn test_multipoint_search_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_multipoint", true)?;
+    let collection_id = storage_engine
+        .create_collection("test_multipoint", true)?
+        .id;
 
     // 2. Insert test data
     let docs = vec![
@@ -1060,7 +1068,7 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
     let executor = runtime.executor.clone();
-    let collection_id = storage_engine.create_collection("test_snapshot", true)?;
+    let collection_id = storage_engine.create_collection("test_snapshot", true)?.id;
 
     // 2. Insert initial doc
     let initial_doc = doc! { "_id": 1_i32, "value": "initial" };

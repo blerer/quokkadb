@@ -498,7 +498,8 @@ mod tests {
             StorageEngine::new(metric_registry, options.clone(), directory.path()).unwrap();
         let collection_id = storage_engine
             .create_collection("index_build", true)
-            .unwrap();
+            .unwrap()
+            .id;
         (directory, storage_engine, collection_id)
     }
 
@@ -657,7 +658,7 @@ mod tests {
         let mut metrics = MetricRegistry::default();
         let (storage_engine, _) =
             StorageEngine::new(&mut metrics, options.clone(), directory.path()).unwrap();
-        let collection_id = storage_engine.create_collection("empty", true).unwrap();
+        let collection_id = storage_engine.create_collection("empty", true).unwrap().id;
         let created_index = create_index(&storage_engine, collection_id);
         let key = IndexBuildKey::new(collection_id, created_index.id);
         let syncs_before_build = metrics.counter_value(metrics::names::wal::SYNCS);

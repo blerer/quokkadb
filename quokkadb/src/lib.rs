@@ -287,7 +287,7 @@ impl DbImpl {
         self: &Arc<Self>,
         name: &str,
         if_not_exists: bool,
-    ) -> error::Result<u32> {
+    ) -> error::Result<Arc<CollectionMetadata>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_collection", collection = %name, if_not_exists)
@@ -300,7 +300,7 @@ impl DbImpl {
         self: &Arc<Self>,
         name: &str,
         options: CreateCollectionOptions,
-    ) -> error::Result<u32> {
+    ) -> error::Result<Arc<CollectionMetadata>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_collection", collection = %name).entered(),
@@ -396,13 +396,13 @@ impl DbImpl {
 
     pub fn execute_write(
         &self,
-        collection: u32,
+        metadata: &CollectionMetadata,
         logical_plan: LogicalPlan,
         sync: bool,
     ) -> error::Result<WriteResult> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("execute_write", collection).entered(),
+            _operation: debug_span!("execute_write", collection = %metadata.id).entered(),
         };
         let (physical_plan, parameters) = match logical_plan {
             LogicalPlan::InsertOne {
@@ -431,7 +431,7 @@ impl DbImpl {
                 update,
                 upsert,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::UpdateOne {
                         collection,
@@ -448,7 +448,7 @@ impl DbImpl {
                 update,
                 upsert,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::UpdateMany {
                         collection,
@@ -467,7 +467,7 @@ impl DbImpl {
                 upsert,
                 return_document,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::FindOneAndUpdate {
                         collection,
@@ -486,7 +486,7 @@ impl DbImpl {
                 replacement,
                 upsert,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::ReplaceOne {
                         collection,
@@ -505,7 +505,7 @@ impl DbImpl {
                 upsert,
                 return_document,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::FindOneAndReplace {
                         collection,
@@ -523,7 +523,7 @@ impl DbImpl {
                 query,
                 projection,
             } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::FindOneAndDelete {
                         collection,
@@ -534,14 +534,14 @@ impl DbImpl {
                 )
             }
             LogicalPlan::DeleteOne { collection, query } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::DeleteOne { collection, query },
                     Some(parameters),
                 )
             }
             LogicalPlan::DeleteMany { collection, query } => {
-                let (parameters, query) = self.optimize_query(collection, query)?;
+                let (parameters, query) = self.optimize_query(metadata, query)?;
                 (
                     PhysicalPlan::DeleteMany { collection, query },
                     Some(parameters),
@@ -556,14 +556,14 @@ impl DbImpl {
 
     pub fn execute_query(
         &self,
-        collection: u32,
+        metadata: &CollectionMetadata,
         logical_plan: Arc<LogicalPlan>,
     ) -> error::Result<QueryOutput> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("execute_query", collection).entered(),
+            _operation: debug_span!("execute_query", collection = %metadata.id).entered(),
         };
-        let (parameters, physical_plan) = self.optimize_query(collection, logical_plan)?;
+        let (parameters, physical_plan) = self.optimize_query(metadata, logical_plan)?;
 
         self.executor.execute_cached(physical_plan, &parameters)
     }
@@ -572,45 +572,32 @@ impl DbImpl {
     /// without running the resulting physical plan.
     pub(crate) fn plan_query(
         &self,
-        collection: u32,
+        metadata: &CollectionMetadata,
         logical_plan: Arc<LogicalPlan>,
-    ) -> error::Result<(Arc<PhysicalPlan>, Arc<Catalog>)> {
-        let (_, physical_plan, catalog) = self.build_optimized_query(collection, logical_plan)?;
-        Ok((physical_plan, catalog))
+    ) -> error::Result<Arc<PhysicalPlan>> {
+        Ok(self.optimize_query(metadata, logical_plan)?.1)
     }
 
     fn optimize_query(
         &self,
-        collection: u32,
+        metadata: &CollectionMetadata,
         logical_plan: Arc<LogicalPlan>,
     ) -> error::Result<(Parameters, Arc<PhysicalPlan>)> {
-        let (parameters, physical_plan, _) =
-            self.build_optimized_query(collection, logical_plan)?;
-        Ok((parameters, physical_plan))
-    }
-
-    fn build_optimized_query(
-        &self,
-        collection: u32,
-        logical_plan: Arc<LogicalPlan>,
-    ) -> error::Result<(Parameters, Arc<PhysicalPlan>, Arc<Catalog>)> {
-        // First, normalize the logical plan
         let normalized_plan = self.optimizer.normalize(logical_plan);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, parameters) = self.optimizer.parametrize(normalized_plan);
 
-        let catalog = self.storage_engine.catalog();
         let logical_plan_for_cache = logical_plan.clone();
-        let physical_plan =
-            self.query_cache
-                .get_or_insert_with(collection, logical_plan_for_cache, || {
-                    self.optimizer.optimize(
-                        logical_plan,
-                        catalog.clone(),
-                        self.storage_engine.as_ref(),
-                    )
-                })?;
-        Ok((parameters, physical_plan, catalog))
+        let physical_plan = self.query_cache.get_or_insert_with(
+            metadata.id,
+            metadata.version,
+            logical_plan_for_cache,
+            || {
+                self.optimizer
+                    .optimize(logical_plan, &metadata, self.storage_engine.as_ref())
+            },
+        )?;
+        Ok((parameters, physical_plan))
     }
 }
 

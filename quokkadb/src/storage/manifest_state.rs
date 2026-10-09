@@ -913,7 +913,8 @@ impl fmt::Display for ManifestEdit {
 mod tests {
     use super::*;
     use crate::storage::catalog::{
-        CollectionMetadata, CollectionOptions, IndexDirection, IndexPath, OrderedIndexField,
+        CollectionBuilder, CollectionMetadata, CollectionOptions, IndexDirection, IndexPath,
+        OrderedIndexField,
     };
     use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
@@ -1445,12 +1446,7 @@ mod tests {
         let tree = flush_pending_catalog_edits(tree, 1000);
 
         assert_eq!(
-            Some(Arc::new(CollectionMetadata::new(
-                10,
-                "docs",
-                1000,
-                CollectionOptions::default()
-            ))),
+            Some(CollectionBuilder::new(10, "docs", 1000).build()),
             tree.catalog.get_collection_by_name(&"docs".to_string())
         );
 

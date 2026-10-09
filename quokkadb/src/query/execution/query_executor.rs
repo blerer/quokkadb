@@ -220,7 +220,7 @@ mod tests {
     fn execute_direct_records_write_metrics() -> Result<()> {
         let runtime = executor_test_runtime()?;
         let self1 = &runtime.storage_engine;
-        let collection_id = self1.create_collection("items", true)?;
+        let collection_id = self1.create_collection("items", true)?.id;
 
         let result = runtime.executor.execute_direct(
             PhysicalPlan::InsertOne {
@@ -265,7 +265,7 @@ mod tests {
     fn execute_cached_records_read_metrics_after_consumption() -> Result<()> {
         let runtime = executor_test_runtime()?;
         let self1 = &runtime.storage_engine;
-        let collection_id = self1.create_collection("items", true)?;
+        let collection_id = self1.create_collection("items", true)?.id;
         runtime.executor.execute_direct(
             PhysicalPlan::InsertOne {
                 collection: collection_id,
@@ -317,7 +317,7 @@ mod tests {
     fn execute_cached_records_metrics_when_dropped_without_iteration() -> Result<()> {
         let runtime = executor_test_runtime()?;
         let self1 = &runtime.storage_engine;
-        let collection_id = self1.create_collection("items", true)?;
+        let collection_id = self1.create_collection("items", true)?.id;
 
         let params = Parameters::new();
         let output = runtime.executor.execute_cached(

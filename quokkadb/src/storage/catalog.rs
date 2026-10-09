@@ -723,6 +723,90 @@ impl fmt::Display for IndexDirection {
     }
 }
 
+/// Test helper for constructing collection metadata with declared indexes.
+#[cfg(test)]
+pub(crate) struct CollectionBuilder {
+    collection: CollectionMetadata,
+}
+
+#[cfg(test)]
+impl CollectionBuilder {
+    pub(crate) fn new(id: u32, name: &str, created_at: u64) -> Self {
+        Self {
+            collection: CollectionMetadata::new(id, name, created_at, CollectionOptions::default()),
+        }
+    }
+
+    pub(crate) fn index(mut self, builder: IndexBuilder) -> Self {
+        let id = self.collection.next_index_id;
+        self.collection = self.collection.add_index(builder.build(id));
+        self
+    }
+
+    pub(crate) fn build(self) -> Arc<CollectionMetadata> {
+        Arc::new(self.collection)
+    }
+}
+
+/// Test helper for building an index definition and its metadata.
+#[cfg(test)]
+pub(crate) struct IndexBuilder {
+    fields: Vec<OrderedIndexField>,
+    created_at: u64,
+    queryable_at: Option<u64>,
+    dropped_at: Option<u64>,
+    options: IndexOptions,
+}
+
+#[cfg(test)]
+impl IndexBuilder {
+    pub(crate) fn new(created_at: u64) -> Self {
+        Self {
+            fields: Vec::new(),
+            created_at,
+            queryable_at: None,
+            dropped_at: None,
+            options: IndexOptions::default(),
+        }
+    }
+
+    pub(crate) fn asc<P: Into<IndexPath>>(mut self, path: P) -> Self {
+        self.fields.push(OrderedIndexField::asc(path));
+        self
+    }
+
+    pub(crate) fn desc<P: Into<IndexPath>>(mut self, path: P) -> Self {
+        self.fields.push(OrderedIndexField::desc(path));
+        self
+    }
+
+    pub(crate) fn name(mut self, name: &str) -> Self {
+        self.options.name = Some(name.to_string());
+        self
+    }
+
+    pub(crate) fn queryable_at(mut self, timestamp: u64) -> Self {
+        self.queryable_at = Some(timestamp);
+        self
+    }
+
+    pub(crate) fn dropped_at(mut self, timestamp: u64) -> Self {
+        self.dropped_at = Some(timestamp);
+        self
+    }
+
+    fn build(self, id: u32) -> IndexMetadata {
+        IndexMetadata {
+            id,
+            definition: IndexDefinition::Regular(self.fields),
+            created_at: self.created_at,
+            queryable_at: self.queryable_at,
+            dropped_at: self.dropped_at,
+            options: self.options,
+        }
+    }
+}
+
 mod index_direction_tags {
     pub(super) const ASCENDING: u8 = 0;
     pub(super) const DESCENDING: u8 = 1;

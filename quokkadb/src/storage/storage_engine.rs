@@ -526,7 +526,7 @@ impl StorageEngine {
         self: &Arc<Self>,
         name: &str,
         if_not_exists: bool,
-    ) -> StorageResult<u32> {
+    ) -> StorageResult<Arc<CollectionMetadata>> {
         self.create_collection_with_options(name, CollectionOptions::default(), if_not_exists)
     }
 
@@ -535,11 +535,11 @@ impl StorageEngine {
         name: &str,
         options: CollectionOptions,
         if_not_exists: bool,
-    ) -> StorageResult<u32> {
+    ) -> StorageResult<Arc<CollectionMetadata>> {
         self.check_error_mode()?;
 
         if if_not_exists && let Some(collection) = self.catalog().get_collection_by_name(name) {
-            return Ok(collection.id);
+            return Ok(collection);
         }
         self.perform_create_collection(name, options, if_not_exists)
     }
@@ -559,7 +559,7 @@ impl StorageEngine {
         name: &str,
         options: CollectionOptions,
         if_not_exists: bool,
-    ) -> StorageResult<u32> {
+    ) -> StorageResult<Arc<CollectionMetadata>> {
         // The collection do not exist we need to create it and update the manifest
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
 
@@ -578,11 +578,11 @@ impl StorageEngine {
             // We want to sync to ensure that all the previous sequence numbers are persisted.
             wal_and_manifest.wal.sync()?;
             tracing::debug!(collection = %name, id, "creating collection");
-            let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
-            Ok(id)
+            let lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+            Ok(lsm_tree.catalog().get_collection_by_id(&id).unwrap())
         } else {
             if if_not_exists {
-                Ok(collection.unwrap().id)
+                Ok(collection.unwrap())
             } else {
                 Err(StorageError::CollectionAlreadyExists(name.to_string()))
             }
