@@ -624,6 +624,14 @@ impl CollectionMetadata {
         }
     }
 
+    pub fn get_queryable_index_at(&self, id: u32, snapshot: u64) -> Option<Arc<IndexMetadata>> {
+        self.get_index_at(id, snapshot).filter(|index| {
+            index
+                .queryable_at
+                .is_some_and(|sequence| sequence <= snapshot)
+        })
+    }
+
     pub fn get_index_at(&self, id: u32, snapshot: u64) -> Option<Arc<IndexMetadata>> {
         self.indexes.get(&id).and_then(|idx| {
             if idx.was_created_at(snapshot) && !idx.was_dropped_at(snapshot) {

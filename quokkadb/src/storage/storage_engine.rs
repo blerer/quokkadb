@@ -110,6 +110,12 @@ impl StorageEngine {
         if let Some(manifest_path) = manifest_path {
             let manifest_state = Manifest::rebuild_manifest_state(&manifest_path)?;
             let mut last_seq_nbr = manifest_state.lsm.last_sequence_number;
+            // Keep the schema stream independent of flushes performed during replay.
+            let mut schema_sequences = manifest_state
+                .pending_catalog_sequences()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .peekable();
 
             let scan_results = scan_db_directory(db_dir, manifest_state.lsm.oldest_log_number)?;
 
@@ -201,6 +207,10 @@ impl StorageEngine {
                 match rs {
                     Ok(iter) => {
                         let wal_version = iter.version();
+                        // A valid empty WAL is reusable too, including after schema-only commits.
+                        if is_last_wal_file {
+                            reusable_wal = Some((wal_path.to_path_buf(), wal_version));
+                        }
                         let mut count = 0;
                         for rs in iter {
                             match rs {
@@ -228,6 +238,28 @@ impl StorageEngine {
                                     }
                                 }
                                 Ok((seq, batch)) => {
+                                    while schema_sequences
+                                        .peek()
+                                        .is_some_and(|schema| *schema < seq)
+                                    {
+                                        let schema = schema_sequences.next().unwrap();
+                                        assert_eq!(
+                                            schema,
+                                            last_seq_nbr + 1,
+                                            "Gap before recovered schema edit"
+                                        );
+                                        last_seq_nbr = schema;
+                                    }
+                                    assert_ne!(
+                                        schema_sequences.peek(),
+                                        Some(&seq),
+                                        "Data and schema share a sequence"
+                                    );
+                                    assert_eq!(
+                                        seq,
+                                        last_seq_nbr + 1,
+                                        "Gap or duplicate in recovered WAL sequence"
+                                    );
                                     count += 1;
                                     lsm_tree.memtable.write(seq, &batch);
                                     last_seq_nbr = seq;
@@ -274,6 +306,22 @@ impl StorageEngine {
                         }
                     }
                 }
+            }
+
+            // Schema-only commits are durable without a following WAL record.
+            // A gap identifies schema edits dependent on a lost WAL tail.
+            while schema_sequences.peek() == Some(&(last_seq_nbr + 1)) {
+                last_seq_nbr = schema_sequences.next().unwrap();
+            }
+            if lsm_tree
+                .manifest
+                .has_pending_catalog_edits_after(last_seq_nbr)
+            {
+                let edit = ManifestEdit::DiscardPendingCatalogEditsAfter {
+                    sequence: last_seq_nbr,
+                };
+                lsm_tree = lsm_tree.apply(&edit);
+                manifest.append_edit(&edit)?;
             }
 
             // If the last wal file can be reused, either because it was fine or because it has been
@@ -334,21 +382,6 @@ impl StorageEngine {
                 )?;
                 wal
             };
-
-            // Catalog edits at the next sequence depend only on preceding writes,
-            // which are synced before the edit is persisted. Retain these edits
-            // even when no write at their sequence was recovered.
-            let next_seq_nbr = last_seq_nbr + 1;
-            if lsm_tree
-                .manifest
-                .has_pending_catalog_edits_after(next_seq_nbr)
-            {
-                let edit = ManifestEdit::DiscardPendingCatalogEditsAfter {
-                    sequence: next_seq_nbr,
-                };
-                lsm_tree = lsm_tree.apply(&edit);
-                manifest.append_edit(&edit)?;
-            }
 
             // Delete SST files that are on disk but not referenced by the manifest.
             // These are leftovers from a compaction that was interrupted before the
@@ -562,6 +595,7 @@ impl StorageEngine {
     ) -> StorageResult<Arc<CollectionMetadata>> {
         // The collection do not exist we need to create it and update the manifest
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
 
         // We need first to check that the collection has not been created concurrently
         let lsm_tree = self.lsm_tree.load();
@@ -575,10 +609,8 @@ impl StorageEngine {
                 created_at: self.next_seq_number.load(Ordering::Relaxed),
                 options,
             };
-            // We want to sync to ensure that all the previous sequence numbers are persisted.
-            wal_and_manifest.wal.sync()?;
             tracing::debug!(collection = %name, id, "creating collection");
-            let lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+            let lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
             Ok(lsm_tree.catalog().get_collection_by_id(&id).unwrap())
         } else {
             if if_not_exists {
@@ -592,6 +624,7 @@ impl StorageEngine {
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> StorageResult<Option<u32>> {
         self.check_error_mode()?;
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
 
         let lsm_tree = self.lsm_tree.load();
         let Some(collection) = lsm_tree.catalog().get_collection_by_name(name) else {
@@ -603,10 +636,8 @@ impl StorageEngine {
             id,
             dropped_at: self.next_seq_number.load(Ordering::Relaxed),
         };
-        // We want to sync to ensure that all the previous sequence numbers are persisted.
-        wal_and_manifest.wal.sync()?;
         tracing::debug!(collection = %name, id, "dropping collection");
-        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(Some(id))
     }
 
@@ -618,6 +649,7 @@ impl StorageEngine {
         self.check_error_mode()?;
 
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
         let lsm_tree = self.lsm_tree.load();
         let catalog = lsm_tree.catalog();
         let id = catalog
@@ -638,14 +670,13 @@ impl StorageEngine {
             renamed_at: self.next_seq_number.load(Ordering::Relaxed),
         };
 
-        wal_and_manifest.wal.sync()?;
         tracing::debug!(
             old_name = %old_name,
             new_name = %new_name,
             id,
             "renaming collection"
         );
-        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
 
@@ -658,6 +689,7 @@ impl StorageEngine {
         self.check_error_mode()?;
 
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
         let catalog_sequence = self.next_seq_number.load(Ordering::Relaxed);
         let build_snapshot = self.acquire_snapshot();
 
@@ -723,14 +755,13 @@ impl StorageEngine {
             created_at: catalog_sequence,
         };
 
-        wal_and_manifest.wal.sync()?;
         tracing::debug!(
             collection = %collection.name,
             index = %resolved_name,
             id = index_id,
             "creating index"
         );
-        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(CreatedIndex {
             id: index_id,
             name: resolved_name,
@@ -742,6 +773,7 @@ impl StorageEngine {
         self.check_error_mode()?;
 
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
 
         let lsm_tree = self.lsm_tree.load();
         let catalog = lsm_tree.catalog();
@@ -786,14 +818,13 @@ impl StorageEngine {
             dropped_at: snapshot,
         };
 
-        wal_and_manifest.wal.sync()?;
         tracing::debug!(
             collection = %collection.name,
             index = %index.name(),
             id = index.id,
             "dropping index"
         );
-        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
 
@@ -805,16 +836,33 @@ impl StorageEngine {
         self.check_error_mode()?;
 
         let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
         let lsm_tree = self.lsm_tree.load();
         let queryable_at = self.next_seq_number.load(Ordering::Relaxed);
+        let catalog = lsm_tree.catalog();
+        let collection = catalog
+            .get_collection_at(collection_id, queryable_at)
+            .ok_or_else(|| StorageError::CollectionNotFound {
+                name: String::new(),
+                id: Some(collection_id),
+            })?;
+        let index = collection
+            .get_index_at(index_id, queryable_at)
+            .ok_or_else(|| StorageError::IndexNotFound {
+                collection_name: collection.name.clone(),
+                index_name: format!("index id {index_id}"),
+                id: Some(index_id),
+            })?;
+        if index.queryable_at.is_some() {
+            return Ok(());
+        }
         let edit = ManifestEdit::MarkIndexQueryable {
             collection_id,
             index_id,
             queryable_at,
         };
 
-        wal_and_manifest.wal.sync()?;
-        let _lsm_tree = self.append_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
     }
 
@@ -859,6 +907,10 @@ impl StorageEngine {
     }
 
     pub fn write(self: &Arc<Self>, batch: WriteBatch, sync: bool) -> StorageResult<()> {
+        assert!(
+            !batch.operations().is_empty(),
+            "Write batches must not be empty"
+        );
         self.check_error_mode()?;
 
         let writer = Arc::new(Writer::new(batch, sync));
@@ -947,16 +999,17 @@ impl StorageEngine {
                 }
             }
 
+            let batch = writer.batch();
+            should_sync |= writer.sync();
+
             // Grab the sequence number for this batch
             let seq = self.next_seq_number.fetch_add(1u64, Ordering::Relaxed);
             next_seq = seq + 1;
 
-            let batch = writer.batch();
             if let Err(error) = wal_and_manifest.wal.append(seq, batch) {
                 self.handle_write_error(&StorageError::Io(error), &writers);
                 return;
             }
-            should_sync |= writer.sync();
 
             tracing::trace!(
                 seq,
@@ -1469,7 +1522,46 @@ impl StorageEngine {
         Ok(())
     }
 
+    fn append_schema_edit(
+        self: &Arc<Self>,
+        lsm_tree: &LsmTree,
+        wal_and_manifest: &mut MutexGuard<WalAndManifest>,
+        edit: &ManifestEdit,
+    ) -> StorageResult<Arc<LsmTree>> {
+        self.check_error_mode()?;
+        let sequence = edit
+            .catalog_edit_sequence()
+            .expect("Expected a schema edit");
+        assert_eq!(sequence, self.next_seq_number.load(Ordering::Relaxed));
+        // We want to sync to ensure that all the previous sequence numbers are persisted.
+        if let Err(error) = wal_and_manifest.wal.sync() {
+            self.error_mode.store(true, Ordering::Relaxed);
+            return Err(error.into());
+        }
+        let new_tree = self.persist_edit(lsm_tree, wal_and_manifest, edit)?;
+        let _snapshot_guard = self.snapshot_registration_mutex.lock().unwrap();
+        self.lsm_tree.store(new_tree.clone());
+        self.next_seq_number.store(sequence + 1, Ordering::Relaxed);
+        self.last_visible_seq.store(sequence, Ordering::Release);
+        Ok(new_tree)
+    }
+
     fn append_edit(
+        self: &Arc<Self>,
+        lsm_tree: &LsmTree,
+        wal_and_manifest: &mut MutexGuard<WalAndManifest>,
+        edit: &ManifestEdit,
+    ) -> Result<Arc<LsmTree>> {
+        assert!(
+            edit.catalog_edit_sequence().is_none(),
+            "Schema edits must publish their sequence"
+        );
+        let new_tree = self.persist_edit(lsm_tree, wal_and_manifest, edit)?;
+        self.lsm_tree.store(new_tree.clone());
+        Ok(new_tree)
+    }
+
+    fn persist_edit(
         self: &Arc<Self>,
         lsm_tree: &LsmTree,
         wal_and_manifest: &mut MutexGuard<WalAndManifest>,
@@ -1505,7 +1597,6 @@ impl StorageEngine {
             new_tree = Arc::new(new_tree.apply(&edit));
         }
 
-        self.lsm_tree.store(new_tree.clone());
         Ok(new_tree)
     }
 

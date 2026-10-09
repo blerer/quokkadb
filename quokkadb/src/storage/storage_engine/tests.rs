@@ -196,28 +196,28 @@ fn test_read() {
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 1, 1, 1));
+        assert_eq!(actual, &put_rec(col, 1, 1, 2));
 
         let user_key1 = &user_key(2);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 2, 1, 2));
+        assert_eq!(actual, &put_rec(col, 2, 1, 3));
 
         let user_key1 = &user_key(3);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 3, 1, 3));
+        assert_eq!(actual, &put_rec(col, 3, 1, 4));
 
         let user_key1 = &user_key(4);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &delete_rec(col, 4, 5));
+        assert_eq!(actual, &delete_rec(col, 4, 6));
 
         let user_key1 = &user_key(5);
         assert!(
@@ -250,28 +250,28 @@ fn test_read() {
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 1, 1, 1));
+        assert_eq!(actual, &put_rec(col, 1, 1, 2));
 
         let user_key1 = &user_key(2);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 2, 2, 6));
+        assert_eq!(actual, &put_rec(col, 2, 2, 7));
 
         let user_key1 = &user_key(3);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 3, 2, 7));
+        assert_eq!(actual, &put_rec(col, 3, 2, 8));
 
         let user_key1 = &user_key(4);
         let actual = &engine
             .read_at_snapshot(col, idx, user_key1, &snapshot)
             .unwrap()
             .unwrap();
-        assert_eq!(actual, &put_rec(col, 4, 2, 8));
+        assert_eq!(actual, &put_rec(col, 4, 2, 9));
     }
 
     // Now we will test with a real snapshot lease
@@ -280,25 +280,25 @@ fn test_read() {
         .read_at_snapshot(col, idx, &user_key(1), &snapshot)
         .unwrap()
         .unwrap();
-    assert_eq!(actual, &put_rec(col, 1, 1, 1));
+    assert_eq!(actual, &put_rec(col, 1, 1, 2));
 
     let actual = &engine
         .read_at_snapshot(col, idx, &user_key(2), &snapshot)
         .unwrap()
         .unwrap();
-    assert_eq!(actual, &put_rec(col, 2, 2, 6));
+    assert_eq!(actual, &put_rec(col, 2, 2, 7));
 
     let actual = &engine
         .read_at_snapshot(col, idx, &user_key(3), &snapshot)
         .unwrap()
         .unwrap();
-    assert_eq!(actual, &put_rec(col, 3, 2, 7));
+    assert_eq!(actual, &put_rec(col, 3, 2, 8));
 
     let actual = &engine
         .read_at_snapshot(col, idx, &user_key(4), &snapshot)
         .unwrap()
         .unwrap();
-    assert_eq!(actual, &put_rec(col, 4, 2, 8));
+    assert_eq!(actual, &put_rec(col, 4, 2, 9));
 }
 
 #[test]
@@ -321,15 +321,15 @@ fn test_acquire_snapshot_registers_and_releases_lease() {
         .unwrap();
 
     let snapshot1 = engine.acquire_snapshot();
-    assert_eq!(snapshot1.sequence(), 1);
+    assert_eq!(snapshot1.sequence(), 2);
     assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(0));
 
     drop(snapshot0);
-    assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(1));
+    assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(2));
 
     let snapshot1_clone = snapshot1.clone();
     drop(snapshot1);
-    assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(1));
+    assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), Some(2));
 
     drop(snapshot1_clone);
     assert_eq!(engine.snapshot_manager.oldest_active_snapshot(), None);
@@ -350,23 +350,23 @@ fn test_range_scan() {
 
     // Stage 1: All in memtable
     let inserts = vec![
-        put_op(col, 1, 1), // seq 1
-        put_op(col, 2, 1), // seq 2
-        put_op(col, 3, 1), // seq 3
-        put_op(col, 4, 1), // seq 4
-        put_op(col, 5, 1), // seq 5
+        put_op(col, 1, 1), // seq 2
+        put_op(col, 2, 1), // seq 3
+        put_op(col, 3, 1), // seq 4
+        put_op(col, 4, 1), // seq 5
+        put_op(col, 5, 1), // seq 6
     ];
     for insert in inserts {
         engine.write(write_batch(vec![insert]), false).unwrap();
     }
 
     let snapshot1 = engine.acquire_snapshot();
-    assert_eq!(snapshot1.sequence(), 5);
+    assert_eq!(snapshot1.sequence(), 6);
 
     // update 2, delete 4
     let updates = vec![
-        put_op(col, 2, 2), // seq 6
-        delete_op(col, 4), // seq 7
+        put_op(col, 2, 2), // seq 7
+        delete_op(col, 4), // seq 8
     ];
     for update in updates {
         engine.write(write_batch(vec![update]), false).unwrap();
@@ -379,32 +379,32 @@ fn test_range_scan() {
     let mut iter = engine
         .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction)
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 4));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 6));
     assert!(iter.next().is_none());
 
     let mut iter = engine
         .range_scan_at_snapshot(col, idx, &(..), &snapshot1, Direction::Forward)
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 2));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 4, 1, 4));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 3));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 4));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 4, 1, 5));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 6));
     assert!(iter.next().is_none());
 
     // Stage 2: One SSTable and memtable
     engine.flush().unwrap();
     let snapshot2 = engine.acquire_snapshot();
-    assert_eq!(snapshot2.sequence(), 7);
+    assert_eq!(snapshot2.sequence(), 8);
 
     let updates2 = vec![
-        put_op(col, 6, 1), // seq 8
-        put_op(col, 3, 2), // seq 9
-        delete_op(col, 5), // seq 10
+        put_op(col, 6, 1), // seq 9
+        put_op(col, 3, 2), // seq 10
+        delete_op(col, 5), // seq 11
     ];
     for update in updates2 {
         engine.write(write_batch(vec![update]), false).unwrap();
@@ -417,32 +417,32 @@ fn test_range_scan() {
     let mut iter = engine
         .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction)
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 10));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 11));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 9));
     assert!(iter.next().is_none());
 
     let mut iter = engine
         .range_scan_at_snapshot(col, idx, &(..), &snapshot2, Direction::Reverse)
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 5));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 3));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 1));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 6));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 1, 4));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
     assert!(iter.next().is_none());
 
     // Stage 3: Two SSTables and memtable
     engine.flush().unwrap();
     let snapshot3 = engine.acquire_snapshot();
-    assert_eq!(snapshot3.sequence(), 10);
+    assert_eq!(snapshot3.sequence(), 11);
 
     let updates3 = vec![
-        put_op(col, 1, 2), // seq 11
-        put_op(col, 7, 1), // seq 12
+        put_op(col, 1, 2), // seq 12
+        put_op(col, 7, 1), // seq 13
     ];
     for update in updates3 {
         engine.write(write_batch(vec![update]), false).unwrap();
@@ -455,13 +455,13 @@ fn test_range_scan() {
     let mut iter = engine
         .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction)
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 2, 11));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 7, 1, 12));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 1, 2, 12));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 10));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 11));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 9));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 7, 1, 13));
     assert!(iter.next().is_none());
 
     let mut iter = engine
@@ -473,11 +473,11 @@ fn test_range_scan() {
             Direction::Reverse,
         )
         .unwrap();
-    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 8));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 10));
-    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 7));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 9));
-    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 6));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 9));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 5, 11));
+    assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 3, 2, 10));
+    assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
     assert!(iter.next().is_none());
 }
 
@@ -595,7 +595,7 @@ fn test_read_and_scan_with_immutable_memtables() {
 
     // --- Verification: Updates and snapshots ---
     let snapshot = engine.acquire_snapshot();
-    assert_eq!(snapshot.sequence(), 5);
+    assert_eq!(snapshot.sequence(), 6);
 
     // Update a key that is in the immutable memtable. The update goes to the active memtable.
     let val_update = doc! { "v": "updated" }.to_vec().unwrap();
@@ -1004,7 +1004,7 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
     engine.flush().unwrap();
 
     let snapshot = engine.acquire_snapshot();
-    let expected_before = put_rec(col, 1, 1, 1);
+    let expected_before = put_rec(col, 1, 1, 2);
     assert_eq!(
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
@@ -1030,7 +1030,7 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
             .unwrap(),
-        Some(put_rec(col, 1, 1, 1))
+        Some(put_rec(col, 1, 1, 2))
     );
 }
 
@@ -1053,7 +1053,7 @@ fn test_snapshot_point_read_survives_compaction_after_delete() {
     engine.flush().unwrap();
 
     let snapshot = engine.acquire_snapshot();
-    let expected_before = put_rec(col, 1, 1, 1);
+    let expected_before = put_rec(col, 1, 1, 2);
     assert_eq!(
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
@@ -1079,7 +1079,7 @@ fn test_snapshot_point_read_survives_compaction_after_delete() {
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
             .unwrap(),
-        Some(put_rec(col, 1, 1, 1))
+        Some(put_rec(col, 1, 1, 2))
     );
 }
 
@@ -1105,9 +1105,9 @@ fn test_snapshot_range_scan_survives_compaction() {
 
     let snapshot = engine.acquire_snapshot();
     let expected = vec![
-        put_rec(col, 1, 1, 1),
-        put_rec(col, 2, 1, 2),
-        put_rec(col, 3, 1, 3),
+        put_rec(col, 1, 1, 2),
+        put_rec(col, 2, 1, 3),
+        put_rec(col, 3, 1, 4),
     ];
 
     let actual_before: Vec<_> = engine
@@ -1162,7 +1162,7 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
     engine.flush().unwrap();
 
     let snapshot = engine.acquire_snapshot();
-    let expected_before = put_rec(col, 1, 1, 1);
+    let expected_before = put_rec(col, 1, 1, 2);
     assert_eq!(
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
@@ -1201,7 +1201,7 @@ fn test_snapshot_read_survives_compaction_after_collection_drop() {
         engine
             .read_at_snapshot(col, 0, &user_key(1), &snapshot)
             .unwrap(),
-        Some(put_rec(col, 1, 1, 1))
+        Some(put_rec(col, 1, 1, 2))
     );
 }
 
@@ -1238,7 +1238,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
     engine.flush().unwrap();
 
     let snapshot = engine.acquire_snapshot();
-    let expected_before = put_rec_at(collection_id, index_id, 1, 1, 1);
+    let expected_before = put_rec_at(collection_id, index_id, 1, 1, 3);
     assert_eq!(
         engine
             .read_at_snapshot(collection_id, index_id, &user_key(1), &snapshot)
@@ -1293,7 +1293,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
         engine
             .read_at_snapshot(collection_id, index_id, &user_key(1), &snapshot)
             .unwrap(),
-        Some(put_rec_at(collection_id, index_id, 1, 1, 1))
+        Some(put_rec_at(collection_id, index_id, 1, 1, 3))
     );
 }
 
@@ -2553,7 +2553,7 @@ fn test_recovery_retains_index_edits_without_following_write() {
     assert_eq!(builds[0].key.collection_id, collection_id);
     assert_eq!(builds[0].key.index_id, pending_index_id);
     assert_eq!(
-        builds[0].snapshot.sequence(),
+        builds[0].snapshot.sequence() + 1,
         engine.acquire_snapshot().sequence()
     );
     engine.shutdown().unwrap();
@@ -4279,4 +4279,382 @@ fn test_default_writes_follow_durable_wal_durability() {
 
     assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), 2); // header + durable group sync
     assert_eq!(registry.gauge_value(metrics::names::wal::BYTES_BUFFERED), 0);
+}
+
+#[test]
+fn test_schema_sequences_publish_snapshot_boundaries_without_data() {
+    let dir = tempdir().unwrap();
+    let engine = new_engine(
+        &mut MetricRegistry::default(),
+        Options::lightweight(),
+        dir.path(),
+    );
+    let before = engine.acquire_snapshot();
+    let collection = engine.create_collection("empty", false).unwrap();
+    assert_eq!(collection.created_at, before.sequence() + 1);
+    let created = engine.acquire_snapshot();
+    assert_eq!(created.sequence(), collection.created_at);
+    assert!(
+        engine
+            .catalog()
+            .get_collection_at(collection.id, before.sequence())
+            .is_none()
+    );
+    assert!(
+        engine
+            .catalog()
+            .get_collection_at(collection.id, created.sequence())
+            .is_some()
+    );
+
+    let index = engine
+        .create_index(
+            collection.id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        index.build_snapshot.as_ref().unwrap().sequence(),
+        created.sequence()
+    );
+    let registered = engine.acquire_snapshot();
+    assert_eq!(registered.sequence(), created.sequence() + 1);
+    engine
+        .mark_index_queryable(collection.id, index.id)
+        .unwrap();
+    let published = engine.acquire_snapshot();
+    assert_eq!(published.sequence(), registered.sequence() + 1);
+    let metadata = engine
+        .catalog()
+        .get_collection_by_id(&collection.id)
+        .unwrap();
+    assert!(
+        metadata
+            .get_index_at(index.id, registered.sequence())
+            .is_some()
+    );
+    assert!(
+        metadata
+            .get_queryable_index_at(index.id, registered.sequence())
+            .is_none()
+    );
+    assert!(
+        metadata
+            .get_queryable_index_at(index.id, published.sequence())
+            .is_some()
+    );
+    engine
+        .mark_index_queryable(collection.id, index.id)
+        .unwrap();
+    assert_eq!(engine.acquire_snapshot().sequence(), published.sequence());
+
+    engine.drop_index(collection.id, index.id).unwrap();
+    let dropped = engine.acquire_snapshot();
+    assert_eq!(dropped.sequence(), published.sequence() + 1);
+    let metadata = engine
+        .catalog()
+        .get_collection_by_id(&collection.id)
+        .unwrap();
+    assert!(
+        metadata
+            .get_queryable_index_at(index.id, published.sequence())
+            .is_some()
+    );
+    assert!(
+        metadata
+            .get_index_at(index.id, dropped.sequence())
+            .is_none()
+    );
+    engine.rename_collection("empty", "renamed").unwrap();
+    engine.drop_collection("renamed").unwrap();
+    assert_eq!(engine.acquire_snapshot().sequence(), dropped.sequence() + 2);
+    assert!(
+        engine
+            .catalog()
+            .get_collection_at(collection.id, dropped.sequence())
+            .is_some()
+    );
+    assert!(
+        engine
+            .catalog()
+            .get_collection_at(collection.id, engine.acquire_snapshot().sequence())
+            .is_none()
+    );
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn test_schema_only_sequences_survive_rotation_and_repeated_reopen() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+    let collection = engine.create_collection("first", false).unwrap();
+    engine.rename_collection("first", "renamed").unwrap();
+    let index = engine
+        .create_queryable_index(
+            collection.id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap();
+    let sequence = engine.acquire_snapshot().sequence();
+    // Force a manifest snapshot with the entire schema-only history pending.
+    {
+        let mut guard = engine.db_mutex.lock().unwrap();
+        let number = engine.next_file_number.fetch_add(1, Ordering::Relaxed);
+        guard
+            .manifest
+            .rotate(
+                number,
+                &ManifestEdit::Snapshot(engine.lsm_tree.load().manifest.clone()),
+            )
+            .unwrap();
+    }
+    engine.shutdown().unwrap();
+    drop(engine);
+    for _ in 0..2 {
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        let snapshot = engine.acquire_snapshot();
+        assert_eq!(snapshot.sequence(), sequence);
+        let metadata = engine
+            .catalog()
+            .get_collection_at(collection.id, snapshot.sequence())
+            .unwrap();
+        assert_eq!(metadata.name, "renamed");
+        assert!(
+            metadata
+                .get_queryable_index_at(index.id, snapshot.sequence())
+                .is_some()
+        );
+        engine.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn test_empty_write_is_rejected_before_queueing() {
+    let dir = tempdir().unwrap();
+    let mut registry = MetricRegistry::default();
+    let engine = new_engine(
+        &mut registry,
+        Options::lightweight()
+            .with_wal_durability(WalDurability::Buffered)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+        dir.path(),
+    );
+    let collection = engine.create_collection("empty", false).unwrap();
+    engine
+        .write(write_batch(vec![put_op(collection.id, 1, 1)]), false)
+        .unwrap();
+    let snapshot = engine.acquire_snapshot();
+    engine
+        .create_index(
+            collection.id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap();
+    let preconditions =
+        collection_version_preconditions(snapshot, collection.id, collection.version);
+    let sequence = engine.acquire_snapshot().sequence();
+    let next_sequence = engine.next_seq_number.load(Ordering::Relaxed);
+    let syncs = registry.counter_value(metrics::names::wal::SYNCS);
+    let count_key = CountStatsKey::Collection(collection.id);
+    let count = engine.count_stat(&count_key);
+
+    for batch in [
+        write_batch(vec![]),
+        write_batch_with_count_stats(
+            vec![],
+            CountStats::new(BTreeMap::from([(count_key.clone(), 1)])),
+        ),
+        write_batch_with_preconditions(vec![], preconditions),
+    ] {
+        let panic =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.write(batch, true)))
+                .expect_err("Empty writes must panic");
+        assert_eq!(
+            panic.downcast_ref::<&str>().copied(),
+            Some("Write batches must not be empty")
+        );
+        assert!(engine.queue.lock().unwrap().is_empty());
+        assert_eq!(engine.acquire_snapshot().sequence(), sequence);
+        assert_eq!(
+            engine.next_seq_number.load(Ordering::Relaxed),
+            next_sequence
+        );
+        assert_eq!(registry.counter_value(metrics::names::wal::SYNCS), syncs);
+        assert_eq!(engine.count_stat(&count_key), count);
+    }
+
+    engine
+        .write(write_batch(vec![put_op(collection.id, 2, 1)]), true)
+        .unwrap();
+    assert_eq!(engine.acquire_snapshot().sequence(), sequence + 1);
+    engine.shutdown().unwrap();
+}
+
+#[test]
+fn test_failed_schema_commit_does_not_publish_sequence() {
+    let dir = tempdir().unwrap();
+    let engine = new_engine(
+        &mut MetricRegistry::default(),
+        Options::lightweight(),
+        dir.path(),
+    );
+    let before = engine.acquire_snapshot();
+    engine.manifest_fail_write_after(0);
+    assert!(engine.create_collection("failed", false).is_err());
+    assert_eq!(engine.acquire_snapshot().sequence(), before.sequence());
+    assert!(engine.catalog().get_collection_by_name("failed").is_none());
+    assert!(matches!(
+        engine.create_collection("later", false),
+        Err(StorageError::ErrorMode(_))
+    ));
+    engine.manifest_fail_write_after(usize::MAX);
+}
+
+#[test]
+fn test_recovery_merges_schema_prefix_and_discards_edits_after_lost_write() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+    let collection = engine.create_collection("docs", false).unwrap(); // 1
+    engine
+        .write(write_batch(vec![put_op(collection.id, 1, 1)]), true)
+        .unwrap(); // 2
+    let wal_path = dir
+        .path()
+        .join(DbFile::new_write_ahead_log(engine.lsm_tree.load().memtable.log_number).filename());
+    let retained_length = fs::metadata(&wal_path).unwrap().len();
+    engine.rename_collection("docs", "renamed").unwrap(); // 3
+    let index = engine
+        .create_queryable_index(
+            collection.id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap(); // 4, 5
+    engine
+        .write(write_batch(vec![put_op(collection.id, 2, 1)]), true)
+        .unwrap(); // 6
+    engine.create_collection("lost", false).unwrap(); // 7
+    engine.rename_collection("renamed", "lost_name").unwrap(); // 8
+    drop(index);
+    drop(engine);
+    OpenOptions::new()
+        .write(true)
+        .open(wal_path)
+        .unwrap()
+        .set_len(retained_length)
+        .unwrap();
+
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+    assert_eq!(engine.acquire_snapshot().sequence(), 5);
+    assert!(engine.catalog().get_collection_by_name("lost").is_none());
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_name("lost_name")
+            .is_none()
+    );
+    assert!(engine.catalog().get_collection_by_name("renamed").is_some());
+    assert!(
+        engine
+            .read_at_snapshot(collection.id, 0, &user_key(2), &engine.acquire_snapshot())
+            .unwrap()
+            .is_none()
+    );
+    engine
+        .write(write_batch(vec![put_op(collection.id, 3, 1)]), true)
+        .unwrap();
+    assert_eq!(engine.acquire_snapshot().sequence(), 6);
+    engine.flush().unwrap();
+    engine.shutdown().unwrap();
+    drop(engine);
+    let engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+    assert_eq!(engine.acquire_snapshot().sequence(), 6);
+    assert!(
+        engine
+            .read_at_snapshot(collection.id, 0, &user_key(3), &engine.acquire_snapshot())
+            .unwrap()
+            .is_some()
+    );
+    engine.shutdown().unwrap();
+}
+
+fn reopen_with_invalid_wal_sequence(sequence: u64) {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+    let collection = engine.create_collection("docs", false).unwrap();
+    {
+        let mut guard = engine.db_mutex.lock().unwrap();
+        guard
+            .wal
+            .append(sequence, &write_batch(vec![put_op(collection.id, 1, 1)]))
+            .unwrap();
+        guard.wal.sync().unwrap();
+    }
+    drop(engine);
+    let _engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+}
+
+#[test]
+#[should_panic(expected = "Data and schema share a sequence")]
+fn test_recovery_rejects_duplicate_schema_and_data_sequence() {
+    reopen_with_invalid_wal_sequence(1);
+}
+
+#[test]
+#[should_panic(expected = "Gap or duplicate in recovered WAL sequence")]
+fn test_recovery_rejects_gap_before_intact_wal_record() {
+    reopen_with_invalid_wal_sequence(3);
+}
+
+#[test]
+fn test_failed_schema_wal_sync_does_not_publish_sequence() {
+    let dir = tempdir().unwrap();
+    let engine = new_engine(
+        &mut MetricRegistry::default(),
+        Options::lightweight()
+            .with_wal_durability(WalDurability::Buffered)
+            .with_wal_bytes_per_sync(StorageQuantity::new(1, Mebibytes)),
+        dir.path(),
+    );
+    let collection = engine.create_collection("existing", false).unwrap();
+    engine
+        .write(write_batch(vec![put_op(collection.id, 1, 1)]), false)
+        .unwrap();
+    let before = engine.acquire_snapshot();
+    engine
+        .db_mutex
+        .lock()
+        .unwrap()
+        .wal
+        .return_error_on_sync(true);
+    assert!(engine.rename_collection("existing", "unpublished").is_err());
+    assert_eq!(engine.acquire_snapshot().sequence(), before.sequence());
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_name("existing")
+            .is_some()
+    );
+    assert!(
+        engine
+            .catalog()
+            .get_collection_by_name("unpublished")
+            .is_none()
+    );
+    assert!(matches!(
+        engine.create_collection("later", false),
+        Err(StorageError::ErrorMode(_))
+    ));
+    engine
+        .db_mutex
+        .lock()
+        .unwrap()
+        .wal
+        .return_error_on_sync(false);
 }

@@ -667,8 +667,8 @@ mod tests {
             .build_index(key, &created_index.build_snapshot.unwrap())
             .unwrap();
 
-        // There are no backfill writes: the checkpoint deletion must sync the
-        // WAL sequence that anchors creation and publication in the catalog.
+        // There are no backfill writes. Schema publication is independently durable,
+        // and checkpoint deletion must still sync its own WAL record.
         assert_eq!(
             metrics.counter_value(metrics::names::wal::SYNCS),
             syncs_before_build + 1

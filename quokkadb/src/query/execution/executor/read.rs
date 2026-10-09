@@ -1,5 +1,5 @@
 use super::{Metrics, QueryOutput, bind};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::query::execution::{filters, indexes::Index};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
@@ -54,6 +54,12 @@ impl ReadExecutor {
         parameters: &Parameters,
         snapshot: Snapshot,
     ) -> Result<QueryOutput> {
+        if let PhysicalPlan::CollectionScan { collection, .. }
+        | PhysicalPlan::PointSearch { collection, .. }
+        | PhysicalPlan::MultiPointSearch { collection, .. } = plan.as_ref()
+        {
+            self.collection_at_snapshot(*collection, &snapshot)?;
+        }
         match plan.as_ref() {
             PhysicalPlan::NoOp => Ok(Box::new(std::iter::empty())),
             PhysicalPlan::CollectionScan {
@@ -360,6 +366,23 @@ impl ReadExecutor {
         )))
     }
 
+    fn collection_at_snapshot(
+        &self,
+        collection: u32,
+        snapshot: &Snapshot,
+    ) -> Result<Arc<crate::storage::catalog::CollectionMetadata>> {
+        let catalog = self.storage_engine.catalog();
+        catalog
+            .get_collection_at(collection, snapshot.sequence())
+            .ok_or_else(|| Error::CollectionNotFound {
+                name: catalog
+                    .get_collection_by_id(&collection)
+                    .map(|metadata| metadata.name.clone())
+                    .unwrap_or_default(),
+                id: Some(collection),
+            })
+    }
+
     pub(super) fn perform_index_scan(
         &self,
         parameters: &Parameters,
@@ -376,13 +399,17 @@ impl ReadExecutor {
             snapshot = snapshot.sequence(),
             direction = ?direction
         );
-        let index_metadata = self
-            .storage_engine
-            .catalog()
-            .get_collection_by_id(collection)
-            .unwrap()
-            .get_index_by_id(*index)
-            .unwrap();
+        let collection_metadata = self.collection_at_snapshot(*collection, &snapshot)?;
+        let index_metadata = collection_metadata
+            .get_queryable_index_at(*index, snapshot.sequence())
+            .ok_or_else(|| Error::IndexNotFound {
+                collection_name: collection_metadata.name.clone(),
+                index_name: collection_metadata
+                    .get_index_by_id(*index)
+                    .map(|metadata| metadata.name())
+                    .unwrap_or_else(|| format!("index id {index}")),
+                id: Some(*index),
+            })?;
         let index_codec = Index::from(*collection, &index_metadata);
         let bound_range = index_codec.bind_range_expr(range, parameters)?;
 

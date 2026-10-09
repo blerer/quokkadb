@@ -32,7 +32,6 @@ pub use crate::id::QuokkaId;
 pub use quokkadb_derive::{QuokkaDocument, QuokkaType};
 
 pub use crate::collection::Collection;
-use crate::collection::QueryOutput;
 use crate::error::Error;
 use crate::index_builder::IndexBuilder;
 use crate::metrics::Metrics;
@@ -44,7 +43,7 @@ use crate::query::optimizer::optimizer::Optimizer;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::query_cache::QueryCache;
 use crate::query::{IndexKeySpec, Parameters};
-use crate::storage::catalog::{Catalog, CollectionMetadata};
+use crate::storage::catalog::CollectionMetadata;
 use crate::storage::catalog::{
     CollectionOptions as InternalCollectionOptions,
     IdCreationStrategy as InternalIdCreationStrategy, IndexOptions,
@@ -310,20 +309,8 @@ impl DbImpl {
         Ok(self1.create_collection_with_options(name, options1, false)?)
     }
 
-    pub fn get_collection_id(self: &Arc<Self>, name: &str) -> Option<u32> {
-        self.get_collection(name).map(|c| c.id)
-    }
-
     pub fn get_collection(self: &Arc<Self>, name: &str) -> Option<Arc<CollectionMetadata>> {
         Some(self.storage_engine.catalog().get_collection_by_name(name)?)
-    }
-
-    pub(crate) fn get_index_id(&self, collection_id: u32, index_name: &str) -> Option<u32> {
-        self.storage_engine
-            .catalog()
-            .get_collection_by_id(&collection_id)?
-            .get_index_by_name(index_name)
-            .map(|index| index.id)
     }
 
     pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
@@ -552,30 +539,6 @@ impl DbImpl {
 
         self.executor
             .execute_direct(physical_plan, parameters, sync)
-    }
-
-    pub fn execute_query(
-        &self,
-        metadata: &CollectionMetadata,
-        logical_plan: Arc<LogicalPlan>,
-    ) -> error::Result<QueryOutput> {
-        let _spans = OperationSpans {
-            _instance: self.observability.instance_span().clone().entered(),
-            _operation: debug_span!("execute_query", collection = %metadata.id).entered(),
-        };
-        let (parameters, physical_plan) = self.optimize_query(metadata, logical_plan)?;
-
-        self.executor.execute_cached(physical_plan, &parameters)
-    }
-
-    /// Plans a read query using the same optimizer and cache as execution,
-    /// without running the resulting physical plan.
-    pub(crate) fn plan_query(
-        &self,
-        metadata: &CollectionMetadata,
-        logical_plan: Arc<LogicalPlan>,
-    ) -> error::Result<Arc<PhysicalPlan>> {
-        Ok(self.optimize_query(metadata, logical_plan)?.1)
     }
 
     fn optimize_query(

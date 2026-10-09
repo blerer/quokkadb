@@ -244,6 +244,7 @@ impl WriteExecutor {
         self.storage_engine
             .catalog()
             .get_collection_by_id(&collection)
+            .filter(|metadata| !metadata.is_dropped())
             .ok_or_else(|| StorageError::CollectionNotFound {
                 name: String::new(),
                 id: Some(collection),

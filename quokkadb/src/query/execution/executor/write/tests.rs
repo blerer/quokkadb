@@ -2093,7 +2093,7 @@ fn test_insert_many_rejects_schema_change_before_commit() -> Result<()> {
     let paused_handle =
         spawn_paused_insert_many(executor.clone(), hook.clone(), collection_id, docs);
     hook.wait_until_hit();
-    let index = storage_engine.create_index(
+    let index = storage_engine.create_queryable_index(
         collection_id,
         IndexDefinition::Regular(vec![OrderedIndexField::asc("schema_value")]),
         IndexOptions::default(),

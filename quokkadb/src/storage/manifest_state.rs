@@ -54,6 +54,12 @@ impl ManifestState {
         !self.pending_catalog_edits.is_empty()
     }
 
+    pub fn pending_catalog_sequences(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending_catalog_edits
+            .iter()
+            .map(|edit| edit.catalog_edit_sequence().unwrap())
+    }
+
     pub fn has_pending_catalog_edits_after(&self, sequence: u64) -> bool {
         self.pending_catalog_edits
             .last()
@@ -68,8 +74,8 @@ impl ManifestState {
         assert!(
             pending_catalog_edits
                 .last()
-                .is_none_or(|previous| previous.catalog_edit_sequence().unwrap() <= sequence),
-            "Pending catalog edits must be ordered by sequence number"
+                .is_none_or(|previous| previous.catalog_edit_sequence().unwrap() < sequence),
+            "Pending catalog edits must have strictly increasing sequence numbers"
         );
         pending_catalog_edits.push(edit.clone());
         ManifestState {
@@ -452,7 +458,7 @@ pub enum ManifestEdit {
 }
 
 impl ManifestEdit {
-    fn catalog_edit_sequence(&self) -> Option<u64> {
+    pub(super) fn catalog_edit_sequence(&self) -> Option<u64> {
         match self {
             ManifestEdit::CreateCollection { created_at, .. }
             | ManifestEdit::CreateIndex { created_at, .. } => Some(*created_at),
@@ -1413,7 +1419,7 @@ mod tests {
             .apply(&ManifestEdit::CreateCollection {
                 name: "docs".to_string(),
                 id: 10,
-                created_at: 100,
+                created_at: 98,
                 options: CollectionOptions::default(),
             })
             .apply(&ManifestEdit::CreateIndex {
@@ -1421,7 +1427,7 @@ mod tests {
                 index_id: 1,
                 definition: IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]),
                 options: IndexOptions::default(),
-                created_at: 100,
+                created_at: 99,
             })
             .apply(&edit);
 
