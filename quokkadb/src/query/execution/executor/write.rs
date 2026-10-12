@@ -312,6 +312,9 @@ impl WriteExecutor {
             upserted_id = Some(generated_id.clone());
 
             let user_key = generated_id.try_into_key()?;
+            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
+                return Err(Self::duplicate_key_error(&generated_id));
+            }
             let new_doc_bytes = serialize_to_vec(&new_doc)?;
             self.write_document(
                 collection,
@@ -659,6 +662,9 @@ impl WriteExecutor {
 
             let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
             let user_key = upserted_id.clone().try_into_key()?;
+            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
+                return Err(Self::duplicate_key_error(&upserted_id));
+            }
             let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
             #[cfg(test)]
@@ -738,6 +744,9 @@ impl WriteExecutor {
             let (new_doc, upserted_id) =
                 self.perform_replacement_upsert(&query, &replacement, parameters)?;
             let user_key = upserted_id.clone().try_into_key()?;
+            if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
+                return Err(Self::duplicate_key_error(&upserted_id));
+            }
             let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
             match self.write_document(

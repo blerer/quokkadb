@@ -1506,6 +1506,279 @@ fn test_delete_one_retries_after_concurrent_delete() -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum UpsertOperation {
+    UpdateOne,
+    UpdateMany,
+    FindOneAndUpdate(ReturnDocument),
+    ReplaceOne,
+    FindOneAndReplace(ReturnDocument),
+}
+
+fn execute_filtered_upsert(
+    executor: &QueryExecutor,
+    collection: u32,
+    operation: UpsertOperation,
+) -> Result<WriteResult> {
+    use crate::query::expr_fn::{field, field_filters, interval, point};
+
+    let mut parameters = Parameters::new();
+    let key = parameters.collect_parameter(1.into());
+    let status = parameters.collect_parameter("ready".into());
+    let query = Arc::new(PhysicalPlan::PointSearch {
+        collection,
+        key,
+        filter: Some(field_filters(field(["status"]), [interval(point(&status))])),
+        projection: None,
+    });
+    let update = update([set([field_name("value")], 42)]);
+    let replacement = doc! { "status": "ready", "value": 42 };
+    let plan = match operation {
+        UpsertOperation::UpdateOne => PhysicalPlan::UpdateOne {
+            collection,
+            query,
+            update,
+            upsert: true,
+        },
+        UpsertOperation::UpdateMany => PhysicalPlan::UpdateMany {
+            collection,
+            query,
+            update,
+            upsert: true,
+        },
+        UpsertOperation::FindOneAndUpdate(return_document) => PhysicalPlan::FindOneAndUpdate {
+            collection,
+            query,
+            update,
+            projection: None,
+            upsert: true,
+            return_document,
+        },
+        UpsertOperation::ReplaceOne => PhysicalPlan::ReplaceOne {
+            collection,
+            query,
+            replacement,
+            upsert: true,
+        },
+        UpsertOperation::FindOneAndReplace(return_document) => PhysicalPlan::FindOneAndReplace {
+            collection,
+            query,
+            replacement,
+            projection: None,
+            upsert: true,
+            return_document,
+        },
+    };
+    executor.execute_direct(plan, Some(parameters), false)
+}
+
+fn setup_upsert_conflict(status: &str) -> Result<(ExecutorTestRuntime, u32, u32)> {
+    let runtime = executor_test_runtime()?;
+    let collection = runtime
+        .storage_engine
+        .create_collection("test_upsert_retry", true)?
+        .id;
+    let index = runtime.storage_engine.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("status")]),
+        IndexOptions::default(),
+    )?;
+    insert_one(
+        &runtime.executor,
+        collection,
+        &doc! { "_id": 1, "status": status, "preserve": "important" },
+    )?;
+    Ok((runtime, collection, index.id))
+}
+
+fn assert_upsert_preserved_existing_document(
+    runtime: &ExecutorTestRuntime,
+    collection: u32,
+    index: u32,
+) -> Result<()> {
+    let expected = doc! { "_id": 1, "status": "done", "preserve": "important" };
+    assert_eq!(
+        read_stored_doc(&runtime.storage_engine, collection, 1)?,
+        expected
+    );
+    assert_eq!(
+        runtime
+            .storage_engine
+            .count_stat(&CountStatsKey::Collection(collection)),
+        Some(1)
+    );
+    assert!(index_scan_eq(&runtime.executor, collection, index, "ready")?.is_empty());
+    assert_eq!(
+        index_scan_eq(&runtime.executor, collection, index, "done")?,
+        vec![expected]
+    );
+    Ok(())
+}
+
+fn assert_upsert_duplicate_key(result: Result<WriteResult>) {
+    match result {
+        Err(Error::InvalidRequest(message)) => {
+            assert_eq!(message, "Duplicate key error. dup key: { _id: 1 }");
+        }
+        other => panic!("Expected duplicate-key error for existing upsert ID, got {other:?}"),
+    }
+}
+
+fn run_upsert_after_concurrent_filter_change(operation: UpsertOperation) -> Result<()> {
+    use crate::query::execution::executor::with_executor_test_hook;
+
+    // UpdateMany returns conflicts to its caller; the single-document operations retry internally.
+    let point = match operation {
+        UpsertOperation::UpdateMany => ExecutorFailpoint::BeforeCommit,
+        _ => ExecutorFailpoint::AfterRead,
+    };
+    let hook = Arc::new(PausingHook::new(point));
+    let (runtime, collection, index) = setup_upsert_conflict("ready")?;
+    let paused_executor = runtime.executor.clone();
+    let paused_hook = hook.clone();
+    let paused_handle = std::thread::spawn(move || {
+        with_executor_test_hook(paused_hook, || {
+            execute_filtered_upsert(&paused_executor, collection, operation)
+        })
+    });
+
+    hook.wait_until_hit();
+    // Force a version conflict, then a retry whose filter no longer matches the existing ID.
+    let concurrent_result = execute_update_one_with_expr(
+        &runtime.executor,
+        collection,
+        1,
+        update([set([field_name("status")], "done")]),
+    );
+    hook.release();
+    let mut result = paused_handle.join().unwrap();
+    assert_update_result(concurrent_result?, 1, 1, Option::<Bson>::None);
+
+    if matches!(operation, UpsertOperation::UpdateMany) {
+        assert!(
+            matches!(&result, Err(Error::VersionConflict(_))),
+            "Expected version conflict, got {result:?}"
+        );
+        assert_upsert_preserved_existing_document(&runtime, collection, index)?;
+        result = execute_filtered_upsert(&runtime.executor, collection, operation);
+    }
+    assert_upsert_duplicate_key(result);
+    assert_upsert_preserved_existing_document(&runtime, collection, index)
+}
+
+#[test]
+fn test_update_one_upsert_rejects_existing_id_after_concurrent_update_changes_filter() -> Result<()>
+{
+    run_upsert_after_concurrent_filter_change(UpsertOperation::UpdateOne)
+}
+
+#[test]
+fn test_find_one_and_update_before_upsert_rejects_existing_id_after_concurrent_update() -> Result<()>
+{
+    run_upsert_after_concurrent_filter_change(UpsertOperation::FindOneAndUpdate(
+        ReturnDocument::Before,
+    ))
+}
+
+#[test]
+fn test_find_one_and_update_after_upsert_rejects_existing_id_after_concurrent_update() -> Result<()>
+{
+    run_upsert_after_concurrent_filter_change(UpsertOperation::FindOneAndUpdate(
+        ReturnDocument::After,
+    ))
+}
+
+#[test]
+fn test_replace_one_upsert_rejects_existing_id_after_concurrent_update() -> Result<()> {
+    run_upsert_after_concurrent_filter_change(UpsertOperation::ReplaceOne)
+}
+
+#[test]
+fn test_find_one_and_replace_before_upsert_rejects_existing_id_after_concurrent_update()
+-> Result<()> {
+    run_upsert_after_concurrent_filter_change(UpsertOperation::FindOneAndReplace(
+        ReturnDocument::Before,
+    ))
+}
+
+#[test]
+fn test_find_one_and_replace_after_upsert_rejects_existing_id_after_concurrent_update() -> Result<()>
+{
+    run_upsert_after_concurrent_filter_change(UpsertOperation::FindOneAndReplace(
+        ReturnDocument::After,
+    ))
+}
+
+#[test]
+fn test_update_many_upsert_rejects_existing_id_outside_filter() -> Result<()> {
+    let (runtime, collection, index) = setup_upsert_conflict("done")?;
+    let result =
+        execute_filtered_upsert(&runtime.executor, collection, UpsertOperation::UpdateMany);
+    assert_upsert_duplicate_key(result);
+    assert_upsert_preserved_existing_document(&runtime, collection, index)
+}
+
+#[test]
+fn test_update_many_upsert_rejects_existing_id_after_caller_retries_conflict() -> Result<()> {
+    run_upsert_after_concurrent_filter_change(UpsertOperation::UpdateMany)
+}
+
+#[test]
+fn test_upserts_succeed_after_deleting_same_id() -> Result<()> {
+    for operation in [
+        UpsertOperation::UpdateOne,
+        UpsertOperation::UpdateMany,
+        UpsertOperation::FindOneAndUpdate(ReturnDocument::Before),
+        UpsertOperation::FindOneAndUpdate(ReturnDocument::After),
+        UpsertOperation::ReplaceOne,
+        UpsertOperation::FindOneAndReplace(ReturnDocument::Before),
+        UpsertOperation::FindOneAndReplace(ReturnDocument::After),
+    ] {
+        let (runtime, collection, index) = setup_upsert_conflict("done")?;
+        assert_delete_result(execute_delete_one(&runtime.executor, collection, 1)?, 1);
+
+        // A visible tombstone must allow reuse of the ID, unlike a nonmatching live document.
+        let result = execute_filtered_upsert(&runtime.executor, collection, operation)?;
+        let expected = doc! { "_id": 1, "status": "ready", "value": 42 };
+        match operation {
+            UpsertOperation::UpdateOne
+            | UpsertOperation::UpdateMany
+            | UpsertOperation::ReplaceOne => {
+                assert_update_result(result, 0, 0, Some(1));
+            }
+            UpsertOperation::FindOneAndUpdate(return_document)
+            | UpsertOperation::FindOneAndReplace(return_document) => {
+                assert_eq!(
+                    result,
+                    WriteResult::SingleDocument {
+                        affected_count: 1,
+                        document: match return_document {
+                            ReturnDocument::Before => None,
+                            ReturnDocument::After => Some(expected.clone()),
+                        },
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            read_stored_doc(&runtime.storage_engine, collection, 1)?,
+            expected
+        );
+        assert_eq!(
+            runtime
+                .storage_engine
+                .count_stat(&CountStatsKey::Collection(collection)),
+            Some(1)
+        );
+        assert!(index_scan_eq(&runtime.executor, collection, index, "done")?.is_empty());
+        assert_eq!(
+            index_scan_eq(&runtime.executor, collection, index, "ready")?,
+            vec![expected]
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
     let hook = Arc::new(PausingHook::new(ExecutorFailpoint::AfterRead));
