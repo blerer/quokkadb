@@ -1825,6 +1825,8 @@ fn test_wal_replay_with_last_log_partially_written() {
         col
     };
 
+    let valid_length = fs::metadata(&wal_path).unwrap().len();
+
     // Corrupt the WAL by appending a partial record.
     let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
     // Write a record size (4 bytes), but nothing else. This simulates a crash during write.
@@ -1833,9 +1835,10 @@ fn test_wal_replay_with_last_log_partially_written() {
     drop(file);
 
     // --- Second run (restart and replay) ---
-    let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
+    let engine_restarted = new_engine(&mut MetricRegistry::default(), options.clone(), &db_path);
 
     // WAL replay should have truncated the file and recovered the valid records.
+    assert_eq!(fs::metadata(&wal_path).unwrap().len(), valid_length);
     let user_key1 = &user_key(1);
     let snapshot = engine_restarted.acquire_snapshot();
     let (_key1, val1) = engine_restarted
@@ -1863,7 +1866,7 @@ fn test_wal_replay_with_last_log_partially_written() {
 
     // Writing a new record should work.
     engine_restarted
-        .write(write_batch(vec![put_op(col, 3, 1)]), false)
+        .write(write_batch(vec![put_op(col, 3, 1)]), true)
         .unwrap();
     let snapshot = engine_restarted.acquire_snapshot();
     let user_key1 = &user_key(3);
@@ -1873,6 +1876,23 @@ fn test_wal_replay_with_last_log_partially_written() {
         .unwrap();
     let (_, expected_val3) = put_rec(col, 3, 1, 3); // next seq is 3
     assert_eq!(val3, expected_val3);
+    engine_restarted
+        .write(write_batch(vec![put_op(col, 4, 1)]), true)
+        .unwrap();
+    drop(snapshot);
+    drop(engine_restarted);
+
+    // Replaying again must retain the new synchronized records in the reused WAL.
+    let engine = new_engine(&mut MetricRegistry::default(), options, &db_path);
+    let snapshot = engine.acquire_snapshot();
+    for key in 1..=4 {
+        let (_, value) = engine
+            .read_at_snapshot(col, idx, &user_key(key), &snapshot)
+            .unwrap()
+            .unwrap();
+        let (_, expected) = put_rec(col, key, 1, key as u64);
+        assert_eq!(value, expected);
+    }
 }
 
 #[test]

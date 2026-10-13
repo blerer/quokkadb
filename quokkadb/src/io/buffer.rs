@@ -15,10 +15,20 @@ pub struct Buffer {
 impl Buffer {
     /// Creates a new buffer with a specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_position(capacity, 0)
+    }
+
+    /// Creates a buffer whose prefix represents already-consumed bytes.
+    /// Both cursors start at `position`, so the prefix is never returned for reading.
+    ///
+    /// # Panics
+    /// Panics if the position exceeds the capacity.
+    pub(crate) fn with_capacity_and_position(capacity: usize, position: usize) -> Self {
+        assert!(position <= capacity, "Buffer position exceeds capacity");
         Buffer {
             data: vec![0; capacity],
-            read_index: 0,
-            write_index: 0,
+            read_index: position,
+            write_index: position,
         }
     }
 
@@ -132,6 +142,29 @@ mod tests {
         let buffer = Buffer::with_capacity(10);
         assert_eq!(buffer.writable_bytes(), 10);
         assert_eq!(buffer.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn test_buffer_with_consumed_prefix() {
+        for position in [0, 3, 10] {
+            let mut buffer = Buffer::with_capacity_and_position(10, position);
+            assert_eq!(buffer.writable_bytes(), 10 - position);
+            assert_eq!(buffer.readable_bytes(), 0);
+            assert!(buffer.as_slice().is_empty());
+            assert_eq!(buffer.is_empty(), position == 0);
+            let data = vec![42; 10 - position];
+            buffer.write_slice(&data);
+            assert_eq!(buffer.read_slice(data.len()), data);
+            buffer.clear();
+            assert_eq!(buffer.writable_bytes(), 10);
+            assert!(buffer.is_empty());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Buffer position exceeds capacity")]
+    fn test_buffer_position_exceeds_capacity() {
+        Buffer::with_capacity_and_position(10, 11);
     }
 
     #[test]

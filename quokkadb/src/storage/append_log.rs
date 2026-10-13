@@ -63,12 +63,16 @@ impl<F: LogFileCreator> AppendLog<F> {
             .to_path_buf();
 
         let current_file = LogFile::load_from(file_path, observer.clone())?;
+        // Resume at the physical block offset. The prefix is already on disk, so both
+        // cursors must advance to avoid rewriting it while preserving padding alignment.
+        let position = (current_file.file_size % BUFFER_SIZE_IN_BYTES as u64) as usize;
+        let buffer = Buffer::with_capacity_and_position(BUFFER_SIZE_IN_BYTES, position);
 
         Ok(AppendLog {
             directory: db_path,
             file_creator,
             current_file,
-            buffer: Buffer::with_capacity(BUFFER_SIZE_IN_BYTES),
+            buffer,
             observer,
             #[cfg(test)]
             fail_append_after: AtomicUsize::new(usize::MAX),
@@ -409,6 +413,18 @@ impl Iterator for LogIterator {
             // There should be either enough readable bytes for the size + its CRC or we need to move to the
             // next block
             if self.buffer.readable_bytes() < 8 {
+                if self.buffer.readable_bytes() > 0 && self.buffer.writable_bytes() > 0 {
+                    // Only a complete block can end with short padding. A partial block
+                    // leaves an incomplete record header, even when its bytes are zero.
+                    self.buffer.clear();
+                    return Some(Err(LogReplayError::Corruption {
+                        record_offset: self.position,
+                        reason: format!(
+                            "Reached an unexpected end of file in {} while reading record header. Stopping replay.",
+                            &self.path.to_string_lossy()
+                        ),
+                    }));
+                }
                 match self.refill_buffer() {
                     Ok(false) => return None, // EOF reached
                     Ok(true) => continue,
@@ -977,6 +993,100 @@ mod tests {
     }
 
     #[test]
+    fn test_reopen_preserves_block_alignment() {
+        for initial_size in [250, BUFFER_SIZE_IN_BYTES - 12, 9000] {
+            let dir = tempdir().unwrap();
+            let file_creator = Arc::new(MockLogFileCreator);
+            let mut log = AppendLog::new(
+                dir.path(),
+                DbFile::new_write_ahead_log(42),
+                file_creator.clone(),
+                MockLogObserver::new(),
+            )
+            .unwrap();
+            let payloads = vec![vec![1; initial_size], vec![2; 3000], vec![3; 1200]];
+            log.append(&payloads[0]).unwrap();
+            log.sync().unwrap();
+            let path = log.file_path().clone();
+            drop(log);
+
+            let original_bytes = std::fs::read(&path).unwrap();
+            let observer = MockLogObserver::new();
+            let mut log = AppendLog::load_from(&path, file_creator, observer.clone()).unwrap();
+            log.flush().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+            assert_eq!(observer.bytes_written.load(Ordering::Relaxed), 0);
+            assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
+            assert_eq!(observer.syncs.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                observer.files_size.load(Ordering::Relaxed),
+                original_bytes.len() as u64
+            );
+
+            for payload in &payloads[1..] {
+                log.append(payload).unwrap();
+                log.sync().unwrap();
+            }
+            drop(log);
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.starts_with(&original_bytes));
+            assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                observer.files_size.load(Ordering::Relaxed),
+                bytes.len() as u64
+            );
+            assert_eq!(
+                observer.bytes_written.load(Ordering::Relaxed),
+                (bytes.len() - original_bytes.len()) as u64
+            );
+            let (_, entries) = AppendLog::<MockLogFileCreator>::read_log_file(path, 6).unwrap();
+            assert_eq!(entries.map(|r| r.unwrap()).collect::<Vec<_>>(), payloads);
+        }
+    }
+
+    #[test]
+    fn test_rotate_after_reopen_pads_last_block() {
+        let dir = tempdir().unwrap();
+        let file_creator = Arc::new(MockLogFileCreator);
+        let mut log = AppendLog::new(
+            dir.path(),
+            DbFile::new_write_ahead_log(24),
+            file_creator.clone(),
+            MockLogObserver::new(),
+        )
+        .unwrap();
+        let payload = vec![1; 250];
+        log.append(&payload).unwrap();
+        log.sync().unwrap();
+        let path = log.file_path().clone();
+        drop(log);
+
+        let observer = MockLogObserver::new();
+        let mut log = AppendLog::load_from(&path, file_creator, observer.clone()).unwrap();
+        let (new_path, old_path) = log.rotate(DbFile::new_write_ahead_log(25)).unwrap();
+        assert_eq!(old_path, path);
+        assert_eq!(
+            path.metadata().unwrap().len(),
+            2 * BUFFER_SIZE_IN_BYTES as u64
+        );
+        assert_eq!(observer.bytes_buffered.load(Ordering::Relaxed), 0);
+        let (_, entries) = AppendLog::<MockLogFileCreator>::read_log_file(path, 6).unwrap();
+        assert_eq!(
+            entries.map(|r| r.unwrap()).collect::<Vec<_>>(),
+            vec![payload]
+        );
+
+        log.append(b"new log record").unwrap();
+        log.sync().unwrap();
+        let (_, entries) = AppendLog::<MockLogFileCreator>::read_log_file(new_path, 6).unwrap();
+        assert_eq!(
+            entries.map(|r| r.unwrap()).collect::<Vec<_>>(),
+            vec![b"new log record".to_vec()]
+        );
+    }
+
+    #[test]
     fn test_log_load_from() {
         // Setup
         let dir = tempdir().unwrap();
@@ -1016,36 +1126,90 @@ mod tests {
 
     #[test]
     fn test_partial_write_recovery() {
-        let dir = tempdir().unwrap();
-        let path = dir.path();
-        let log_path = path.join("000020.log");
+        for initial_size in [250, BUFFER_SIZE_IN_BYTES - 12] {
+            for header_len in 1..8 {
+                let dir = tempdir().unwrap();
+                let file_creator = Arc::new(MockLogFileCreator);
+                let mut log = AppendLog::new(
+                    dir.path(),
+                    DbFile::new_write_ahead_log(20),
+                    file_creator.clone(),
+                    MockLogObserver::new(),
+                )
+                .unwrap();
+                let payload = vec![1; initial_size];
+                log.append(&payload).unwrap();
+                log.sync().unwrap();
+                let log_path = log.file_path().clone();
+                let expected_offset = log.log_file_size();
+                drop(log);
 
-        let file_creator = Arc::new(MockLogFileCreator);
-        let mut log = AppendLog::new(
-            path,
-            DbFile::new_write_ahead_log(20),
-            file_creator.clone(),
-            MockLogObserver::new(),
-        )
-        .unwrap();
-        log.append(&vec![1; 250]).unwrap();
-        log.sync().unwrap();
+                // The first three bytes are zero, just like a torn small record size.
+                let size = 10u32.to_be_bytes();
+                let header = [size.as_slice(), compute_crc32(&size).as_slice()].concat();
+                let mut file = OpenOptions::new().append(true).open(&log_path).unwrap();
+                file.write_all(&header[..header_len]).unwrap();
+                file.sync_all().unwrap();
+                drop(file);
 
-        // Simulate partial write (write only size bytes of new record)
-        let mut file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(&log_path)
+                let (_, mut entries) =
+                    AppendLog::<MockLogFileCreator>::read_log_file(log_path.clone(), 6).unwrap();
+                assert_eq!(entries.next().unwrap().unwrap(), payload);
+                assert!(matches!(
+                    entries.next(),
+                    Some(Err(LogReplayError::Corruption { record_offset, .. }))
+                        if record_offset == expected_offset
+                ));
+                assert!(entries.next().is_none());
+
+                truncate_file(&log_path, expected_offset).unwrap();
+                let mut log =
+                    AppendLog::load_from(&log_path, file_creator, MockLogObserver::new()).unwrap();
+                log.append(b"after recovery").unwrap();
+                log.sync().unwrap();
+                drop(log);
+                let (_, entries) =
+                    AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
+                assert_eq!(
+                    entries.map(|entry| entry.unwrap()).collect::<Vec<_>>(),
+                    vec![payload, b"after recovery".to_vec()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_short_block_padding_and_clean_eof() {
+        for padding_len in 1..8 {
+            let dir = tempdir().unwrap();
+            let mut log = AppendLog::new(
+                dir.path(),
+                DbFile::new_write_ahead_log(20),
+                Arc::new(MockLogFileCreator),
+                MockLogObserver::new(),
+            )
             .unwrap();
-        file.write_all(&[0, 0, 0, 10]).unwrap();
-        file.sync_all().unwrap();
-        drop(file);
+            let payload = vec![1; BUFFER_SIZE_IN_BYTES - 12 - padding_len];
+            log.append(&payload).unwrap();
+            log.sync().unwrap();
+            let log_path = log.file_path().clone();
 
-        let (_header, entries) =
-            AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
-        let results: Vec<_> = entries.collect();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].as_ref().unwrap().len(), 250);
+            // A partial block ending exactly after a record is a clean EOF.
+            let (_, entries) =
+                AppendLog::<MockLogFileCreator>::read_log_file(log_path.clone(), 6).unwrap();
+            assert_eq!(
+                entries.map(|entry| entry.unwrap()).collect::<Vec<_>>(),
+                vec![payload.clone()]
+            );
+
+            // Rotation pads the remaining 1–7 bytes to complete the block.
+            log.rotate(DbFile::new_write_ahead_log(21)).unwrap();
+            let (_, entries) = AppendLog::<MockLogFileCreator>::read_log_file(log_path, 6).unwrap();
+            assert_eq!(
+                entries.map(|entry| entry.unwrap()).collect::<Vec<_>>(),
+                vec![payload]
+            );
+        }
     }
 
     #[test]
