@@ -1,3 +1,4 @@
+use crate::io::sync_dir;
 use crate::obs::metrics::{self, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
@@ -18,6 +19,8 @@ use std::{
     time::Duration,
 };
 use tracing::{Span, trace_span};
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 /// Represents a task to be handled by the `FlushManager`.
 ///
@@ -167,6 +170,10 @@ impl FlushManager {
         let start = Instant::now();
         let memtable_size = memtable.size();
         let sst = memtable.flush(&db_dir, &sst_file, &options)?;
+        // Persist the filename before the callback publishes it and retires the WAL.
+        #[cfg(test)]
+        before_sync(db_dir, SyncPoint::Directory)?;
+        sync_dir(db_dir)?;
         let duration = start.elapsed();
         metrics.memtable_size.record(memtable_size as u64);
         metrics.count.inc();

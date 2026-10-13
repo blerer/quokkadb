@@ -15,6 +15,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///
@@ -162,6 +164,8 @@ impl<'a> SSTableWriter<'a> {
     ///
     /// This method writes the remaining data block (if any), constructs the index and metaindex
     /// blocks, and writes the footer to complete the SSTable.
+    /// The completed file is synchronized before returning. Callers must also synchronize
+    /// its parent directory before publishing the SSTable in the manifest.
     pub fn finish(&mut self) -> Result<SSTableMetadata> {
         if !self.data_block_builder.is_empty() {
             self.flush_data_block()?;
@@ -179,6 +183,9 @@ impl<'a> SSTableWriter<'a> {
 
         let metaindex_handle = self.write_metaindex_block()?;
         self.write_footer(index_handle, metaindex_handle)?;
+        #[cfg(test)]
+        before_sync(self.file_path.parent().unwrap(), SyncPoint::File)?;
+        self.output.get_ref().sync_all()?;
         let size = self.file_path.metadata()?.len();
         Ok(SSTableMetadata::new(
             self.id,

@@ -11,16 +11,15 @@ use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::internal_key::encode_record_key;
 use crate::storage::lsm_version::DropKind;
 use crate::storage::operation::Operation;
-use crate::storage::test_utils::{
-    assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key,
-};
+use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key};
 use crate::storage::write_batch::{Precondition, Preconditions};
 use bson::doc;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::Path;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
+use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
 
 fn write_batch(operations: Vec<Operation>) -> WriteBatch {
     WriteBatch::new_for_test(operations, CountStats::default())
@@ -4658,3 +4657,163 @@ fn test_failed_schema_wal_sync_does_not_publish_sequence() {
         .wal
         .return_error_on_sync(false);
 }
+
+
+fn expected_events(failure: Option<SyncPoint>) -> Vec<SyncPoint> {
+    if failure == Some(SyncPoint::File) {
+        vec![SyncPoint::File]
+    } else {
+        vec![SyncPoint::File, SyncPoint::Directory]
+    }
+}
+
+#[test]
+fn test_flush_sst_sync_before_publication() {
+    for failure in [None, Some(SyncPoint::File), Some(SyncPoint::Directory)] {
+        let dir = tempdir().unwrap();
+        let engine = new_engine(
+            &mut MetricRegistry::default(),
+            Options::lightweight(),
+            dir.path(),
+        );
+        engine.disable_auto_compaction();
+        let collection = engine.create_collection("docs", true).unwrap().id;
+        engine
+            .write(write_batch(vec![put_op(collection, 1, 1)]), true)
+            .unwrap();
+        let wal = engine.wal_path();
+        let hook = SyncHook::new(dir.path(), failure);
+
+        let result = engine.flush();
+        assert_eq!(hook.events(), expected_events(failure));
+        let persisted = engine.live_sst_numbers();
+        if let Some(point) = failure {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("Injected SST {point:?} sync error"))
+            );
+            assert!(persisted.is_empty(), "Failed SST must not be published");
+            assert!(wal.exists(), "WAL must remain available for recovery");
+        } else {
+            result.unwrap();
+            assert_eq!(persisted.len(), 1);
+            assert!(!wal.exists());
+            assert!(
+                engine
+                    .read_at_snapshot(collection, 0, &user_key(1), &engine.acquire_snapshot())
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_compaction_sst_sync_failure_preserves_inputs() {
+    for point in [SyncPoint::File, SyncPoint::Directory] {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight().with_level0_file_num_compaction_trigger(2);
+        let engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+        engine.disable_auto_compaction();
+        let collection = engine.create_collection("docs", true).unwrap().id;
+        for id in 1..=2 {
+            engine
+                .write(write_batch(vec![put_op(collection, id, 1)]), true)
+                .unwrap();
+            engine.flush().unwrap();
+        }
+        let inputs = engine.live_sst_numbers();
+        assert_eq!(inputs.len(), 2);
+        let manifest_path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
+        let before = fs::read(&manifest_path).unwrap();
+        let hook = SyncHook::new(dir.path(), Some(point));
+
+        let error = engine.compact().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Injected SST {point:?} sync error"))
+        );
+        assert_eq!(hook.events(), expected_events(Some(point)));
+        assert_eq!(fs::read(&manifest_path).unwrap(), before);
+        assert_eq!(engine.lsm_tree().levels().live_sst_numbers(), inputs);
+        for number in inputs {
+            assert!(dir.path().join(DbFile::new_sst(number).filename()).exists());
+        }
+    }
+}
+
+#[test]
+fn test_recovery_flush_sst_sync_before_manifest() {
+    for failure in [None, Some(SyncPoint::File), Some(SyncPoint::Directory)] {
+        let dir = tempdir().unwrap();
+        let options = Arc::new(Options::lightweight());
+        let engine = new_engine(
+            &mut MetricRegistry::default(),
+            options.as_ref().clone(),
+            dir.path(),
+        );
+        engine.disable_auto_compaction();
+        let collection = engine.create_collection("docs", true).unwrap().id;
+        engine
+            .write(write_batch(vec![put_op(collection, 1, 1)]), true)
+            .unwrap();
+        let wal = engine.wal_path();
+        // Rotate normally, but prevent the SSTable from being published so startup
+        // must replay the old WAL and flush it when it reaches the new WAL.
+        {
+            let setup_hook = SyncHook::new(dir.path(), Some(SyncPoint::File));
+            let error = engine.flush().unwrap_err();
+            assert!(error.to_string().contains("Injected SST File sync error"));
+            assert_eq!(setup_hook.events(), vec![SyncPoint::File]);
+        }
+        assert_ne!(engine.wal_path(), wal);
+        assert!(wal.exists());
+        drop(engine);
+
+        let hook = SyncHook::new(dir.path(), failure);
+        let result =
+            StorageEngine::new(&mut MetricRegistry::default(), options.clone(), dir.path());
+        assert_eq!(hook.events(), expected_events(failure));
+        drop(hook);
+
+        let recovered = if let Some(point) = failure {
+            let error = result.err().expect("Synchronization must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("Injected SST {point:?} sync error"))
+            );
+            assert!(
+                read_lsm_tree_from_disk(&dir)
+                    .levels()
+                    .live_sst_numbers()
+                    .is_empty()
+            );
+            assert!(wal.exists());
+            // A failed open must preserve enough state for a subsequent recovery.
+            StorageEngine::new(&mut MetricRegistry::default(), options, dir.path())
+                .unwrap()
+                .0
+        } else {
+            result.unwrap().0
+        };
+        let live_ssts = recovered.live_sst_numbers();
+        assert_eq!(live_ssts.len(), 1);
+        let persisted = read_lsm_tree_from_disk(&dir);
+        assert_eq!(persisted.levels().live_sst_numbers(), live_ssts);
+        let (_, value) = recovered
+            .read_at_snapshot(collection, 0, &user_key(1), &recovered.acquire_snapshot())
+            .unwrap()
+            .expect("Recovery must preserve the original document");
+        assert_eq!(value, put_op(collection, 1, 1).value());
+    }
+}
+
+fn read_lsm_tree_from_disk(dir: &TempDir) -> LsmTree {
+    let manifest_path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
+    LsmTree::from(Manifest::rebuild_manifest_state(&manifest_path).unwrap())
+}
+

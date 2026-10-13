@@ -33,6 +33,8 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::{fmt, fs};
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 struct WalAndManifest {
     wal: WriteAheadLog,
@@ -544,6 +546,10 @@ impl StorageEngine {
         let count_stats = imm_memtable.count_stats_for_flush();
 
         let sst = Arc::new(imm_memtable.flush(&db_dir, &sst_file, &options)?);
+        // Recovery bypasses FlushManager, so persist the filename before the manifest edit.
+        #[cfg(test)]
+        before_sync(db_dir, SyncPoint::Directory)?;
+        sync_dir(db_dir)?;
 
         let edit = ManifestEdit::Flush {
             oldest_log_number: lsm_tree.imm_memtables[0].log_number,
@@ -1686,6 +1692,7 @@ impl CountStatSource for StorageEngine {
 
 #[cfg(test)]
 impl StorageEngine {
+
     pub(crate) fn create_queryable_index(
         self: &Arc<Self>,
         collection_id: u32,
@@ -1725,10 +1732,21 @@ impl StorageEngine {
         self.lsm_tree.load_full()
     }
 
+    pub fn live_sst_numbers(&self) -> std::collections::HashSet<u64> {
+        self.lsm_tree().levels().live_sst_numbers()
+    }
+
     pub fn fail_next_precondition_checks(&self, count: u8) {
         let _ = self
             .fail_next_precondition_checks
             .store(count, Ordering::Relaxed);
+    }
+
+    /// Returns the path of the WAL associated with the current memtable.
+    pub(crate) fn wal_path(&self) -> PathBuf {
+        let log_number = self.lsm_tree.load().memtable.log_number;
+        self.db_dir
+            .join(DbFile::new_write_ahead_log(log_number).filename())
     }
 }
 

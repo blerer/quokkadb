@@ -1,5 +1,5 @@
 use crate::obs::metrics::names::index_build;
-use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
+use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::query::execution::indexes::{Indexes, OperationsCountAndSize};
 use crate::storage::Direction;
@@ -455,6 +455,7 @@ mod tests {
     use bson::{Bson, doc};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
+    use crate::obs::metrics::names::wal;
 
     fn insert_document(storage_engine: &Arc<StorageEngine>, collection: u32, id: i32, name: &str) {
         let operation = Operation::new_put(
@@ -661,7 +662,7 @@ mod tests {
         let collection_id = storage_engine.create_collection("empty", true).unwrap().id;
         let created_index = create_index(&storage_engine, collection_id);
         let key = IndexBuildKey::new(collection_id, created_index.id);
-        let syncs_before_build = metrics.counter_value(metrics::names::wal::SYNCS);
+        let syncs_before_build = metrics.counter_value(wal::SYNCS);
 
         IndexBuilder::new(&mut metrics, &options, storage_engine.clone())
             .build_index(key, &created_index.build_snapshot.unwrap())
@@ -670,7 +671,7 @@ mod tests {
         // There are no backfill writes. Schema publication is independently durable,
         // and checkpoint deletion must still sync its own WAL record.
         assert_eq!(
-            metrics.counter_value(metrics::names::wal::SYNCS),
+            metrics.counter_value(wal::SYNCS),
             syncs_before_build + 1
         );
         assert_index_queryable(&storage_engine, collection_id, key.index_id);

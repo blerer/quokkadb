@@ -1,3 +1,4 @@
+use crate::io::sync_dir;
 use crate::obs::metrics::MetricRegistry;
 use crate::options::options::Options;
 use crate::storage::callback::Callback;
@@ -17,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use tracing::{Span, trace_span};
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -323,6 +326,12 @@ fn perform_compaction(
     if sstable_writer.estimated_size() > 0 {
         added.push(Arc::new(sstable_writer.finish()?));
     }
+    if !added.is_empty() {
+        // All output files are synced; persist their names together before publication.
+        #[cfg(test)]
+        before_sync(db_dir, SyncPoint::Directory)?;
+        sync_dir(db_dir)?;
+    }
     let removed = job
         .input_files
         .iter()
@@ -437,6 +446,7 @@ mod tests {
     use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
     use crate::storage::sstable::sstable_cache::SSTableCache;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
+    use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
     use crate::storage::test_utils::{put_rec, record_key};
     use crate::util::interval::Interval;
     use std::ops::{Bound, RangeBounds};
@@ -648,6 +658,7 @@ mod tests {
             partitions_grid: None,
         };
 
+        let hook = SyncHook::new(dir.path(), Some(SyncPoint::Directory));
         let op = perform_compaction(
             &options,
             &dir.path().to_path_buf(),
@@ -664,6 +675,7 @@ mod tests {
         assert_eq!(drops[0], drop);
 
         assert_eq!(added.len(), 0);
+        assert!(hook.events().is_empty());
         assert_eq!(removed.len(), 1);
     }
 
@@ -989,10 +1001,11 @@ mod tests {
             partitions_grid: Some(vec![b1.clone(), b2.clone()]),
         };
 
+        let hook = SyncHook::new(dir.path(), None);
         let op = perform_compaction(
             &options,
             &dir.path().to_path_buf(),
-            cache,
+            cache.clone(),
             job.clone(),
             None,
             &counter,
@@ -1000,6 +1013,20 @@ mod tests {
         .unwrap();
         let (compaction_job, added, _removed, _drops) = unwrap_compaction(op);
 
+        assert_eq!(
+            hook.events(),
+            vec![
+                SyncPoint::File,
+                SyncPoint::File,
+                SyncPoint::File,
+                SyncPoint::Directory
+            ]
+        );
+        let recovered_entries: Vec<_> = added
+            .iter()
+            .flat_map(|sst| read_sst_entries(dir.path(), cache.clone(), sst))
+            .collect();
+        assert_eq!(recovered_entries, entries);
         assert_eq!(compaction_job, job);
         assert_eq!(
             added.len(),

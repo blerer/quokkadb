@@ -1,5 +1,5 @@
 use crate::io::buffer::Buffer;
-use crate::io::{ZeroCopy, file_name_as_str};
+use crate::io::{ZeroCopy, file_name_as_str, sync_dir};
 use crate::storage::files::DbFile;
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
@@ -278,6 +278,8 @@ impl<F: LogFileCreator> Drop for AppendLog<F> {
 pub trait LogFileCreator: Send + Sync {
     type Observer: LogObserver;
 
+    /// Creates a log with a durable header and directory entry before returning,
+    /// so callers can safely publish its filename in the manifest or CURRENT.
     fn new_log(
         &self,
         directory: PathBuf,
@@ -309,6 +311,7 @@ pub trait LogFileCreator: Send + Sync {
         };
         log_file.write_all(buffer.as_slice())?;
         log_file.sync()?;
+        sync_dir(&directory)?;
 
         Ok(log_file)
     }

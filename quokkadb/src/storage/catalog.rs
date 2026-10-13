@@ -788,18 +788,8 @@ impl IndexBuilder {
         self
     }
 
-    pub(crate) fn name(mut self, name: &str) -> Self {
-        self.options.name = Some(name.to_string());
-        self
-    }
-
     pub(crate) fn queryable_at(mut self, timestamp: u64) -> Self {
         self.queryable_at = Some(timestamp);
-        self
-    }
-
-    pub(crate) fn dropped_at(mut self, timestamp: u64) -> Self {
-        self.dropped_at = Some(timestamp);
         self
     }
 

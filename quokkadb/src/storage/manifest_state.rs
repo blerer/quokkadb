@@ -919,7 +919,7 @@ impl fmt::Display for ManifestEdit {
 mod tests {
     use super::*;
     use crate::storage::catalog::{
-        CollectionBuilder, CollectionMetadata, CollectionOptions, IndexDirection, IndexPath,
+        CollectionBuilder, CollectionOptions, IndexDirection, IndexPath,
         OrderedIndexField,
     };
     use crate::storage::internal_key::encode_record_key;

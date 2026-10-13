@@ -58,3 +58,59 @@ pub fn document(user_key: i32, version: u32) -> Document {
         "payload": format!("This is document {} version {}.", user_key, version)
     }
 }
+
+pub mod fs_sync {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::io::Error;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SyncPoint {
+        File,
+        Directory,
+    }
+
+    struct State {
+        fail_at: Option<SyncPoint>,
+        events: Vec<SyncPoint>,
+    }
+
+    static HOOKS: Mutex<BTreeMap<PathBuf, State>> = Mutex::new(BTreeMap::new());
+
+    pub(crate) struct SyncHook(PathBuf);
+
+    impl SyncHook {
+        pub(crate) fn new(directory: &Path, fail_at: Option<SyncPoint>) -> Self {
+            let previous = HOOKS.lock().unwrap().insert(
+                directory.to_path_buf(),
+                State {
+                    fail_at,
+                    events: Vec::new(),
+                },
+            );
+            assert!(previous.is_none(), "SST sync hook already registered");
+            Self(directory.to_path_buf())
+        }
+
+        pub(crate) fn events(&self) -> Vec<SyncPoint> {
+            HOOKS.lock().unwrap().get(&self.0).unwrap().events.clone()
+        }
+    }
+
+    impl Drop for SyncHook {
+        fn drop(&mut self) {
+            HOOKS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub(crate) fn before_sync(directory: &Path, point: SyncPoint) -> Result<()> {
+        if let Some(state) = HOOKS.lock().unwrap().get_mut(directory) {
+            state.events.push(point);
+            if state.fail_at == Some(point) {
+                return Err(Error::other(format!("Injected SST {point:?} sync error")));
+            }
+        }
+        Ok(())
+    }
+}
