@@ -124,7 +124,16 @@ impl Buffer {
 
     pub fn fill(&mut self, reader: &mut File) -> std::io::Result<()> {
         self.read_index = 0;
-        self.write_index = reader.read(&mut self.data)?;
+        self.write_index = 0;
+        // A short read is not necessarily EOF. Fill the block before classifying padding.
+        while self.write_index < self.data.len() {
+            match reader.read(&mut self.data[self.write_index..]) {
+                Ok(0) => break,
+                Ok(size) => self.write_index += size,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 

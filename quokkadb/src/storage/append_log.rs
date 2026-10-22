@@ -14,6 +14,9 @@ use std::{fmt, mem, result};
 /// aligning with disk block sizes.
 pub const BUFFER_SIZE_IN_BYTES: usize = 4096;
 
+/// The size of the record header, which includes the record size (4 bytes) and its CRC (4 bytes).
+const RECORD_HEADER_SIZE: usize = 8;
+
 pub struct AppendLog<F: LogFileCreator> {
     directory: PathBuf, // The path to the log directory
     file_creator: Arc<F>,
@@ -120,9 +123,8 @@ impl<F: LogFileCreator> AppendLog<F> {
         may_be_fail(&self.fail_append_after, "Injected error on append")?;
 
         let mut bytes_written = 0;
-        let len = data.len();
-
-        bytes_written += self.flush_buffer_if_needed(len)?;
+        // Keep the size and its CRC in one block. The payload and trailing CRC may span blocks.
+        bytes_written += self.flush_buffer_if_needed(RECORD_HEADER_SIZE)?;
 
         // Write record size
         let size = data.len() as u32;
@@ -213,14 +215,19 @@ impl<F: LogFileCreator> AppendLog<F> {
         let mut file = File::open(path.clone())?;
 
         let mut block = vec![0u8; BUFFER_SIZE_IN_BYTES];
-        file.read_exact(&mut block)
-            .map_err(|_e| LogReplayError::Corruption {
-                record_offset: 0,
-                reason: format!(
-                    "Not enough bytes to read in {} header.",
-                    path.to_string_lossy()
-                ),
-            })?;
+        file.read_exact(&mut block).map_err(|e| {
+            if e.kind() == ErrorKind::UnexpectedEof {
+                LogReplayError::Corruption {
+                    record_offset: 0,
+                    reason: format!(
+                        "Not enough bytes to read in {} header.",
+                        path.to_string_lossy()
+                    ),
+                }
+            } else {
+                e.into()
+            }
+        })?;
 
         let mut header = vec![0; header_size];
         header.copy_from_slice(&block[..header_size]);
@@ -403,125 +410,115 @@ impl LogIterator {
         self.position += remaining as u64;
         Ok(self.buffer.readable_bytes() > 0)
     }
+
+    /// Reads record bytes across blocks without advancing the record's starting position.
+    fn read_record_bytes(
+        &mut self,
+        bytes: &mut [u8],
+        part: &str,
+    ) -> result::Result<(), LogReplayError> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self.buffer.readable_bytes() == 0 && !self.refill_buffer()? {
+                return Err(LogReplayError::IncompleteRecord {
+                    record_offset: self.position,
+                    reason: format!(
+                        "Reached an unexpected end of file in {} while reading {}. Stopping replay.",
+                        self.path.to_string_lossy(),
+                        part
+                    ),
+                });
+            }
+            let available = (bytes.len() - offset).min(self.buffer.readable_bytes());
+            bytes[offset..offset + available].copy_from_slice(self.buffer.read_slice(available));
+            offset += available;
+        }
+        Ok(())
+    }
+
+    /// Skips block padding, returning false at EOF and true when a record header is available.
+    fn skip_padding(&mut self) -> result::Result<bool, LogReplayError> {
+        loop {
+            // There should be either enough readable bytes for the size + its CRC or we need to move to the
+            // next block
+            if self.buffer.readable_bytes() < RECORD_HEADER_SIZE {
+                if self.buffer.readable_bytes() > 0 && self.buffer.writable_bytes() > 0 {
+                    // Only a complete block can end with short padding. A partial block
+                    // leaves an incomplete record header, even when its bytes are zero.
+                    self.buffer.clear();
+                    return Err(LogReplayError::IncompleteRecord {
+                        record_offset: self.position,
+                        reason: format!(
+                            "Reached an unexpected end of file in {} while reading record header. Stopping replay.",
+                            &self.path.to_string_lossy()
+                        ),
+                    });
+                }
+            } else if !self.buffer.as_slice().starts_with(&[0; 4]) {
+                return Ok(true);
+            }
+
+            // Zero size bytes indicate padding, including the last block before rotation.
+            // Peek without consuming them so refill_buffer accounts for all skipped bytes.
+            if !self.refill_buffer()? {
+                return Ok(false);
+            }
+        }
+    }
 }
 
 impl Iterator for LogIterator {
     type Item = result::Result<Vec<u8>, LogReplayError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            // There should be either enough readable bytes for the size + its CRC or we need to move to the
-            // next block
-            if self.buffer.readable_bytes() < 8 {
-                if self.buffer.readable_bytes() > 0 && self.buffer.writable_bytes() > 0 {
-                    // Only a complete block can end with short padding. A partial block
-                    // leaves an incomplete record header, even when its bytes are zero.
-                    self.buffer.clear();
-                    return Some(Err(LogReplayError::Corruption {
-                        record_offset: self.position,
-                        reason: format!(
-                            "Reached an unexpected end of file in {} while reading record header. Stopping replay.",
-                            &self.path.to_string_lossy()
-                        ),
-                    }));
-                }
-                match self.refill_buffer() {
-                    Ok(false) => return None, // EOF reached
-                    Ok(true) => continue,
-                    Err(e) => return Some(Err(e.into())), // propagate error
-                }
-            }
-
-            let size_as_bytes = self.buffer.read_slice(4);
-
-            // If all the size bytes are zero it means that it is the block padding and that we
-            // need to move to the next block
-            if size_as_bytes == &[0; 4] {
-                match self.refill_buffer() {
-                    Ok(false) => return None, // EOF reached
-                    Ok(true) => {
-                        // We need to account for the 4 bytes that have been read.
-                        // The skipping will be accounted for by the refill_buffer method
-                        self.position += 4;
-                        continue;
-                    }
-                    Err(e) => return Some(Err(e.into())), // propagate error
-                }
-            }
-
-            let size = size_as_bytes.read_u32_be(0) as usize;
-
-            let expected_crc = compute_crc32(size_as_bytes);
-            let actual_crc = self.buffer.read_slice(4);
-
-            if expected_crc != actual_crc {
-                return Some(Err(LogReplayError::Corruption {
-                    record_offset: self.position,
-                    reason: format!(
-                        "Invalid size checksum found in {}. Stopping replay.",
-                        &self.path.to_string_lossy()
-                    ),
-                }));
-            }
-
-            let mut data = vec![0u8; size];
-            let mut offset = 0;
-
-            while offset < size {
-                if self.buffer.readable_bytes() == 0 {
-                    match self.refill_buffer() {
-                        Ok(false) => {
-                            return Some(Err(LogReplayError::Corruption {
-                                record_offset: self.position,
-                                reason: format!(
-                                    "Reached an unexpected end of file in {} while reading data. Stopping replay.",
-                                    &self.path.to_string_lossy()
-                                ),
-                            }));
-                        }
-                        Ok(true) => continue,
-                        Err(e) => return Some(Err(e.into())), // propagate error
-                    }
-                }
-                let available = (size - offset).min(self.buffer.readable_bytes());
-                data[offset..offset + available]
-                    .copy_from_slice(&self.buffer.read_slice(available));
-                offset += available;
-            }
-
-            if self.buffer.readable_bytes() < 4 {
-                match self.refill_buffer() {
-                    Ok(false) => {
-                        return Some(Err(LogReplayError::Corruption {
-                            record_offset: self.position,
-                            reason: format!(
-                                "Reached an unexpected end of file in {} while reading data crc. Stopping replay.",
-                                &self.path.to_string_lossy()
-                            ),
-                        }));
-                    }
-                    Ok(true) => continue,
-                    Err(e) => return Some(Err(e.into())), // propagate error
-                }
-            }
-
-            let expected_crc = compute_crc32(&data);
-            let actual_crc = self.buffer.read_slice(4);
-            if expected_crc != actual_crc {
-                return Some(Err(LogReplayError::Corruption {
-                    record_offset: self.position,
-                    reason: format!(
-                        "Invalid data checksum found in {}. Stopping replay.",
-                        &self.path.to_string_lossy()
-                    ),
-                }));
-            }
-
-            // Update the position with the record total record size:
-            // size (4 bytes) + size crc (4 bytes) + data (size) + data crc (4 bytes)
-            self.position += 4 + 4 + size as u64 + 4;
-            return Some(Ok(data));
+        match self.skip_padding() {
+            Ok(false) => return None,
+            Ok(true) => {}
+            Err(e) => return Some(Err(e)),
         }
+
+        let size_as_bytes = self.buffer.read_slice(4);
+        let size = size_as_bytes.read_u32_be(0) as usize;
+
+        let expected_crc = compute_crc32(size_as_bytes);
+        let actual_crc = self.buffer.read_slice(4);
+
+        if expected_crc != actual_crc {
+            return Some(Err(LogReplayError::Corruption {
+                record_offset: self.position,
+                reason: format!(
+                    "Invalid size checksum found in {}. Stopping replay.",
+                    &self.path.to_string_lossy()
+                ),
+            }));
+        }
+
+        let mut data = vec![0u8; size];
+        if let Err(error) = self.read_record_bytes(&mut data, "data") {
+            return Some(Err(error));
+        }
+
+        // The checksum may straddle blocks; retain every byte and the record start.
+        let mut actual_crc = [0; 4];
+        if let Err(error) = self.read_record_bytes(&mut actual_crc, "data crc") {
+            return Some(Err(error));
+        }
+
+        let expected_crc = compute_crc32(&data);
+        if expected_crc != actual_crc {
+            return Some(Err(LogReplayError::Corruption {
+                record_offset: self.position,
+                reason: format!(
+                    "Invalid data checksum found in {}. Stopping replay.",
+                    &self.path.to_string_lossy()
+                ),
+            }));
+        }
+
+        // Update the position with the record total record size:
+        // size (4 bytes) + size crc (4 bytes) + data (size) + data crc (4 bytes)
+        self.position += 4 + 4 + size as u64 + 4;
+        Some(Ok(data))
     }
 }
 
@@ -529,12 +526,23 @@ impl Iterator for LogIterator {
 pub enum LogReplayError {
     Io(Error),
     Corruption { record_offset: u64, reason: String },
+    IncompleteRecord { record_offset: u64, reason: String },
 }
 
 impl fmt::Display for LogReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LogReplayError::Io(err) => write!(f, "I/O error while replaying: {}", err),
+            LogReplayError::IncompleteRecord {
+                record_offset,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Incomplete record at offset {}: {}",
+                    record_offset, reason
+                )
+            }
             LogReplayError::Corruption {
                 record_offset,
                 reason,
@@ -555,6 +563,13 @@ impl From<LogReplayError> for Error {
     fn from(e: LogReplayError) -> Self {
         match e {
             LogReplayError::Io(inner) => inner,
+            LogReplayError::IncompleteRecord {
+                record_offset,
+                reason,
+            } => Error::new(
+                ErrorKind::UnexpectedEof,
+                format!("Incomplete record at offset {}: {}", record_offset, reason),
+            ),
             LogReplayError::Corruption {
                 record_offset: offset,
                 reason,
@@ -792,10 +807,10 @@ mod tests {
         assert_eq!(log.append(&vec![2; 360]).unwrap(), 372);
         assert_eq!(log.append(&vec![3; 690]).unwrap(), 702);
         assert_eq!(log.append(&vec![4; 1024]).unwrap(), 1036);
-        assert_eq!(log.append(&vec![5; 1024]).unwrap(), 1036); // buffer remaining 688 next one will not fit in
-        assert_eq!(log.append(&vec![6; 1024]).unwrap(), 688 + 1036);
-        assert_eq!(log.append(&vec![7; 3048]).unwrap(), 3060); // Fill perfectly the remaining part of the block
-        assert_eq!(log.append(&vec![8; 4084]).unwrap(), 4096); // Fill the next block fully
+        assert_eq!(log.append(&vec![5; 1024]).unwrap(), 1036); // 688 bytes remain; the next record spans blocks.
+        assert_eq!(log.append(&vec![6; 1024]).unwrap(), 1036);
+        assert_eq!(log.append(&vec![7; 3048]).unwrap(), 3060);
+        assert_eq!(log.append(&vec![8; 4084]).unwrap(), 4096); // A block-sized record can start within a block.
         assert_eq!(log.append(&vec![9; 9000]).unwrap(), 9012); // Fill more than 2 blocks
         log.sync().unwrap();
 
@@ -907,7 +922,7 @@ mod tests {
         record_offset += log.append(&vec![2; 360]).unwrap();
         record_offset += log.append(&vec![3; 690]).unwrap();
         record_offset += log.append(&vec![4; 1024]).unwrap();
-        record_offset += log.append(&vec![5; 1024]).unwrap(); // buffer remaining 688 next one will not fit in
+        record_offset += log.append(&vec![5; 1705]).unwrap(); // 7 bytes remain, so the next append pads.
         record_offset += log.append(&vec![6; 1024]).unwrap();
         log.sync().unwrap();
 
@@ -941,7 +956,7 @@ mod tests {
         assert_eq!(entries.next().unwrap().unwrap(), vec![2; 360]);
         assert_eq!(entries.next().unwrap().unwrap(), vec![3; 690]);
         assert_eq!(entries.next().unwrap().unwrap(), vec![4; 1024]);
-        assert_eq!(entries.next().unwrap().unwrap(), vec![5; 1024]);
+        assert_eq!(entries.next().unwrap().unwrap(), vec![5; 1705]);
         assert_eq!(entries.next().unwrap().unwrap(), vec![6; 1024]);
 
         let rs = entries.next().unwrap();
@@ -1157,10 +1172,9 @@ mod tests {
                 assert_eq!(entries.next().unwrap().unwrap(), payload);
                 assert!(matches!(
                     entries.next(),
-                    Some(Err(LogReplayError::Corruption { record_offset, .. }))
+                    Some(Err(LogReplayError::IncompleteRecord { record_offset, .. }))
                         if record_offset == expected_offset
                 ));
-                assert!(entries.next().is_none());
 
                 truncate_file(&log_path, expected_offset).unwrap();
                 let mut log =
@@ -1173,6 +1187,59 @@ mod tests {
                 assert_eq!(
                     entries.map(|entry| entry.unwrap()).collect::<Vec<_>>(),
                     vec![payload, b"after recovery".to_vec()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_incomplete_record_offsets_and_split_checksums() {
+        // Include checksums split after each of their first three bytes.
+        for size in [20, 4085, 4086, 4087, 9000] {
+            let dir = tempdir().unwrap();
+            let mut log = AppendLog::new(
+                dir.path(),
+                DbFile::new_write_ahead_log(20),
+                Arc::new(MockLogFileCreator),
+                MockLogObserver::new(),
+            )
+            .unwrap();
+            // Fill a block with a complete record so the tested record starts at a block boundary.
+            let prefix = vec![1; BUFFER_SIZE_IN_BYTES - 12];
+            log.append(&prefix).unwrap();
+            log.sync().unwrap();
+            let record_offset = log.log_file_size();
+            let payload = vec![42; size];
+            log.append(&payload).unwrap();
+            log.sync().unwrap();
+            let path = log.file_path().clone();
+            drop(log);
+            let complete = std::fs::read(&path).unwrap();
+            let (_, records) =
+                AppendLog::<MockLogFileCreator>::read_log_file(path.clone(), 6).unwrap();
+            assert_eq!(
+                records.map(|r| r.unwrap()).collect::<Vec<_>>(),
+                vec![prefix.clone(), payload]
+            );
+
+            // Each cut retains this many bytes from the record start:
+            // size (4) + size CRC (4) + payload (size) + payload CRC (4).
+            // Cuts 1–7 leave a partial header; 8–9 leave zero or one payload byte.
+            let mut cuts: Vec<usize> = (1..=9).collect();
+            // Cut midway through the payload, then after the full payload with 0–3 CRC bytes.
+            cuts.extend([size / 2 + 8, size + 8, size + 9, size + 10, size + 11]);
+            if size > BUFFER_SIZE_IN_BYTES {
+                // Also cut just before, exactly at, and just after the first block boundary.
+                cuts.extend([4095, 4096, 4097]);
+            }
+            for cut in cuts {
+                std::fs::write(&path, &complete[..record_offset as usize + cut]).unwrap();
+                let (_, mut records) =
+                    AppendLog::<MockLogFileCreator>::read_log_file(path.clone(), 6).unwrap();
+                assert_eq!(records.next().unwrap().unwrap(), prefix);
+                assert!(
+                    matches!(records.next(), Some(Err(LogReplayError::IncompleteRecord { record_offset: offset, .. })) if offset == record_offset),
+                    "size={size}, cut={cut}"
                 );
             }
         }
@@ -1209,6 +1276,48 @@ mod tests {
                 entries.map(|entry| entry.unwrap()).collect::<Vec<_>>(),
                 vec![payload]
             );
+        }
+    }
+
+    #[test]
+    fn test_append_reserves_header_at_block_boundary() {
+        for remaining in 1..=13 {
+            for size in [1, 9000] {
+                for reopen in [false, true] {
+                    let dir = tempdir().unwrap();
+                    let mut log = AppendLog::new(
+                        dir.path(),
+                        DbFile::new_write_ahead_log(20),
+                        Arc::new(MockLogFileCreator),
+                        MockLogObserver::new(),
+                    )
+                    .unwrap();
+                    let prefix = vec![1; BUFFER_SIZE_IN_BYTES - 12 - remaining];
+                    log.append(&prefix).unwrap();
+                    log.sync().unwrap();
+                    let path = log.file_path().clone();
+                    if reopen {
+                        drop(log);
+                        log = AppendLog::load_from(
+                            &path,
+                            Arc::new(MockLogFileCreator),
+                            MockLogObserver::new(),
+                        )
+                        .unwrap();
+                    }
+                    let payload = vec![2; size];
+                    let padding = if remaining < 8 { remaining } else { 0 };
+                    assert_eq!(log.append(&payload).unwrap(), padding + size + 12);
+                    log.sync().unwrap();
+                    drop(log);
+                    let (_, records) =
+                        AppendLog::<MockLogFileCreator>::read_log_file(path, 6).unwrap();
+                    assert_eq!(
+                        records.map(|r| r.unwrap()).collect::<Vec<_>>(),
+                        vec![prefix, payload]
+                    );
+                }
+            }
         }
     }
 

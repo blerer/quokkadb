@@ -1,8 +1,8 @@
 use crate::io::byte_reader::ByteReader;
-use crate::io::{file_name_as_str, sync_dir};
+use crate::io::{file_name_as_str, sync_dir, truncate_file};
 use crate::obs::metrics::{self, AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
-use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver};
+use crate::storage::append_log::{AppendLog, LogFileCreator, LogObserver, LogReplayError};
 use crate::storage::files::DbFile;
 use crate::storage::manifest_state::{MANIFEST_FORMAT_VERSION, ManifestEdit, ManifestState};
 use std::fs;
@@ -178,7 +178,8 @@ impl Manifest {
         Ok(Some(db_dir.join(manifest_name)))
     }
 
-    pub fn rebuild_manifest_state(manifest_path: &Path) -> Result<ManifestState> {
+    /// Repairs an incomplete terminal append before startup opens the manifest for writing.
+    pub(crate) fn recover_manifest_state(manifest_path: &Path) -> Result<ManifestState> {
         const HEADER_SIZE: usize = 4 + 4 + 8; // MAGIC (u32) + VERSION (u32) + ID (u64)
 
         let (header, iter) = AppendLog::<ManifestFileCreator>::read_log_file(
@@ -189,8 +190,17 @@ impl Manifest {
 
         let mut tree: Option<ManifestState> = None;
 
+        let mut incomplete_offset = None;
         for bytes in iter {
-            let edit = ManifestEdit::try_from_vec(&bytes?, version)?;
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(LogReplayError::IncompleteRecord { record_offset, .. }) => {
+                    incomplete_offset = Some(record_offset);
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let edit = ManifestEdit::try_from_vec(&bytes, version)?;
             match edit {
                 ManifestEdit::Snapshot(snapshot) => {
                     tree = Some(Arc::try_unwrap(snapshot).unwrap()); // We know that we are the only owner.
@@ -203,10 +213,16 @@ impl Manifest {
             }
         }
 
-        tree.ok_or(Error::new(
+        let state = tree.ok_or(Error::new(
             ErrorKind::UnexpectedEof,
             format!("Invalid manifest file: {}", manifest_path.display()),
-        ))
+        ))?;
+        if let Some(record_offset) = incomplete_offset {
+            tracing::warn!(path = %manifest_path.display(), record_offset,
+                "incomplete manifest record; truncating file");
+            truncate_file(manifest_path, record_offset)?;
+        }
+        Ok(state)
     }
 
     pub(crate) fn format_version(&self) -> u32 {
@@ -442,8 +458,120 @@ mod tests {
 
         let manifest_path = path.join("MANIFEST-000001");
 
-        let rebuilt = Manifest::rebuild_manifest_state(&manifest_path.clone()).unwrap();
+        let rebuilt = Manifest::recover_manifest_state(&manifest_path).unwrap();
         assert_eq!(expected, rebuilt);
+    }
+
+    #[test]
+    fn test_recover_incomplete_manifest_tail() {
+        let dir = tempdir().unwrap();
+        let initial = Arc::new(ManifestState::new(1, 1, 4));
+        let mut manifest = Manifest::new(
+            &mut MetricRegistry::default(),
+            &Options::default(),
+            dir.path(),
+            1,
+            &ManifestEdit::Snapshot(initial.clone()),
+        )
+        .unwrap();
+        let path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
+        let prefix = fs::read(&path).unwrap();
+        let edit = ManifestEdit::CreateCollection {
+            id: 10,
+            name: "torn".to_string(),
+            created_at: 1000,
+            options: CollectionOptions::default(),
+        };
+        manifest.append_edit(&edit).unwrap();
+        drop(manifest);
+        let complete = fs::read(&path).unwrap();
+        for end in prefix.len() + 1..complete.len() {
+            let torn = &complete[..end];
+            fs::write(&path, torn).unwrap();
+            assert_eq!(Manifest::recover_manifest_state(&path).unwrap(), *initial);
+            assert_eq!(fs::read(&path).unwrap(), prefix);
+            let mut manifest = Manifest::load_from(
+                &mut MetricRegistry::default(),
+                &Options::default(),
+                path.clone(),
+            )
+            .unwrap();
+            manifest.append_edit(&edit).unwrap();
+            drop(manifest);
+            assert_eq!(
+                Manifest::recover_manifest_state(&path).unwrap(),
+                initial.apply(&edit)
+            );
+        }
+    }
+
+    #[test]
+    fn test_manifest_recovery_preserves_corruption_errors() {
+        let dir = tempdir().unwrap();
+        let snapshot = ManifestEdit::Snapshot(Arc::new(ManifestState::new(1, 1, 4)));
+        let mut manifest = Manifest::new(
+            &mut MetricRegistry::default(),
+            &Options::default(),
+            dir.path(),
+            1,
+            &snapshot,
+        )
+        .unwrap();
+        let path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
+        let snapshot_end = fs::metadata(&path).unwrap().len() as usize;
+        manifest
+            .append_edit(&ManifestEdit::CreateCollection {
+                id: 10,
+                name: "complete".to_string(),
+                created_at: 1000,
+                options: CollectionOptions::default(),
+            })
+            .unwrap();
+        drop(manifest);
+        let complete = fs::read(&path).unwrap();
+        // Header checksum, snapshot checksum, final size checksum, final payload checksum.
+        for offset in [16, snapshot_end - 1, snapshot_end + 4, complete.len() - 1] {
+            let mut corrupt = complete.clone();
+            corrupt[offset] ^= 0x80;
+            fs::write(&path, &corrupt).unwrap();
+            assert_eq!(
+                Manifest::recover_manifest_state(&path).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+            assert_eq!(fs::read(&path).unwrap(), corrupt);
+        }
+        // Neither a truncated file header nor an incomplete initial snapshot is repairable.
+        for end in [
+            15,
+            BUFFER_SIZE_IN_BYTES,
+            BUFFER_SIZE_IN_BYTES + 1,
+            snapshot_end - 1,
+        ] {
+            fs::write(&path, &complete[..end]).unwrap();
+            assert!(Manifest::recover_manifest_state(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), complete[..end]);
+        }
+        // A checksummed but incomplete edit payload is a decoding error, not a torn frame.
+        fs::write(&path, &complete[..snapshot_end]).unwrap();
+        let mut manifest = Manifest::load_from(
+            &mut MetricRegistry::default(),
+            &Options::default(),
+            path.clone(),
+        )
+        .unwrap();
+        let bytes = ManifestEdit::CreateCollection {
+            id: 10,
+            name: "incomplete_name".to_string(),
+            created_at: 1000,
+            options: CollectionOptions::default(),
+        }
+        .to_vec(MANIFEST_FORMAT_VERSION);
+        manifest.append_log.append(&bytes[..3]).unwrap();
+        manifest.append_log.sync().unwrap();
+        drop(manifest);
+        let before = fs::read(&path).unwrap();
+        assert!(Manifest::recover_manifest_state(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]

@@ -11,15 +11,17 @@ use crate::storage::count_stats::{CountStats, CountStatsKey};
 use crate::storage::internal_key::encode_record_key;
 use crate::storage::lsm_version::DropKind;
 use crate::storage::operation::Operation;
-use crate::storage::test_utils::{assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key};
+use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
+use crate::storage::test_utils::{
+    assert_next_entry_eq, delete_op, delete_rec, document, put_op, put_rec, user_key,
+};
 use crate::storage::write_batch::{Precondition, Preconditions};
 use bson::doc;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::Path;
-use tempfile::{tempdir, TempDir};
-use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
+use tempfile::{TempDir, tempdir};
 
 fn write_batch(operations: Vec<Operation>) -> WriteBatch {
     WriteBatch::new_for_test(operations, CountStats::default())
@@ -4678,7 +4680,6 @@ fn test_failed_schema_wal_sync_does_not_publish_sequence() {
         .return_error_on_sync(false);
 }
 
-
 fn expected_events(failure: Option<SyncPoint>) -> Vec<SyncPoint> {
     if failure == Some(SyncPoint::File) {
         vec![SyncPoint::File]
@@ -4834,6 +4835,91 @@ fn test_recovery_flush_sst_sync_before_manifest() {
 
 fn read_lsm_tree_from_disk(dir: &TempDir) -> LsmTree {
     let manifest_path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
-    LsmTree::from(Manifest::rebuild_manifest_state(&manifest_path).unwrap())
+    LsmTree::from(Manifest::recover_manifest_state(&manifest_path).unwrap())
 }
 
+#[test]
+fn test_restart_with_torn_manifest_append() {
+    for tail_len in [1, 3, 7, 8, 9, 12] {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        engine.disable_auto_compaction();
+        let collection = engine.create_collection("committed", true).unwrap().id;
+        engine
+            .write(write_batch(vec![put_op(collection, 1, 1)]), true)
+            .unwrap();
+        engine.flush().unwrap();
+        engine
+            .write(write_batch(vec![put_op(collection, 2, 1)]), true)
+            .unwrap();
+        drop(engine);
+
+        let path = Manifest::read_current_file(dir.path()).unwrap().unwrap();
+        let prefix = fs::read(&path).unwrap();
+        let mut manifest =
+            Manifest::load_from(&mut MetricRegistry::default(), &options, path.clone()).unwrap();
+        // Model a crash during an append without removing files needed by the committed prefix.
+        manifest
+            .append_edit(&ManifestEdit::CreateCollection {
+                id: collection + 1,
+                name: "uncommitted".to_string(),
+                created_at: 1000,
+                options: CollectionOptions::default(),
+            })
+            .unwrap();
+        drop(manifest);
+        let complete_len = fs::metadata(&path).unwrap().len();
+        // Include both partial headers and partial trailing checksums.
+        let end = if tail_len == 12 {
+            complete_len - 1
+        } else {
+            prefix.len() as u64 + tail_len
+        };
+        truncate_file(&path, end).unwrap();
+
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        assert!(
+            engine
+                .catalog()
+                .get_collection_by_name("committed")
+                .is_some()
+        );
+        assert!(
+            engine
+                .catalog()
+                .get_collection_by_name("uncommitted")
+                .is_none()
+        );
+        for id in [1, 2] {
+            assert!(
+                engine
+                    .read_at_snapshot(collection, 0, &user_key(id), &engine.acquire_snapshot())
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(fs::read(&path).unwrap().starts_with(&prefix));
+        engine.create_collection("after_recovery", true).unwrap();
+        engine
+            .write(write_batch(vec![put_op(collection, 3, 1)]), true)
+            .unwrap();
+        drop(engine);
+
+        let engine = new_engine(&mut MetricRegistry::default(), options, dir.path());
+        assert!(
+            engine
+                .catalog()
+                .get_collection_by_name("after_recovery")
+                .is_some()
+        );
+        for id in [1, 2, 3] {
+            assert!(
+                engine
+                    .read_at_snapshot(collection, 0, &user_key(id), &engine.acquire_snapshot())
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+}

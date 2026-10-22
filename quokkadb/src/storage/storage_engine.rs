@@ -20,6 +20,8 @@ use crate::storage::manifest_state::ManifestEdit;
 use crate::storage::memtable::Memtable;
 use crate::storage::snapshot_manager::{Snapshot, SnapshotManager};
 use crate::storage::sstable::sstable_cache::SSTableCache;
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{SyncPoint, before_sync};
 use crate::storage::wal::WriteAheadLog;
 use crate::storage::write_batch::{Precondition, Preconditions, WriteBatch};
 use arc_swap::ArcSwap;
@@ -33,8 +35,6 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::{fmt, fs};
-#[cfg(test)]
-use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 struct WalAndManifest {
     wal: WriteAheadLog,
@@ -110,7 +110,7 @@ impl StorageEngine {
         // Otherwise, it is the first time that we start this database and need to create a
         // new manifest and wal.
         if let Some(manifest_path) = manifest_path {
-            let manifest_state = Manifest::rebuild_manifest_state(&manifest_path)?;
+            let manifest_state = Manifest::recover_manifest_state(&manifest_path)?;
             let mut last_seq_nbr = manifest_state.lsm.last_sequence_number;
             // Keep the schema stream independent of flushes performed during replay.
             let mut schema_sequences = manifest_state
@@ -223,6 +223,10 @@ impl StorageEngine {
                                             LogReplayError::Corruption {
                                                 record_offset,
                                                 reason,
+                                            }
+                                            | LogReplayError::IncompleteRecord {
+                                                record_offset,
+                                                reason,
                                             } => {
                                                 tracing::warn!(
                                                     path = %wal_path.display(),
@@ -233,6 +237,7 @@ impl StorageEngine {
                                                 truncate_file(wal_path, record_offset)?;
                                                 reusable_wal =
                                                     Some((wal_path.to_path_buf(), wal_version));
+                                                break;
                                             }
                                         }
                                     } else {
@@ -291,6 +296,10 @@ impl StorageEngine {
                                     return Err(e.into());
                                 }
                                 LogReplayError::Corruption {
+                                    record_offset: _,
+                                    reason,
+                                }
+                                | LogReplayError::IncompleteRecord {
                                     record_offset: _,
                                     reason,
                                 } => {
@@ -1692,7 +1701,6 @@ impl CountStatSource for StorageEngine {
 
 #[cfg(test)]
 impl StorageEngine {
-
     pub(crate) fn create_queryable_index(
         self: &Arc<Self>,
         collection_id: u32,
@@ -2007,6 +2015,10 @@ impl From<LogReplayError> for StorageError {
         match err {
             LogReplayError::Io(e) => StorageError::Io(e),
             LogReplayError::Corruption {
+                record_offset,
+                reason,
+            }
+            | LogReplayError::IncompleteRecord {
                 record_offset,
                 reason,
             } => StorageError::LogCorruption {
