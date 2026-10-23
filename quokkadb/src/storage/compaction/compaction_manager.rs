@@ -10,6 +10,8 @@ use crate::storage::lsm_version::{DropMetadata, LevelItem, Levels, SplitResults}
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::storage_engine::SSTableOperation;
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{SyncPoint, before_sync};
 use crate::util::interval::IntervalPosition;
 use std::collections::VecDeque;
 use std::io::Result;
@@ -18,8 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use tracing::{Span, trace_span};
-#[cfg(test)]
-use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 struct CompactionTask {
     compaction_job: CompactionJob,
@@ -298,28 +298,37 @@ fn perform_compaction(
 
     let mut sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
     let mut boundary_idx: usize = 0;
+    let mut previous_record_key = Vec::new();
 
     for entry in compaction_iter {
         let (internal_key, value) = entry?;
+        let record_key = extract_record_key(&internal_key);
+        let is_new_record = previous_record_key.as_slice() != record_key;
+        let mut crossed_boundary = false;
 
         if let Some(boundaries) = &job.partitions_grid {
-            let record_key = extract_record_key(&internal_key);
             while boundary_idx < boundaries.len()
                 && record_key > boundaries[boundary_idx].as_slice()
             {
-                if sstable_writer.estimated_size() > 0 {
-                    added.push(Arc::new(sstable_writer.finish()?));
-                    sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
-                }
+                crossed_boundary = true;
                 boundary_idx += 1;
             }
         }
 
-        sstable_writer.add(&internal_key, &value)?;
-
-        if sstable_writer.estimated_size() >= sst_max_size {
+        // Keep all retained versions of a record together, even if they exceed the target size.
+        let estimated_size = sstable_writer.estimated_size();
+        if estimated_size > 0
+            && is_new_record
+            && (crossed_boundary || estimated_size >= sst_max_size)
+        {
             added.push(Arc::new(sstable_writer.finish()?));
             sstable_writer = new_sstable_writer(options, db_dir, next_file_number)?;
+        }
+
+        sstable_writer.add(&internal_key, &value)?;
+        if is_new_record {
+            previous_record_key.clear();
+            previous_record_key.extend_from_slice(record_key);
         }
     }
 
@@ -440,6 +449,7 @@ mod tests {
     use super::*;
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
+    use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
     use crate::storage::Direction;
     use crate::storage::files::DbFile;
     use crate::storage::internal_key::InternalKeyRange;
@@ -447,7 +457,7 @@ mod tests {
     use crate::storage::sstable::sstable_cache::SSTableCache;
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
-    use crate::storage::test_utils::{put_rec, record_key};
+    use crate::storage::test_utils::{delete_rec, put_rec, record_key};
     use crate::util::interval::Interval;
     use std::ops::{Bound, RangeBounds};
     use std::sync::Arc;
@@ -514,6 +524,86 @@ mod tests {
             } => (compaction_job, added_sstables, removed_sstables, drops),
             _ => panic!("Expected SSTableOperation::Compaction"),
         }
+    }
+
+    fn assert_record_versions_stay_together(partitioned: bool, include_next_record: bool) {
+        let dir = tempdir().unwrap();
+        // Every nonempty writer exceeds this target, including within a record's history.
+        let options = Options::lightweight()
+            .with_max_target_file_size(StorageQuantity::new(1, StorageUnit::Bytes));
+        let cache = setup_cache(&options);
+        let counter = next_file_number(10);
+        let col = 10;
+        let newest = put_rec(col, 50, 3, 5);
+        let deletion = delete_rec(col, 50, 4);
+        let floor = put_rec(col, 50, 2, 3);
+        let obsolete = put_rec(col, 50, 1, 2);
+        let next_record = put_rec(col, 70, 1, 6);
+
+        // L0 files represent successive memtable flushes with disjoint sequence ranges.
+        let first = write_sst(dir.path(), 1, &[floor.clone(), obsolete], &options);
+        let mut second_entries = vec![newest.clone(), deletion.clone()];
+        if include_next_record {
+            second_entries.push(next_record.clone());
+        }
+        let second = write_sst(dir.path(), 2, &second_entries, &options);
+        assert!(first.max_sequence_number < second.min_sequence_number);
+        let job = CompactionJob {
+            id: 0,
+            input_level: 0,
+            output_level: 1,
+            input_files: vec![first, second],
+            output_files: vec![],
+            drops: vec![],
+            input_key_range: Interval::all(),
+            output_key_range: Interval::all(),
+            // The next record crosses both boundaries; neither should create an empty file.
+            partitions_grid: partitioned.then(|| vec![record_key(col, 50), record_key(col, 60)]),
+        };
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache.clone(),
+            job,
+            Some(3),
+            &counter,
+        )
+        .unwrap();
+        let (_, added, removed, _) = unwrap_compaction(op);
+
+        assert_eq!(removed.len(), 2);
+        assert_eq!(added.len(), if include_next_record { 2 } else { 1 });
+        assert_eq!(
+            read_sst_entries(dir.path(), cache.clone(), &added[0]),
+            vec![newest, deletion, floor]
+        );
+        assert_eq!(added[0].min_key, record_key(col, 50));
+        assert_eq!(added[0].max_key, record_key(col, 50));
+        assert!(added[0].size > options.target_file_size_for_level(1));
+        if include_next_record {
+            assert_eq!(
+                read_sst_entries(dir.path(), cache, &added[1]),
+                vec![next_record]
+            );
+        }
+        for pair in added.windows(2) {
+            assert!(pair[0].max_key < pair[1].min_key);
+        }
+    }
+
+    #[test]
+    fn test_size_split_keeps_retained_record_versions_together() {
+        assert_record_versions_stay_together(false, true);
+    }
+
+    #[test]
+    fn test_size_and_partition_split_keep_boundary_record_versions_together() {
+        assert_record_versions_stay_together(true, true);
+    }
+
+    #[test]
+    fn test_final_oversized_record_versions_stay_in_one_file() {
+        assert_record_versions_stay_together(false, false);
     }
 
     // -----------------------------------------------------------------------
