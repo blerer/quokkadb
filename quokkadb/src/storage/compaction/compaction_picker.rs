@@ -62,7 +62,7 @@ pub struct CompactionJob {
     pub drops: Vec<Arc<DropMetadata>>,
     /// The key range covered by this compaction in the input level.
     pub input_key_range: Interval<Vec<u8>>,
-    /// The key range covered by this compaction in the output level.
+    /// The key range reserved in the output level, including newly introduced keys.
     pub output_key_range: Interval<Vec<u8>>,
     /// For partial compactions, the partitions grid used to determine the sstable splits.
     /// None for full compactions.
@@ -394,10 +394,13 @@ impl CompactionPicker {
         // Find all overlapping files in the output level
         let output_files = output.find_sstables_in_range(&input_key_range, u64::MAX);
 
-        // Use input_key_range as fallback when output is empty to prevent another
-        // compaction from racing to write to the same output level range
-        let output_key_range = span(output_files.iter().map(|f| f.as_ref()))
-            .unwrap_or_else(|| input_key_range.clone());
+        // Protect the full output span, including keys introduced by the source files.
+        // Otherwise an outgoing partial compaction could change partition boundaries
+        // within our output while we are still writing against the old partition grid.
+        let output_key_range = span(output_files.iter().map(|f| f.as_ref())).map_or_else(
+            || input_key_range.clone(),
+            |range| input_key_range.span(&range),
+        );
 
         Some(CompactionJob {
             id,
@@ -1145,7 +1148,7 @@ mod tests {
         assert_eq!(job.input_level, 3);
         assert_eq!(job.input_key_range, interval(10, 30));
         assert_eq!(job.output_level, 4);
-        assert_eq!(job.output_key_range, interval(5, 25));
+        assert_eq!(job.output_key_range, interval(5, 30));
         assert_eq!(
             job.partitions_grid,
             Some(vec![]),
@@ -1541,6 +1544,52 @@ mod tests {
 
     mod full_compactions {
         use super::*;
+
+        #[test]
+        fn test_full_compaction_protects_new_output_from_partition_changes() {
+            let options = test_options();
+            let base_bytes = options.max_bytes_for_level_base().to_bytes() as u64;
+            let l2_target = (base_bytes as f64 * options.max_bytes_for_level_multiplier()) as u64;
+            let l3_min = min_boundary_size(&options, 3);
+            let mut picker = test_picker(&options);
+
+            let selected = create_sst(10, 2, 40, 60, 1000);
+            let affected = create_sst(11, 2, 110, 120, l2_target);
+            let unrelated = create_sst(12, 2, 210, 220, l2_target);
+            let levels = Levels::new(options.max_levels())
+                .add(1, once(create_sst(20, 1, 10, 100, base_bytes * 4)), empty())
+                .add(
+                    2,
+                    vec![selected.clone(), affected, unrelated.clone()],
+                    empty(),
+                )
+                .add(
+                    3,
+                    vec![
+                        create_sst(1, 3, 0, 60, l3_min),
+                        create_sst(2, 3, 61, 200, l3_min),
+                        create_sst(3, 3, 201, 300, l3_min),
+                    ],
+                    empty(),
+                );
+
+            // L1 has the highest score. Its output extends beyond the selected L2 file.
+            let incoming = picker.pick_compaction(&levels).unwrap();
+            assert_eq!(incoming.input_level, 1);
+            assert_eq!(incoming.output_files, vec![selected]);
+
+            // The (60, 200] partition must wait: compacting it could introduce a new
+            // boundary inside the incoming [10, 100] output. The >200 partition is safe.
+            let outgoing = picker.pick_compaction(&levels).unwrap();
+            assert_eq!(outgoing.input_level, 2);
+            assert_eq!(outgoing.input_files, vec![unrelated]);
+            assert_eq!(incoming.output_key_range, interval(10, 100));
+            assert!(picker.pick_compaction(&levels).is_none());
+
+            picker.unmark_compacting(&incoming);
+            assert!(!picker.is_range_compacting(2, &interval(10, 100)));
+            assert!(picker.is_range_compacting(2, &interval(210, 220)));
+        }
 
         #[test]
         fn test_full_compaction_l0_to_l1() {
