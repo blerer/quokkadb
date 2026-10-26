@@ -474,7 +474,8 @@ pub enum FileAccessHint {
     #[default]
     Normal,
     /// Minimize OS cache pollution: use POSIX_FADV_RANDOM on open,
-    /// and POSIX_FADV_DONTNEED after each read (Unix only; no-op on Windows).
+    /// and POSIX_FADV_DONTNEED after each read where the platform supports
+    /// those hints. This is a no-op on Apple and Windows platforms.
     MinimizeCachePollution,
 }
 
@@ -500,7 +501,7 @@ impl SharedFile {
     pub fn open_with_hint(path: &Path, hint: FileAccessHint) -> Result<Self> {
         let file = File::open(path)?;
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_vendor = "apple")))]
         if hint == FileAccessHint::MinimizeCachePollution {
             Self::fadvise_random(&file)?;
         }
@@ -523,6 +524,7 @@ impl SharedFile {
             let file = self.file.read().unwrap();
             file.read_at(&mut buffer, offset)?;
 
+            #[cfg(not(target_vendor = "apple"))]
             if self.hint == FileAccessHint::MinimizeCachePollution {
                 Self::fadvise_dontneed(&file, offset, size)?;
             }
@@ -560,7 +562,7 @@ impl SharedFile {
     // Unix-specific fadvise helpers (using rustix)
     // -------------------------------------------------------------------------
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     fn fadvise_random(file: &File) -> Result<()> {
         use rustix::fs::{Advice, fadvise};
         use std::num::NonZeroU64;
@@ -568,7 +570,7 @@ impl SharedFile {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     fn fadvise_dontneed(file: &File, offset: u64, size: usize) -> Result<()> {
         use rustix::fs::{Advice, fadvise};
         use std::num::NonZeroU64;
