@@ -35,7 +35,7 @@
 use crate::obs::metrics::{self, AtomicGauge, Counter, Histogram, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::lsm_version::Level::{NonOverlapping, Overlapping};
-use crate::storage::lsm_version::{DropMetadata, Level, LevelItem, Levels, SSTableMetadata, span};
+use crate::storage::lsm_version::{DropMetadata, LevelItem, Levels, SSTableMetadata, span};
 use crate::util::interval::{Interval, has_overlapping_intervals};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
@@ -64,6 +64,10 @@ pub struct CompactionJob {
     pub input_key_range: Interval<Vec<u8>>,
     /// The key range reserved in the output level, including newly introduced keys.
     pub output_key_range: Interval<Vec<u8>>,
+    /// Copied record-key ranges from SSTables strictly below the output level that
+    /// overlap the reserved output range. Sorted and merged, preserving disjoint gaps.
+    /// These bounds reflect the selection-time LSM view and do not retain file metadata.
+    pub deeper_level_ranges: Vec<Interval<Vec<u8>>>,
     /// For partial compactions, the partitions grid used to determine the sstable splits.
     /// None for full compactions.
     pub partitions_grid: Option<Vec<Vec<u8>>>,
@@ -228,11 +232,6 @@ impl CompactionPicker {
         for input_level in scores.levels_needing_compaction() {
             let output_level = input_level + 1;
 
-            // Sanity check - output level should always exist for levels needing compaction
-            // (except last level which has score 0)
-            let input = levels.level(input_level).unwrap();
-            let output = levels.level(output_level).unwrap();
-
             // 2L-Spooky: partial compaction only when compacting into the bottom two levels
             let use_partial = input_level >= self.level_x;
 
@@ -246,13 +245,9 @@ impl CompactionPicker {
 
             if use_partial {
                 // Partial compaction: range checking is done inside pick_partial_compaction
-                if let Some(job) = self.pick_partial_compaction(
-                    input,
-                    output,
-                    input_level,
-                    output_level,
-                    partitions_grid,
-                ) {
+                if let Some(job) =
+                    self.pick_partial_compaction(levels, input_level, output_level, partitions_grid)
+                {
                     self.mark_compacting(&job);
                     self.metrics.jobs_picked.inc();
                     self.metrics.jobs_picked_partial.inc();
@@ -299,13 +294,9 @@ impl CompactionPicker {
                     continue;
                 }
 
-                if let Some(job) = self.pick_full_compaction(
-                    input,
-                    output,
-                    input_level,
-                    output_level,
-                    partitions_grid,
-                ) {
+                if let Some(job) =
+                    self.pick_full_compaction(levels, input_level, output_level, partitions_grid)
+                {
                     self.mark_compacting(&job);
                     self.metrics.jobs_picked.inc();
                     self.metrics.jobs_picked_full.inc();
@@ -341,6 +332,36 @@ impl CompactionPicker {
         None
     }
 
+    fn capture_deeper_level_ranges(
+        &self,
+        levels: &Levels,
+        output_level: usize,
+        output_key_range: &Interval<Vec<u8>>,
+    ) -> Vec<Interval<Vec<u8>>> {
+        let mut ranges: Vec<_> = ((output_level + 1)..=self.level_l)
+            .flat_map(|level| {
+                levels
+                    .level(level)
+                    .unwrap()
+                    .find_sstables_in_range(output_key_range, u64::MAX)
+            })
+            .map(|sst| sst.record_key_range())
+            .collect();
+        ranges.sort();
+
+        let mut merged: Vec<Interval<Vec<u8>>> = Vec::new();
+        for range in ranges {
+            if let Some(previous) = merged.last_mut() {
+                if let Some(union) = previous.union(&range) {
+                    *previous = union;
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+        merged
+    }
+
     /// Returns true if any compaction is active on the given level.
     ///
     /// Used for full compaction blocking: if any range (full or partial) is being
@@ -369,12 +390,14 @@ impl CompactionPicker {
     /// compaction and ensures all data is properly merged.
     fn pick_full_compaction(
         &mut self,
-        input: &Level,
-        output: &Level,
+        levels: &Levels,
         input_level: usize,
         output_level: usize,
         partitions_grid: Option<Vec<Vec<u8>>>,
     ) -> Option<CompactionJob> {
+        // The last level has score 0, so both source and destination must exist.
+        let input = levels.level(input_level).unwrap();
+        let output = levels.level(output_level).unwrap();
         let id = self.next_job_id;
         self.next_job_id += 1;
 
@@ -402,7 +425,11 @@ impl CompactionPicker {
             |range| input_key_range.span(&range),
         );
 
+        let deeper_level_ranges =
+            self.capture_deeper_level_ranges(levels, output_level, &output_key_range);
+
         Some(CompactionJob {
+            deeper_level_ranges,
             id,
             input_level: input_level as u8,
             output_level: output_level as u8,
@@ -421,12 +448,13 @@ impl CompactionPicker {
     /// Partitions are determined by the max level's SSTable boundaries.
     fn pick_partial_compaction(
         &mut self,
-        input: &Level,
-        output: &Level,
+        levels: &Levels,
         input_level: usize,
         output_level: usize,
         partitions_grid: Option<Vec<Vec<u8>>>,
     ) -> Option<CompactionJob> {
+        let input = levels.level(input_level).unwrap();
+        let output = levels.level(output_level).unwrap();
         assert!(
             matches!(input, NonOverlapping { .. }),
             "Expected NonOverlapping level for partial compaction, found Overlapping"
@@ -467,8 +495,11 @@ impl CompactionPicker {
 
             // Find files in the output level that are within the same partition range
             let output_files = output.find_sstables_in_range(&partition_key_range, u64::MAX);
+            let deeper_level_ranges =
+                self.capture_deeper_level_ranges(levels, output_level, &partition_key_range);
 
             return Some(CompactionJob {
+                deeper_level_ranges,
                 id,
                 input_level: input_level as u8,
                 output_level: output_level as u8,
@@ -791,6 +822,90 @@ mod tests {
         CompactionPicker::new(&mut MetricRegistry::new(), options)
     }
 
+    #[test]
+    fn test_capture_deeper_ranges_merges_overlaps_and_preserves_gaps() {
+        let options = test_options().with_max_levels(6);
+        let mut picker = test_picker(&options);
+        let endpoint = create_sst(10, 2, 4, 5, 1000);
+        let levels = Levels::new(options.max_levels())
+            .add(
+                0,
+                (100..104).map(|number| create_sst(number, 0, 15, 85, 1000)),
+                empty(),
+            )
+            .add(1, once(create_sst(90, 1, 5, 95, 1000)), empty())
+            .add(
+                2,
+                vec![
+                    create_sst(9, 2, 0, 3, 1000),
+                    endpoint.clone(),
+                    create_sst(11, 2, 20, 30, 1000),
+                    create_sst(12, 2, 40, 45, 1000),
+                    create_sst(13, 2, 95, 100, 1000),
+                    create_sst(14, 2, 101, 110, 1000),
+                ],
+                empty(),
+            )
+            // L3 is empty; files in L4 and L5 must still be captured.
+            .add(
+                4,
+                vec![
+                    create_sst(5, 4, 25, 40, 1000),
+                    create_sst(6, 4, 60, 70, 1000),
+                ],
+                empty(),
+            )
+            .add(
+                5,
+                vec![
+                    create_sst(1, 5, 22, 23, 1000),
+                    create_sst(2, 5, 60, 70, 1000),
+                ],
+                empty(),
+            );
+        let references_before = Arc::strong_count(&endpoint);
+
+        let job = picker.pick_compaction(&levels).unwrap();
+        assert_eq!(job.output_level, 1);
+        assert_eq!(job.output_key_range, interval(5, 95));
+        // Preserve complete endpoint ranges, including keys outside the output range.
+        // Neither the source nor the output-level ranges should fill the gaps.
+        let expected = vec![
+            interval(4, 5),
+            interval(20, 45),
+            interval(60, 70),
+            interval(95, 100),
+        ];
+        assert_eq!(job.deeper_level_ranges, expected);
+        assert_eq!(Arc::strong_count(&endpoint), references_before);
+
+        let newer_levels = levels.add(3, once(create_sst(80, 3, 5, 95, 1000)), empty());
+        picker.unmark_compacting(&job);
+        let newer_job = picker.pick_compaction(&newer_levels).unwrap();
+        assert_eq!(newer_job.deeper_level_ranges, vec![interval(4, 100)]);
+        assert_eq!(job.deeper_level_ranges, expected);
+    }
+
+    #[test]
+    fn test_capture_deeper_ranges_excludes_disjoint_files() {
+        let options = test_options();
+        let mut picker = test_picker(&options);
+        let levels = Levels::new(options.max_levels())
+            .add(
+                0,
+                (10..14).map(|number| create_sst(number, 0, 10, 20, 1000)),
+                empty(),
+            )
+            .add(
+                2,
+                vec![create_sst(1, 2, 0, 9, 1000), create_sst(2, 2, 21, 30, 1000)],
+                empty(),
+            );
+        let job = picker.pick_compaction(&levels).unwrap();
+        assert_eq!(job.output_level, 1);
+        assert!(job.deeper_level_ranges.is_empty());
+    }
+
     /// Encodes a record key with the specified collection, index, and user key value.
     fn record_key_for(collection: u32, index: u32, k: u32) -> Vec<u8> {
         let user_key = Bson::Int32(k as i32).try_into_key().unwrap();
@@ -1104,6 +1219,7 @@ mod tests {
 
         assert_eq!(job.input_level, 2);
         assert_eq!(job.output_level, 3);
+        assert!(job.deeper_level_ranges.is_empty());
         // Both input and output key ranges use the partition range
         // Since the L2 file [10, 30] is within partition 0 [Min, 20] and partition 1 (20, 40],
         // it spans from the start of the first partition to the end of the second.
@@ -1780,6 +1896,7 @@ mod tests {
 
             // Manually create a partial compaction job to simulate L2→L3 running
             let partial_job = CompactionJob {
+                deeper_level_ranges: Vec::new(),
                 id: 0,
                 input_level: 2,
                 output_level: 3,
@@ -2522,6 +2639,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,
@@ -2599,6 +2717,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,
@@ -2674,6 +2793,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,
@@ -2738,6 +2858,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,
@@ -2878,6 +2999,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,
@@ -2946,6 +3068,7 @@ mod tests {
             assert_eq!(
                 job,
                 CompactionJob {
+                    deeper_level_ranges: Vec::new(),
                     id: job.id,
                     input_level: 2,
                     output_level: 3,

@@ -1036,6 +1036,50 @@ fn test_snapshot_point_read_survives_compaction_after_overwrite() {
 }
 
 #[test]
+fn test_reclaimed_point_tombstone_stays_absent_after_reopening() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let mut registry = MetricRegistry::default();
+    let engine = new_engine(&mut registry, compactable_options(), &path);
+    engine.disable_auto_compaction();
+    let col = engine
+        .create_collection("reclaimed_delete", true)
+        .unwrap()
+        .id;
+
+    engine
+        .write(write_batch(vec![put_op(col, 1, 1)]), false)
+        .unwrap();
+    engine.flush().unwrap();
+    engine
+        .write(write_batch(vec![delete_op(col, 1)]), false)
+        .unwrap();
+    engine.flush().unwrap();
+    assert_eq!(engine.lsm_tree().levels().sst_count(), 2);
+
+    engine.compact().unwrap();
+    assert_eq!(engine.lsm_tree().levels().sst_count(), 0);
+    assert!(
+        engine
+            .read_at_snapshot(col, 0, &user_key(1), &engine.acquire_snapshot())
+            .unwrap()
+            .is_none()
+    );
+    engine.shutdown().unwrap();
+    drop(engine);
+
+    let reopened = new_engine(&mut registry, compactable_options(), &path);
+    assert_eq!(reopened.lsm_tree().levels().sst_count(), 0);
+    assert!(
+        reopened
+            .read_at_snapshot(col, 0, &user_key(1), &reopened.acquire_snapshot())
+            .unwrap()
+            .is_none()
+    );
+    reopened.shutdown().unwrap();
+}
+
+#[test]
 fn test_snapshot_point_read_survives_compaction_after_delete() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();

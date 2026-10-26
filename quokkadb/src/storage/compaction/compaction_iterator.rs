@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use crate::storage::Direction;
 use crate::storage::files::DbFile;
-use crate::storage::internal_key::{InternalKeyRange, extract_record_key, extract_sequence_number};
+use crate::storage::internal_key::{
+    InternalKeyRange, extract_operation_type, extract_record_key, extract_sequence_number,
+};
 use crate::storage::iterators::MergeIterator;
 use crate::storage::lsm_version::{DropMetadata, LevelItem, SSTableMetadata};
+use crate::storage::operation::OperationType;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::util::interval::{Interval, IntervalPosition};
 
@@ -29,6 +32,7 @@ impl<'a> CompactionIterator<'a> {
         output_files: &[Arc<SSTableMetadata>],
         drops: &[Arc<DropMetadata>],
         oldest_active_snapshot: Option<u64>,
+        deeper_level_ranges: &'a [Interval<Vec<u8>>],
     ) -> Result<Box<Self>> {
         // drops should be sorted and should be non overlapping after compaction picker's merge/split logic
         let drops: Vec<Arc<DropMetadata>> = drops.iter().cloned().collect();
@@ -62,6 +66,7 @@ impl<'a> CompactionIterator<'a> {
         let record_iter = Box::new(VersionRetentionIterator::new(
             record_iter,
             oldest_active_snapshot,
+            deeper_level_ranges,
         ));
 
         let mut drop_iter: Box<dyn Iterator<Item = Arc<DropMetadata>>> =
@@ -78,23 +83,58 @@ impl<'a> CompactionIterator<'a> {
     }
 }
 
+/// Checks absence using a job's sorted, merged deeper-level ranges.
+///
+/// Queries must use nondecreasing record keys within the job's reserved output range.
+/// A contained key may exist below; only a key outside every range is proven absent.
+/// The cursor borrows bounds and performs no allocation or SSTable reads.
+struct DeeperLevelCursor<'a> {
+    ranges: &'a [Interval<Vec<u8>>],
+    next_range: usize,
+}
+
+impl<'a> DeeperLevelCursor<'a> {
+    fn new(ranges: &'a [Interval<Vec<u8>>]) -> Self {
+        Self {
+            ranges,
+            next_range: 0,
+        }
+    }
+
+    /// Accepts the full record key, without its sequence number or operation type.
+    /// Repeated keys are allowed, as multiple retained versions can share a key.
+    fn key_is_absent(&mut self, record_key: &[u8]) -> bool {
+        while let Some(range) = self.ranges.get(self.next_range) {
+            match range.position_of(record_key) {
+                IntervalPosition::Before => return true,
+                IntervalPosition::Contained => return false,
+                IntervalPosition::After => self.next_range += 1,
+            }
+        }
+        true
+    }
+}
+
 struct VersionRetentionIterator<'a> {
     iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
     oldest_active_snapshot: Option<u64>,
     previous_record_key: Option<Vec<u8>>,
-    emitted_floor_version: bool,
+    consumed_floor_version: bool,
+    deeper_levels: DeeperLevelCursor<'a>,
 }
 
 impl<'a> VersionRetentionIterator<'a> {
     fn new(
         iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
         oldest_active_snapshot: Option<u64>,
+        deeper_level_ranges: &'a [Interval<Vec<u8>>],
     ) -> Self {
         Self {
             iter,
             oldest_active_snapshot,
             previous_record_key: None,
-            emitted_floor_version: false,
+            consumed_floor_version: false,
+            deeper_levels: DeeperLevelCursor::new(deeper_level_ranges),
         }
     }
 }
@@ -114,25 +154,34 @@ impl<'a> Iterator for VersionRetentionIterator<'a> {
 
                     if is_new_record {
                         self.previous_record_key = Some(record_key.to_vec());
-                        self.emitted_floor_version = false;
+                        self.consumed_floor_version = false;
                     }
 
-                    match self.oldest_active_snapshot {
-                        None => {
-                            if is_new_record {
-                                return Some(Ok((key, value)));
-                            }
-                        }
+                    let retain = match self.oldest_active_snapshot {
+                        None => is_new_record,
                         Some(snapshot_floor) => {
                             let seq = extract_sequence_number(&key);
                             if seq > snapshot_floor {
                                 return Some(Ok((key, value)));
                             }
-                            if !self.emitted_floor_version {
-                                self.emitted_floor_version = true;
-                                return Some(Ok((key, value)));
+                            if !self.consumed_floor_version {
+                                self.consumed_floor_version = true;
+                                true
+                            } else {
+                                false
                             }
                         }
+                    };
+
+                    if retain {
+                        // Consume the retained version even when omitting its tombstone,
+                        // so an older value cannot become visible again.
+                        if extract_operation_type(&key) == OperationType::Delete
+                            && self.deeper_levels.key_is_absent(record_key)
+                        {
+                            continue;
+                        }
+                        return Some(Ok((key, value)));
                     }
                 }
                 Err(err) => return Some(Err(err)),
@@ -194,6 +243,139 @@ mod tests {
 
     const COL: u32 = 10;
 
+    #[test]
+    fn test_tombstone_reclamation_respects_snapshot_floor_and_newer_puts() {
+        for newer_put in [false, true] {
+            for snapshot in [None, Some(3), Some(4), Some(5)] {
+                let newest = put_rec(COL, 1, 3, 6);
+                let deletion = delete_rec(COL, 1, 4);
+                let old = put_rec(COL, 1, 2, 3);
+                let next_record = put_rec(COL, 2, 1, 7);
+                let mut entries = Vec::new();
+                if newer_put {
+                    entries.push(newest.clone());
+                }
+                entries.extend([
+                    deletion.clone(),
+                    old.clone(),
+                    put_rec(COL, 1, 1, 2),
+                    next_record.clone(),
+                ]);
+                let retained = VersionRetentionIterator::new(
+                    Box::new(entries.into_iter().map(Ok)),
+                    snapshot,
+                    &[],
+                )
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+                let mut expected = Vec::new();
+                if newer_put {
+                    expected.push(newest);
+                }
+                if snapshot == Some(3) {
+                    // An old snapshot still needs the put; newer reads need its deletion.
+                    expected.extend([deletion, old]);
+                }
+                expected.push(next_record);
+                assert_eq!(
+                    retained, expected,
+                    "snapshot {snapshot:?}, newer put {newer_put}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tombstones_retained_only_inside_deeper_ranges() {
+        let ranges = vec![Interval::closed(record_key(COL, 10), record_key(COL, 20))];
+        for snapshot in [None, Some(2), Some(3)] {
+            let entries = [5, 10, 15, 20, 25]
+                .into_iter()
+                .flat_map(|key| [delete_rec(COL, key, 2), put_rec(COL, key, 1, 1)])
+                .map(Ok);
+            let retained = VersionRetentionIterator::new(Box::new(entries), snapshot, &ranges)
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                retained,
+                vec![
+                    delete_rec(COL, 10, 2),
+                    delete_rec(COL, 15, 2),
+                    delete_rec(COL, 20, 2)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn test_deeper_level_absence_without_ranges() {
+        let mut cursor = DeeperLevelCursor::new(&[]);
+        for key in [10, 10, 20] {
+            assert!(cursor.key_is_absent(&record_key(COL, key)));
+        }
+    }
+
+    #[test]
+    fn test_deeper_level_absence_at_endpoints_and_in_gaps() {
+        let ranges = vec![
+            Interval::closed(record_key(COL, 10), record_key(COL, 20)),
+            Interval::closed(record_key(COL, 30), record_key(COL, 40)),
+        ];
+        let mut cursor = DeeperLevelCursor::new(&ranges);
+        for (key, absent) in [
+            (5, true),
+            (10, false),
+            (10, false),
+            (15, false),
+            (20, false),
+            (20, false),
+            (25, true),
+            (25, true),
+            (30, false),
+            (40, false),
+            (45, true),
+            (45, true),
+            (50, true),
+        ] {
+            assert_eq!(
+                cursor.key_is_absent(&record_key(COL, key)),
+                absent,
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deeper_level_absence_skips_multiple_ranges() {
+        let ranges: Vec<_> = [10, 20, 30, 40]
+            .into_iter()
+            .map(|key| Interval::closed(record_key(COL, key), record_key(COL, key)))
+            .collect();
+        let mut cursor = DeeperLevelCursor::new(&ranges);
+        assert!(cursor.key_is_absent(&record_key(COL, 5)));
+        assert!(!cursor.key_is_absent(&record_key(COL, 30)));
+        assert!(cursor.key_is_absent(&record_key(COL, 35)));
+        assert!(!cursor.key_is_absent(&record_key(COL, 40)));
+        assert!(cursor.key_is_absent(&record_key(COL, 50)));
+    }
+
+    #[test]
+    fn test_deeper_level_absence_compares_collection_and_index_prefixes() {
+        use crate::storage::internal_key::encode_record_key;
+        use crate::storage::test_utils::user_key;
+
+        let key = user_key(10);
+        let indexed_key = encode_record_key(COL, 1, &key);
+        let ranges = vec![Interval::closed(indexed_key.clone(), indexed_key.clone())];
+        let mut cursor = DeeperLevelCursor::new(&ranges);
+        assert!(cursor.key_is_absent(&encode_record_key(COL - 1, 1, &key)));
+        assert!(cursor.key_is_absent(&encode_record_key(COL, 0, &key)));
+        assert!(!cursor.key_is_absent(&indexed_key));
+        assert!(cursor.key_is_absent(&encode_record_key(COL, 2, &key)));
+        assert!(cursor.key_is_absent(&encode_record_key(COL + 1, 1, &key)));
+    }
+
     fn write_sst(
         dir: &std::path::Path,
         sst_number: u64,
@@ -233,7 +415,7 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None)
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None, &[])
                 .unwrap();
 
         for expected in &entries {
@@ -266,9 +448,16 @@ mod tests {
         ];
         let sst2 = write_sst(path, 2, &entries2, &options);
 
-        let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[], None)
-                .unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst1],
+            &[sst2],
+            &[],
+            None,
+            &[],
+        )
+        .unwrap();
 
         // Should be merged in sorted order
         let expected_keys: Vec<i32> = vec![1, 2, 3, 4, 5, 6];
@@ -304,9 +493,16 @@ mod tests {
         // Create a drop that covers collection 1
         let drop = DropMetadata::new_collection_drop(col_1, 100);
 
-        let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop], None)
-                .unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[drop],
+            None,
+            &[],
+        )
+        .unwrap();
 
         let expected_entries = vec![
             put_rec(col_2, 1, 1, 11),
@@ -357,6 +553,7 @@ mod tests {
             &[],
             &[drop_1, drop_3],
             None,
+            &[],
         )
         .unwrap();
 
@@ -387,9 +584,16 @@ mod tests {
         // Create a drop that covers all keys
         let drop = DropMetadata::new_collection_drop(COL, 100);
 
-        let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[drop], None)
-                .unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[drop],
+            None,
+            &[],
+        )
+        .unwrap();
 
         assert!(iter.next().is_none());
     }
@@ -410,11 +614,18 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let retained: Vec<_> =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(2))
-                .unwrap()
-                .collect::<Result<Vec<_>>>()
-                .unwrap();
+        let retained: Vec<_> = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[],
+            Some(2),
+            &[],
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(
             retained,
@@ -441,11 +652,18 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let retained: Vec<_> =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(5))
-                .unwrap()
-                .collect::<Result<Vec<_>>>()
-                .unwrap();
+        let retained: Vec<_> = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[],
+            Some(5),
+            &[],
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(retained, vec![put_rec(COL, 1, 3, 3)]);
     }
@@ -466,11 +684,18 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let retained: Vec<_> =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(4))
-                .unwrap()
-                .collect::<Result<Vec<_>>>()
-                .unwrap();
+        let retained: Vec<_> = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[],
+            Some(4),
+            &[],
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(
             retained,
@@ -496,11 +721,18 @@ mod tests {
 
         let sst = write_sst(path, 1, &entries, &options);
 
-        let retained: Vec<_> =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], Some(4))
-                .unwrap()
-                .collect::<Result<Vec<_>>>()
-                .unwrap();
+        let retained: Vec<_> = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst],
+            &[],
+            &[],
+            Some(4),
+            &[],
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(
             retained,
@@ -549,6 +781,7 @@ mod tests {
             &[],
             &[drop],
             None,
+            &[],
         )
         .unwrap();
 
@@ -577,11 +810,11 @@ mod tests {
         let sst = write_sst(path, 1, &entries, &options);
 
         let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None)
+            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst], &[], &[], None, &[])
                 .unwrap();
 
-        // All entries including deletes should be present
-        for expected in &entries {
+        // Without deeper overlap, only the put entries remain.
+        for expected in [&entries[0], &entries[2]] {
             let actual = iter.next().unwrap().unwrap();
             assert_eq!(actual, *expected);
         }
@@ -604,9 +837,16 @@ mod tests {
         let entries2 = vec![put_rec(COL, 1, 2, 20)];
         let sst2 = write_sst(path, 2, &entries2, &options);
 
-        let mut iter =
-            CompactionIterator::new(&path.to_path_buf(), sst_cache, &[sst1], &[sst2], &[], None)
-                .unwrap();
+        let mut iter = CompactionIterator::new(
+            &path.to_path_buf(),
+            sst_cache,
+            &[sst1],
+            &[sst2],
+            &[],
+            None,
+            &[],
+        )
+        .unwrap();
 
         // ForwardIterator should deduplicate, keeping only the newest version (seq 20)
         let (key, value) = iter.next().unwrap().unwrap();

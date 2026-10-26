@@ -292,6 +292,7 @@ fn perform_compaction(
         &job.output_files,
         &drops_to_apply,
         oldest_active_snapshot,
+        &job.deeper_level_ranges,
     )?;
 
     let mut added = Vec::new();
@@ -549,6 +550,7 @@ mod tests {
         let second = write_sst(dir.path(), 2, &second_entries, &options);
         assert!(first.max_sequence_number < second.min_sequence_number);
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -592,6 +594,58 @@ mod tests {
     }
 
     #[test]
+    fn test_compaction_uses_deeper_ranges_to_reclaim_point_tombstones() {
+        for overlap in [false, true] {
+            let dir = tempdir().unwrap();
+            let options = Options::lightweight();
+            let cache = setup_cache(&options);
+            let deletion = delete_rec(10, 1, 2);
+            let input = write_sst(
+                dir.path(),
+                1,
+                &[deletion.clone(), put_rec(10, 1, 1, 1)],
+                &options,
+            );
+            let job = CompactionJob {
+                id: 0,
+                input_level: 0,
+                output_level: 1,
+                input_files: vec![input.clone()],
+                output_files: vec![],
+                drops: vec![],
+                input_key_range: Interval::all(),
+                output_key_range: Interval::all(),
+                deeper_level_ranges: if overlap {
+                    vec![Interval::closed(record_key(10, 1), record_key(10, 1))]
+                } else {
+                    vec![]
+                },
+                partitions_grid: None,
+            };
+            let op = perform_compaction(
+                &options,
+                &dir.path().to_path_buf(),
+                cache.clone(),
+                job,
+                None,
+                &next_file_number(10),
+            )
+            .unwrap();
+            let (_, added, removed, _) = unwrap_compaction(op);
+            assert_eq!(removed, vec![input]);
+            if overlap {
+                assert_eq!(added.len(), 1);
+                assert_eq!(
+                    read_sst_entries(dir.path(), cache, &added[0]),
+                    vec![deletion]
+                );
+            } else {
+                assert!(added.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_size_split_keeps_retained_record_versions_together() {
         assert_record_versions_stay_together(false, true);
     }
@@ -630,6 +684,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -690,6 +745,7 @@ mod tests {
         );
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -737,6 +793,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 50);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -782,6 +839,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 50);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -821,6 +879,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 50);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -867,6 +926,7 @@ mod tests {
         let retained_drop = DropMetadata::new_collection_drop(col_2, 60);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -917,6 +977,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -961,6 +1022,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 99);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1014,6 +1076,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1080,6 +1143,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1145,6 +1209,7 @@ mod tests {
         let input_sst = write_sst(dir.path(), 1, &entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1195,6 +1260,7 @@ mod tests {
         let full_drop = DropMetadata::new_collection_drop(col, 10);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1249,6 +1315,7 @@ mod tests {
 
         // Single partition (no boundaries) — everything goes into one SST.
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 2,
             output_level: 3,
@@ -1301,6 +1368,7 @@ mod tests {
         let output_sst = write_sst(dir.path(), 2, &output_entries, &options);
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 2,
             output_level: 3,
@@ -1361,6 +1429,7 @@ mod tests {
             .expect_two();
 
         let job = CompactionJob {
+            deeper_level_ranges: Vec::new(),
             id: 0,
             input_level: 2,
             output_level: 3,
@@ -1400,6 +1469,7 @@ mod tests {
             partitions_grid: Option<Vec<Vec<u8>>>,
         ) -> CompactionJob {
             CompactionJob {
+                deeper_level_ranges: Vec::new(),
                 id: 0,
                 input_level: 0,
                 output_level: 1,
