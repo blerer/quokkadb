@@ -8,10 +8,17 @@ pub(crate) mod serializable;
 pub(crate) mod size_estimate;
 pub(crate) mod varint;
 
-use std::fs::{File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind, Result};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::{fs, ptr};
+
+#[cfg(windows)]
+const WINDOWS_FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
 /// A trait for reading little-endian integers directly from byte slices
 /// without additional allocations. These methods perform **zero-copy**
@@ -170,9 +177,20 @@ pub fn file_name_as_str(path: &Path) -> Option<&str> {
 ///
 /// * `Ok(())` if the directory was successfully synced.
 /// * An error if opening or syncing the directory fails.
+#[cfg(not(windows))]
 pub fn sync_dir<P: AsRef<Path>>(dir_path: P) -> Result<()> {
     let path = dir_path.as_ref();
     let dir = File::open(path)?;
+    dir.sync_all()
+}
+
+#[cfg(windows)]
+pub fn sync_dir<P: AsRef<Path>>(dir_path: P) -> Result<()> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(WINDOWS_FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir_path)?;
     dir.sync_all()
 }
 
@@ -245,7 +263,7 @@ pub fn invalid_data(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use crate::io::{file_name_as_str, mark_file_as_corrupted, truncate_file};
+    use crate::io::{file_name_as_str, mark_file_as_corrupted, sync_dir, truncate_file};
     use std::fs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
@@ -362,6 +380,12 @@ mod tests {
     fn test_file_name_for_directory() {
         let path = Path::new("/only/dir/");
         assert_eq!(file_name_as_str(path), Some("dir"));
+    }
+
+    #[test]
+    fn test_sync_dir() {
+        let dir = tempdir().unwrap();
+        sync_dir(dir.path()).unwrap();
     }
 
     #[test]
