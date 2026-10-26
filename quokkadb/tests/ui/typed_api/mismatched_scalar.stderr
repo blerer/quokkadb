@@ -1,22 +1,19 @@
-error[E0277]: the trait bound `i32: From<&str>` is not satisfied
-  --> tests/ui/typed_api/mismatched_scalar.rs:12:32
+error[E0277]: the trait bound `Age: From<&str>` is not satisfied
+  --> tests/ui/typed_api/mismatched_scalar.rs:18:32
    |
-12 |     User::root_fields().age.eq("old");
-   |                             -- ^^^^^ the trait `From<&str>` is not implemented for `i32`
+18 |     User::root_fields().age.eq("old");
+   |                             -- ^^^^^ unsatisfied trait bound
    |                             |
    |                             required by a bound introduced by this call
    |
-   = help: the following other types implement trait `From<T>`:
-             `i32` implements `From<bool>`
-             `i32` implements `From<deranged::RangedI32<MIN, MAX>>`
-             `i32` implements `From<i16>`
-             `i32` implements `From<i8>`
-             `i32` implements `From<u16>`
-             `i32` implements `From<u8>`
-             `i32` implements `From<zerocopy::byteorder::I16<O>>`
-             `i32` implements `From<zerocopy::byteorder::I16<O>>`
-           and $N others
-   = note: required for `&str` to implement `Into<i32>`
+help: the trait `Into<Age>` is not implemented for `&str`
+      but trait `Into<quokkadb::storage::catalog::IndexPath>` is implemented for it
+  --> src/storage/catalog.rs
+   |
+   | impl Into<IndexPath> for &str {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `quokkadb::storage::catalog::IndexPath`, found `Age`
+   = note: required for `&str` to implement `Into<Age>`
 note: required by a bound in `quokkadb::Field::<D, V>::eq`
   --> src/document.rs
    |
