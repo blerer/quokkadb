@@ -37,15 +37,6 @@ impl<T: Debug> Interval<T> {
         Self { start, end }
     }
 
-    /// Creates an open range `(a..b)`.
-    ///
-    /// Includes values `x` such that `a < x < b`.
-    pub fn open(start: T, end: T) -> Self {
-        Self {
-            start: Bound::Excluded(start),
-            end: Bound::Excluded(end),
-        }
-    }
 
     /// Creates a closed range `[a..b]`.
     ///
@@ -58,8 +49,19 @@ impl<T: Debug> Interval<T> {
     }
 
     /// Creates an open-closed range `(a..b]`.
+    /// Creates an open range `(a..b)`.
+    ///
+    /// Includes values `x` such that `a < x < b`.
+    #[allow(dead_code)]
+    pub fn open(start: T, end: T) -> Self {
+        Self {
+            start: Bound::Excluded(start),
+            end: Bound::Excluded(end),
+        }
+    }
     ///
     /// Includes values `x` such that `a < x <= b`.
+    #[allow(dead_code)]
     pub fn open_closed(start: T, end: T) -> Self {
         Self {
             start: Bound::Excluded(start),
@@ -70,6 +72,7 @@ impl<T: Debug> Interval<T> {
     /// Creates a closed-open range `[a..b)`.
     ///
     /// Includes values `x` such that `a <= x < b`.
+    #[allow(dead_code)]
     pub fn closed_open(start: T, end: T) -> Self {
         Self {
             start: Bound::Included(start),

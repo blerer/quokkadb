@@ -27,6 +27,7 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
         Ok(*byte)
     }
 
+    #[allow(dead_code)]
     pub fn read_u32_le(&self) -> Result<u32> {
         let bytes = self.read_fixed_slice(4)?;
         Ok(bytes.read_u32_le(0))
@@ -42,15 +43,13 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
         Ok(bytes.read_u64_be(0))
     }
 
-    pub fn peek_i32_le(&self) -> Result<i32> {
-        Ok(self.buffer.as_ref().read_i32_le(self.position.get()))
-    }
-
+    #[allow(dead_code)]
     pub fn read_i32_le(&self) -> Result<i32> {
         let bytes = self.read_fixed_slice(4)?;
         Ok(bytes.read_i32_le(0))
     }
 
+    #[allow(dead_code)]
     pub fn read_i64_le(&self) -> Result<i64> {
         let bytes = self.read_fixed_slice(8)?;
         Ok(bytes.read_i64_le(0))
@@ -93,6 +92,7 @@ impl<B: AsRef<[u8]>> ByteReader<B> {
         self.position.get() < self.buffer.as_ref().len()
     }
 
+    #[allow(dead_code)]
     pub fn remaining(&self) -> usize {
         self.buffer.as_ref().len() - self.position.get()
     }

@@ -336,6 +336,7 @@ impl Index {
         }
     }
 
+    #[allow(dead_code)]
     pub fn extract_id<'a>(index_key_value: &'a IndexKeyValue) -> &'a [u8] {
         Self::extract_id_from_entry_bytes(&index_key_value.key, &index_key_value.value)
             .expect("index entry produced by encoder must contain a valid _id")
@@ -359,6 +360,7 @@ impl Index {
         Ok(&key[parts_key_len..])
     }
 
+    #[allow(dead_code)]
     pub fn decode_index_entry(&self, index_key_value: IndexKeyValue) -> Result<Document> {
         let key = &index_key_value.key;
         let value = &index_key_value.value;
@@ -453,6 +455,7 @@ impl IndexFieldCodec {
         self.encode_value(&sentinel)
     }
 
+    #[allow(dead_code)]
     pub fn decode(&self, raw_key_bytes: &[u8], key_type_bytes: &[u8]) -> Result<(String, Bson)> {
         let part_key_owned: Vec<u8> = if matches!(self.order, SortOrder::Descending) {
             raw_key_bytes.iter().map(|&b| !b).collect()

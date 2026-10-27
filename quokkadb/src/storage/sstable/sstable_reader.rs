@@ -224,6 +224,7 @@ impl SSTableReader {
     }
 
     /// Get the properties of the SSTable
+    #[allow(dead_code)]
     pub fn properties(&self) -> &SSTableProperties {
         &self.properties
     }

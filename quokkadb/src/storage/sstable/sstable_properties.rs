@@ -78,6 +78,7 @@ impl SSTableProperties {
     ///
     /// # Returns
     /// - `f64`: The compression ratio.
+    #[allow(dead_code)]
     pub fn compression_ratio(&self) -> f64 {
         compute_compression_ratio(self.raw_key_size, self.raw_value_size, self.data_size)
     }
@@ -88,6 +89,7 @@ impl SSTableProperties {
         Ok(writer.take_buffer())
     }
 
+    #[allow(dead_code)]
     pub fn from_slice(slice: &[u8], version: u32) -> std::io::Result<Self> {
         let reader = ByteReader::new(slice);
         let properties = Self::read_from(&reader, version)?;

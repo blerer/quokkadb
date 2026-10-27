@@ -4,11 +4,6 @@ use crate::io::serializable::Serializable;
 use crate::storage::FIRST_USER_COLLECTION_ID;
 use std::io::Result;
 
-mod cursor_tags {
-    pub(super) const ABSENT: u8 = 0;
-    pub(super) const PRESENT: u8 = 1;
-}
-
 /// Identifies one index build in the internal state collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct IndexBuildKey {

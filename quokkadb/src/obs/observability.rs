@@ -7,6 +7,7 @@ static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct Observability {
+    #[cfg(test)]
     instance_id: u64,
     instance_span: Span,
 }
@@ -22,11 +23,13 @@ impl Observability {
         );
 
         Arc::new(Self {
+            #[cfg(test)]
             instance_id,
             instance_span,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn instance_id(&self) -> u64 {
         self.instance_id
     }

@@ -1254,6 +1254,7 @@ fn encode_bson_into_key_typed(
 ///
 /// * `key`      – the raw key bytes
 /// * `key_type` – the raw type bytes
+#[cfg(test)]
 pub fn decode_bson_from_key(key: &TypedKey) -> std::io::Result<Bson> {
     let key_reader = ByteReader::new(key.key.as_slice());
     let key_type_reader = ByteReader::new(key.key_type.as_slice());
