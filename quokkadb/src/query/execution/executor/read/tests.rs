@@ -521,20 +521,15 @@ fn test_sort_plans_execution() -> Result<()> {
 
     let scan_plan = full_scan_plan(collection_id);
 
-    // --- In-Memory Sort ---
-    let mem_sort_plan = Arc::new(PhysicalPlan::InMemorySort {
-        input: scan_plan.clone(),
-        sort_fields: sort_fields.clone(),
-    });
-    assert_sorted_results(&executor, mem_sort_plan, &expected_ids)?;
-
     // --- External Merge Sort ---
-    let ext_sort_plan = Arc::new(PhysicalPlan::ExternalMergeSort {
-        input: scan_plan.clone(),
-        sort_fields: sort_fields.clone(),
-        max_in_memory_rows: 2,
-    });
-    assert_sorted_results(&executor, ext_sort_plan, &expected_ids)?;
+    for max_in_memory_rows in [2, 4, 5, 6] {
+        let ext_sort_plan = Arc::new(PhysicalPlan::ExternalMergeSort {
+            input: scan_plan.clone(),
+            sort_fields: sort_fields.clone(),
+            max_in_memory_rows,
+        });
+        assert_sorted_results(&executor, ext_sort_plan, &expected_ids)?;
+    }
 
     // --- Top-K Heap Sort ---
     // k=3

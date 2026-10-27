@@ -76,7 +76,6 @@ impl WriteExecutor {
                 .extract_upsert_id_from_query(input, parameters)
                 .or_else(|| self.extract_upsert_id_from_expr(predicate, parameters)),
             PhysicalPlan::Projection { input, .. }
-            | PhysicalPlan::InMemorySort { input, .. }
             | PhysicalPlan::ExternalMergeSort { input, .. }
             | PhysicalPlan::TopKHeapSort { input, .. }
             | PhysicalPlan::Limit { input, .. } => {
@@ -147,7 +146,6 @@ impl WriteExecutor {
                 self.extract_equality_from_expr(predicate, parameters, doc);
             }
             PhysicalPlan::Projection { input, .. }
-            | PhysicalPlan::InMemorySort { input, .. }
             | PhysicalPlan::ExternalMergeSort { input, .. }
             | PhysicalPlan::TopKHeapSort { input, .. }
             | PhysicalPlan::Limit { input, .. } => {

@@ -76,7 +76,6 @@ impl CostEstimator {
             PhysicalPlan::MultiPointSearch { .. } => 10.0,
             PhysicalPlan::Filter { .. } => 1.0,
             PhysicalPlan::Projection { .. } => 0.5,
-            PhysicalPlan::InMemorySort { .. } => 500.0,
             PhysicalPlan::ExternalMergeSort { .. } => 5000.0,
             PhysicalPlan::TopKHeapSort { .. } => 100.0,
             PhysicalPlan::Limit { .. } => 0.1,

@@ -130,12 +130,6 @@ impl ReadExecutor {
                     input_iter.map(move |res| res.and_then(|doc| projector(doc))),
                 ))
             }
-            PhysicalPlan::InMemorySort { input, sort_fields } => {
-                self.metrics.in_memory_sorts.inc();
-                let input_iter =
-                    self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
-                crate::query::execution::sorts::in_memory_sort(input_iter, sort_fields)
-            }
             PhysicalPlan::ExternalMergeSort {
                 input,
                 sort_fields,

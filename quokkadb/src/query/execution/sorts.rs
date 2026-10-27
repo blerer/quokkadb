@@ -36,32 +36,39 @@ pub fn compare_documents(a: &Document, b: &Document, sort_fields: &[SortField]) 
     Ordering::Equal
 }
 
-/// Sorts all documents in memory using the specified sort fields.
-/// Returns an iterator over sorted documents.
-pub fn in_memory_sort(
-    input_iter: Box<dyn Iterator<Item = Result<Document>>>,
-    sort_fields: &Arc<Vec<SortField>>,
-) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
-    let mut rows: Vec<Document> = input_iter.collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|a, b| compare_documents(a, b, sort_fields));
-    Ok(Box::new(rows.into_iter().map(Ok)))
-}
-
 /// Performs an external merge sort for large datasets that exceed memory limits.
-/// Uses temporary files to store sorted runs and merges them.
+/// Sorts entirely in memory when the input fits within `max_in_memory_rows`.
+/// Otherwise, uses temporary files to store sorted runs and merges them.
 /// Returns an iterator over sorted documents.
 pub fn external_merge_sort(
-    mut input: Box<dyn Iterator<Item = Result<Document>>>,
+    input: Box<dyn Iterator<Item = Result<Document>>>,
     sort_fields: Arc<Vec<SortField>>,
     max_in_memory_rows: usize,
 ) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+    external_merge_sort_with_temp_dir(input, sort_fields, max_in_memory_rows, tempdir)
+}
+
+fn external_merge_sort_with_temp_dir(
+    mut input: Box<dyn Iterator<Item = Result<Document>>>,
+    sort_fields: Arc<Vec<SortField>>,
+    max_in_memory_rows: usize,
+    mut create_temp_dir: impl FnMut() -> std::io::Result<TempDir>,
+) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+    assert!(
+        max_in_memory_rows > 0,
+        "max_in_memory_rows must be positive"
+    );
     let mut runs = Vec::new();
-    let temp_dir = tempdir()?;
+    let mut temp_dir = None;
     let mut input_drained = false;
+    let mut pending = None;
 
     while !input_drained {
         let mut chunk: Vec<Document> = Vec::with_capacity(max_in_memory_rows);
-        for _ in 0..max_in_memory_rows {
+        if let Some(doc) = pending.take() {
+            chunk.push(doc);
+        }
+        for _ in chunk.len()..max_in_memory_rows {
             match input.next() {
                 Some(Ok(doc)) => chunk.push(doc),
                 Some(Err(e)) => return Err(e),
@@ -72,10 +79,22 @@ pub fn external_merge_sort(
             }
         }
 
+        if temp_dir.is_none() {
+            // Look ahead so an input exactly at the threshold stays in memory.
+            if !input_drained {
+                pending = input.next().transpose()?;
+            }
+            if pending.is_none() {
+                chunk.sort_by(|a, b| compare_documents(a, b, &sort_fields));
+                return Ok(Box::new(chunk.into_iter().map(Ok)));
+            }
+            temp_dir = Some(create_temp_dir()?);
+        }
+
         if !chunk.is_empty() {
             chunk.sort_by(|a, b| compare_documents(a, b, &sort_fields));
 
-            let run_file = tempfile::Builder::new().tempfile_in(&temp_dir)?;
+            let run_file = tempfile::Builder::new().tempfile_in(temp_dir.as_ref().unwrap())?;
             let mut writer = BufWriter::new(run_file);
             for doc in chunk {
                 doc.to_writer(&mut writer)?;
@@ -89,7 +108,11 @@ pub fn external_merge_sort(
     if runs.is_empty() {
         Ok(Box::new(std::iter::empty()))
     } else {
-        Ok(Box::new(MergeIterator::new(runs, sort_fields, temp_dir)?))
+        Ok(Box::new(MergeIterator::new(
+            runs,
+            sort_fields,
+            temp_dir.unwrap(),
+        )?))
     }
 }
 
@@ -441,13 +464,57 @@ mod tests {
     }
 
     #[test]
-    fn test_in_memory_sort() {
-        run_sort_test(|iter, fields| in_memory_sort(iter, &fields), None);
+    fn test_external_merge_sort() {
+        for threshold in [1, 2, 4, 5, 6] {
+            run_sort_test(
+                |iter, fields| external_merge_sort(iter, fields, threshold),
+                None,
+            );
+        }
     }
 
     #[test]
-    fn test_external_merge_sort() {
-        run_sort_test(|iter, fields| external_merge_sort(iter, fields, 2), None);
+    fn test_external_merge_sort_without_temp_files() {
+        for threshold in [5, 6] {
+            run_sort_test(
+                |iter, fields| {
+                    external_merge_sort_with_temp_dir(iter, fields, threshold, || {
+                        panic!("fitting input must not create a temporary directory")
+                    })
+                },
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn test_external_merge_sort_input_errors() {
+        // Fail during buffering, lookahead, and after the first spill.
+        for successful_rows in [0, 1, 2, 3] {
+            let input =
+                (0..successful_rows)
+                    .map(|id| Ok(doc! { "_id": id }))
+                    .chain(std::iter::once(Err(crate::error::Error::InvalidRequest(
+                        "input failed".into(),
+                    ))));
+            let mut created_temp_dir = false;
+            let result = external_merge_sort_with_temp_dir(
+                Box::new(input),
+                Arc::new(vec![make_sort_field(
+                    vec!["_id".into()],
+                    SortOrder::Ascending,
+                )]),
+                2,
+                || {
+                    created_temp_dir = true;
+                    tempdir()
+                },
+            );
+            assert!(
+                matches!(result, Err(crate::error::Error::InvalidRequest(message)) if message == "input failed")
+            );
+            assert_eq!(created_temp_dir, successful_rows > 2);
+        }
     }
 
     #[test]

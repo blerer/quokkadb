@@ -77,10 +77,6 @@ fn explain_node(plan: &PhysicalPlan, metadata: &CollectionMetadata) -> ExplainNo
             ExplainOperator::Projection,
             vec![explain_node(input, metadata)],
         ),
-        PhysicalPlan::InMemorySort { input, .. } => (
-            ExplainOperator::InMemorySort,
-            vec![explain_node(input, metadata)],
-        ),
         PhysicalPlan::ExternalMergeSort {
             input,
             max_in_memory_rows,

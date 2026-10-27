@@ -222,14 +222,6 @@ pub enum PhysicalPlan {
         projection: Arc<Projection>,
     },
 
-    /// Sorts the input in memory. This is for datasets that are expected to fit in memory.
-    InMemorySort {
-        /// The input plan that provides the data.
-        input: Arc<PhysicalPlan>,
-        /// The fields and direction to sort by.
-        sort_fields: Arc<Vec<SortField>>,
-    },
-
     /// Sorts a large input using external merge sort, which can spill to disk.
     ExternalMergeSort {
         /// The input plan that provides the data.
@@ -311,9 +303,6 @@ impl SizeEstimate for PhysicalPlan {
             }
             PhysicalPlan::Projection { input, projection } => {
                 input.estimated_heap_size() + projection.estimated_heap_size()
-            }
-            PhysicalPlan::InMemorySort { input, sort_fields } => {
-                input.estimated_heap_size() + sort_fields.estimated_heap_size()
             }
             PhysicalPlan::ExternalMergeSort {
                 input,
