@@ -12,7 +12,7 @@ use crate::storage::sstable::sstable_writer::SSTableWriter;
 use crate::storage::storage_engine::SSTableOperation;
 #[cfg(test)]
 use crate::storage::test_utils::fs_sync::{SyncPoint, before_sync};
-use crate::util::interval::IntervalPosition;
+use crate::util::interval::{IntervalPosition, has_overlapping_intervals};
 use std::collections::VecDeque;
 use std::io::Result;
 use std::path::{Path, PathBuf};
@@ -247,7 +247,8 @@ fn worker_loop(
                             compaction_job,
                             added_sstables,
                             removed_sstables,
-                            drops,
+                            removed_drops,
+                            added_drops,
                         } = &op
                         {
                             tracing::trace!(
@@ -257,7 +258,8 @@ fn worker_loop(
                                 compaction_job.id,
                                 added = added_sstables.len(),
                                 removed = removed_sstables.len(),
-                                drops = drops.len(),
+                                removed_drops = removed_drops.len(),
+                                added_drops = added_drops.len(),
                                 "compaction done"
                             );
                         }
@@ -282,6 +284,13 @@ fn perform_compaction(
     oldest_active_snapshot: Option<u64>,
     next_file_number: &AtomicU64,
 ) -> Result<SSTableOperation> {
+    assert!(
+        job.drops.iter().all(|drop| {
+            job.input_key_range.contains_interval(&drop.key_range)
+                && job.output_key_range.contains_interval(&drop.key_range)
+        }),
+        "Compaction must process the entire range of each selected drop"
+    );
     let sst_max_size = options.target_file_size_for_level(job.output_level);
     let drops_to_apply = drops_safe_to_apply(&job.drops, oldest_active_snapshot);
 
@@ -349,13 +358,26 @@ fn perform_compaction(
         .chain(job.output_files.iter().cloned())
         .collect();
 
-    let drops = split_drops_if_needed(&job);
+    // A marker must survive until its range was filtered and no covered data can
+    // remain below the output level. SSTable bounds conservatively prove absence.
+    let added_drops = split_drops_if_needed(&job)
+        .into_iter()
+        .filter(|drop| {
+            oldest_active_snapshot.is_some_and(|snapshot| drop.drop_sequence_number > snapshot)
+                || has_overlapping_intervals(
+                    std::slice::from_ref(&drop.key_range),
+                    &job.deeper_level_ranges,
+                )
+        })
+        .collect();
+    let removed_drops = job.drops.clone();
 
     Ok(SSTableOperation::Compaction {
         compaction_job: job,
         added_sstables: added,
         removed_sstables: removed,
-        drops,
+        removed_drops,
+        added_drops,
     })
 }
 
@@ -521,8 +543,17 @@ mod tests {
                 compaction_job,
                 added_sstables,
                 removed_sstables,
-                drops,
-            } => (compaction_job, added_sstables, removed_sstables, drops),
+                removed_drops,
+                added_drops,
+            } => {
+                assert_eq!(removed_drops, compaction_job.drops);
+                (
+                    compaction_job,
+                    added_sstables,
+                    removed_sstables,
+                    added_drops,
+                )
+            }
             _ => panic!("Expected SSTableOperation::Compaction"),
         }
     }
@@ -778,7 +809,7 @@ mod tests {
         assert_eq!(removed.len(), 3);
     }
 
-    /// Drops without a partitions_grid are passed through unchanged.
+    /// Applied drops overlapping deeper data are passed through without a partitions_grid.
     #[test]
     fn test_full_no_partitions_drops_passed_through() {
         let dir = tempdir().unwrap();
@@ -793,7 +824,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 50);
 
         let job = CompactionJob {
-            deeper_level_ranges: Vec::new(),
+            deeper_level_ranges: vec![DropMetadata::new_collection_drop(col, 2).key_range.clone()],
             id: 0,
             input_level: 0,
             output_level: 1,
@@ -817,7 +848,7 @@ mod tests {
         .unwrap();
         let (_compaction_job, added, removed, drops) = unwrap_compaction(op);
 
-        // No partitions_grid → drops returned as-is
+        // Deeper data requires retaining the drop; no partitions_grid means no split.
         assert_eq!(drops.len(), 1);
         assert_eq!(drops[0], drop);
 
@@ -902,7 +933,10 @@ mod tests {
         .unwrap();
         let (_job, added, _removed, drops) = unwrap_compaction(op);
 
-        assert_eq!(drops, vec![drop]);
+        assert!(
+            drops.is_empty(),
+            "Applied drop has no remaining deeper data"
+        );
         assert!(
             added.is_empty(),
             "applied drop should erase compacted history"
@@ -949,7 +983,7 @@ mod tests {
         .unwrap();
         let (_job, added, _removed, drops) = unwrap_compaction(op);
 
-        assert_eq!(drops, vec![applied_drop, retained_drop]);
+        assert_eq!(drops, vec![retained_drop]);
         assert_eq!(added.len(), 1);
         assert_eq!(
             read_sst_entries(dir.path(), cache, &added[0]),
@@ -1007,7 +1041,7 @@ mod tests {
         assert_eq!(removed[0].number, input_sst.number);
     }
 
-    /// Drops with an empty partitions_grid are still passed through unchanged
+    /// Drops overlapping deeper data with an empty partitions_grid are passed through unchanged
     /// (split_drops_if_needed returns early when boundaries is empty).
     #[test]
     fn test_full_empty_partitions_grid_drops_passed_through() {
@@ -1022,7 +1056,7 @@ mod tests {
         let drop = DropMetadata::new_collection_drop(col, 99);
 
         let job = CompactionJob {
-            deeper_level_ranges: Vec::new(),
+            deeper_level_ranges: vec![DropMetadata::new_collection_drop(col, 2).key_range.clone()],
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1260,7 +1294,7 @@ mod tests {
         let full_drop = DropMetadata::new_collection_drop(col, 10);
 
         let job = CompactionJob {
-            deeper_level_ranges: Vec::new(),
+            deeper_level_ranges: vec![DropMetadata::new_collection_drop(col, 2).key_range.clone()],
             id: 0,
             input_level: 1,
             output_level: 2,
@@ -1411,9 +1445,9 @@ mod tests {
         assert!(added[1].min_key > boundary);
     }
 
-    /// Partial compaction: a drop in the same partition is included in the output drops.
+    /// Partial compaction into the bottom level retires an applied drop fragment.
     #[test]
-    fn test_partial_drop_in_partition_included_in_output() {
+    fn test_partial_drop_in_partition_is_retired_at_bottom() {
         let dir = tempdir().unwrap();
         let options = Options::lightweight();
         let cache = setup_cache(&options);
@@ -1453,10 +1487,130 @@ mod tests {
         .unwrap();
         let (_compaction_job, _added, _removed, drops) = unwrap_compaction(op);
 
-        // The drop fragment ends at the boundary (Included(50)); it is the left fragment
-        // so split_drops_if_needed should return it as-is (it ends at the boundary).
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0], drop_p0);
+        // The fragment includes the boundary, and all its data was processed.
+        // No replacement is needed at the bottom level.
+        assert!(drops.is_empty());
+    }
+
+    #[test]
+    fn test_drop_retirement_respects_snapshot_and_fragment_boundaries() {
+        let col = 10;
+        let col2 = 11;
+        let boundary = record_key(col, 50);
+        let drop = DropMetadata::new_collection_drop(col, 50);
+        let (left, right) = drop.split_at(&boundary).expect_two();
+        let cases = [
+            (vec![], vec![]),
+            // The split boundary belongs only to the left fragment.
+            (
+                vec![Interval::closed(boundary.clone(), boundary.clone())],
+                vec![left.clone()],
+            ),
+            (
+                vec![Interval::open_closed(boundary.clone(), record_key(col, 70))],
+                vec![right.clone()],
+            ),
+            (
+                vec![Interval::closed(record_key(col, 40), record_key(col, 60))],
+                vec![left.clone(), right.clone()],
+            ),
+            (
+                vec![Interval::closed(
+                    record_key(col2, 1),
+                    record_key(col2, 2),
+                )],
+                vec![],
+            ),
+        ];
+
+        for snapshot in [None, Some(49), Some(50), Some(51)] {
+            for (deeper_level_ranges, retained) in &cases {
+                let dir = tempdir().unwrap();
+                let options = Options::lightweight();
+                let cache = setup_cache(&options);
+                let entries = vec![
+                    put_rec(col, 50, 1, 1),
+                    put_rec(col, 70, 1, 2),
+                    put_rec(col2, 1, 1, 3),
+                ];
+                let input = write_sst(dir.path(), 1, &entries, &options);
+                let job = CompactionJob {
+                    id: 0,
+                    input_level: 0,
+                    output_level: 1,
+                    input_files: vec![input],
+                    output_files: vec![],
+                    drops: vec![drop.clone()],
+                    input_key_range: Interval::all(),
+                    output_key_range: Interval::all(),
+                    deeper_level_ranges: deeper_level_ranges.clone(),
+                    partitions_grid: Some(vec![boundary.clone()]),
+                };
+                let op = perform_compaction(
+                    &options,
+                    &dir.path().to_path_buf(),
+                    cache.clone(),
+                    job,
+                    snapshot,
+                    &next_file_number(10),
+                )
+                .unwrap();
+                let (_, added, _, added_drops) = unwrap_compaction(op);
+                let blocked = snapshot == Some(49);
+                let expected_drops = if blocked {
+                    vec![left.clone(), right.clone()]
+                } else {
+                    retained.clone()
+                };
+                assert_eq!(added_drops, expected_drops);
+                let actual: Vec<_> = added
+                    .iter()
+                    .flat_map(|sst| read_sst_entries(dir.path(), cache.clone(), sst))
+                    .collect();
+                assert_eq!(
+                    actual,
+                    if blocked {
+                        entries
+                    } else {
+                        vec![entries[2].clone()]
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bottom_compaction_preserves_snapshot_blocked_fragment() {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let entries = vec![put_rec(10, 1, 1, 1)];
+        let input = write_sst(dir.path(), 1, &entries, &options);
+        let drop = DropMetadata::new_collection_drop(10, 50);
+        let cache = setup_cache(&options);
+        let job = CompactionJob {
+            id: 0,
+            input_level: 2,
+            output_level: 3,
+            input_files: vec![input],
+            output_files: vec![],
+            drops: vec![drop.clone()],
+            input_key_range: Interval::all(),
+            output_key_range: Interval::all(),
+            deeper_level_ranges: vec![],
+            partitions_grid: None,
+        };
+        let op = perform_compaction(
+            &options,
+            &dir.path().to_path_buf(),
+            cache.clone(),
+            job,
+            Some(49),
+            &next_file_number(10),
+        )
+        .unwrap();
+        let (_, added, _, added_drops) = unwrap_compaction(op);
+        assert_eq!(added_drops, vec![drop]);
+        assert_eq!(read_sst_entries(dir.path(), cache, &added[0]), entries);
     }
 
     mod split_drops_tests {

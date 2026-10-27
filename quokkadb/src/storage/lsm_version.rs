@@ -113,8 +113,10 @@ impl LsmVersion {
         output_level: usize,
         removed_sstables: &Vec<Arc<SSTableMetadata>>,
         added_sstables: &Vec<Arc<SSTableMetadata>>,
-        drops: &Vec<Arc<DropMetadata>>,
+        removed_drops: &Vec<Arc<DropMetadata>>,
+        added_drops: &Vec<Arc<DropMetadata>>,
     ) -> LsmVersion {
+        assert!(output_level > 0, "Compaction must target a level below L0");
         let input_level = output_level - 1;
 
         let (removed_from_input, removed_from_output): (HashSet<_>, HashSet<_>) = removed_sstables
@@ -122,7 +124,7 @@ impl LsmVersion {
             .cloned()
             .partition(|sst| sst.level == input_level as u8);
 
-        let drops: HashSet<Arc<DropMetadata>> = drops.into_iter().cloned().collect();
+        let removed_drops: HashSet<Arc<DropMetadata>> = removed_drops.iter().cloned().collect();
 
         let next_file_number = self.next_file_number.max(
             added_sstables
@@ -135,9 +137,13 @@ impl LsmVersion {
 
         let sst_levels = Arc::new(
             self.sst_levels
-                .remove(input_level, &removed_from_input, &drops)
+                .remove(input_level, &removed_from_input, &removed_drops)
                 .remove(output_level, &removed_from_output, &HashSet::new())
-                .add(output_level, added_sstables.into_iter().cloned(), drops),
+                .add(
+                    output_level,
+                    added_sstables.into_iter().cloned(),
+                    added_drops.iter().cloned(),
+                ),
         );
 
         LsmVersion {

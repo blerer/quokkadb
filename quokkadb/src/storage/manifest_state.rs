@@ -239,13 +239,15 @@ impl ManifestState {
                 output_level,
                 removed_sstables,
                 added_sstables,
-                drops,
+                removed_drops,
+                added_drops,
             } => ManifestState {
                 lsm: Arc::new(self.lsm.with_compaction(
                     *output_level,
                     removed_sstables,
                     added_sstables,
-                    drops,
+                    removed_drops,
+                    added_drops,
                 )),
                 catalog: self.catalog.clone(),
                 count_stats: self.count_stats.clone(),
@@ -421,13 +423,14 @@ pub enum ManifestEdit {
     /// and drop the empty memtable.
     IgnoringEmptyMemtable { oldest_log_number: u64 },
 
-    /// Records a compaction that has been performed, the SSTables removed and added, and any drops
-    /// that were applied.
+    /// Records a compaction that has been performed, the SSTables removed and added, and the drop
+    /// markers consumed from the input level and retained in the output level.
     Compaction {
         output_level: usize,
         removed_sstables: Vec<Arc<SSTableMetadata>>,
         added_sstables: Vec<Arc<SSTableMetadata>>,
-        drops: Vec<Arc<DropMetadata>>,
+        removed_drops: Vec<Arc<DropMetadata>>,
+        added_drops: Vec<Arc<DropMetadata>>,
     },
 
     /// Add a new index to a collection
@@ -620,12 +623,14 @@ impl Serializable for ManifestEdit {
                 let output_level = reader.read_u8()? as usize;
                 let removed_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader, version)?;
                 let added_sstables = Vec::<Arc<SSTableMetadata>>::read_from(&reader, version)?;
-                let drops = Vec::<Arc<DropMetadata>>::read_from(&reader, version)?;
+                let removed_drops = Vec::<Arc<DropMetadata>>::read_from(&reader, version)?;
+                let added_drops = Vec::<Arc<DropMetadata>>::read_from(&reader, version)?;
                 Ok(ManifestEdit::Compaction {
                     output_level,
                     removed_sstables,
                     added_sstables,
-                    drops,
+                    removed_drops,
+                    added_drops,
                 })
             }
             tags::CREATE_INDEX => {
@@ -748,13 +753,15 @@ impl Serializable for ManifestEdit {
                 output_level,
                 removed_sstables,
                 added_sstables,
-                drops,
+                removed_drops,
+                added_drops,
             } => {
                 writer.write_u8(tags::COMPACTION);
                 writer.write_u8(*output_level as u8);
                 Vec::<Arc<SSTableMetadata>>::write_to(removed_sstables, writer, version);
                 Vec::<Arc<SSTableMetadata>>::write_to(added_sstables, writer, version);
-                Vec::<Arc<DropMetadata>>::write_to(drops, writer, version);
+                Vec::<Arc<DropMetadata>>::write_to(removed_drops, writer, version);
+                Vec::<Arc<DropMetadata>>::write_to(added_drops, writer, version);
             }
             ManifestEdit::CreateIndex {
                 collection_id,
@@ -871,11 +878,12 @@ impl fmt::Display for ManifestEdit {
                 output_level,
                 removed_sstables,
                 added_sstables,
-                drops,
+                removed_drops,
+                added_drops,
             } => write!(
                 f,
-                "Compaction {{ output_level: {}, removed_sstables: {:?}, added_sstables: {:?}, drops: {:?} }}",
-                output_level, removed_sstables, added_sstables, drops
+                "Compaction {{ output_level: {}, removed_sstables: {:?}, added_sstables: {:?}, removed_drops: {:?}, added_drops: {:?} }}",
+                output_level, removed_sstables, added_sstables, removed_drops, added_drops
             ),
             ManifestEdit::CreateIndex {
                 collection_id,
@@ -919,8 +927,7 @@ impl fmt::Display for ManifestEdit {
 mod tests {
     use super::*;
     use crate::storage::catalog::{
-        CollectionBuilder, CollectionOptions, IndexDirection, IndexPath,
-        OrderedIndexField,
+        CollectionBuilder, CollectionOptions, IndexDirection, IndexPath, OrderedIndexField,
     };
     use crate::storage::internal_key::encode_record_key;
     use crate::util::bson_utils::BsonKey;
@@ -1363,10 +1370,90 @@ mod tests {
             output_level: 1,
             removed_sstables: vec![sst1.clone()],
             added_sstables: vec![sst2.clone()],
-            drops: vec![drop1, drop2],
+            removed_drops: vec![drop1, drop2.clone()],
+            added_drops: vec![drop2],
         };
 
         check_edit_serialization_roundtrip(edit, MANIFEST_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn test_compaction_replay_replaces_original_drop_with_surviving_fragments() {
+        let original = DropMetadata::new_collection_drop(10, 50);
+        let boundary = encode_record_key(10, 0, &Bson::Int32(50).try_into_key().unwrap());
+        let (left, right) = original.split_at(&boundary).expect_two();
+        let unrelated = DropMetadata::new_index_drop(20, 1, 60);
+
+        for added_drops in [vec![], vec![right.clone()], vec![left, right]] {
+            let mut state = ManifestState::new(1, 2, 4);
+            let lsm = Arc::get_mut(&mut state.lsm).unwrap();
+            lsm.sst_levels = Arc::new(lsm.sst_levels.add(
+                0,
+                Vec::<Arc<SSTableMetadata>>::new(),
+                vec![original.clone(), unrelated.clone()],
+            ));
+            let edit = ManifestEdit::Compaction {
+                output_level: 1,
+                removed_sstables: vec![],
+                added_sstables: vec![],
+                removed_drops: vec![original.clone()],
+                added_drops: added_drops.clone(),
+            };
+            let bytes = edit.to_vec(MANIFEST_FORMAT_VERSION);
+            let replayed =
+                ManifestEdit::read_from(&ByteReader::new(bytes), MANIFEST_FORMAT_VERSION).unwrap();
+            let next = state.apply(&replayed);
+            assert_eq!(next, state.apply(&edit));
+            assert_eq!(
+                next.lsm.sst_levels.level(0).unwrap().drops(),
+                &[unrelated.clone()]
+            );
+            assert_eq!(next.lsm.sst_levels.level(1).unwrap().drops(), added_drops);
+            assert_eq!(
+                state.lsm.sst_levels.level(0).unwrap().drops(),
+                &[original.clone(), unrelated.clone()]
+            );
+
+            let mut writer = ByteWriter::new();
+            next.write_to(&mut writer, MANIFEST_FORMAT_VERSION);
+            assert_eq!(
+                ManifestState::read_from(
+                    &ByteReader::new(writer.take_buffer()),
+                    MANIFEST_FORMAT_VERSION
+                )
+                .unwrap(),
+                next
+            );
+        }
+    }
+
+    #[test]
+    fn test_compaction_retires_index_drop_without_retiring_parent_fragments() {
+        let index_drop = DropMetadata::new_index_drop(10, 1, 50);
+        let collection_drop = DropMetadata::new_collection_drop(10, 60);
+        let mut state = ManifestState::new(1, 2, 4);
+        let lsm = Arc::get_mut(&mut state.lsm).unwrap();
+        lsm.sst_levels = Arc::new(lsm.sst_levels.add(
+            0,
+            Vec::<Arc<SSTableMetadata>>::new(),
+            vec![index_drop.clone(), collection_drop],
+        ));
+        let removed_drops = state.lsm.sst_levels.level(0).unwrap().drops().to_vec();
+        assert_eq!(removed_drops.len(), 3);
+        let added_drops: Vec<_> = removed_drops
+            .iter()
+            .filter(|drop| **drop != index_drop)
+            .cloned()
+            .collect();
+        let next = state.apply(&ManifestEdit::Compaction {
+            output_level: 1,
+            removed_sstables: vec![],
+            added_sstables: vec![],
+            removed_drops,
+            added_drops: added_drops.clone(),
+        });
+        assert!(next.lsm.sst_levels.level(0).unwrap().drops().is_empty());
+        assert_eq!(next.lsm.sst_levels.level(1).unwrap().drops(), added_drops);
     }
 
     #[test]

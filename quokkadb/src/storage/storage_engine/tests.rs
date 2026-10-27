@@ -4776,6 +4776,115 @@ fn test_flush_sst_sync_before_publication() {
 }
 
 #[test]
+fn test_compaction_drop_retirement_publication_and_restart() {
+    // Exercise successful publication, failed SST creation, and failed manifest append.
+    for failure in [None, Some("sst"), Some("manifest")] {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight().with_level0_file_num_compaction_trigger(2);
+        let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+        engine.disable_auto_compaction();
+        let collection = engine.create_collection("dropped", true).unwrap().id;
+        let survivor = engine.create_collection("survivor", true).unwrap().id;
+
+        // Both earlier memtables must be published before the drop's flush.
+        engine
+            .write(write_batch(vec![put_op(collection, 1, 1)]), true)
+            .unwrap();
+        engine.flush().unwrap();
+        engine
+            .write(write_batch(vec![put_op(collection, 2, 1)]), true)
+            .unwrap();
+        engine.flush().unwrap();
+        engine.drop_collection("dropped").unwrap();
+        engine
+            .write(write_batch(vec![put_op(survivor, 1, 1)]), true)
+            .unwrap();
+        engine.flush().unwrap();
+
+        let before = engine.lsm_tree.load_full();
+        let original_drops = before.manifest.get_drops_before_or_at(u64::MAX);
+        assert_eq!(original_drops.len(), 1);
+        assert!(before.imm_memtables.is_empty());
+        let inputs = before.levels().live_sst_numbers();
+        let hook =
+            (failure == Some("sst")).then(|| SyncHook::new(dir.path(), Some(SyncPoint::File)));
+        if failure == Some("manifest") {
+            engine.manifest_fail_write_after(0);
+        }
+
+        let result = engine.compact();
+        if failure.is_some() {
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains(if failure == Some("sst") {
+                "Injected SST File sync error"
+            } else {
+                "Injected error on append"
+            }));
+            assert_eq!(engine.lsm_tree.load_full().manifest, before.manifest);
+            let persisted = read_lsm_tree_from_disk(&dir);
+            assert_eq!(
+                persisted.manifest.get_drops_before_or_at(u64::MAX),
+                original_drops
+            );
+            assert_eq!(persisted.levels().live_sst_numbers(), inputs);
+        } else {
+            result.unwrap();
+            let persisted = read_lsm_tree_from_disk(&dir);
+            assert!(
+                persisted
+                    .manifest
+                    .get_drops_before_or_at(u64::MAX)
+                    .is_empty()
+            );
+            assert!(
+                engine
+                    .lsm_tree
+                    .load_full()
+                    .manifest
+                    .get_drops_before_or_at(u64::MAX)
+                    .is_empty()
+            );
+        }
+        drop(hook);
+        drop(before);
+        // Stop workers before opening the persisted state through normal recovery.
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let reopened = new_engine(&mut MetricRegistry::default(), options, dir.path());
+        reopened.disable_auto_compaction();
+        // Recovery may already have scheduled the pending cleanup on failed publication.
+        if failure.is_none() {
+            assert!(
+                reopened
+                    .lsm_tree
+                    .load_full()
+                    .manifest
+                    .get_drops_before_or_at(u64::MAX)
+                    .is_empty()
+            );
+        }
+        // The collection drop is logically visible even when physical retirement failed.
+        let snapshot = reopened.acquire_snapshot();
+        for key in [1, 2] {
+            assert!(
+                reopened
+                    .read_at_snapshot(collection, 0, &user_key(key), &snapshot)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            reopened
+                .read_at_snapshot(survivor, 0, &user_key(1), &reopened.acquire_snapshot())
+                .unwrap()
+                .is_some()
+        );
+        reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn test_compaction_sst_sync_failure_preserves_inputs() {
     for point in [SyncPoint::File, SyncPoint::Directory] {
         let dir = tempdir().unwrap();

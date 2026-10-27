@@ -1441,7 +1441,8 @@ impl StorageEngine {
                         compaction_job,
                         removed_sstables,
                         added_sstables,
-                        drops,
+                        removed_drops,
+                        added_drops,
                     } => {
                         // We want to perform the changes within the manifest lock to avoid concurrent updates to
                         // the LSM tree
@@ -1472,7 +1473,8 @@ impl StorageEngine {
                             output_level,
                             removed_sstables,
                             added_sstables,
-                            drops,
+                            removed_drops,
+                            added_drops,
                         };
 
                         let new_lsm_tree =
@@ -1939,7 +1941,8 @@ pub enum SSTableOperation {
         compaction_job: CompactionJob,
         removed_sstables: Vec<Arc<SSTableMetadata>>,
         added_sstables: Vec<Arc<SSTableMetadata>>,
-        drops: Vec<Arc<DropMetadata>>,
+        removed_drops: Vec<Arc<DropMetadata>>,
+        added_drops: Vec<Arc<DropMetadata>>,
     },
 }
 
