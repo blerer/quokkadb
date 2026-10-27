@@ -123,7 +123,7 @@ fn main() -> Result<()> {
 
 The documentation covers the document and typed APIs, queries, indexes, configuration, database internals, and current limitations.
 
-### Platform Support
+## Platform Support
 
 QuokkaDB is designed to be portable across desktop, server, and mobile platforms.
 
