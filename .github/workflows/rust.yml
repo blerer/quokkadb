@@ -31,3 +31,50 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --verbose
+
+  mobile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Android
+            os: ubuntu-latest
+            target: aarch64-linux-android
+          - name: iOS
+            os: macos-latest
+            target: aarch64-apple-ios
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust 1.95.0
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Android NDK
+        if: matrix.name == 'Android'
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Configure Android NDK
+        if: matrix.name == 'Android'
+        run: sdkmanager "ndk;27.2.12479018"
+
+      - name: Check workspace for Android
+        if: matrix.name == 'Android'
+        run: |
+          export ANDROID_CLANG="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          export ANDROID_AR="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export CC_aarch64_linux_android="$ANDROID_CLANG"
+          export AR_aarch64_linux_android="$ANDROID_AR"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_CLANG"
+          cargo check --locked --workspace --target ${{ matrix.target }} --verbose
+
+      - name: Check workspace for iOS
+        if: matrix.name == 'iOS'
+        run: cargo check --locked --workspace --target ${{ matrix.target }} --verbose
