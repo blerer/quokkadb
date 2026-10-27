@@ -82,6 +82,7 @@ impl IndexBuilder {
             &(..),
             &snapshot,
             Direction::Forward,
+            true,
         )? {
             let (internal_key, _) = entry?;
             if extract_operation_type(&internal_key) == OperationType::Delete {
@@ -184,6 +185,7 @@ impl IndexBuilder {
             &user_key_range,
             snapshot,
             Direction::Forward,
+            false,
         )?;
 
         loop {
@@ -518,7 +520,14 @@ mod tests {
     fn count_records(storage_engine: &StorageEngine, collection: u32, index: u32) -> usize {
         let snapshot = storage_engine.acquire_snapshot();
         storage_engine
-            .range_scan_at_snapshot(collection, index, &(..), &snapshot, Direction::Forward)
+            .range_scan_at_snapshot(
+                collection,
+                index,
+                &(..),
+                &snapshot,
+                Direction::Forward,
+                true,
+            )
             .unwrap()
             .count()
     }

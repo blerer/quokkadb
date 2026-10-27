@@ -46,13 +46,15 @@ impl BlockCache {
         Arc::new(Self { cache })
     }
 
-    /// Retrieve the specified block, loading it from disk if necessary
+    /// Retrieve the specified block, loading it from disk if necessary.
+    /// When `fill_cache` is false, misses (including errors) are not inserted.
     pub fn get(
         &self,
         compressor: &Arc<dyn Compressor>,
         checksum_strategy: &Arc<dyn ChecksumStrategy>,
         file: &SharedFile,
         block_handle: &BlockHandle,
+        fill_cache: bool,
     ) -> Result<Arc<[u8]>, Error> {
         let key = (
             file.path.to_string_lossy().into_owned(),
@@ -66,8 +68,7 @@ impl BlockCache {
         )
         .entered();
 
-        // Fetch or insert the block in a thread-safe manner
-        let block = self.cache.get_with(key.clone(), || {
+        let load = || {
             let start = Instant::now();
 
             // Read, decompress, and validate the block
@@ -93,10 +94,30 @@ impl BlockCache {
             );
 
             Ok(Arc::from(uncompressed_block))
-        });
+        };
+
+        // Scans can reuse cached blocks without admitting their misses.
+        let block = if fill_cache {
+            // Fetch or insert the block in a thread-safe manner
+            self.cache.get_with(key, load)
+        } else {
+            self.cache.get(&key).unwrap_or_else(load)
+        };
 
         block.map_err(|arc_err| Error::new(arc_err.kind(), arc_err.to_string()))
         // Clone so each thread gets its own Result<Arc<[u8]>>
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains(&self, file: &SharedFile, handle: &BlockHandle) -> bool {
+        self.cache
+            .contains_key(&(file.path.to_string_lossy().into_owned(), handle.offset))
+    }
+
+    #[cfg(test)]
+    pub(super) fn entry_count(&self) -> u64 {
+        self.cache.run_pending_tasks();
+        self.cache.entry_count()
     }
 
     fn read_and_decompress(
@@ -174,5 +195,81 @@ impl Metrics {
                 metrics::names::block_cache::EVICTIONS,
                 self.evictions.clone(),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::checksum::Crc32ChecksumStrategy;
+    use crate::io::compressor::{CompressorType, NoopCompressor};
+
+    #[test]
+    fn admission_and_cached_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("block");
+        let checksum: Arc<dyn ChecksumStrategy> = Arc::new(Crc32ChecksumStrategy);
+        let compressor: Arc<dyn Compressor> = Arc::new(NoopCompressor);
+        let payload = b"cached block";
+        let mut bytes = payload.to_vec();
+        bytes.extend(checksum.checksum(payload));
+        std::fs::write(&path, &bytes).unwrap();
+        let file = SharedFile::open(&path).unwrap();
+        let handle = BlockHandle::new(0, bytes.len() as u64);
+        let cache = BlockCache::new(&mut MetricRegistry::new(), &Options::lightweight());
+
+        let uncached = cache
+            .get(&compressor, &checksum, &file, &handle, false)
+            .unwrap();
+        assert_eq!(&*uncached, payload);
+        assert!(!cache.contains(&file, &handle));
+
+        let cached = cache
+            .get(&compressor, &checksum, &file, &handle, true)
+            .unwrap();
+        assert!(cache.contains(&file, &handle));
+        let reused = cache
+            .get(&compressor, &checksum, &file, &handle, false)
+            .unwrap();
+        assert!(Arc::ptr_eq(&cached, &reused));
+    }
+
+    #[test]
+    fn uncached_reads_validate_and_do_not_cache_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("block");
+        let checksum: Arc<dyn ChecksumStrategy> = Arc::new(Crc32ChecksumStrategy);
+        let cache = BlockCache::new(&mut MetricRegistry::new(), &Options::lightweight());
+        for kind in [CompressorType::Noop, CompressorType::LZ4] {
+            let compressor = kind.new_compressor();
+            let bytes = compressor
+                .compress(b"payload with an invalid checksum")
+                .unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let file = SharedFile::open(&path).unwrap();
+            let handle = BlockHandle::new(0, bytes.len() as u64);
+            let error = cache
+                .get(&compressor, &checksum, &file, &handle, false)
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(!cache.contains(&file, &handle));
+        }
+
+        // A valid size prefix followed by an invalid LZ4 stream.
+        std::fs::write(&path, [32, 0, 0, 0, 255]).unwrap();
+        let file = SharedFile::open(&path).unwrap();
+        let handle = BlockHandle::new(0, 5);
+        assert!(
+            cache
+                .get(
+                    &CompressorType::LZ4.new_compressor(),
+                    &checksum,
+                    &file,
+                    &handle,
+                    false
+                )
+                .is_err()
+        );
+        assert!(!cache.contains(&file, &handle));
     }
 }

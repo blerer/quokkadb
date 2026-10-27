@@ -1223,6 +1223,8 @@ impl StorageEngine {
     }
 
     /// Scans a key range using a real snapshot lease.
+    /// When `fill_cache` is false, data-block misses are not cached; metadata and
+    /// existing cached blocks are still reused.
     pub fn range_scan_at_snapshot<R>(
         &self,
         collection: u32,
@@ -1230,6 +1232,7 @@ impl StorageEngine {
         user_key_range: &R,
         snapshot: &Snapshot,
         direction: Direction,
+        fill_cache: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>
     where
         R: RangeBounds<Vec<u8>>,
@@ -1245,6 +1248,7 @@ impl StorageEngine {
             user_key_range,
             snapshot.sequence(),
             direction,
+            fill_cache,
         )?;
 
         let static_iterator = unsafe {

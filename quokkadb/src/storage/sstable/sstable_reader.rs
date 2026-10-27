@@ -228,7 +228,7 @@ impl SSTableReader {
     }
 
     fn get_block(&self, handle: &BlockHandle) -> Result<Arc<[u8]>> {
-        self.block_loader.load_block(handle)
+        self.block_loader.load_block(handle, true)
     }
 
     /// Read a value by user key and snapshot
@@ -302,6 +302,7 @@ impl SSTableReader {
         &self,
         range: Rc<InternalKeyRange>,
         direction: Direction,
+        fill_cache: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
         let _span = trace_span!(
             "sstable_reader.range_scan",
@@ -320,7 +321,7 @@ impl SSTableReader {
 
                     let data_iter = match index_iter.next() {
                         Some(Ok((_index_key, handle))) => {
-                            let data_block = self.block_loader.load_block(&handle)?;
+                            let data_block = self.block_loader.load_block(&handle, fill_cache)?;
                             let data_reader = BlockReader::new(data_block, DataEntryReader)?;
                             Some(data_reader.scan_forward_from(&range.start_bound())?)
                         }
@@ -330,6 +331,7 @@ impl SSTableReader {
 
                     Box::new(SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
+                        fill_cache,
                         range: range.clone(),
                         direction: direction.clone(),
                         index_iter,
@@ -342,7 +344,7 @@ impl SSTableReader {
 
                     let data_iter = match index_iter.next() {
                         Some(Ok((_index_key, handle))) => {
-                            let data_block = self.block_loader.load_block(&handle)?;
+                            let data_block = self.block_loader.load_block(&handle, fill_cache)?;
                             let data_reader = BlockReader::new(data_block, DataEntryReader)?;
                             Some(data_reader.scan_reverse_from(range.end_bound())?)
                         }
@@ -352,6 +354,7 @@ impl SSTableReader {
 
                     Box::new(SSTableRangeScanIterator {
                         block_loader: self.block_loader.clone(),
+                        fill_cache,
                         range: range.clone(),
                         direction: direction.clone(),
                         index_iter,
@@ -376,6 +379,7 @@ impl SSTableReader {
 }
 
 struct SSTableRangeScanIterator {
+    fill_cache: bool,
     block_loader: Arc<BlockLoader>,
     range: Rc<InternalKeyRange>,
     direction: Direction,
@@ -393,10 +397,11 @@ impl Iterator for SSTableRangeScanIterator {
                 // Attempt to load the next data block iterator from the index_iter
                 match self.index_iter.next() {
                     Some(Ok((_index_key, handle))) => {
-                        let data_block = match self.block_loader.load_block(&handle) {
-                            Ok(block) => block,
-                            Err(e) => return Some(Err(e)),
-                        };
+                        let data_block =
+                            match self.block_loader.load_block(&handle, self.fill_cache) {
+                                Ok(block) => block,
+                                Err(e) => return Some(Err(e)),
+                            };
                         let data_reader = match BlockReader::new(data_block, DataEntryReader) {
                             Ok(reader) => reader,
                             Err(e) => return Some(Err(e)),
@@ -608,12 +613,13 @@ impl BlockLoader {
     }
 
     /// Retrieves an SSTable block from the Block cache, loading it if needed.
-    pub fn load_block(&self, handle: &BlockHandle) -> Result<Arc<[u8]>> {
+    pub fn load_block(&self, handle: &BlockHandle, fill_cache: bool) -> Result<Arc<[u8]>> {
         self.block_cache.get(
             &self.compressor,
             &self.checksum_strategy,
             &self.file,
             handle,
+            fill_cache,
         )
     }
 }
@@ -908,6 +914,47 @@ mod tests {
     }
 
     #[test]
+    fn range_scan_cache_admission() {
+        let dir = tempdir().unwrap();
+        let options = Options::lightweight();
+        let sst_file = DbFile::new_sst(1);
+        let mut writer =
+            SSTableWriter::new_with_expected_keys(dir.path(), &sst_file, &options, 1000).unwrap();
+        for i in 1..=1000 {
+            let op = put_op(32, i, 1);
+            writer.add(&op.internal_key(1), op.value()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        for fill_cache in [false, true] {
+            let cache = BlockCache::new(&mut MetricRegistry::new(), &options);
+            let reader =
+                SSTableReader::open(cache.clone(), &dir.path().join(sst_file.filename())).unwrap();
+
+            reader
+                .range_scan(
+                    key_range(
+                        32,
+                        &Interval::all(),
+                        MAX_SEQUENCE_NUMBER,
+                        Direction::Forward,
+                    ),
+                    Direction::Forward,
+                    fill_cache,
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+
+            if fill_cache {
+                assert!(cache.entry_count() > 1);
+            } else {
+                assert_eq!(cache.entry_count(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn test_sstable_reader_range_scan() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
@@ -1114,7 +1161,7 @@ mod tests {
     {
         let internal_key_range = key_range(col, selected_range, snapshot, direction.clone());
         let mut iter = reader
-            .range_scan(internal_key_range.clone(), direction.clone())
+            .range_scan(internal_key_range.clone(), direction.clone(), true)
             .unwrap();
 
         check_iter(

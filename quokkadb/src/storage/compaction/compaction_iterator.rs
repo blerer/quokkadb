@@ -44,7 +44,7 @@ impl<'a> CompactionIterator<'a> {
             .map(|sst| {
                 let file_path = db_dir.join(DbFile::new_sst(sst.number).filename());
                 let reader = sst_cache.get(&file_path)?;
-                reader.range_scan(InternalKeyRange::all(), Direction::Forward)
+                reader.range_scan(InternalKeyRange::all(), Direction::Forward, false)
             })
             .collect::<Result<Vec<_>>>()?;
 

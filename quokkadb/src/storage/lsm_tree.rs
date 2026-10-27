@@ -238,6 +238,7 @@ impl LsmTree {
         user_key_range: &R,
         snapshot: u64,
         direction: Direction,
+        fill_cache: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>>
     where
         R: RangeBounds<Vec<u8>>,
@@ -308,8 +309,11 @@ impl LsmTree {
         for sst_meta in sstable_metas {
             let file_path = db_dir.join(DbFile::new_sst(sst_meta.number).filename());
             let sst_reader = sstable_cache.get(&file_path)?;
-            let iter =
-                sst_reader.range_scan(internal_key_range_for_scan.clone(), direction.clone())?;
+            let iter = sst_reader.range_scan(
+                internal_key_range_for_scan.clone(),
+                direction.clone(),
+                fill_cache,
+            )?;
             iterators.push(match direction {
                 Direction::Forward => Box::new(ForwardIterator::new(iter, snapshot)),
                 Direction::Reverse => Box::new(ReverseIterator::new(iter, snapshot)),

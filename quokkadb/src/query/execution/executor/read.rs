@@ -328,7 +328,7 @@ impl ReadExecutor {
 
         let iter = self
             .storage_engine
-            .range_scan_at_snapshot(*collection, 0, &range, &snapshot, direction.clone())?
+            .range_scan_at_snapshot(*collection, 0, &range, &snapshot, direction.clone(), true)?
             .filter_map(move |res| {
                 let doc = match res {
                     Ok((k, v)) => {
@@ -430,6 +430,7 @@ impl ReadExecutor {
                 &bound_range,
                 &snapshot,
                 direction.clone(),
+                true,
             )?
             .filter_map(move |res| {
                 let primary_key = match res {

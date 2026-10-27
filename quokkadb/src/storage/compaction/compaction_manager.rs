@@ -521,7 +521,7 @@ mod tests {
             .get(&dir.join(DbFile::new_sst(sst.number).filename()))
             .unwrap();
         reader
-            .range_scan(InternalKeyRange::all(), Direction::Forward)
+            .range_scan(InternalKeyRange::all(), Direction::Forward, true)
             .unwrap()
             .collect::<Result<Vec<_>>>()
             .unwrap()
