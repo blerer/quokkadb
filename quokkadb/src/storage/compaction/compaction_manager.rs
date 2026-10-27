@@ -1515,10 +1515,7 @@ mod tests {
                 vec![left.clone(), right.clone()],
             ),
             (
-                vec![Interval::closed(
-                    record_key(col2, 1),
-                    record_key(col2, 2),
-                )],
+                vec![Interval::closed(record_key(col2, 1), record_key(col2, 2))],
                 vec![],
             ),
         ];

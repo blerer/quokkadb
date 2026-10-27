@@ -65,6 +65,11 @@ impl LsmTree {
     pub fn apply(&self, edit: &ManifestEdit) -> Self {
         let manifest = Arc::new(self.manifest.apply(edit));
         let catalog = match edit {
+            ManifestEdit::Compaction { .. }
+                if !Arc::ptr_eq(&manifest.catalog, &self.manifest.catalog) =>
+            {
+                manifest.visible_catalog()
+            }
             ManifestEdit::CreateCollection { .. }
             | ManifestEdit::DropCollection { .. }
             | ManifestEdit::RenameCollection { .. }
@@ -397,5 +402,88 @@ mod tests {
         );
 
         assert_eq!(tree.count_stat(&CountStatsKey::Collection(10)), Some(6));
+    }
+
+    #[test]
+    fn compaction_reclaims_committed_schema_and_preserves_pending_edits() {
+        use crate::storage::catalog::{
+            Catalog, CollectionOptions, IndexDefinition, IndexOptions, OrderedIndexField,
+        };
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let mut state = ManifestState::new(1, 2, 4);
+        state.catalog = Arc::new(
+            Catalog::new()
+                .add_collection("old", 10, 1)
+                .drop_collection(10, 2)
+                .add_collection("live", 11, 3)
+                .add_index_to_collection(11, 1, &definition, &IndexOptions::default(), 4)
+                .drop_index(11, 1, 5),
+        );
+        let tree = LsmTree::from(state)
+            .apply(&ManifestEdit::RenameCollection {
+                id: 11,
+                new_name: "renamed".into(),
+                renamed_at: 6,
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 11,
+                index_id: 2,
+                definition,
+                options: IndexOptions::default(),
+                created_at: 7,
+            })
+            .apply(&ManifestEdit::DropIndex {
+                collection_id: 11,
+                index_id: 2,
+                dropped_at: 8,
+            })
+            .apply(&ManifestEdit::CreateCollection {
+                name: "old".into(),
+                id: 12,
+                created_at: 9,
+                options: CollectionOptions::default(),
+            });
+        let version = tree.catalog().get_collection_by_id(&11).unwrap().version;
+        let edit = ManifestEdit::Compaction {
+            output_level: 1,
+            removed_sstables: vec![],
+            added_sstables: vec![],
+            removed_drops: vec![],
+            added_drops: vec![],
+        };
+        let compacted = tree.apply(&edit);
+        assert!(compacted.catalog().get_collection_by_id(&10).is_none());
+        assert_eq!(
+            compacted
+                .catalog()
+                .get_collection_by_name("old")
+                .unwrap()
+                .id,
+            12
+        );
+        let live = compacted
+            .catalog()
+            .get_collection_by_name("renamed")
+            .unwrap();
+        assert_eq!(live.version, version);
+        assert!(live.get_index_by_id(1).is_none());
+        assert!(live.get_index_by_id(2).unwrap().is_dropped());
+        assert_eq!(
+            compacted
+                .manifest
+                .pending_catalog_sequences()
+                .collect::<Vec<_>>(),
+            vec![6, 7, 8, 9]
+        );
+        assert_eq!(compacted.catalog(), compacted.manifest.visible_catalog());
+        assert!(tree.catalog().get_collection_by_id(&10).is_some());
+
+        let flushed = compacted.apply(&ManifestEdit::Flush {
+            oldest_log_number: 1,
+            sst: Arc::new(SSTableMetadata::new(2, 0, &[1], &[2], 6, 9, 1)),
+            count_stats: CountStats::default(),
+        });
+        assert!(!flushed.manifest.has_pending_catalog_edits());
+        assert_eq!(flushed.catalog(), compacted.catalog());
     }
 }

@@ -2,8 +2,9 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
 use crate::storage::count_stats::{CountStats, CountStatsKey};
-use crate::storage::lsm_version::{DropMetadata, LsmVersion, SSTableMetadata};
+use crate::storage::lsm_version::{DropKind, DropMetadata, LsmVersion, SSTableMetadata};
 use crate::util::interval::Interval;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::io::Result;
 use std::sync::Arc;
@@ -241,18 +242,36 @@ impl ManifestState {
                 added_sstables,
                 removed_drops,
                 added_drops,
-            } => ManifestState {
-                lsm: Arc::new(self.lsm.with_compaction(
+            } => {
+                let lsm = Arc::new(self.lsm.with_compaction(
                     *output_level,
                     removed_sstables,
                     added_sstables,
                     removed_drops,
                     added_drops,
-                )),
-                catalog: self.catalog.clone(),
-                count_stats: self.count_stats.clone(),
-                pending_catalog_edits: self.pending_catalog_edits.clone(),
-            },
+                ));
+                let mut pending_collections = BTreeSet::new();
+                let mut pending_indexes = BTreeSet::new();
+                for drop in lsm.sst_levels.drops() {
+                    pending_collections.insert(drop.collection);
+                    if let DropKind::Index(index) = drop.kind {
+                        pending_indexes.insert((drop.collection, index));
+                    }
+                }
+                // Only committed drops have introduced cleanup markers. Pending
+                // catalog edits must be overlaid after pruning the durable catalog.
+                let catalog = self
+                    .catalog
+                    .reclaim_dropped_if_needed(&pending_collections, &pending_indexes)
+                    .map(Arc::new)
+                    .unwrap_or_else(|| self.catalog.clone());
+                ManifestState {
+                    lsm,
+                    catalog,
+                    count_stats: self.count_stats.clone(),
+                    pending_catalog_edits: self.pending_catalog_edits.clone(),
+                }
+            }
             ManifestEdit::DiscardPendingCatalogEditsAfter { sequence } => {
                 self.discard_pending_catalog_edits_after(*sequence)
             }
@@ -1386,6 +1405,11 @@ mod tests {
 
         for added_drops in [vec![], vec![right.clone()], vec![left, right]] {
             let mut state = ManifestState::new(1, 2, 4);
+            state.catalog = Arc::new(
+                Catalog::new()
+                    .add_collection("docs", 10, 1)
+                    .drop_collection(10, 50),
+            );
             let lsm = Arc::get_mut(&mut state.lsm).unwrap();
             lsm.sst_levels = Arc::new(lsm.sst_levels.add(
                 0,
@@ -1404,6 +1428,10 @@ mod tests {
                 ManifestEdit::read_from(&ByteReader::new(bytes), MANIFEST_FORMAT_VERSION).unwrap();
             let next = state.apply(&replayed);
             assert_eq!(next, state.apply(&edit));
+            assert_eq!(
+                next.catalog.get_collection_by_id(&10).is_some(),
+                !added_drops.is_empty()
+            );
             assert_eq!(
                 next.lsm.sst_levels.level(0).unwrap().drops(),
                 &[unrelated.clone()]
@@ -1454,6 +1482,96 @@ mod tests {
         });
         assert!(next.lsm.sst_levels.level(0).unwrap().drops().is_empty());
         assert_eq!(next.lsm.sst_levels.level(1).unwrap().drops(), added_drops);
+    }
+
+    #[test]
+    fn test_reclaim_collection_waits_for_index_drop_on_another_level() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let mut state = ManifestState::new(1, 3, 4);
+        state.catalog = Arc::new(
+            Catalog::new()
+                .add_collection("docs", 10, 1)
+                .add_index_to_collection(10, 1, &definition, &IndexOptions::default(), 2)
+                .drop_index(10, 1, 4)
+                .drop_collection(10, 5),
+        );
+        let collection_drop = DropMetadata::new_collection_drop(10, 5);
+        let index_drop = DropMetadata::new_index_drop(10, 1, 4);
+        let index_key = encode_record_key(10, 1, &Bson::Int32(1).try_into_key().unwrap());
+        let index_sst = Arc::new(SSTableMetadata::new(
+            2, 3, &index_key, &index_key, 3, 3, 100,
+        ));
+        let lsm = Arc::get_mut(&mut state.lsm).unwrap();
+        // Normalizing the overlapping drops splits the collection marker around
+        // the earlier index drop. Only the index range still contains data in L3.
+        lsm.sst_levels = Arc::new(
+            lsm.sst_levels
+                .add(0, vec![], vec![collection_drop, index_drop.clone()])
+                .add(3, vec![index_sst.clone()], vec![]),
+        );
+        let drops = state.lsm.sst_levels.level(0).unwrap().drops().to_vec();
+        assert_eq!(drops.len(), 3);
+        let collection_fragments: Vec<_> = drops
+            .iter()
+            .filter(|drop| drop.kind == DropKind::Collection)
+            .collect();
+        assert_eq!(collection_fragments.len(), 2);
+        assert!(
+            collection_fragments
+                .iter()
+                .all(|drop| { drop.key_range.intersection(&index_drop.key_range).is_none() })
+        );
+
+        // L0 -> L1 retires the collection fragments, but carries the index marker
+        // because its data remains below the output level.
+        let first = state.apply(&ManifestEdit::Compaction {
+            output_level: 1,
+            removed_sstables: vec![],
+            added_sstables: vec![],
+            removed_drops: drops,
+            added_drops: vec![index_drop.clone()],
+        });
+        assert!(Arc::ptr_eq(&first.catalog, &state.catalog));
+        assert!(
+            first
+                .catalog
+                .get_collection_by_id(&10)
+                .unwrap()
+                .get_index_by_id(1)
+                .is_some()
+        );
+        // The next compaction also has to retain the index marker: L3 has not
+        // been processed yet, so reaching L2 is not sufficient for reclamation.
+        let second = first.apply(&ManifestEdit::Compaction {
+            output_level: 2,
+            removed_sstables: vec![],
+            added_sstables: vec![],
+            removed_drops: vec![index_drop.clone()],
+            added_drops: vec![index_drop.clone()],
+        });
+        assert!(Arc::ptr_eq(&second.catalog, &state.catalog));
+        assert_eq!(
+            second.lsm.sst_levels.level(2).unwrap().drops(),
+            &[index_drop.clone()]
+        );
+        assert_eq!(
+            second.lsm.sst_levels.level(3).unwrap().sstables(),
+            &[index_sst.clone()]
+        );
+
+        // L2 -> L3 removes the remaining index data and retires the final marker.
+        let edit = ManifestEdit::Compaction {
+            output_level: 3,
+            removed_sstables: vec![index_sst],
+            added_sstables: vec![],
+            removed_drops: vec![index_drop],
+            added_drops: vec![],
+        };
+        let next = second.apply(&edit);
+        assert!(next.lsm.sst_levels.drops().next().is_none());
+        assert!(next.lsm.sst_levels.level(3).unwrap().sstables().is_empty());
+        assert!(next.catalog.get_collection_by_id(&10).is_none());
+        assert_eq!(next.catalog.next_collection_id, 11);
     }
 
     #[test]

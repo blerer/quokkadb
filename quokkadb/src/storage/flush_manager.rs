@@ -7,6 +7,8 @@ use crate::storage::lsm_version::SSTableMetadata;
 use crate::storage::memtable::Memtable;
 use crate::storage::sstable::sstable_cache::SSTableCache;
 use crate::storage::storage_engine::SSTableOperation;
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{SyncPoint, before_sync};
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -19,8 +21,6 @@ use std::{
     time::Duration,
 };
 use tracing::{Span, trace_span};
-#[cfg(test)]
-use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 /// Represents a task to be handled by the `FlushManager`.
 ///

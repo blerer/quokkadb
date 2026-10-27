@@ -10,13 +10,13 @@ use crate::storage::sstable::sstable_properties::{SSTableProperties, SSTableProp
 use crate::storage::sstable::{
     BlockHandle, MAGIC_NUMBER, SSTABLE_CURRENT_VERSION, SSTABLE_FOOTER_LENGTH,
 };
+#[cfg(test)]
+use crate::storage::test_utils::fs_sync::{SyncPoint, before_sync};
 use crate::util::bloom_filter::{BloomFilter, BloomFilterBuilder};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(test)]
-use crate::storage::test_utils::fs_sync::{before_sync, SyncPoint};
 
 /// A builder for creating Sorted String Tables (SSTables).
 ///

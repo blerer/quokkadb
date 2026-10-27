@@ -222,6 +222,11 @@ pub struct Levels {
 }
 
 impl Levels {
+    /// Borrows every outstanding drop fragment across all levels.
+    pub fn drops(&self) -> impl Iterator<Item = &Arc<DropMetadata>> {
+        self.levels.iter().flat_map(|level| level.drops())
+    }
+
     pub fn new(max_levels: usize) -> Self {
         let levels: Vec<_> = (0..max_levels)
             .map(|i| Arc::new(Level::empty(i as u8)))

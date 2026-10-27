@@ -54,7 +54,7 @@ fn collection_version_preconditions(
     preconditions
 }
 
-fn put_op_at(collection: u32, index: u32, user_key_val: i32, version: u32) -> Operation {
+fn put_op_with_index(collection: u32, index: u32, user_key_val: i32, version: u32) -> Operation {
     Operation::new_put(
         collection,
         index,
@@ -63,14 +63,14 @@ fn put_op_at(collection: u32, index: u32, user_key_val: i32, version: u32) -> Op
     )
 }
 
-fn put_rec_at(
+fn put_rec_with_index(
     collection: u32,
     index: u32,
     user_key_val: i32,
     version: u32,
     sequence_num: u64,
 ) -> (Vec<u8>, Vec<u8>) {
-    let op = put_op_at(collection, index, user_key_val, version);
+    let op = put_op_with_index(collection, index, user_key_val, version);
     (op.internal_key(sequence_num), op.value().to_vec())
 }
 
@@ -1276,14 +1276,14 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
 
     engine
         .write(
-            write_batch(vec![put_op_at(collection_id, index_id, 1, 1)]),
+            write_batch(vec![put_op_with_index(collection_id, index_id, 1, 1)]),
             false,
         )
         .unwrap();
     engine.flush().unwrap();
 
     let snapshot = engine.acquire_snapshot();
-    let expected_before = put_rec_at(collection_id, index_id, 1, 1, 3);
+    let expected_before = put_rec_with_index(collection_id, index_id, 1, 1, 3);
     assert_eq!(
         engine
             .read_at_snapshot(collection_id, index_id, &user_key(1), &snapshot)
@@ -1293,7 +1293,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
 
     engine
         .write(
-            write_batch(vec![put_op_at(collection_id, index_id, 2, 1)]),
+            write_batch(vec![put_op_with_index(collection_id, index_id, 2, 1)]),
             false,
         )
         .unwrap();
@@ -1319,7 +1319,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
         .id;
     engine
         .write(
-            write_batch(vec![put_op_at(collection_id, survivor_index, 1, 1)]),
+            write_batch(vec![put_op_with_index(collection_id, survivor_index, 1, 1)]),
             false,
         )
         .unwrap();
@@ -1338,7 +1338,7 @@ fn test_snapshot_read_survives_compaction_after_index_drop() {
         engine
             .read_at_snapshot(collection_id, index_id, &user_key(1), &snapshot)
             .unwrap(),
-        Some(put_rec_at(collection_id, index_id, 1, 1, 3))
+        Some(put_rec_with_index(collection_id, index_id, 1, 1, 3))
     );
 }
 
@@ -4796,6 +4796,7 @@ fn test_compaction_drop_retirement_publication_and_restart() {
             .unwrap();
         engine.flush().unwrap();
         engine.drop_collection("dropped").unwrap();
+        let recreated = engine.create_collection("dropped", true).unwrap().id;
         engine
             .write(write_batch(vec![put_op(survivor, 1, 1)]), true)
             .unwrap();
@@ -4827,9 +4828,31 @@ fn test_compaction_drop_retirement_publication_and_restart() {
                 original_drops
             );
             assert_eq!(persisted.levels().live_sst_numbers(), inputs);
+            assert!(
+                persisted
+                    .catalog()
+                    .get_collection_by_id(&collection)
+                    .is_some()
+            );
         } else {
             result.unwrap();
             let persisted = read_lsm_tree_from_disk(&dir);
+            assert!(
+                persisted
+                    .catalog()
+                    .get_collection_by_id(&collection)
+                    .is_none()
+            );
+            assert!(engine.catalog().get_collection_by_id(&collection).is_none());
+            assert_eq!(
+                engine
+                    .catalog()
+                    .get_collection_by_name("dropped")
+                    .unwrap()
+                    .id,
+                recreated
+            );
+            assert_eq!(engine.catalog().next_collection_id, recreated + 1);
             assert!(
                 persisted
                     .manifest
@@ -4855,6 +4878,24 @@ fn test_compaction_drop_retirement_publication_and_restart() {
         reopened.disable_auto_compaction();
         // Recovery may already have scheduled the pending cleanup on failed publication.
         if failure.is_none() {
+            assert!(
+                reopened
+                    .catalog()
+                    .get_collection_by_id(&collection)
+                    .is_none()
+            );
+            assert_eq!(
+                reopened
+                    .catalog()
+                    .get_collection_by_name("dropped")
+                    .unwrap()
+                    .id,
+                recreated
+            );
+            assert!(matches!(
+                reopened.drop_index(collection, 1),
+                Err(StorageError::CollectionNotFound { .. })
+            ));
             assert!(
                 reopened
                     .lsm_tree
@@ -4917,6 +4958,81 @@ fn test_compaction_sst_sync_failure_preserves_inputs() {
             assert!(dir.path().join(DbFile::new_sst(number).filename()).exists());
         }
     }
+}
+
+#[test]
+fn test_compaction_reclaims_index_schema_and_preserves_recreated_index_after_restart() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight().with_level0_file_num_compaction_trigger(2);
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+    engine.disable_auto_compaction();
+    let collection = engine.create_collection("docs", true).unwrap().id;
+    let index_options = IndexOptions {
+        name: Some("by_name".into()),
+    };
+    let old = engine
+        .create_index(collection, simple_index_definition(), index_options.clone())
+        .unwrap()
+        .id;
+    engine
+        .write(
+            write_batch(vec![put_op_with_index(collection, old, 1, 1)]),
+            true,
+        )
+        .unwrap();
+    engine.flush().unwrap();
+    engine.drop_index(collection, old).unwrap();
+    let replacement = engine
+        .create_index(collection, simple_index_definition(), index_options)
+        .unwrap()
+        .id;
+    engine
+        .mark_index_queryable(collection, replacement)
+        .unwrap();
+    engine
+        .write(write_batch(vec![
+            put_op(collection, 1, 1),
+            put_op_with_index(collection, replacement, 1, 1)
+        ]), true)
+        .unwrap();
+    engine.flush().unwrap();
+    let before = engine.catalog().get_collection_by_id(&collection).unwrap();
+    let snapshot = engine.acquire_snapshot();
+    engine.compact().unwrap();
+    let after = engine.catalog().get_collection_by_id(&collection).unwrap();
+    assert!(after.get_index_by_id(old).is_none());
+    assert_eq!(after.get_index_by_name("by_name").unwrap().id, replacement);
+    assert_eq!(after.version, before.version);
+    assert_eq!(after.next_index_id, before.next_index_id);
+    assert!(before.get_index_by_id(old).is_some());
+    // Physical cleanup must not invalidate a writer's unchanged logical schema.
+    engine
+        .write(
+            write_batch_with_preconditions(
+                vec![put_op(collection, 2, 1)],
+                collection_version_preconditions(snapshot, collection, before.version),
+            ),
+            true,
+        )
+        .unwrap();
+    assert!(matches!(
+        engine.drop_index(collection, old),
+        Err(StorageError::IndexNotFound { .. })
+    ));
+    engine.shutdown().unwrap();
+    drop(engine);
+    let reopened = new_engine(&mut MetricRegistry::default(), options, dir.path());
+    let metadata = reopened
+        .catalog()
+        .get_collection_by_id(&collection)
+        .unwrap();
+    assert!(metadata.get_index_by_id(old).is_none());
+    assert_eq!(
+        metadata.get_index_by_name("by_name").unwrap().id,
+        replacement
+    );
+    assert_eq!(metadata.next_index_id, before.next_index_id);
+    reopened.shutdown().unwrap();
 }
 
 #[test]

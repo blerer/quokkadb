@@ -441,6 +441,7 @@ fn new_put_state_operation(key: IndexBuildKey, state: &IndexBuildState) -> Opera
 mod tests {
     use super::*;
     use crate::obs::metrics::MetricRegistry;
+    use crate::obs::metrics::names::wal;
     use crate::options::options::{Options, WalDurability};
     use crate::options::storage_quantity::StorageQuantity;
     use crate::storage::catalog::{
@@ -455,7 +456,6 @@ mod tests {
     use bson::{Bson, doc};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
-    use crate::obs::metrics::names::wal;
 
     fn insert_document(storage_engine: &Arc<StorageEngine>, collection: u32, id: i32, name: &str) {
         let operation = Operation::new_put(
@@ -670,10 +670,7 @@ mod tests {
 
         // There are no backfill writes. Schema publication is independently durable,
         // and checkpoint deletion must still sync its own WAL record.
-        assert_eq!(
-            metrics.counter_value(wal::SYNCS),
-            syncs_before_build + 1
-        );
+        assert_eq!(metrics.counter_value(wal::SYNCS), syncs_before_build + 1);
         assert_index_queryable(&storage_engine, collection_id, key.index_id);
         // Reopen without shutdown or an explicit flush supplying durability.
         drop(storage_engine);

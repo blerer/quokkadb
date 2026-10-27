@@ -3,7 +3,7 @@ use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::storage::FIRST_USER_COLLECTION_ID;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::io::Result;
 use std::sync::Arc;
@@ -64,6 +64,56 @@ impl Serializable for Catalog {
 }
 
 impl Catalog {
+    /// Removes committed dropped metadata whose data cleanup has completed.
+    /// Name mappings and schema versions already reflect the logical drops.
+    pub(crate) fn reclaim_dropped_if_needed(
+        &self,
+        pending_collections: &BTreeSet<u32>,
+        pending_indexes: &BTreeSet<(u32, u32)>,
+    ) -> Option<Self> {
+        let mut collections = None;
+        for (id, collection) in &self.collections {
+            if collection.dropped_at.is_some() {
+                if !pending_collections.contains(id) {
+                    collections
+                        .get_or_insert_with(|| self.collections.clone())
+                        .remove(id);
+                }
+                // Preserve nested metadata until the entire collection is reclaimed.
+                continue;
+            }
+            let mut indexes = None;
+            for (index_id, index) in &collection.indexes {
+                if index.dropped_at.is_some() && !pending_indexes.contains(&(*id, *index_id)) {
+                    indexes
+                        .get_or_insert_with(|| collection.indexes.clone())
+                        .remove(index_id);
+                }
+            }
+            if let Some(indexes) = indexes {
+                let replacement = CollectionMetadata {
+                    next_index_id: collection.next_index_id,
+                    id: collection.id,
+                    name: collection.name.clone(),
+                    created_at: collection.created_at,
+                    version: collection.version,
+                    dropped_at: collection.dropped_at,
+                    indexes,
+                    index_id_by_name: collection.index_id_by_name.clone(),
+                    options: collection.options.clone(),
+                };
+                collections
+                    .get_or_insert_with(|| self.collections.clone())
+                    .insert(*id, Arc::new(replacement));
+            }
+        }
+        collections.map(|collections| Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+            id_by_name: self.id_by_name.clone(),
+        })
+    }
+
     pub fn new() -> Self {
         Catalog {
             next_collection_id: FIRST_USER_COLLECTION_ID,
@@ -1342,6 +1392,52 @@ mod tests {
                 OrderedIndexField::asc("name"),
                 OrderedIndexField::desc("age"),
             ])
+        );
+    }
+
+    #[test]
+    fn test_reclaim_dropped_preserves_names_versions_ids_and_sharing() {
+        let definition = IndexDefinition::Regular(vec![OrderedIndexField::asc("name")]);
+        let catalog = Catalog::new()
+            .add_collection("old", 10, 1)
+            .drop_collection(10, 2)
+            .add_collection("old", 11, 3)
+            .add_collection("live", 12, 4)
+            .add_index_to_collection(12, 1, &definition, &IndexOptions::default(), 5)
+            .drop_index(12, 1, 6)
+            .add_index_to_collection(12, 2, &definition, &IndexOptions::default(), 7);
+        let pending_collections = BTreeSet::from([10, 12]);
+        let pending_indexes = BTreeSet::from([(12, 1)]);
+        assert!(
+            catalog
+                .reclaim_dropped_if_needed(&pending_collections, &pending_indexes)
+                .is_none()
+        );
+        let before = catalog.get_collection_by_id(&12).unwrap();
+        let reclaimed = catalog
+            .reclaim_dropped_if_needed(&BTreeSet::new(), &BTreeSet::new())
+            .unwrap();
+        assert!(reclaimed.get_collection_by_id(&10).is_none());
+        assert_eq!(reclaimed.get_collection_by_name("old").unwrap().id, 11);
+        assert!(Arc::ptr_eq(
+            &catalog.get_collection_by_id(&11).unwrap(),
+            &reclaimed.get_collection_by_id(&11).unwrap()
+        ));
+        let after = reclaimed.get_collection_by_id(&12).unwrap();
+        assert!(after.get_index_by_id(1).is_none());
+        assert_eq!(after.get_index_by_name("name_1").unwrap().id, 2);
+        assert!(Arc::ptr_eq(
+            &before.get_index_by_id(2).unwrap(),
+            &after.get_index_by_id(2).unwrap()
+        ));
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.next_index_id, before.next_index_id);
+        assert_eq!(reclaimed.next_collection_id, catalog.next_collection_id);
+        assert!(before.get_index_by_id(1).is_some());
+        assert!(
+            reclaimed
+                .reclaim_dropped_if_needed(&BTreeSet::new(), &BTreeSet::new())
+                .is_none()
         );
     }
 
