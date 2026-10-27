@@ -123,6 +123,20 @@ fn main() -> Result<()> {
 
 The documentation covers the document and typed APIs, queries, indexes, configuration, database internals, and current limitations.
 
+### Platform Support
+
+QuokkaDB is designed to be portable across desktop, server, and mobile platforms.
+
+| Platform | Status |
+|---|---|
+| Linux (x86-64) | Tested |
+| Windows (x86-64) | Tested |
+| macOS (ARM64) | Tested |
+| Android (ARM64) | Experimental |
+| iOS (ARM64) | Experimental |
+
+Platform compatibility is continuously validated through automated CI tests. Mobile support is still experimental and has not yet undergone extensive device-level reliability testing.
+
 ## Contributing
 
 QuokkaDB is still evolving, and real-world feedback is especially valuable.
