@@ -4,6 +4,7 @@ use crate::query::execution::{filters, indexes::Index};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::Direction;
+use crate::storage::ScanCachePolicy;
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};
 use crate::storage::operation::OperationType;
 use crate::storage::snapshot_manager::Snapshot;
@@ -328,7 +329,14 @@ impl ReadExecutor {
 
         let iter = self
             .storage_engine
-            .range_scan_at_snapshot(*collection, 0, &range, &snapshot, direction.clone(), true)?
+            .range_scan_at_snapshot(
+                *collection,
+                0,
+                &range,
+                &snapshot,
+                direction.clone(),
+                ScanCachePolicy::Normal,
+            )?
             .filter_map(move |res| {
                 let doc = match res {
                     Ok((k, v)) => {
@@ -430,7 +438,7 @@ impl ReadExecutor {
                 &bound_range,
                 &snapshot,
                 direction.clone(),
-                true,
+                ScanCachePolicy::Normal,
             )?
             .filter_map(move |res| {
                 let primary_key = match res {

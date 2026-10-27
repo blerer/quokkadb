@@ -40,3 +40,13 @@ pub enum Direction {
     Forward,
     Reverse,
 }
+
+/// Cache behavior for scan data blocks. Metadata remains cached in either mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ScanCachePolicy {
+    #[default]
+    Normal,
+    /// Reuse cached blocks without admitting misses. On Linux, use a separate
+    /// file handle with advisory NOREUSE behavior (effective since Linux 6.3).
+    NoReuse,
+}

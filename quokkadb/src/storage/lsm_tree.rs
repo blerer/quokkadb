@@ -1,3 +1,4 @@
+use crate::storage::ScanCachePolicy;
 use crate::storage::catalog::Catalog;
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::files::DbFile;
@@ -238,7 +239,7 @@ impl LsmTree {
         user_key_range: &R,
         snapshot: u64,
         direction: Direction,
-        fill_cache: bool,
+        cache_policy: ScanCachePolicy,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>>
     where
         R: RangeBounds<Vec<u8>>,
@@ -312,7 +313,7 @@ impl LsmTree {
             let iter = sst_reader.range_scan(
                 internal_key_range_for_scan.clone(),
                 direction.clone(),
-                fill_cache,
+                cache_policy,
             )?;
             iterators.push(match direction {
                 Direction::Forward => Box::new(ForwardIterator::new(iter, snapshot)),

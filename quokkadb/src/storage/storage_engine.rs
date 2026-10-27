@@ -2,6 +2,7 @@ use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::obs::metrics::{self, DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
 use crate::storage::Direction;
+use crate::storage::ScanCachePolicy;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
 use crate::storage::catalog::{
@@ -1223,8 +1224,8 @@ impl StorageEngine {
     }
 
     /// Scans a key range using a real snapshot lease.
-    /// When `fill_cache` is false, data-block misses are not cached; metadata and
-    /// existing cached blocks are still reused.
+    /// `NoReuse` avoids admitting data-block misses and applies scan-specific
+    /// Linux page-cache advice; metadata and existing cached blocks are reused.
     pub fn range_scan_at_snapshot<R>(
         &self,
         collection: u32,
@@ -1232,7 +1233,7 @@ impl StorageEngine {
         user_key_range: &R,
         snapshot: &Snapshot,
         direction: Direction,
-        fill_cache: bool,
+        cache_policy: ScanCachePolicy,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>>
     where
         R: RangeBounds<Vec<u8>>,
@@ -1248,7 +1249,7 @@ impl StorageEngine {
             user_key_range,
             snapshot.sequence(),
             direction,
-            fill_cache,
+            cache_policy,
         )?;
 
         let static_iterator = unsafe {

@@ -3,6 +3,7 @@ use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
 use crate::query::execution::indexes::{Indexes, OperationsCountAndSize};
 use crate::storage::Direction;
+use crate::storage::ScanCachePolicy;
 use crate::storage::count_stats::{CountStats, CountStatsBuilder};
 use crate::storage::index_build_state::{IndexBuildKey, IndexBuildState};
 use crate::storage::internal_key::{extract_operation_type, extract_user_key};
@@ -82,7 +83,7 @@ impl IndexBuilder {
             &(..),
             &snapshot,
             Direction::Forward,
-            true,
+            ScanCachePolicy::Normal,
         )? {
             let (internal_key, _) = entry?;
             if extract_operation_type(&internal_key) == OperationType::Delete {
@@ -185,7 +186,7 @@ impl IndexBuilder {
             &user_key_range,
             snapshot,
             Direction::Forward,
-            false,
+            ScanCachePolicy::NoReuse,
         )?;
 
         loop {
@@ -526,7 +527,7 @@ mod tests {
                 &(..),
                 &snapshot,
                 Direction::Forward,
-                true,
+                ScanCachePolicy::Normal,
             )
             .unwrap()
             .count()

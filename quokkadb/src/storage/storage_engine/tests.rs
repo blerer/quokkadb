@@ -4,6 +4,7 @@ use crate::options::options::WalDurability;
 use crate::options::storage_quantity::StorageUnit::Mebibytes;
 use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
 use crate::storage::FIRST_USER_COLLECTION_ID;
+use crate::storage::ScanCachePolicy;
 use crate::storage::catalog::{
     IndexDefinition, IndexDirection, IndexOptions, IndexPath, OrderedIndexField,
 };
@@ -378,7 +379,14 @@ fn test_range_scan() {
     let direction = Direction::Forward;
     let snapshot = engine.acquire_snapshot();
     let mut iter = engine
-        .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
     assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
@@ -388,7 +396,14 @@ fn test_range_scan() {
     assert!(iter.next().is_none());
 
     let mut iter = engine
-        .range_scan_at_snapshot(col, idx, &(..), &snapshot1, Direction::Forward, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            &(..),
+            &snapshot1,
+            Direction::Forward,
+            ScanCachePolicy::Normal,
+        )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
     assert_next_entry_eq(&mut iter, &put_rec(col, 2, 1, 3));
@@ -416,7 +431,14 @@ fn test_range_scan() {
     let direction = Direction::Forward;
     let snapshot = engine.acquire_snapshot();
     let mut iter = engine
-        .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 1, 1, 2));
     assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
@@ -427,7 +449,14 @@ fn test_range_scan() {
     assert!(iter.next().is_none());
 
     let mut iter = engine
-        .range_scan_at_snapshot(col, idx, &(..), &snapshot2, Direction::Reverse, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            &(..),
+            &snapshot2,
+            Direction::Reverse,
+            ScanCachePolicy::Normal,
+        )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 5, 1, 6));
     assert_next_entry_eq(&mut iter, &delete_rec(col, 4, 8));
@@ -454,7 +483,14 @@ fn test_range_scan() {
     let direction = Direction::Forward;
     let snapshot = engine.acquire_snapshot();
     let mut iter = engine
-        .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 1, 2, 12));
     assert_next_entry_eq(&mut iter, &put_rec(col, 2, 2, 7));
@@ -472,7 +508,7 @@ fn test_range_scan() {
             &(user_key(2)..=user_key(6)),
             &snapshot3,
             Direction::Reverse,
-            true,
+            ScanCachePolicy::Normal,
         )
         .unwrap();
     assert_next_entry_eq(&mut iter, &put_rec(col, 6, 1, 9));
@@ -577,7 +613,14 @@ fn test_read_and_scan_with_immutable_memtables() {
     let user_key_range = &(..);
     let direction = Direction::Forward;
     let results: Vec<_> = engine
-        .range_scan_at_snapshot(col, idx, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col,
+            idx,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -1157,11 +1200,29 @@ fn test_snapshot_range_scan_survives_compaction() {
     ];
 
     let actual_before: Vec<_> = engine
-        .range_scan_at_snapshot(col, 0, &(..), &snapshot, Direction::Forward, true)
+        .range_scan_at_snapshot(
+            col,
+            0,
+            &(..),
+            &snapshot,
+            Direction::Forward,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
     assert_eq!(actual_before, expected);
+
+    let bulk_scan = engine
+        .range_scan_at_snapshot(
+            col,
+            0,
+            &(..),
+            &snapshot,
+            Direction::Forward,
+            ScanCachePolicy::NoReuse,
+        )
+        .unwrap();
 
     engine
         .write(
@@ -1172,7 +1233,14 @@ fn test_snapshot_range_scan_survives_compaction() {
     engine.flush().unwrap();
 
     let actual_after_second_flush: Vec<_> = engine
-        .range_scan_at_snapshot(col, 0, &(..), &snapshot, Direction::Forward, true)
+        .range_scan_at_snapshot(
+            col,
+            0,
+            &(..),
+            &snapshot,
+            Direction::Forward,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -1181,11 +1249,19 @@ fn test_snapshot_range_scan_survives_compaction() {
     engine.compact().unwrap();
 
     let actual_after_compaction: Vec<_> = engine
-        .range_scan_at_snapshot(col, 0, &(..), &snapshot, Direction::Forward, true)
+        .range_scan_at_snapshot(
+            col,
+            0,
+            &(..),
+            &snapshot,
+            Direction::Forward,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
     assert_eq!(actual_after_compaction, expected);
+    assert_eq!(bulk_scan.collect::<Result<Vec<_>>>().unwrap(), expected);
 }
 
 #[test]
@@ -3638,7 +3714,14 @@ fn test_drop_and_recreate_collection_data_isolation() {
     let direction = Direction::Forward;
     let snapshot = engine.acquire_snapshot();
     let results: Vec<_> = engine
-        .range_scan_at_snapshot(col_id_2, 0, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col_id_2,
+            0,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -3789,7 +3872,14 @@ fn test_drop_and_recreate_collection_with_flush() {
     let direction = Direction::Forward;
     let snapshot = engine.acquire_snapshot();
     let results: Vec<_> = engine
-        .range_scan_at_snapshot(col_id_2, 0, user_key_range, &snapshot, direction, true)
+        .range_scan_at_snapshot(
+            col_id_2,
+            0,
+            user_key_range,
+            &snapshot,
+            direction,
+            ScanCachePolicy::Normal,
+        )
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -3886,7 +3976,14 @@ fn test_drop_and_recreate_collection_persistence() {
         let user_key_range = &(..);
         let direction = Direction::Forward;
         let results: Vec<_> = engine
-            .range_scan_at_snapshot(col_id_2, 0, user_key_range, &snapshot, direction, true)
+            .range_scan_at_snapshot(
+                col_id_2,
+                0,
+                user_key_range,
+                &snapshot,
+                direction,
+                ScanCachePolicy::Normal,
+            )
             .unwrap()
             .map(Result::unwrap)
             .collect();

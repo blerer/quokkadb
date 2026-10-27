@@ -473,7 +473,6 @@ mod tests {
     use crate::obs::metrics::MetricRegistry;
     use crate::options::options::Options;
     use crate::options::storage_quantity::{StorageQuantity, StorageUnit};
-    use crate::storage::Direction;
     use crate::storage::files::DbFile;
     use crate::storage::internal_key::InternalKeyRange;
     use crate::storage::lsm_version::{DropMetadata, SSTableMetadata};
@@ -481,6 +480,7 @@ mod tests {
     use crate::storage::sstable::sstable_writer::SSTableWriter;
     use crate::storage::test_utils::fs_sync::{SyncHook, SyncPoint};
     use crate::storage::test_utils::{delete_rec, put_rec, record_key};
+    use crate::storage::{Direction, ScanCachePolicy};
     use crate::util::interval::Interval;
     use std::ops::{Bound, RangeBounds};
     use std::sync::Arc;
@@ -521,7 +521,11 @@ mod tests {
             .get(&dir.join(DbFile::new_sst(sst.number).filename()))
             .unwrap();
         reader
-            .range_scan(InternalKeyRange::all(), Direction::Forward, true)
+            .range_scan(
+                InternalKeyRange::all(),
+                Direction::Forward,
+                ScanCachePolicy::Normal,
+            )
             .unwrap()
             .collect::<Result<Vec<_>>>()
             .unwrap()

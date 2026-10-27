@@ -4,6 +4,7 @@ use crate::io::checksum::{ChecksumStrategy, Crc32ChecksumStrategy};
 use crate::io::compressor::{Compressor, CompressorType};
 use crate::io::serializable::Serializable;
 use crate::storage::Direction;
+use crate::storage::ScanCachePolicy;
 use crate::storage::files::DbFile;
 use crate::storage::internal_key::{InternalKeyBound, InternalKeyRange};
 use crate::storage::internal_key::{
@@ -302,7 +303,7 @@ impl SSTableReader {
         &self,
         range: Rc<InternalKeyRange>,
         direction: Direction,
-        fill_cache: bool,
+        cache_policy: ScanCachePolicy,
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>>> {
         let _span = trace_span!(
             "sstable_reader.range_scan",
@@ -313,6 +314,8 @@ impl SSTableReader {
         .entered();
         let index_block = self.get_block(&self.index_handle)?;
         let index_reader = BlockReader::new(index_block, IndexEntryReader)?;
+        let block_loader = self.block_loader.for_scan(cache_policy)?;
+        let fill_cache = cache_policy == ScanCachePolicy::Normal;
 
         let mut sstable_iter_base: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>> =
             match direction {
@@ -321,7 +324,7 @@ impl SSTableReader {
 
                     let data_iter = match index_iter.next() {
                         Some(Ok((_index_key, handle))) => {
-                            let data_block = self.block_loader.load_block(&handle, fill_cache)?;
+                            let data_block = block_loader.load_block(&handle, fill_cache)?;
                             let data_reader = BlockReader::new(data_block, DataEntryReader)?;
                             Some(data_reader.scan_forward_from(&range.start_bound())?)
                         }
@@ -330,7 +333,7 @@ impl SSTableReader {
                     };
 
                     Box::new(SSTableRangeScanIterator {
-                        block_loader: self.block_loader.clone(),
+                        block_loader: block_loader.clone(),
                         fill_cache,
                         range: range.clone(),
                         direction: direction.clone(),
@@ -344,7 +347,7 @@ impl SSTableReader {
 
                     let data_iter = match index_iter.next() {
                         Some(Ok((_index_key, handle))) => {
-                            let data_block = self.block_loader.load_block(&handle, fill_cache)?;
+                            let data_block = block_loader.load_block(&handle, fill_cache)?;
                             let data_reader = BlockReader::new(data_block, DataEntryReader)?;
                             Some(data_reader.scan_reverse_from(range.end_bound())?)
                         }
@@ -353,7 +356,7 @@ impl SSTableReader {
                     };
 
                     Box::new(SSTableRangeScanIterator {
-                        block_loader: self.block_loader.clone(),
+                        block_loader: block_loader.clone(),
                         fill_cache,
                         range: range.clone(),
                         direction: direction.clone(),
@@ -472,54 +475,24 @@ impl Iterator for SSTableRangeScanIterator {
     }
 }
 
-/// Hint mode for SharedFile I/O behavior.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FileAccessHint {
-    /// Normal buffered I/O (default OS behavior).
-    #[default]
-    Normal,
-    /// Minimize OS cache pollution: use POSIX_FADV_RANDOM on open,
-    /// and POSIX_FADV_DONTNEED after each read where the platform supports
-    /// those hints. This is a no-op on Apple and Windows platforms.
-    MinimizeCachePollution,
-}
-
 #[derive(Clone, Debug)]
 pub struct SharedFile {
     pub(crate) path: PathBuf,
     file: Arc<RwLock<File>>,
-    hint: FileAccessHint,
 }
 
 impl SharedFile {
     /// Open a file with default (normal) access hints.
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_hint(path, FileAccessHint::Normal)
-    }
-
-    /// Open a file with the specified access hint.
-    ///
-    /// With `FileAccessHint::MinimizeCachePollution`:
-    /// - On Unix: applies `POSIX_FADV_RANDOM` at open time to disable readahead,
-    ///   and `POSIX_FADV_DONTNEED` after each `read_block` to evict pages.
-    /// - On Windows: currently a no-op (behaves like Normal).
-    pub fn open_with_hint(path: &Path, hint: FileAccessHint) -> Result<Self> {
         let file = File::open(path)?;
-
-        #[cfg(all(unix, not(target_vendor = "apple")))]
-        if hint == FileAccessHint::MinimizeCachePollution {
-            Self::fadvise_random(&file)?;
-        }
 
         Ok(SharedFile {
             path: path.to_path_buf(),
             file: Arc::new(RwLock::new(file)),
-            hint,
         })
     }
 
     /// Read a block of data from the cached FD (Opens a new FD if locked on Windows).
-    /// If opened with `MinimizeCachePollution`, advises the OS to drop pages after reading.
     pub fn read_block(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0; size];
 
@@ -527,12 +500,7 @@ impl SharedFile {
         {
             use std::os::unix::fs::FileExt;
             let file = self.file.read().unwrap();
-            file.read_at(&mut buffer, offset)?;
-
-            #[cfg(not(target_vendor = "apple"))]
-            if self.hint == FileAccessHint::MinimizeCachePollution {
-                Self::fadvise_dontneed(&file, offset, size)?;
-            }
+            file.read_exact_at(&mut buffer, offset)?;
         }
 
         #[cfg(windows)]
@@ -547,7 +515,6 @@ impl SharedFile {
                 temp_file.seek(SeekFrom::Start(offset))?;
                 temp_file.read_exact(&mut buffer)?;
             }
-            // Windows: no equivalent DONTNEED hint available via std
         }
 
         Ok(buffer)
@@ -556,31 +523,6 @@ impl SharedFile {
     pub fn len(&self) -> Result<u64> {
         let file = self.file.read().unwrap();
         Ok(file.metadata()?.len())
-    }
-
-    /// Returns the access hint this file was opened with.
-    pub fn hint(&self) -> FileAccessHint {
-        self.hint
-    }
-
-    // -------------------------------------------------------------------------
-    // Unix-specific fadvise helpers (using rustix)
-    // -------------------------------------------------------------------------
-
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    fn fadvise_random(file: &File) -> Result<()> {
-        use rustix::fs::{Advice, fadvise};
-        use std::num::NonZeroU64;
-        fadvise(file, 0, None::<NonZeroU64>, Advice::Random)?;
-        Ok(())
-    }
-
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    fn fadvise_dontneed(file: &File, offset: u64, size: usize) -> Result<()> {
-        use rustix::fs::{Advice, fadvise};
-        use std::num::NonZeroU64;
-        fadvise(file, offset, NonZeroU64::new(size as u64), Advice::DontNeed)?;
-        Ok(())
     }
 }
 
@@ -598,6 +540,35 @@ struct BlockLoader {
 }
 
 impl BlockLoader {
+    /// Isolate Linux scan advice from the cached reader's open file description.
+    fn for_scan(self: &Arc<Self>, policy: ScanCachePolicy) -> Result<Arc<Self>> {
+        #[cfg(target_os = "linux")]
+        if policy == ScanCachePolicy::NoReuse {
+            use rustix::fs::{Advice, fadvise};
+            use std::num::NonZeroU64;
+
+            // Opening again is intentional: dup/try_clone would share advice.
+            let file = SharedFile::open(&self.file.path)?;
+            if let Err(error) = fadvise(
+                &*file.file.read().unwrap(),
+                0,
+                None::<NonZeroU64>,
+                Advice::NoReuse,
+            ) {
+                tracing::warn!(file = %file, %error, "Could not apply scan NOREUSE advice");
+            }
+            return Ok(Arc::new(Self::new(
+                self.block_cache.clone(),
+                file,
+                self.compressor.clone(),
+                self.checksum_strategy.clone(),
+            )));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = policy;
+        Ok(self.clone())
+    }
+
     pub fn new(
         block_cache: Arc<BlockCache>,
         file: SharedFile,
@@ -926,7 +897,7 @@ mod tests {
         }
         writer.finish().unwrap();
 
-        for fill_cache in [false, true] {
+        for cache_policy in [ScanCachePolicy::NoReuse, ScanCachePolicy::Normal] {
             let cache = BlockCache::new(&mut MetricRegistry::new(), &options);
             let reader =
                 SSTableReader::open(cache.clone(), &dir.path().join(sst_file.filename())).unwrap();
@@ -940,18 +911,31 @@ mod tests {
                         Direction::Forward,
                     ),
                     Direction::Forward,
-                    fill_cache,
+                    cache_policy,
                 )
                 .unwrap()
                 .collect::<Result<Vec<_>>>()
                 .unwrap();
 
-            if fill_cache {
+            if cache_policy == ScanCachePolicy::Normal {
                 assert!(cache.entry_count() > 1);
             } else {
                 assert_eq!(cache.entry_count(), 1);
             }
         }
+    }
+
+    #[test]
+    fn shared_file_reports_short_reads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("short-read");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = SharedFile::open(&path).unwrap();
+        assert_eq!(file.read_block(1, 2).unwrap(), b"bc");
+        assert_eq!(
+            file.read_block(1, 3).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
@@ -1161,7 +1145,11 @@ mod tests {
     {
         let internal_key_range = key_range(col, selected_range, snapshot, direction.clone());
         let mut iter = reader
-            .range_scan(internal_key_range.clone(), direction.clone(), true)
+            .range_scan(
+                internal_key_range.clone(),
+                direction.clone(),
+                ScanCachePolicy::Normal,
+            )
             .unwrap();
 
         check_iter(

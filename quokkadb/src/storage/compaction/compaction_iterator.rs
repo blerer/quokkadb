@@ -1,3 +1,4 @@
+use crate::storage::ScanCachePolicy;
 use std::io::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +45,11 @@ impl<'a> CompactionIterator<'a> {
             .map(|sst| {
                 let file_path = db_dir.join(DbFile::new_sst(sst.number).filename());
                 let reader = sst_cache.get(&file_path)?;
-                reader.range_scan(InternalKeyRange::all(), Direction::Forward, false)
+                reader.range_scan(
+                    InternalKeyRange::all(),
+                    Direction::Forward,
+                    ScanCachePolicy::NoReuse,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
 
