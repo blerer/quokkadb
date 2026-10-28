@@ -104,9 +104,9 @@ An index that looks structurally useful is not guaranteed to be chosen. Use metr
 let executor = db.metrics().executor();
 let index_scans = executor.index_scans();
 let collection_scans = executor.collection_scans();
-let sorts = executor.in_memory_sorts()
-    + executor.external_merge_sorts()
-    + executor.top_k_sorts();
+let sorts = executor.external_merge_sorts() + executor.top_k_sorts();
+let spill_operations = executor.external_merge_spills();
+let spill_bytes = executor.external_merge_spill_bytes();
 ```
 
 Compare those values with the filters and sorts your application runs. See [Operations](../operations.md#read-metrics-in-the-application) for the available metrics and how to interpret them.

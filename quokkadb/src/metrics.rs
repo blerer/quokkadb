@@ -527,16 +527,22 @@ impl<'a> ExecutorMetrics<'a> {
             .counter_value(obs_metrics::names::executor::MULTI_POINT_SEARCHES)
     }
 
-    /// Returns the number of executed queries whose physical plans used in-memory sorting.
-    pub fn in_memory_sorts(&self) -> u64 {
-        self.registry
-            .counter_value(obs_metrics::names::executor::IN_MEMORY_SORTS)
-    }
-
     /// Returns the number of executed queries whose physical plans used external merge sort.
     pub fn external_merge_sorts(&self) -> u64 {
         self.registry
             .counter_value(obs_metrics::names::executor::EXTERNAL_MERGE_SORTS)
+    }
+
+    /// Returns the number of external merge sorts that wrote at least one spill run.
+    pub fn external_merge_spills(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::EXTERNAL_MERGE_SPILLS)
+    }
+
+    /// Returns the total BSON bytes written to external merge-sort spill runs.
+    pub fn external_merge_spill_bytes(&self) -> u64 {
+        self.registry
+            .counter_value(obs_metrics::names::executor::EXTERNAL_MERGE_SPILL_BYTES)
     }
 
     /// Returns the number of executed queries whose physical plans used top-k heap sort.

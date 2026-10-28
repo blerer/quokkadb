@@ -173,8 +173,6 @@ pub enum ExplainOperator {
     Filter,
     /// Selects or reshapes fields from the input documents.
     Projection,
-    /// Sorts all input documents in memory.
-    InMemorySort,
     /// Sorts input documents using an external merge sort.
     ExternalMergeSort {
         /// Maximum number of rows kept in memory before spilling.
@@ -205,7 +203,6 @@ impl ExplainOperator {
             Self::MultiPointSearch { .. } => ExplainOperatorKind::MultiPointSearch,
             Self::Filter => ExplainOperatorKind::Filter,
             Self::Projection => ExplainOperatorKind::Projection,
-            Self::InMemorySort => ExplainOperatorKind::InMemorySort,
             Self::ExternalMergeSort { .. } => ExplainOperatorKind::ExternalMergeSort,
             Self::TopKHeapSort { .. } => ExplainOperatorKind::TopKHeapSort,
             Self::Limit { .. } => ExplainOperatorKind::Limit,
@@ -230,8 +227,6 @@ pub enum ExplainOperatorKind {
     Filter,
     /// Selects or reshapes fields.
     Projection,
-    /// Sorts all input documents in memory.
-    InMemorySort,
     /// Sorts input documents using an external merge sort.
     ExternalMergeSort,
     /// Selects the first sorted documents using a heap.

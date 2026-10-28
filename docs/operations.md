@@ -110,7 +110,7 @@ let wal_bytes_buffered = metrics.wal().bytes_buffered();
 | --- | --- | --- |
 | Is cache capacity helping reads? | `block_cache().hit_ratio()`, `hits()`, `misses()`, `evictions()` | A low hit ratio or frequent evictions can justify investigating cache capacity and the working set. |
 | Are queries using available indexes? | `executor().collection_scans()`, `index_scans()`, `point_searches()` | Compare scan counts with the filters and sorts the application performs. Add or revise an index only when the query pattern warrants it. |
-| Is sorting becoming expensive? | `in_memory_sorts()`, `external_merge_sorts()`, `top_k_sorts()` | Correlate sort activity with query shape, limits, and index coverage. |
+| Is sorting becoming expensive? | `external_merge_sorts()`, `external_merge_spills()`, `external_merge_spill_bytes()`, `top_k_sorts()` | `external_merge_sorts()` counts plans that use external merge sort; the spill counters show whether those sorts wrote temporary runs and how many serialized BSON bytes they wrote. Correlate them with query shape, limits, and index coverage. |
 | Is durable-write work accumulating? | `wal().bytes_buffered()`, `wal().syncs()`, `wal().total_bytes()` | Buffered WAL bytes and sync activity show the selected durability behavior and write pressure. |
 | Is storage growing or flushing frequently? | `storage().total_sstable_size()`, `memtable_size()`, `memtable_total_size()`, `flush().count()` | Use these values to understand on-disk growth and memory waiting to be flushed. |
 | Is compaction keeping up? | `compaction().active_at_level(level)`, `score_at_level(level)`, `jobs_picked()`, `jobs_skipped_level_compacting()` | A sustained high score or active work can identify a compaction capacity constraint. |

@@ -273,6 +273,6 @@ Operations return `quokkadb::error::Result<T>`, an alias for `Result<T, Error>`.
 | Manifest | `manifest()` | `rewrite`, `writes`, `size`, `bytes_written` |
 | Storage | `storage()` | `sstable_count`, `sstable_count_at_level`, `total_sstable_size`, `sstable_size_at_level`, `memtable_size`, `memtable_total_size`, `memtable_count` |
 | Compaction | `compaction()` | `jobs_picked`, `jobs_picked_full`, `jobs_picked_partial`, `jobs_skipped_level_compacting`, `jobs_skipped_range_overlap`, `input_files_count`, `picked_at_level`, `score_at_level`, `active_at_level` |
-| Query execution | `executor()` | `read_queries`, `write_queries`, `read_query_duration`, `write_query_duration`, `rows_returned`, `documents_written`, `collection_scans`, `index_scans`, `point_searches`, `multi_point_searches`, `in_memory_sorts`, `external_merge_sorts`, `top_k_sorts` |
+| Query execution | `executor()` | `read_queries`, `write_queries`, `read_query_duration`, `write_query_duration`, `rows_returned`, `documents_written`, `collection_scans`, `index_scans`, `point_searches`, `multi_point_searches`, `external_merge_sorts`, `external_merge_spills`, `external_merge_spill_bytes`, `top_k_sorts` |
 
 Duration, throughput, size, and input-count accessors that return `HistogramMetrics` provide `count`, `sum`, `min`, `max`, `mean`, `stddev`, `quantile`, and `buckets`. See [Operations](operations.md) for observability guidance.

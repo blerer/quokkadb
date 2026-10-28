@@ -179,8 +179,9 @@ pub mod names {
         pub const INDEX_SCANS: &str = "executor.index_scans";
         pub const POINT_SEARCHES: &str = "executor.point_searches";
         pub const MULTI_POINT_SEARCHES: &str = "executor.multi_point_searches";
-        pub const IN_MEMORY_SORTS: &str = "executor.in_memory_sorts";
         pub const EXTERNAL_MERGE_SORTS: &str = "executor.external_merge_sorts";
+        pub const EXTERNAL_MERGE_SPILLS: &str = "executor.external_merge_spills";
+        pub const EXTERNAL_MERGE_SPILL_BYTES: &str = "executor.external_merge_spill_bytes";
         pub const TOP_K_SORTS: &str = "executor.top_k_sorts";
     }
 

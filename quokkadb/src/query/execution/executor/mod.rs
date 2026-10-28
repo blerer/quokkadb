@@ -19,8 +19,9 @@ pub(crate) struct Metrics {
     pub(crate) index_scans: Arc<Counter>,
     pub(crate) point_searches: Arc<Counter>,
     pub(crate) multi_point_searches: Arc<Counter>,
-    pub(crate) in_memory_sorts: Arc<Counter>,
     pub(crate) external_merge_sorts: Arc<Counter>,
+    pub(crate) external_merge_spills: Arc<Counter>,
+    pub(crate) external_merge_spill_bytes: Arc<Counter>,
     pub(crate) top_k_sorts: Arc<Counter>,
 }
 
@@ -37,8 +38,9 @@ impl Metrics {
             index_scans: Counter::new(),
             point_searches: Counter::new(),
             multi_point_searches: Counter::new(),
-            in_memory_sorts: Counter::new(),
             external_merge_sorts: Counter::new(),
+            external_merge_spills: Counter::new(),
+            external_merge_spill_bytes: Counter::new(),
             top_k_sorts: Counter::new(),
         }
     }
@@ -86,12 +88,16 @@ impl Metrics {
                 self.multi_point_searches.clone(),
             )
             .register_counter(
-                metrics::names::executor::IN_MEMORY_SORTS,
-                self.in_memory_sorts.clone(),
-            )
-            .register_counter(
                 metrics::names::executor::EXTERNAL_MERGE_SORTS,
                 self.external_merge_sorts.clone(),
+            )
+            .register_counter(
+                metrics::names::executor::EXTERNAL_MERGE_SPILLS,
+                self.external_merge_spills.clone(),
+            )
+            .register_counter(
+                metrics::names::executor::EXTERNAL_MERGE_SPILL_BYTES,
+                self.external_merge_spill_bytes.clone(),
             )
             .register_counter(
                 metrics::names::executor::TOP_K_SORTS,

@@ -428,10 +428,7 @@ fn sort_not_supported_by_index_does_not_use_index() {
     assert!(
         explain
             .root
-            .contains_operator(ExplainOperatorKind::InMemorySort)
-            || explain
-                .root
-                .contains_operator(ExplainOperatorKind::ExternalMergeSort)
+            .contains_operator(ExplainOperatorKind::ExternalMergeSort)
             || explain
                 .root
                 .contains_operator(ExplainOperatorKind::TopKHeapSort),

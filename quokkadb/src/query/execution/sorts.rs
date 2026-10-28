@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::obs::metrics::Counter;
 use crate::query::{BsonValueRef, Expr, SortField, SortOrder, get_path_value};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
@@ -6,6 +7,21 @@ use std::collections::BinaryHeap;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
 use std::sync::Arc;
 use tempfile::{NamedTempFile, TempDir, tempdir};
+
+#[derive(Clone)]
+pub(crate) struct SpillMetrics {
+    pub(crate) spills: Arc<Counter>,
+    pub(crate) spill_bytes: Arc<Counter>,
+}
+
+impl Default for SpillMetrics {
+    fn default() -> Self {
+        Self {
+            spills: Counter::new(),
+            spill_bytes: Counter::new(),
+        }
+    }
+}
 
 /// Compares two BSON documents according to the provided sort fields.
 /// Returns an `Ordering` based on multi-key, multi-order comparison.
@@ -37,21 +53,26 @@ pub fn external_merge_sort(
     input: Box<dyn Iterator<Item = Result<Document>>>,
     sort_fields: Arc<Vec<SortField>>,
     max_in_memory_rows: usize,
+    metrics: SpillMetrics,
 ) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
-    external_merge_sort_with_temp_dir(input, sort_fields, max_in_memory_rows, tempdir)
+    external_merge_sort_with_temp_dir(input, sort_fields, max_in_memory_rows, metrics, tempdir)
 }
 
 fn external_merge_sort_with_temp_dir(
-    mut input: Box<dyn Iterator<Item = Result<Document>>>,
+    input: Box<dyn Iterator<Item = Result<Document>>>,
     sort_fields: Arc<Vec<SortField>>,
     max_in_memory_rows: usize,
-    mut create_temp_dir: impl FnMut() -> std::io::Result<TempDir>,
+    metrics: SpillMetrics,
+    create_temp_dir: impl FnMut() -> std::io::Result<TempDir>,
 ) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+    let mut input = input;
+    let mut create_temp_dir = create_temp_dir;
     assert!(
         max_in_memory_rows > 0,
         "max_in_memory_rows must be positive"
     );
     let mut runs = Vec::new();
+    let mut spill_bytes = 0;
     let mut temp_dir = None;
     let mut input_drained = false;
     let mut pending = None;
@@ -95,6 +116,7 @@ fn external_merge_sort_with_temp_dir(
             }
             let mut file = writer.into_inner().map_err(|e| e.into_error())?;
             file.seek(SeekFrom::Start(0))?;
+            spill_bytes += file.as_file().metadata()?.len();
             runs.push(SpillRun {
                 file,
                 document_count,
@@ -105,11 +127,10 @@ fn external_merge_sort_with_temp_dir(
     if runs.is_empty() {
         Ok(Box::new(std::iter::empty()))
     } else {
-        Ok(Box::new(MergeIterator::new(
-            runs,
-            sort_fields,
-            temp_dir.unwrap(),
-        )?))
+        let merge_iterator = MergeIterator::new(runs, sort_fields, temp_dir.unwrap())?;
+        metrics.spills.inc();
+        metrics.spill_bytes.inc_by(spill_bytes);
+        Ok(Box::new(merge_iterator))
     }
 }
 
@@ -472,7 +493,9 @@ mod tests {
     fn test_external_merge_sort() {
         for threshold in [1, 2, 4, 5, 6] {
             run_sort_test(
-                |iter, fields| external_merge_sort(iter, fields, threshold),
+                |iter, fields| {
+                    external_merge_sort(iter, fields, threshold, SpillMetrics::default())
+                },
                 None,
             );
         }
@@ -483,13 +506,57 @@ mod tests {
         for threshold in [5, 6] {
             run_sort_test(
                 |iter, fields| {
-                    external_merge_sort_with_temp_dir(iter, fields, threshold, || {
-                        panic!("fitting input must not create a temporary directory")
-                    })
+                    external_merge_sort_with_temp_dir(
+                        iter,
+                        fields,
+                        threshold,
+                        SpillMetrics::default(),
+                        || panic!("fitting input must not create a temporary directory"),
+                    )
                 },
                 None,
             );
         }
+    }
+
+    #[test]
+    fn test_external_merge_sort_records_actual_spilling() {
+        let docs = (0..5).map(|id| Ok(doc! { "_id": id }));
+        let fields = Arc::new(vec![make_sort_field(
+            vec!["_id".into()],
+            SortOrder::Ascending,
+        )]);
+        let spills = Counter::new();
+        let spill_bytes = Counter::new();
+
+        let output = external_merge_sort(
+            Box::new(docs),
+            fields.clone(),
+            5,
+            SpillMetrics {
+                spills: spills.clone(),
+                spill_bytes: spill_bytes.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(output.count(), 5);
+        assert_eq!(spills.get(), 0);
+        assert_eq!(spill_bytes.get(), 0);
+
+        let docs = (0..5).map(|id| Ok(doc! { "_id": id }));
+        let output = external_merge_sort(
+            Box::new(docs),
+            fields,
+            2,
+            SpillMetrics {
+                spills: spills.clone(),
+                spill_bytes: spill_bytes.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(output.count(), 5);
+        assert_eq!(spills.get(), 1);
+        assert!(spill_bytes.get() > 0);
     }
 
     #[test]
@@ -510,6 +577,7 @@ mod tests {
                     SortOrder::Ascending,
                 )]),
                 2,
+                SpillMetrics::default(),
                 || {
                     created_temp_dir = true;
                     tempdir()

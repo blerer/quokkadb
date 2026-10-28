@@ -1,6 +1,6 @@
 use super::{Metrics, QueryOutput, bind};
 use crate::error::{Error, Result};
-use crate::query::execution::{filters, indexes::Index};
+use crate::query::execution::{filters, indexes::Index, projections, sorts};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::Direction;
@@ -122,8 +122,7 @@ impl ReadExecutor {
                 })))
             }
             PhysicalPlan::Projection { input, projection } => {
-                let projector =
-                    crate::query::execution::projections::to_projector(projection, parameters)?;
+                let projector = projections::to_projector(projection, parameters)?;
                 let input_iter =
                     self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
                 Ok(Box::new(
@@ -138,10 +137,14 @@ impl ReadExecutor {
                 self.metrics.external_merge_sorts.inc();
                 let input_iter =
                     self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
-                crate::query::execution::sorts::external_merge_sort(
+                sorts::external_merge_sort(
                     input_iter,
                     sort_fields.clone(),
                     *max_in_memory_rows,
+                    sorts::SpillMetrics {
+                        spills: self.metrics.external_merge_spills.clone(),
+                        spill_bytes: self.metrics.external_merge_spill_bytes.clone(),
+                    },
                 )
             }
             PhysicalPlan::TopKHeapSort {
@@ -152,7 +155,7 @@ impl ReadExecutor {
                 self.metrics.top_k_sorts.inc();
                 let input_iter =
                     self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
-                crate::query::execution::sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
+                sorts::top_k_heap_sort(input_iter, sort_fields.clone(), *k)
             }
             PhysicalPlan::Limit { input, skip, limit } => {
                 let mut iter =
