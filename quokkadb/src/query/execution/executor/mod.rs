@@ -7,6 +7,25 @@ use std::sync::{Arc, Mutex};
 
 pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
+/// A document and the size of its original stored BSON value.
+/// Projections preserve this size; it does not describe the current document's memory usage.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExecutionRow {
+    pub(crate) document: Document,
+    pub(crate) source_bson_size: usize,
+}
+
+impl ExecutionRow {
+    pub(crate) fn from_bson_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            document: Document::from_reader(std::io::Cursor::new(bytes))?,
+            source_bson_size: bytes.len(),
+        })
+    }
+}
+
+pub(crate) type ExecutionOutput = Box<dyn Iterator<Item = Result<ExecutionRow>>>;
+
 #[derive(Clone)]
 pub(crate) struct Metrics {
     pub(crate) read_queries: Arc<Counter>,

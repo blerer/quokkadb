@@ -1,10 +1,11 @@
+use super::executor::{ExecutionOutput, ExecutionRow};
 use crate::error::Result;
 use crate::obs::metrics::Counter;
 use crate::query::{BsonValueRef, Expr, SortField, SortOrder, get_path_value};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::{BufReader, BufWriter, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use tempfile::{NamedTempFile, TempDir, tempdir};
 
@@ -48,23 +49,23 @@ pub fn compare_documents(a: &Document, b: &Document, sort_fields: &[SortField]) 
 /// Performs an external merge sort for large datasets that exceed memory limits.
 /// Sorts entirely in memory when the input fits within `max_in_memory_rows`.
 /// Otherwise, uses temporary files to store sorted runs and merges them.
-/// Returns an iterator over sorted documents.
+/// Returns an iterator over sorted rows, preserving their source BSON sizes.
 pub fn external_merge_sort(
-    input: Box<dyn Iterator<Item = Result<Document>>>,
+    input: ExecutionOutput,
     sort_fields: Arc<Vec<SortField>>,
     max_in_memory_rows: usize,
     metrics: SpillMetrics,
-) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+) -> Result<ExecutionOutput> {
     external_merge_sort_with_temp_dir(input, sort_fields, max_in_memory_rows, metrics, tempdir)
 }
 
 fn external_merge_sort_with_temp_dir(
-    input: Box<dyn Iterator<Item = Result<Document>>>,
+    input: ExecutionOutput,
     sort_fields: Arc<Vec<SortField>>,
     max_in_memory_rows: usize,
     metrics: SpillMetrics,
     create_temp_dir: impl FnMut() -> std::io::Result<TempDir>,
-) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+) -> Result<ExecutionOutput> {
     let mut input = input;
     let mut create_temp_dir = create_temp_dir;
     assert!(
@@ -78,7 +79,7 @@ fn external_merge_sort_with_temp_dir(
     let mut pending = None;
 
     while !input_drained {
-        let mut chunk: Vec<Document> = Vec::with_capacity(max_in_memory_rows);
+        let mut chunk: Vec<ExecutionRow> = Vec::with_capacity(max_in_memory_rows);
         if let Some(doc) = pending.take() {
             chunk.push(doc);
         }
@@ -99,20 +100,20 @@ fn external_merge_sort_with_temp_dir(
                 pending = input.next().transpose()?;
             }
             if pending.is_none() {
-                chunk.sort_by(|a, b| compare_documents(a, b, &sort_fields));
+                chunk.sort_by(|a, b| compare_documents(&a.document, &b.document, &sort_fields));
                 return Ok(Box::new(chunk.into_iter().map(Ok)));
             }
             temp_dir = Some(create_temp_dir()?);
         }
 
         if !chunk.is_empty() {
-            chunk.sort_by(|a, b| compare_documents(a, b, &sort_fields));
+            chunk.sort_by(|a, b| compare_documents(&a.document, &b.document, &sort_fields));
 
             let run_file = tempfile::Builder::new().tempfile_in(temp_dir.as_ref().unwrap())?;
             let mut writer = BufWriter::new(run_file);
             let document_count = chunk.len();
             for doc in chunk {
-                doc.to_writer(&mut writer)?;
+                write_spilled_row(&mut writer, &doc)?;
             }
             let mut file = writer.into_inner().map_err(|e| e.into_error())?;
             file.seek(SeekFrom::Start(0))?;
@@ -135,25 +136,26 @@ fn external_merge_sort_with_temp_dir(
 }
 
 /// Efficiently retrieves the top-k smallest documents according to sort fields using a heap.
-/// Returns an iterator over the k sorted documents.
+/// Returns an iterator over the k sorted rows, preserving their source BSON sizes.
 pub fn top_k_heap_sort(
-    input: Box<dyn Iterator<Item = Result<Document>>>,
+    input: ExecutionOutput,
     sort_fields: Arc<Vec<SortField>>,
     k: usize,
-) -> Result<Box<dyn Iterator<Item = Result<Document>>>> {
+) -> Result<ExecutionOutput> {
     if k == 0 {
         return Ok(Box::new(std::iter::empty()));
     }
 
-    // Wrapper for Document to implement Ord for the max-heap.
+    // Wrapper for ExecutionRow to implement Ord for the max-heap.
     struct HeapDoc {
-        doc: Document,
+        doc: ExecutionRow,
         sort_fields: Arc<Vec<SortField>>,
     }
 
     impl PartialEq for HeapDoc {
         fn eq(&self, other: &Self) -> bool {
-            compare_documents(&self.doc, &other.doc, &self.sort_fields) == Ordering::Equal
+            compare_documents(&self.doc.document, &other.doc.document, &self.sort_fields)
+                == Ordering::Equal
         }
     }
 
@@ -161,7 +163,7 @@ pub fn top_k_heap_sort(
 
     impl Ord for HeapDoc {
         fn cmp(&self, other: &Self) -> Ordering {
-            compare_documents(&self.doc, &other.doc, &self.sort_fields)
+            compare_documents(&self.doc.document, &other.doc.document, &self.sort_fields)
         }
     }
 
@@ -193,7 +195,7 @@ pub fn top_k_heap_sort(
 
     // The heap now contains the k smallest elements, but not in sorted order.
     // `into_sorted_vec` consumes the heap and returns a sorted vec (smallest to largest).
-    let sorted_docs: Vec<Document> = heap
+    let sorted_docs: Vec<ExecutionRow> = heap
         .into_sorted_vec()
         .into_iter()
         .map(|hd| hd.doc)
@@ -221,14 +223,15 @@ struct SpillRun {
 }
 
 struct HeapItem {
-    doc: Document,
+    doc: ExecutionRow,
     run_index: usize,
     sort_fields: Arc<Vec<SortField>>,
 }
 
 impl PartialEq for HeapItem {
     fn eq(&self, other: &Self) -> bool {
-        compare_documents(&self.doc, &other.doc, &self.sort_fields) == Ordering::Equal
+        compare_documents(&self.doc.document, &other.doc.document, &self.sort_fields)
+            == Ordering::Equal
     }
 }
 
@@ -243,7 +246,7 @@ impl PartialOrd for HeapItem {
 impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap behavior in BinaryHeap (which is a max-heap)
-        compare_documents(&other.doc, &self.doc, &self.sort_fields)
+        compare_documents(&other.doc.document, &self.doc.document, &self.sort_fields)
     }
 }
 
@@ -268,7 +271,7 @@ impl MergeIterator {
                 continue;
             }
 
-            let doc = Document::from_reader(reader)?;
+            let doc = read_spilled_row(reader)?;
             remaining_documents[i] -= 1;
             heap.push(HeapItem {
                 doc,
@@ -287,7 +290,7 @@ impl MergeIterator {
 }
 
 impl Iterator for MergeIterator {
-    type Item = Result<Document>;
+    type Item = Result<ExecutionRow>;
 
     /// Returns the next sorted document by popping the smallest item from the heap
     /// and loading the next document from the corresponding run.
@@ -295,7 +298,7 @@ impl Iterator for MergeIterator {
         if let Some(smallest) = self.heap.pop() {
             let run_index = smallest.run_index;
             if self.remaining_documents[run_index] > 0 {
-                match Document::from_reader(&mut self.readers[run_index]) {
+                match read_spilled_row(&mut self.readers[run_index]) {
                     Ok(doc) => {
                         self.remaining_documents[run_index] -= 1;
                         self.heap.push(HeapItem {
@@ -314,6 +317,26 @@ impl Iterator for MergeIterator {
     }
 }
 
+// Preserve the original size independently of the possibly projected BSON document.
+fn write_spilled_row(writer: &mut impl Write, row: &ExecutionRow) -> Result<()> {
+    let source_size =
+        u64::try_from(row.source_bson_size).expect("Source BSON size must fit in u64");
+    writer.write_all(&source_size.to_le_bytes())?;
+    row.document.to_writer(writer)?;
+    Ok(())
+}
+
+fn read_spilled_row(reader: &mut impl Read) -> Result<ExecutionRow> {
+    let mut size = [0; 8];
+    reader.read_exact(&mut size)?;
+    let source_bson_size = usize::try_from(u64::from_le_bytes(size))
+        .expect("Spilled source BSON size must fit in usize");
+    Ok(ExecutionRow {
+        document: Document::from_reader(reader)?,
+        source_bson_size,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +345,14 @@ mod tests {
     use std::cmp::Ordering;
     use std::io::{Seek, Write};
     use std::sync::Arc;
+
+    fn test_row(document: Document) -> ExecutionRow {
+        let source_bson_size = document.to_vec().unwrap().len();
+        ExecutionRow {
+            document,
+            source_bson_size,
+        }
+    }
 
     #[test]
     fn test_sort_documents() {
@@ -418,10 +449,7 @@ mod tests {
 
     fn run_sort_test<F>(mut sort_fn: F, k: Option<usize>)
     where
-        F: FnMut(
-            Box<dyn Iterator<Item = Result<Document>>>,
-            Arc<Vec<SortField>>,
-        ) -> Result<Box<dyn Iterator<Item = Result<Document>>>>,
+        F: FnMut(ExecutionOutput, Arc<Vec<SortField>>) -> Result<ExecutionOutput>,
     {
         let docs = vec![
             doc! { "_id": 1, "name": "c", "value": 10.0 },
@@ -436,9 +464,10 @@ mod tests {
             make_sort_field(vec!["name".into()], SortOrder::Ascending),
             make_sort_field(vec!["value".into()], SortOrder::Ascending),
         ]);
-        let input_iter_asc = Box::new(docs.clone().into_iter().map(Ok));
+        let input_iter_asc = Box::new(docs.clone().into_iter().map(|doc| Ok(test_row(doc))));
         let sorted_iter_asc = sort_fn(input_iter_asc, sort_fields_asc.clone()).unwrap();
-        let sorted_docs_asc: Vec<Document> = sorted_iter_asc.map(Result::unwrap).collect();
+        let sorted_docs_asc: Vec<Document> =
+            sorted_iter_asc.map(|row| row.unwrap().document).collect();
         let ids_asc: Vec<i32> = sorted_docs_asc
             .iter()
             .map(|d| d.get_i32("_id").unwrap())
@@ -454,9 +483,10 @@ mod tests {
             make_sort_field(vec!["name".into()], SortOrder::Descending),
             make_sort_field(vec!["value".into()], SortOrder::Descending),
         ]);
-        let input_iter_desc = Box::new(docs.clone().into_iter().map(Ok));
+        let input_iter_desc = Box::new(docs.clone().into_iter().map(|doc| Ok(test_row(doc))));
         let sorted_iter_desc = sort_fn(input_iter_desc, sort_fields_desc).unwrap();
-        let sorted_docs_desc: Vec<Document> = sorted_iter_desc.map(Result::unwrap).collect();
+        let sorted_docs_desc: Vec<Document> =
+            sorted_iter_desc.map(|row| row.unwrap().document).collect();
         let ids_desc: Vec<i32> = sorted_docs_desc
             .iter()
             .map(|d| d.get_i32("_id").unwrap())
@@ -469,15 +499,18 @@ mod tests {
 
         // Edge case: Empty input
         let docs_empty: Vec<Document> = vec![];
-        let input_iter_empty = Box::new(docs_empty.into_iter().map(Ok));
+        let input_iter_empty = Box::new(docs_empty.into_iter().map(|doc| Ok(test_row(doc))));
         let sorted_iter_empty = sort_fn(input_iter_empty, sort_fields_asc.clone()).unwrap();
         assert_eq!(sorted_iter_empty.count(), 0);
 
         // Edge case: Single document
         let docs_single = vec![doc! { "_id": 1 }];
-        let input_iter_single = Box::new(docs_single.clone().into_iter().map(Ok));
+        let input_iter_single =
+            Box::new(docs_single.clone().into_iter().map(|doc| Ok(test_row(doc))));
         let sorted_iter_single = sort_fn(input_iter_single, sort_fields_asc).unwrap();
-        let sorted_docs_single: Vec<Document> = sorted_iter_single.map(Result::unwrap).collect();
+        let sorted_docs_single: Vec<Document> = sorted_iter_single
+            .map(|row| row.unwrap().document)
+            .collect();
         let expected_len = if let Some(k_val) = k {
             std::cmp::min(k_val, docs_single.len())
         } else {
@@ -521,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_external_merge_sort_records_actual_spilling() {
-        let docs = (0..5).map(|id| Ok(doc! { "_id": id }));
+        let docs = (0..5).map(|id| Ok(test_row(doc! { "_id": id })));
         let fields = Arc::new(vec![make_sort_field(
             vec!["_id".into()],
             SortOrder::Ascending,
@@ -543,7 +576,7 @@ mod tests {
         assert_eq!(spills.get(), 0);
         assert_eq!(spill_bytes.get(), 0);
 
-        let docs = (0..5).map(|id| Ok(doc! { "_id": id }));
+        let docs = (0..5).map(|id| Ok(test_row(doc! { "_id": id })));
         let output = external_merge_sort(
             Box::new(docs),
             fields,
@@ -563,12 +596,11 @@ mod tests {
     fn test_external_merge_sort_input_errors() {
         // Fail during buffering, lookahead, and after the first spill.
         for successful_rows in [0, 1, 2, 3] {
-            let input =
-                (0..successful_rows)
-                    .map(|id| Ok(doc! { "_id": id }))
-                    .chain(std::iter::once(Err(crate::error::Error::InvalidRequest(
-                        "input failed".into(),
-                    ))));
+            let input = (0..successful_rows)
+                .map(|id| Ok(test_row(doc! { "_id": id })))
+                .chain(std::iter::once(Err(crate::error::Error::InvalidRequest(
+                    "input failed".into(),
+                ))));
             let mut created_temp_dir = false;
             let result = external_merge_sort_with_temp_dir(
                 Box::new(input),
@@ -591,9 +623,38 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_iterator_rejects_truncated_source_size() {
+        for prefix_len in 0..8 {
+            for complete_rows in 0..=1 {
+                let temp_dir = tempdir().unwrap();
+                let mut file = tempfile::Builder::new().tempfile_in(&temp_dir).unwrap();
+                if complete_rows == 1 {
+                    write_spilled_row(&mut file, &test_row(doc! { "_id": 1 })).unwrap();
+                }
+                file.write_all(&42_u64.to_le_bytes()[..prefix_len]).unwrap();
+                file.rewind().unwrap();
+                let result = MergeIterator::new(
+                    vec![SpillRun {
+                        file,
+                        document_count: complete_rows + 1,
+                    }],
+                    Arc::new(vec![]),
+                    temp_dir,
+                );
+                if complete_rows == 0 {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().next().unwrap().is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_merge_iterator_rejects_truncated_first_document() {
         let temp_dir = tempdir().unwrap();
         let mut file = tempfile::Builder::new().tempfile_in(&temp_dir).unwrap();
+        file.write_all(&42_u64.to_le_bytes()).unwrap();
         file.write_all(&[5, 0, 0]).unwrap();
 
         let result = MergeIterator::new(
@@ -612,7 +673,8 @@ mod tests {
     fn test_merge_iterator_rejects_truncated_later_document() {
         let temp_dir = tempdir().unwrap();
         let mut file = tempfile::Builder::new().tempfile_in(&temp_dir).unwrap();
-        doc! { "_id": 1 }.to_writer(&mut file).unwrap();
+        write_spilled_row(&mut file, &test_row(doc! { "_id": 1 })).unwrap();
+        file.write_all(&42_u64.to_le_bytes()).unwrap();
         file.write_all(&[5, 0, 0]).unwrap();
         file.rewind().unwrap();
 

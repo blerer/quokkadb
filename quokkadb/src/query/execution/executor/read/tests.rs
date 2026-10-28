@@ -1137,3 +1137,135 @@ fn test_execute_cached_at_snapshot() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_scan_rows_capture_source_bson_size() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage = &runtime.storage_engine;
+    let collection = storage.create_collection("row_sizes", true)?.id;
+    let index = storage.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+        IndexOptions::default(),
+    )?;
+    let documents = [
+        doc! { "_id": 1, "a": 7, "payload": "short" },
+        doc! { "_id": 2, "a": 7, "payload": "a longer stored value" },
+    ];
+    insert_docs(&runtime.executor, collection, documents.iter())?;
+    let executor = ReadExecutor::new(storage.clone(), Metrics::new());
+    let mut parameters = Parameters::new();
+    let point = point_search_query(collection, &mut parameters, 2_i32);
+    let keys = parameters.collect_parameter(vec![1_i32, 2_i32].into());
+    let equality = parameters.collect_parameter(7_i32.into());
+    let plans = [
+        (full_scan_plan(collection), vec![1, 2]),
+        (point, vec![2]),
+        (
+            Arc::new(PhysicalPlan::MultiPointSearch {
+                collection,
+                keys,
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            vec![1, 2],
+        ),
+        (
+            Arc::new(PhysicalPlan::IndexScan {
+                collection,
+                index: index.id,
+                range: IndexScanRangeExpr {
+                    equal_prefix: vec![equality],
+                    tail: None,
+                },
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            vec![1, 2],
+        ),
+    ];
+    for (plan, expected_ids) in plans {
+        let rows = executor
+            .execute_cached_with_snapshot(plan, &parameters, storage.acquire_snapshot())?
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), expected_ids.len());
+        for (row, id) in rows.iter().zip(expected_ids) {
+            let original = &documents[(id - 1) as usize];
+            assert_eq!(&row.document, original);
+            assert_eq!(row.source_bson_size, original.to_vec()?.len());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_source_size_survives_projection_filter_sort_and_limit() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage = &runtime.storage_engine;
+    let collection = storage.create_collection("projected_row_sizes", true)?.id;
+    let documents: Vec<_> = (1_i32..=4)
+        .map(|id| doc! { "_id": id, "payload": "x".repeat(id as usize * 20) })
+        .collect();
+    insert_docs(&runtime.executor, collection, documents.iter())?;
+    let executor = ReadExecutor::new(storage.clone(), Metrics::new());
+    let mut parameters = Parameters::new();
+    let lower_bound = parameters.collect_parameter(1_i32.into());
+    let input = Arc::new(PhysicalPlan::Filter {
+        input: full_scan_plan(collection),
+        predicate: field_filters(field(["_id"]), [interval(greater_than(&lower_bound))]),
+    });
+    let input = Arc::new(PhysicalPlan::Projection {
+        input,
+        projection: Arc::new(Projection::Include(proj_fields(vec![(
+            "_id",
+            proj_field(),
+        )]))),
+    });
+    let sort_fields = Arc::new(vec![make_sort_field(
+        vec!["_id".into()],
+        SortOrder::Descending,
+    )]);
+    let plans = [
+        PhysicalPlan::TopKHeapSort {
+            input: input.clone(),
+            sort_fields: sort_fields.clone(),
+            k: 3,
+        },
+        PhysicalPlan::ExternalMergeSort {
+            input: input.clone(),
+            sort_fields: sort_fields.clone(),
+            max_in_memory_rows: 10,
+        },
+        PhysicalPlan::ExternalMergeSort {
+            input,
+            sort_fields,
+            max_in_memory_rows: 1,
+        },
+    ];
+    for sort in plans {
+        let plan = Arc::new(PhysicalPlan::Limit {
+            input: Arc::new(sort),
+            skip: Some(1),
+            limit: Some(2),
+        });
+        let rows = executor
+            .execute_cached_with_snapshot(plan.clone(), &parameters, storage.acquire_snapshot())?
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 2);
+        for (row, id) in rows.iter().zip([3_i32, 2_i32]) {
+            assert_eq!(row.document, doc! { "_id": id });
+            assert_eq!(
+                row.source_bson_size,
+                documents[(id - 1) as usize].to_vec()?.len()
+            );
+            assert!(row.source_bson_size > row.document.to_vec()?.len());
+        }
+        let public_documents = executor
+            .execute_cached_at_snapshot(plan, &parameters, None)?
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(public_documents, vec![doc! { "_id": 3 }, doc! { "_id": 2 }]);
+    }
+    Ok(())
+}

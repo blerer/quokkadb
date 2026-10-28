@@ -1,4 +1,4 @@
-use super::{Metrics, QueryOutput, bind};
+use super::{ExecutionOutput, ExecutionRow, Metrics, QueryOutput, bind};
 use crate::error::{Error, Result};
 use crate::query::execution::{filters, indexes::Index, projections, sorts};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
@@ -10,8 +10,7 @@ use crate::storage::operation::OperationType;
 use crate::storage::snapshot_manager::Snapshot;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
-use bson::{Bson, Document};
-use std::io::Cursor;
+use bson::Bson;
 use std::sync::Arc;
 use tracing::{Span, trace_span};
 
@@ -46,7 +45,10 @@ impl ReadExecutor {
     ) -> Result<QueryOutput> {
         let snapshot = snapshot.unwrap_or_else(|| self.storage_engine.acquire_snapshot());
         let output = self.execute_cached_with_snapshot(plan, parameters, snapshot.clone())?;
-        Ok(Box::new(SnapshotTrackedQueryOutput::new(output, snapshot)))
+        let output = SnapshotTrackedExecutionOutput::new(output, snapshot);
+        Ok(Box::new(
+            output.map(|result| result.map(|row| row.document)),
+        ))
     }
 
     fn execute_cached_with_snapshot(
@@ -54,7 +56,7 @@ impl ReadExecutor {
         plan: Arc<PhysicalPlan>,
         parameters: &Parameters,
         snapshot: Snapshot,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         if let PhysicalPlan::CollectionScan { collection, .. }
         | PhysicalPlan::PointSearch { collection, .. }
         | PhysicalPlan::MultiPointSearch { collection, .. } = plan.as_ref()
@@ -117,7 +119,7 @@ impl ReadExecutor {
                     if res.is_err() {
                         true
                     } else {
-                        filter(res.as_ref().unwrap())
+                        filter(&res.as_ref().unwrap().document)
                     }
                 })))
             }
@@ -125,9 +127,12 @@ impl ReadExecutor {
                 let projector = projections::to_projector(projection, parameters)?;
                 let input_iter =
                     self.execute_cached_with_snapshot(input.clone(), parameters, snapshot)?;
-                Ok(Box::new(
-                    input_iter.map(move |res| res.and_then(|doc| projector(doc))),
-                ))
+                Ok(Box::new(input_iter.map(move |res| {
+                    res.and_then(|mut row| {
+                        row.document = projector(row.document)?;
+                        Ok(row)
+                    })
+                })))
             }
             PhysicalPlan::ExternalMergeSort {
                 input,
@@ -180,7 +185,7 @@ impl ReadExecutor {
         keys: &Arc<Expr>,
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         let access_span = trace_span!(
             "multi_point_search",
             snapshot = snapshot.sequence(),
@@ -225,9 +230,9 @@ impl ReadExecutor {
                 Ok(Some((k, v))) => {
                     let op = extract_operation_type(&k);
                     if op == OperationType::Put {
-                        match Document::from_reader(Cursor::new(v)) {
+                        match ExecutionRow::from_bson_bytes(&v) {
                             Ok(doc) => {
-                                if filter.as_ref().is_none_or(|f| f(&doc)) {
+                                if filter.as_ref().is_none_or(|f| f(&doc.document)) {
                                     Some(Ok(doc))
                                 } else {
                                     None
@@ -245,7 +250,7 @@ impl ReadExecutor {
             Err(e) => Some(Err(e.into())),
         });
 
-        Ok(Box::new(AccessTrackedQueryOutput::new(
+        Ok(Box::new(AccessTrackedExecutionOutput::new(
             Box::new(iter),
             access_span,
         )))
@@ -258,7 +263,7 @@ impl ReadExecutor {
         collection: &u32,
         key: &Arc<Expr>,
         filter: &Option<Arc<Expr>>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         let access_span = trace_span!("point_search", snapshot = snapshot.sequence());
         // TODO: for now the filtering happen after deserialization to a document but should be perform in the future on the byte representation
         let filter = filter
@@ -270,7 +275,7 @@ impl ReadExecutor {
         let collection = *collection;
         let snapshot_for_reads = snapshot.clone();
         let mut executed = false;
-        let iter: QueryOutput = Box::new(std::iter::from_fn(move || {
+        let iter: ExecutionOutput = Box::new(std::iter::from_fn(move || {
             if executed {
                 return None;
             }
@@ -287,9 +292,9 @@ impl ReadExecutor {
                     let op = extract_operation_type(&k);
                     match op {
                         OperationType::Delete => None,
-                        OperationType::Put => match Document::from_reader(Cursor::new(v)) {
+                        OperationType::Put => match ExecutionRow::from_bson_bytes(&v) {
                             Ok(doc) => match &filter {
-                                Some(filter) if !filter(&doc) => None,
+                                Some(filter) if !filter(&doc.document) => None,
                                 _ => Some(Ok(doc)),
                             },
                             Err(err) => Some(Err(err.into())),
@@ -300,7 +305,10 @@ impl ReadExecutor {
                 None => None,
             }
         }));
-        Ok(Box::new(AccessTrackedQueryOutput::new(iter, access_span)))
+        Ok(Box::new(AccessTrackedExecutionOutput::new(
+            iter,
+            access_span,
+        )))
     }
 
     pub(super) fn perform_collection_scan(
@@ -311,7 +319,7 @@ impl ReadExecutor {
         range: &Interval<Arc<Expr>>,
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         let access_span = trace_span!(
             "collection_scan",
             snapshot = snapshot.sequence(),
@@ -341,7 +349,7 @@ impl ReadExecutor {
                         match op {
                             OperationType::Delete => return None,
                             OperationType::Put => {
-                                let doc = Document::from_reader(Cursor::new(v));
+                                let doc = ExecutionRow::from_bson_bytes(&v);
                                 match doc {
                                     Err(e) => return Some(Err(e.into())),
                                     Ok(doc) => doc,
@@ -355,7 +363,7 @@ impl ReadExecutor {
 
                 match &filter {
                     Some(filter) => {
-                        if filter(&doc) {
+                        if filter(&doc.document) {
                             Some(Ok(doc))
                         } else {
                             None
@@ -365,7 +373,7 @@ impl ReadExecutor {
                 }
             });
 
-        Ok(Box::new(AccessTrackedQueryOutput::new(
+        Ok(Box::new(AccessTrackedExecutionOutput::new(
             Box::new(iter),
             access_span,
         )))
@@ -397,7 +405,7 @@ impl ReadExecutor {
         range: &IndexScanRangeExpr,
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         let access_span = trace_span!(
             "index_scan",
             index = *index,
@@ -484,31 +492,31 @@ impl ReadExecutor {
                     }
                 };
 
-                let doc = match Document::from_reader(Cursor::new(doc_bytes)) {
+                let doc = match ExecutionRow::from_bson_bytes(&doc_bytes) {
                     Ok(doc) => doc,
                     Err(e) => return Some(Err(e.into())),
                 };
 
                 match &filter {
-                    Some(filter) if !filter(&doc) => None,
+                    Some(filter) if !filter(&doc.document) => None,
                     _ => Some(Ok(doc)),
                 }
             });
 
-        Ok(Box::new(AccessTrackedQueryOutput::new(
+        Ok(Box::new(AccessTrackedExecutionOutput::new(
             Box::new(iter),
             access_span,
         )))
     }
 }
 
-struct SnapshotTrackedQueryOutput {
-    inner: QueryOutput,
+struct SnapshotTrackedExecutionOutput {
+    inner: ExecutionOutput,
     _snapshot: Snapshot,
 }
 
-impl SnapshotTrackedQueryOutput {
-    fn new(inner: QueryOutput, snapshot: Snapshot) -> Self {
+impl SnapshotTrackedExecutionOutput {
+    fn new(inner: ExecutionOutput, snapshot: Snapshot) -> Self {
         Self {
             inner,
             _snapshot: snapshot,
@@ -516,23 +524,23 @@ impl SnapshotTrackedQueryOutput {
     }
 }
 
-impl Iterator for SnapshotTrackedQueryOutput {
-    type Item = Result<Document>;
+impl Iterator for SnapshotTrackedExecutionOutput {
+    type Item = Result<ExecutionRow>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
     }
 }
 
-struct AccessTrackedQueryOutput {
-    inner: QueryOutput,
+struct AccessTrackedExecutionOutput {
+    inner: ExecutionOutput,
     span: Span,
     started: bool,
     finished: bool,
 }
 
-impl AccessTrackedQueryOutput {
-    fn new(inner: QueryOutput, span: Span) -> Self {
+impl AccessTrackedExecutionOutput {
+    fn new(inner: ExecutionOutput, span: Span) -> Self {
         Self {
             inner,
             span,
@@ -558,8 +566,8 @@ impl AccessTrackedQueryOutput {
     }
 }
 
-impl Iterator for AccessTrackedQueryOutput {
-    type Item = Result<Document>;
+impl Iterator for AccessTrackedExecutionOutput {
+    type Item = Result<ExecutionRow>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let span = self.span.clone();
@@ -575,7 +583,7 @@ impl Iterator for AccessTrackedQueryOutput {
     }
 }
 
-impl Drop for AccessTrackedQueryOutput {
+impl Drop for AccessTrackedExecutionOutput {
     fn drop(&mut self) {
         let span = self.span.clone();
         let _span = span.enter();
