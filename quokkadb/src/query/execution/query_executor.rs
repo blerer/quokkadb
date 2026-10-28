@@ -91,6 +91,7 @@ impl QueryExecutor {
         let output = self
             .read_executor
             .execute_cached_at_snapshot(plan, parameters, snapshot)?;
+        let output = Box::new(output.map(|result| result.map(|row| row.document)));
 
         Ok(Box::new(InstrumentedQueryOutput::new(
             output,

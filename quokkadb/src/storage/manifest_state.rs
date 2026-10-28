@@ -362,7 +362,7 @@ fn without_collection_count_stats(current: &CountStats, collection: u32) -> Coun
             .deltas
             .iter()
             .filter(|(key, _)| {
-                !matches!(key, CountStatsKey::Collection(id) if *id == collection)
+                !matches!(key, CountStatsKey::Collection(id) | CountStatsKey::CollectionDocumentBytes(id) if *id == collection)
                     && !matches!(
                         key,
                         CountStatsKey::Index {
@@ -1208,6 +1208,7 @@ mod tests {
         let state = ManifestState {
             count_stats: CountStats::new(BTreeMap::from([
                 (CountStatsKey::Collection(10), 5),
+                (CountStatsKey::CollectionDocumentBytes(10), 500),
                 (
                     CountStatsKey::Index {
                         collection: 10,
@@ -1277,6 +1278,7 @@ mod tests {
         let state = ManifestState {
             count_stats: CountStats::new(BTreeMap::from([
                 (CountStatsKey::Collection(10), 5),
+                (CountStatsKey::CollectionDocumentBytes(10), 500),
                 (
                     CountStatsKey::Index {
                         collection: 10,
@@ -1306,6 +1308,7 @@ mod tests {
             state.count_stats,
             CountStats::new(BTreeMap::from([
                 (CountStatsKey::Collection(10), 5),
+                (CountStatsKey::CollectionDocumentBytes(10), 500),
                 (
                     CountStatsKey::Index {
                         collection: 10,

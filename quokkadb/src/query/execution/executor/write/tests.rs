@@ -1802,6 +1802,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
     let mid_doc = read_stored_doc(&storage_engine, collection_id, 1)?;
     assert_eq!(mid_doc, doc! { "_id": 1, "value": "concurrent" });
 
+    assert_collection_bytes(&executor, &storage_engine, collection_id)?;
     hook.release();
 
     let paused_doc = paused_update_handle.join().unwrap()?;
@@ -1814,6 +1815,7 @@ fn test_update_one_retries_after_concurrent_update_same_field() -> Result<()> {
         Some(1)
     );
 
+    assert_collection_bytes(&executor, &storage_engine, collection_id)?;
     Ok(())
 }
 
@@ -2385,6 +2387,7 @@ fn test_insert_many_rejects_schema_change_before_commit() -> Result<()> {
         None
     );
 
+    assert_collection_bytes(&executor, &storage_engine, collection_id)?;
     Ok(())
 }
 
@@ -2425,6 +2428,7 @@ fn test_update_many_does_not_retry_after_schema_change() -> Result<()> {
     assert_eq!(read_stored_doc(&storage_engine, collection_id, 1)?, doc1);
     assert_eq!(read_stored_doc(&storage_engine, collection_id, 2)?, doc2);
 
+    assert_collection_bytes(&executor, &storage_engine, collection_id)?;
     Ok(())
 }
 
@@ -2753,4 +2757,191 @@ fn count_written_documents_handles_single_document_edge_cases() {
         },),
         0
     );
+}
+
+fn assert_collection_bytes(
+    executor: &QueryExecutor,
+    storage: &StorageEngine,
+    collection: u32,
+) -> Result<()> {
+    let docs = executor
+        .execute_cached(full_scan_plan(collection), &Parameters::new())?
+        .collect::<Result<Vec<_>>>()?;
+    let mut bytes = 0_i64;
+    for doc in &docs {
+        let value = storage
+            .read_at_snapshot(
+                collection,
+                0,
+                &doc.get("_id").unwrap().try_into_key()?,
+                &storage.acquire_snapshot(),
+            )?
+            .unwrap()
+            .1;
+        bytes += i64::try_from(value.len()).unwrap();
+    }
+    assert_eq!(
+        storage
+            .count_stat(&CountStatsKey::CollectionDocumentBytes(collection))
+            .unwrap_or(0),
+        bytes
+    );
+    assert_eq!(
+        storage
+            .count_stat(&CountStatsKey::Collection(collection))
+            .unwrap_or(0),
+        docs.len() as i64
+    );
+    Ok(())
+}
+
+#[test]
+fn document_byte_totals_follow_writes() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let executor = &runtime.executor;
+    let storage = &runtime.storage_engine;
+    let collection = storage.create_collection("byte_totals", true)?.id;
+    insert_one(executor, collection, &doc! { "_id": 1, "value": "initial" })?;
+    assert_collection_bytes(executor, storage, collection)?;
+    assert!(
+        insert_one(
+            executor,
+            collection,
+            &doc! { "_id": 1, "value": "duplicate" }
+        )
+        .is_err()
+    );
+    assert_collection_bytes(executor, storage, collection)?;
+    executor.execute_direct(
+        PhysicalPlan::InsertMany {
+            collection,
+            documents: vec![
+                doc! { "_id": 2, "value": "two" }.to_vec()?,
+                doc! { "_id": 3, "value": "three" }.to_vec()?,
+            ],
+        },
+        None,
+        false,
+    )?;
+    assert_collection_bytes(executor, storage, collection)?;
+    for value in ["a much longer document value", "x", "y"] {
+        execute_update_one(executor, collection, 1, value)?;
+        assert_collection_bytes(executor, storage, collection)?;
+    }
+    execute_replace_one(executor, collection, 2, doc! { "other": [1, 2, 3] }, false)?;
+    assert_collection_bytes(executor, storage, collection)?;
+    for id in [4, 4] {
+        execute_update_one_with_expr_and_upsert(
+            executor,
+            collection,
+            id,
+            update([set([field_name("value")], "upserted")]),
+            true,
+        )?;
+        assert_collection_bytes(executor, storage, collection)?;
+    }
+    execute_replace_one(
+        executor,
+        collection,
+        5,
+        doc! { "value": "replacement upsert" },
+        true,
+    )?;
+    assert_collection_bytes(executor, storage, collection)?;
+    execute_delete_one(executor, collection, 2)?;
+    assert_collection_bytes(executor, storage, collection)?;
+    let query = Arc::new(PhysicalPlan::ExternalMergeSort {
+        input: full_scan_plan(collection),
+        sort_fields: Arc::new(vec![SortField::desc(crate::query::expr_fn::field(["_id"]))]),
+        max_in_memory_rows: 1,
+    });
+    executor.execute_direct(
+        PhysicalPlan::DeleteMany { collection, query },
+        Some(Parameters::new()),
+        false,
+    )?;
+    assert_collection_bytes(executor, storage, collection)?;
+    assert_eq!(
+        storage.count_stat(&CountStatsKey::CollectionDocumentBytes(collection)),
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn document_byte_totals_with_generated_ids_and_index_selection() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let executor = &runtime.executor;
+    let storage = &runtime.storage_engine;
+    let collection = storage
+        .create_collection_with_options(
+            "generated_byte_totals",
+            CollectionOptions {
+                id_creation_strategy: IdCreationStrategy::Generated,
+                ..CollectionOptions::default()
+            },
+            true,
+        )?
+        .id;
+    let index = storage.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("group")]),
+        IndexOptions::default(),
+    )?;
+    insert_one(executor, collection, &doc! { "group": "a" })?;
+    executor.execute_direct(
+        PhysicalPlan::InsertMany {
+            collection,
+            documents: vec![
+                doc! { "group": "a", "value": "longer" }.to_vec()?,
+                doc! { "group": "b" }.to_vec()?,
+            ],
+        },
+        None,
+        false,
+    )?;
+    assert_collection_bytes(executor, storage, collection)?;
+    let mut parameters = Parameters::new();
+    let query = Arc::new(PhysicalPlan::IndexScan {
+        collection,
+        index: index.id,
+        range: IndexScanRangeExpr {
+            equal_prefix: vec![parameters.collect_parameter("a".into())],
+            tail: None,
+        },
+        direction: Direction::Forward,
+        filter: None,
+        projection: None,
+    });
+    let query = Arc::new(PhysicalPlan::ExternalMergeSort {
+        input: query,
+        sort_fields: Arc::new(vec![SortField::desc(crate::query::expr_fn::field(["_id"]))]),
+        max_in_memory_rows: 1,
+    });
+    let result = executor.execute_direct(
+        PhysicalPlan::UpdateMany {
+            collection,
+            query,
+            update: update([set([field_name("value")], "a larger updated value")]),
+            upsert: false,
+        },
+        Some(parameters),
+        false,
+    )?;
+    assert_update_result(result, 2, 2, Option::<Bson>::None);
+    assert_collection_bytes(executor, storage, collection)?;
+    storage.drop_index(collection, index.id)?;
+    assert_collection_bytes(executor, storage, collection)?;
+    storage.flush()?;
+    assert_collection_bytes(executor, storage, collection)?;
+    storage.drop_collection("generated_byte_totals")?;
+    // A subsequent data flush commits the pending catalog drop and removes its statistics.
+    let survivor = storage.create_collection("surviving_byte_totals", true)?.id;
+    insert_one(executor, survivor, &doc! { "_id": 1 })?;
+    storage.flush()?;
+    assert_eq!(
+        storage.count_stat(&CountStatsKey::CollectionDocumentBytes(collection)),
+        None
+    );
+    Ok(())
 }

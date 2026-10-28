@@ -1,4 +1,4 @@
-use super::{ExecutionOutput, ExecutionRow, Metrics, QueryOutput, bind};
+use super::{ExecutionOutput, ExecutionRow, Metrics, bind};
 use crate::error::{Error, Result};
 use crate::query::execution::{filters, indexes::Index, projections, sorts};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
@@ -33,7 +33,7 @@ impl ReadExecutor {
         }
     }
 
-    /// Executes a cached read plan under a real snapshot lease.
+    /// Executes a cached plan under a snapshot lease while preserving source BSON sizes.
     ///
     /// When `snapshot` is `None`, the executor acquires a fresh snapshot for the
     /// full operation and keeps it alive until the returned iterator is dropped.
@@ -42,13 +42,12 @@ impl ReadExecutor {
         plan: Arc<PhysicalPlan>,
         parameters: &Parameters,
         snapshot: Option<Snapshot>,
-    ) -> Result<QueryOutput> {
+    ) -> Result<ExecutionOutput> {
         let snapshot = snapshot.unwrap_or_else(|| self.storage_engine.acquire_snapshot());
         let output = self.execute_cached_with_snapshot(plan, parameters, snapshot.clone())?;
-        let output = SnapshotTrackedExecutionOutput::new(output, snapshot);
-        Ok(Box::new(
-            output.map(|result| result.map(|row| row.document)),
-        ))
+        Ok(Box::new(SnapshotTrackedExecutionOutput::new(
+            output, snapshot,
+        )))
     }
 
     fn execute_cached_with_snapshot(

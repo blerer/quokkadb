@@ -1264,6 +1264,7 @@ fn test_source_size_survives_projection_filter_sort_and_limit() -> Result<()> {
         }
         let public_documents = executor
             .execute_cached_at_snapshot(plan, &parameters, None)?
+            .map(|result| result.map(|row| row.document))
             .collect::<Result<Vec<_>>>()?;
         assert_eq!(public_documents, vec![doc! { "_id": 3 }, doc! { "_id": 2 }]);
     }

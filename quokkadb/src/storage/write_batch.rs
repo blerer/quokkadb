@@ -331,6 +331,7 @@ mod tests {
             )],
             CountStats::new(BTreeMap::from([
                 (CountStatsKey::Collection(10), 1),
+                (CountStatsKey::CollectionDocumentBytes(10), -50),
                 (
                     CountStatsKey::Index {
                         collection: 10,

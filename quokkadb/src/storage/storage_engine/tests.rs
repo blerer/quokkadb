@@ -1760,6 +1760,10 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
                     CountStats::new(BTreeMap::from([
                         (CountStatsKey::Collection(collection_id), 1),
                         (
+                            CountStatsKey::CollectionDocumentBytes(collection_id),
+                            document(1, 1).to_vec().unwrap().len() as i64,
+                        ),
+                        (
                             CountStatsKey::Index {
                                 collection: collection_id,
                                 index: index_id,
@@ -1788,6 +1792,10 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
                     CountStats::new(BTreeMap::from([
                         (CountStatsKey::Collection(collection_id), 1),
                         (
+                            CountStatsKey::CollectionDocumentBytes(collection_id),
+                            document(2, 1).to_vec().unwrap().len() as i64,
+                        ),
+                        (
                             CountStatsKey::Index {
                                 collection: collection_id,
                                 index: index_id,
@@ -1806,6 +1814,18 @@ fn test_count_stats_persist_across_flush_and_wal_replay_on_restart() {
     };
 
     let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
+    let expected_bytes =
+        (document(1, 1).to_vec().unwrap().len() + document(2, 1).to_vec().unwrap().len()) as i64;
+    assert_eq!(
+        engine_restarted.count_stat(&CountStatsKey::CollectionDocumentBytes(collection_id)),
+        Some(expected_bytes)
+    );
+    engine_restarted.flush().unwrap();
+    engine_restarted.compact().unwrap();
+    assert_eq!(
+        engine_restarted.count_stat(&CountStatsKey::CollectionDocumentBytes(collection_id)),
+        Some(expected_bytes)
+    );
 
     assert_eq!(
         engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),
@@ -1860,6 +1880,10 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
                     CountStats::new(std::collections::BTreeMap::from([
                         (CountStatsKey::Collection(collection_id), 1),
                         (
+                            CountStatsKey::CollectionDocumentBytes(collection_id),
+                            document(1, 1).to_vec().unwrap().len() as i64,
+                        ),
+                        (
                             CountStatsKey::Index {
                                 collection: collection_id,
                                 index: index_id,
@@ -1883,6 +1907,10 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
                     CountStats::new(std::collections::BTreeMap::from([
                         (CountStatsKey::Collection(collection_id), -1),
                         (
+                            CountStatsKey::CollectionDocumentBytes(collection_id),
+                            -(document(1, 1).to_vec().unwrap().len() as i64),
+                        ),
+                        (
                             CountStatsKey::Index {
                                 collection: collection_id,
                                 index: index_id,
@@ -1901,6 +1929,10 @@ fn test_count_stats_delete_delta_replayed_on_restart() {
     };
 
     let engine_restarted = new_engine(&mut MetricRegistry::default(), options, &db_path);
+    assert_eq!(
+        engine_restarted.count_stat(&CountStatsKey::CollectionDocumentBytes(collection_id)),
+        None
+    );
 
     assert_eq!(
         engine_restarted.count_stat(&CountStatsKey::Collection(collection_id)),

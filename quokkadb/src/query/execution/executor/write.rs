@@ -1,6 +1,6 @@
-use super::Metrics;
 use super::WriteResult;
 use super::read::ReadExecutor;
+use super::{ExecutionRow, Metrics};
 #[cfg(test)]
 use super::{ExecutorFailpoint, invoke_executor_test_hook};
 use crate::error::Error;
@@ -292,7 +292,7 @@ impl WriteExecutor {
             while let Some(doc_result) = next {
                 let old_doc = doc_result?;
                 matched_count += 1;
-                let new_doc = updater(old_doc.clone())?;
+                let new_doc = updater(old_doc.document.clone())?;
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
                 self.write_document(
@@ -558,7 +558,7 @@ impl WriteExecutor {
 
         while let Some(doc_result) = iter.next() {
             let old_doc = doc_result?;
-            let user_key = old_doc.get("_id").unwrap().try_into_key()?;
+            let user_key = old_doc.document.get("_id").unwrap().try_into_key()?;
 
             self.delete_document(collection, &snapshot, user_key, &old_doc, sync)?;
             deleted_count += 1;
@@ -631,7 +631,7 @@ impl WriteExecutor {
             if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
                 let updater = updates::to_updater(update, false)?;
-                let new_doc = updater(old_doc.clone())?;
+                let new_doc = updater(old_doc.document.clone())?;
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
@@ -647,7 +647,10 @@ impl WriteExecutor {
                     sync,
                 ) {
                     Ok(_) => {
-                        return Ok(SingleDocumentUpdateResult::Updated { old_doc, new_doc });
+                        return Ok(SingleDocumentUpdateResult::Updated {
+                            old_doc: old_doc.document,
+                            new_doc,
+                        });
                     }
                     Err(e) => {
                         retry_state.retry_on_version_conflict(e)?;
@@ -712,7 +715,7 @@ impl WriteExecutor {
 
             if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
-                let new_doc = self.prepare_replacement_document(&old_doc, &replacement)?;
+                let new_doc = self.prepare_replacement_document(&old_doc.document, &replacement)?;
                 let user_key = new_doc.get("_id").unwrap().try_into_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
@@ -728,7 +731,10 @@ impl WriteExecutor {
                     sync,
                 ) {
                     Ok(_) => {
-                        return Ok(SingleDocumentReplaceResult::Replaced { old_doc, new_doc });
+                        return Ok(SingleDocumentReplaceResult::Replaced {
+                            old_doc: old_doc.document,
+                            new_doc,
+                        });
                     }
                     Err(e) => {
                         retry_state.retry_on_version_conflict(e)?;
@@ -790,12 +796,16 @@ impl WriteExecutor {
 
             if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
-                let user_key = old_doc.get("_id").unwrap().try_into_key()?;
+                let user_key = old_doc.document.get("_id").unwrap().try_into_key()?;
 
                 #[cfg(test)]
                 self.invoke_test_hook(ExecutorFailpoint::AfterRead);
                 match self.delete_document(collection, &snapshot, user_key, &old_doc, sync) {
-                    Ok(_) => return Ok(SingleDocumentDeleteResult::Deleted { old_doc }),
+                    Ok(_) => {
+                        return Ok(SingleDocumentDeleteResult::Deleted {
+                            old_doc: old_doc.document,
+                        });
+                    }
                     Err(e) => {
                         retry_state.retry_on_version_conflict(e)?;
                         continue;
@@ -839,6 +849,7 @@ impl WriteExecutor {
             let indices = Indexes::from_collection(&metadata);
             let raw_doc = RawDocument::from_bytes(&doc)?;
             count_stats.inc_collection(collection, 1);
+            count_stats.inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
             indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
 
             let snapshot = self.storage_engine.acquire_snapshot();
@@ -917,6 +928,8 @@ impl WriteExecutor {
             for (doc, id, user_key) in documents_with_ids {
                 ids.push(id);
                 count_stats.inc_collection(collection, 1);
+                count_stats
+                    .inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
                 operations.push(Operation::new_put(
                     collection,
                     0,
@@ -959,6 +972,8 @@ impl WriteExecutor {
             let mut ids = Vec::with_capacity(documents_with_ids.len());
             for (doc, id, user_key) in documents_with_ids {
                 count_stats.inc_collection(collection, 1);
+                count_stats
+                    .inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
                 preconditions_vec.push(Precondition::VersionMatch {
                     collection,
                     index: 0,
@@ -1010,7 +1025,7 @@ impl WriteExecutor {
         collection: u32,
         snapshot: &Snapshot,
         user_key: Vec<u8>,
-        old_doc: Option<Document>,
+        old_doc: Option<ExecutionRow>,
         new_doc: Document,
         new_doc_bytes: Vec<u8>,
         sync: bool,
@@ -1023,8 +1038,14 @@ impl WriteExecutor {
         let indices = Indexes::from_collection(&metadata);
 
         if let Some(doc) = old_doc.as_ref() {
-            indices.append_delete_ops(&mut operations, doc, &mut count_stats)?;
+            indices.append_delete_ops(&mut operations, &doc.document, &mut count_stats)?;
         }
+
+        let old_size = old_doc.as_ref().map_or(0, |row| row.source_bson_size);
+        count_stats.inc_collection_document_bytes(
+            collection,
+            document_size_as_i64(new_doc_bytes.len()) - document_size_as_i64(old_size),
+        );
 
         operations.push(Operation::new_put(
             collection,
@@ -1058,7 +1079,7 @@ impl WriteExecutor {
         collection: u32,
         snapshot: &Snapshot,
         user_key: Vec<u8>,
-        old_doc: &Document,
+        old_doc: &ExecutionRow,
         sync: bool,
     ) -> std::result::Result<(), StorageError> {
         let mut operations = Vec::new();
@@ -1067,9 +1088,13 @@ impl WriteExecutor {
         let metadata = self.collection_metadata(collection)?;
         self.ensure_writes_allowed(&metadata)?;
         let indices = Indexes::from_collection(&metadata);
-        indices.append_delete_ops(&mut operations, old_doc, &mut count_stats)?;
+        indices.append_delete_ops(&mut operations, &old_doc.document, &mut count_stats)?;
         operations.push(Operation::new_delete(collection, 0, user_key.clone()));
         count_stats.inc_collection(collection, -1);
+        count_stats.inc_collection_document_bytes(
+            collection,
+            -document_size_as_i64(old_doc.source_bson_size),
+        );
 
         let precondition = Precondition::VersionMatch {
             collection,
@@ -1223,6 +1248,11 @@ fn calculate_backoff(attempt: u32) -> Duration {
     }
 
     Duration::from_millis(backoff)
+}
+
+// Statistics use signed deltas, while BSON lengths are nonnegative.
+fn document_size_as_i64(size: usize) -> i64 {
+    i64::try_from(size).expect("Document BSON size must fit in i64")
 }
 
 #[cfg(test)]

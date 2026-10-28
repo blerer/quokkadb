@@ -7,12 +7,18 @@ use std::io::Result;
 mod code {
     pub const COLLECTION: u8 = 0;
     pub const INDEX: u8 = 1;
+    pub const COLLECTION_DOCUMENT_BYTES: u8 = 2;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CountStatsKey {
     Collection(u32),
-    Index { collection: u32, index: u32 },
+    /// Uncompressed live primary-document BSON bytes; excludes keys and index entries.
+    CollectionDocumentBytes(u32),
+    Index {
+        collection: u32,
+        index: u32,
+    },
 }
 
 impl Serializable for CountStatsKey {
@@ -23,6 +29,9 @@ impl Serializable for CountStatsKey {
                 collection: reader.read_varint_u32()?,
                 index: reader.read_varint_u32()?,
             }),
+            code::COLLECTION_DOCUMENT_BYTES => Ok(CountStatsKey::CollectionDocumentBytes(
+                reader.read_varint_u32()?,
+            )),
             _ => unreachable!("Invalid CountStatsKey tag"),
         }
     }
@@ -32,6 +41,11 @@ impl Serializable for CountStatsKey {
             CountStatsKey::Collection(collection) => {
                 writer
                     .write_u8(code::COLLECTION)
+                    .write_varint_u32(*collection);
+            }
+            CountStatsKey::CollectionDocumentBytes(collection) => {
+                writer
+                    .write_u8(code::COLLECTION_DOCUMENT_BYTES)
                     .write_varint_u32(*collection);
             }
             CountStatsKey::Index { collection, index } => {
@@ -44,10 +58,10 @@ impl Serializable for CountStatsKey {
     }
 }
 
-/// Total-count cardinality deltas aggregated per collection and per index.
+/// Cardinality deltas per collection and index, and live BSON byte deltas per collection.
 ///
 /// This is intentionally closer to `sqlite_stat1` than to a full per-prefix
-/// distribution model: the first version only tracks bounded total counts.
+/// distribution model: it tracks total counts and uncompressed primary-document bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct CountStats {
     pub deltas: BTreeMap<CountStatsKey, i64>,
@@ -92,6 +106,12 @@ impl CountStatsBuilder {
         self.inc(CountStatsKey::Collection(collection), delta);
     }
 
+    pub fn inc_collection_document_bytes(&mut self, collection: u32, delta: i64) {
+        if delta != 0 {
+            self.inc(CountStatsKey::CollectionDocumentBytes(collection), delta);
+        }
+    }
+
     pub fn inc_index(&mut self, collection: u32, index: u32, delta: i64) {
         self.inc(CountStatsKey::Index { collection, index }, delta);
     }
@@ -127,8 +147,25 @@ mod tests {
     use crate::io::serializable::check_serialization_round_trip;
 
     #[test]
+    fn document_byte_deltas_accumulate_and_cancel() {
+        let mut builder = CountStatsBuilder::new();
+        builder.inc_collection_document_bytes(7, 0);
+        builder.inc_collection_document_bytes(7, 200);
+        builder.inc_collection_document_bytes(7, -50);
+        builder.inc_collection_document_bytes(8, 20);
+        builder.inc_collection_document_bytes(8, -20);
+        let stats = builder.build();
+        assert_eq!(
+            stats.deltas,
+            BTreeMap::from([(CountStatsKey::CollectionDocumentBytes(7), 150)])
+        );
+        check_serialization_round_trip(stats, 1);
+    }
+
+    #[test]
     fn count_stats_key_round_trip() {
         check_serialization_round_trip(CountStatsKey::Collection(12), 1);
+        check_serialization_round_trip(CountStatsKey::CollectionDocumentBytes(12), 1);
         check_serialization_round_trip(
             CountStatsKey::Index {
                 collection: 12,

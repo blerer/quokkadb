@@ -381,15 +381,20 @@ mod tests {
     #[test]
     fn count_stat_aggregates_manifest_active_and_immutable_memtables() {
         let mut manifest_state = ManifestState::new(1, 10, 4);
-        manifest_state.count_stats =
-            CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 5)]));
+        manifest_state.count_stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(10), 5),
+            (CountStatsKey::CollectionDocumentBytes(10), 500),
+        ]));
         let tree = LsmTree::from(manifest_state);
 
         tree.memtable.write(
             1,
             &WriteBatch::new_for_test(
                 vec![],
-                CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), 2)])),
+                CountStats::new(BTreeMap::from([
+                    (CountStatsKey::Collection(10), 2),
+                    (CountStatsKey::CollectionDocumentBytes(10), 200),
+                ])),
             ),
         );
 
@@ -402,11 +407,18 @@ mod tests {
             2,
             &WriteBatch::new_for_test(
                 vec![],
-                CountStats::new(BTreeMap::from([(CountStatsKey::Collection(10), -1)])),
+                CountStats::new(BTreeMap::from([
+                    (CountStatsKey::Collection(10), -1),
+                    (CountStatsKey::CollectionDocumentBytes(10), -100),
+                ])),
             ),
         );
 
         assert_eq!(tree.count_stat(&CountStatsKey::Collection(10)), Some(6));
+        assert_eq!(
+            tree.count_stat(&CountStatsKey::CollectionDocumentBytes(10)),
+            Some(600)
+        );
     }
 
     #[test]
