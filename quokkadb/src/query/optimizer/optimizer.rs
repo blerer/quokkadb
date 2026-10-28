@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
+use crate::options::options::Options;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter};
 use crate::query::optimizer::normalization_rules;
 use crate::query::optimizer::normalization_rules::NormalisationRule;
@@ -87,6 +88,7 @@ impl CostEstimator {
 pub struct Optimizer {
     normalization_rules: Arc<dyn NormalisationRule>,
     cost_estimator: CostEstimator,
+    sort_memory_limit: usize,
 }
 
 type GroupId = usize;
@@ -259,10 +261,11 @@ struct Provides {
 }
 
 impl Optimizer {
-    pub fn new() -> Self {
+    pub fn new(options: &Options) -> Self {
         Self {
             normalization_rules: Arc::new(normalization_rules::all_normalization_rules()),
             cost_estimator: CostEstimator {},
+            sort_memory_limit: options.sort_memory_limit().to_bytes(),
         }
     }
 
@@ -450,7 +453,15 @@ impl Optimizer {
             }
             LogicalPlan::Sort { sort_fields, .. } => {
                 assert_eq!(child_bests.len(), 1);
-                Ok(self.implement_sort_node(count_stats, &child_bests, sort_fields, req))
+                Ok(
+                    self.implement_sort_node(
+                        &metadata,
+                        count_stats,
+                        &child_bests,
+                        sort_fields,
+                        req,
+                    ),
+                )
             }
             LogicalPlan::Limit { limit, .. } => {
                 assert_eq!(child_bests.len(), 1);
@@ -960,15 +971,16 @@ impl Optimizer {
 
     fn implement_sort_node(
         &self,
+        metadata: &CollectionMetadata,
         count_stats: &dyn CountStatSource,
         child_bests: &[Arc<Best>],
         sort_fields: &Arc<Vec<SortField>>,
         req: &ReqProps,
     ) -> Vec<Candidate> {
-        // TODO: the parameter should be exposed at the Options levels as a number of bytes and we should use cardinality information to deduct the number of rows.
-        const MAX_IN_MEMORY_ROWS: usize = 5000;
-
         let child = &child_bests[0];
+        let estimated_row_bytes = self.estimate_sort_row_bytes(metadata, count_stats);
+        let max_in_memory_rows = (self.sort_memory_limit / estimated_row_bytes).max(1);
+
         // If the child is returning data already sorted in the correct order or a single result
         // we can simply return the child.
         if Some(sort_fields.as_ref()) == child.provides.order.as_ref()
@@ -991,7 +1003,7 @@ impl Optimizer {
             if let Some(count) = limit.limit {
                 let k = limit.skip.unwrap_or(0) + count;
 
-                if k < MAX_IN_MEMORY_ROWS {
+                if k < max_in_memory_rows {
                     let plan = Arc::new(PhysicalPlan::TopKHeapSort {
                         input: child.plan.clone(),
                         sort_fields: sort_fields.clone(),
@@ -1021,7 +1033,7 @@ impl Optimizer {
         let plan = Arc::new(PhysicalPlan::ExternalMergeSort {
             input: child.plan.clone(),
             sort_fields: sort_fields.clone(),
-            max_in_memory_rows: MAX_IN_MEMORY_ROWS,
+            max_in_memory_rows,
         });
 
         let provides = Provides {
@@ -1036,6 +1048,32 @@ impl Optimizer {
         });
 
         candidates
+    }
+
+    fn estimate_sort_row_bytes(
+        &self,
+        metadata: &CollectionMetadata,
+        count_stats: &dyn CountStatSource,
+    ) -> usize {
+        const FALLBACK_ESTIMATED_ROW_BYTES: usize = 1024;
+        const MIN_ESTIMATED_ROW_BYTES: usize = 256;
+
+        let Some(count) = count_stats.count_stat(&CountStatsKey::Collection(metadata.id)) else {
+            return FALLBACK_ESTIMATED_ROW_BYTES;
+        };
+        let Some(total_bytes) =
+            count_stats.count_stat(&CountStatsKey::CollectionDocumentBytes(metadata.id))
+        else {
+            return FALLBACK_ESTIMATED_ROW_BYTES;
+        };
+
+        if count <= 0 || total_bytes <= 0 {
+            return FALLBACK_ESTIMATED_ROW_BYTES;
+        }
+
+        let average_bytes = (total_bytes as u64) / (count as u64);
+        let average_bytes = usize::try_from(average_bytes).unwrap_or(usize::MAX);
+        average_bytes.saturating_mul(3).max(MIN_ESTIMATED_ROW_BYTES)
     }
 }
 
@@ -1199,7 +1237,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_simple_filter() {
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::new(&Options::default());
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(field_filters(field(["a"]), vec![eq(lit(10))]))
@@ -1247,7 +1285,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_complex_filter() {
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::new(&Options::default());
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(and(vec![
@@ -1278,7 +1316,7 @@ mod parametrize_test {
 
     #[test]
     fn test_parametrize_no_literals() {
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::new(&Options::default());
         let collection = 14;
         let plan = LogicalPlanBuilder::scan(collection, None)
             .filter(field_filters(field(["a"]), vec![exists(true)]))
@@ -1298,6 +1336,7 @@ mod parametrize_test {
 #[cfg(test)]
 mod optimizer_tests {
     use super::*;
+    use crate::options::storage_quantity::StorageQuantity;
     use crate::query::expr_fn::{
         and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field,
         proj_fields, within,
@@ -1517,6 +1556,89 @@ mod optimizer_tests {
     }
 
     #[test]
+    fn test_sort_memory_limit_uses_document_size_statistics() {
+        let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .sort(Some(sort_fields.clone()))
+            .build_arc();
+
+        let options = Options::default().with_sort_memory_limit(StorageQuantity::from_bytes(4096));
+        let optimizer = Optimizer::new(&options);
+        let stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), 1),
+            (CountStatsKey::CollectionDocumentBytes(COLLECTION), 1024),
+        ]));
+        let physical = optimizer
+            .optimize(
+                optimizer.parametrize(optimizer.normalize(input)).0,
+                &test_metadata(),
+                &stats,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            physical.as_ref(),
+            PhysicalPlan::ExternalMergeSort {
+                max_in_memory_rows: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_estimate_sort_row_bytes_falls_back_without_valid_statistics() {
+        let optimizer = Optimizer::new(&Options::default());
+        let metadata = test_metadata();
+
+        assert_eq!(
+            optimizer.estimate_sort_row_bytes(&metadata, &CountStats::default()),
+            1024
+        );
+
+        let zero_stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), -1),
+            (CountStatsKey::CollectionDocumentBytes(COLLECTION), 1000),
+        ]));
+        assert_eq!(
+            optimizer.estimate_sort_row_bytes(&metadata, &zero_stats),
+            1024
+        );
+
+        let negative_stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), 1),
+            (CountStatsKey::CollectionDocumentBytes(COLLECTION), -1),
+        ]));
+        assert_eq!(
+            optimizer.estimate_sort_row_bytes(&metadata, &negative_stats),
+            1024
+        );
+    }
+
+    #[test]
+    fn test_estimate_sort_row_bytes_applies_minimum_and_saturates() {
+        let optimizer = Optimizer::new(&Options::default());
+        let metadata = test_metadata();
+
+        let small_stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), 100),
+            (CountStatsKey::CollectionDocumentBytes(COLLECTION), 100),
+        ]));
+        assert_eq!(
+            optimizer.estimate_sort_row_bytes(&metadata, &small_stats),
+            256
+        );
+
+        let huge_stats = CountStats::new(BTreeMap::from([
+            (CountStatsKey::Collection(COLLECTION), 1),
+            (CountStatsKey::CollectionDocumentBytes(COLLECTION), i64::MAX),
+        ]));
+        assert_eq!(
+            optimizer.estimate_sort_row_bytes(&metadata, &huge_stats),
+            usize::MAX
+        );
+    }
+
+    #[test]
     fn test_optimize_external_merge_sort() {
         let sort_fields = Arc::new(vec![SortField::asc(field(["a"]))]);
         let input = LogicalPlanBuilder::scan(COLLECTION, None)
@@ -1526,7 +1648,7 @@ mod optimizer_tests {
         let output = PhysicalPlan::ExternalMergeSort {
             input: Arc::new(full_scan_plan()),
             sort_fields,
-            max_in_memory_rows: 5000,
+            max_in_memory_rows: 4096,
         };
 
         check_optimization(input, output);
@@ -1709,7 +1831,7 @@ mod optimizer_tests {
         metadata: &CollectionMetadata,
         count_stats: CountStats,
     ) -> Result<Arc<PhysicalPlan>> {
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::new(&Options::default());
         // First, normalize the logical plan
         let normalized_plan = optimizer.normalize(input);
         // Then, parametrize the plan to collect parameters
@@ -2082,7 +2204,7 @@ mod optimizer_tests {
                 projection: None,
             }),
             sort_fields: Arc::new(vec![SortField::asc(field(["a"]))]),
-            max_in_memory_rows: 5000,
+            max_in_memory_rows: 4096,
         };
         check_optimization_with_metadata(input.clone(), &test_metadata_with_indexes(), output);
     }

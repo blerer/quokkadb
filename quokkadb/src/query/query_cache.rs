@@ -144,6 +144,7 @@ fn estimate_cached_plan_size(plan: &PhysicalPlan) -> u32 {
 mod tests {
     use super::*;
     use crate::obs::metrics::MetricRegistry;
+    use crate::options::options::Options;
     use crate::query::expr_fn::{eq, field, field_filters, include, lit, proj_field, proj_fields};
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::query::optimizer::optimizer::Optimizer;
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn equivalent_parameterized_logical_plans_share_a_cache_entry() {
         let (cache, metric_registry) = new_cache();
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::new(&Options::default());
         let build_count = AtomicUsize::new(0);
 
         let first_logical_plan = Arc::new(

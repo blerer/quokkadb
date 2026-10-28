@@ -27,6 +27,7 @@ pub struct Options {
     max_open_files: u32,
     block_cache_size: StorageQuantity,
     query_cache_size: StorageQuantity,
+    sort_memory_limit: StorageQuantity,
     index_build_batch_size: StorageQuantity,
     wal_durability: WalDurability,
     wal_bytes_per_sync: StorageQuantity,
@@ -55,6 +56,7 @@ impl Default for Options {
             max_open_files: 200,
             block_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(4, StorageUnit::Mebibytes),
+            sort_memory_limit: StorageQuantity::new(4, StorageUnit::Mebibytes),
             index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(256, StorageUnit::Kibibytes),
@@ -91,6 +93,7 @@ impl Options {
             max_open_files: 512,
             block_cache_size: StorageQuantity::new(128, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(16, StorageUnit::Mebibytes),
+            sort_memory_limit: StorageQuantity::new(16, StorageUnit::Mebibytes),
             index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::Durable,
             wal_bytes_per_sync: StorageQuantity::new(1, StorageUnit::Mebibytes),
@@ -115,6 +118,7 @@ impl Options {
             max_open_files: 1024,
             block_cache_size: StorageQuantity::new(512, StorageUnit::Mebibytes),
             query_cache_size: StorageQuantity::new(64, StorageUnit::Mebibytes),
+            sort_memory_limit: StorageQuantity::new(64, StorageUnit::Mebibytes),
             index_build_batch_size: StorageQuantity::new(1, StorageUnit::Mebibytes),
             wal_durability: WalDurability::ProcessSafe,
             wal_bytes_per_sync: StorageQuantity::new(512, StorageUnit::Kibibytes),
@@ -156,6 +160,12 @@ impl Options {
     /// Override the query cache size.
     pub fn with_query_cache_size(mut self, size: StorageQuantity) -> Self {
         self.query_cache_size = size;
+        self
+    }
+
+    /// Override the approximate memory budget used to choose row-based sort strategies.
+    pub fn with_sort_memory_limit(mut self, size: StorageQuantity) -> Self {
+        self.sort_memory_limit = size;
         self
     }
 
@@ -263,6 +273,10 @@ impl Options {
 
     pub fn query_cache_size(&self) -> StorageQuantity {
         self.query_cache_size
+    }
+
+    pub fn sort_memory_limit(&self) -> StorageQuantity {
+        self.sort_memory_limit
     }
 
     pub fn index_build_batch_size(&self) -> StorageQuantity {
@@ -403,6 +417,11 @@ impl Options {
                 "query_cache_size must be greater than 0".into(),
             ));
         }
+        if self.sort_memory_limit.to_bytes() == 0 {
+            return Err(Error::InvalidOptions(
+                "sort_memory_limit must be greater than 0".into(),
+            ));
+        }
         if self.index_build_batch_size.to_bytes() == 0 {
             return Err(Error::InvalidOptions(
                 "index_build_batch_size must be greater than 0".into(),
@@ -482,6 +501,45 @@ mod tests {
         assert_eq!(
             opts.query_cache_size(),
             StorageQuantity::new(4, StorageUnit::Mebibytes)
+        );
+    }
+
+    #[test]
+    fn sort_memory_limit_defaults_to_four_mebibytes() {
+        assert_eq!(
+            base_options().sort_memory_limit(),
+            StorageQuantity::new(4, StorageUnit::Mebibytes)
+        );
+        assert_eq!(
+            Options::optimized().sort_memory_limit(),
+            StorageQuantity::new(16, StorageUnit::Mebibytes)
+        );
+        assert_eq!(
+            Options::high_query_load().sort_memory_limit(),
+            StorageQuantity::new(64, StorageUnit::Mebibytes)
+        );
+    }
+
+    #[test]
+    fn sort_memory_limit_can_be_configured() {
+        let size = StorageQuantity::new(768, StorageUnit::Kibibytes);
+        assert_eq!(
+            base_options()
+                .with_sort_memory_limit(size)
+                .sort_memory_limit(),
+            size
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_sort_memory_limit() {
+        let err = Options::default()
+            .with_sort_memory_limit(StorageQuantity::new(0, StorageUnit::Bytes))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid options: sort_memory_limit must be greater than 0"
         );
     }
 
@@ -605,6 +663,7 @@ impl fmt::Display for Options {
         writeln!(f, "  Max Open Files: {:?}", self.max_open_files)?;
         writeln!(f, "  Block Cache Size: {:?}", self.block_cache_size)?;
         writeln!(f, "  Query Cache Size: {:?}", self.query_cache_size)?;
+        writeln!(f, "  Sort Memory Limit: {:?}", self.sort_memory_limit)?;
         writeln!(
             f,
             "  Index Build Batch Size: {:?}",
