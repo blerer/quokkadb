@@ -37,7 +37,6 @@ impl<T: Debug> Interval<T> {
         Self { start, end }
     }
 
-
     /// Creates a closed range `[a..b]`.
     ///
     /// Includes values `x` such that `a <= x <= b`.

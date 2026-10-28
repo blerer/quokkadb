@@ -1,18 +1,11 @@
 use crate::error::Result;
 use crate::query::{BsonValueRef, Expr, SortField, SortOrder, get_path_value};
-use bson::error::{Error as BsonError, ErrorKind as BsonErrorKind};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
 use std::sync::Arc;
 use tempfile::{NamedTempFile, TempDir, tempdir};
-
-fn is_bson_stream_exhausted(err: &BsonError) -> bool {
-    matches!(&err.kind, BsonErrorKind::EndOfStream { .. })
-        || matches!(&err.kind, BsonErrorKind::Io { .. })
-            && err.message.as_deref() == Some("failed to fill whole buffer")
-}
 
 /// Compares two BSON documents according to the provided sort fields.
 /// Returns an `Ordering` based on multi-key, multi-order comparison.
@@ -96,12 +89,16 @@ fn external_merge_sort_with_temp_dir(
 
             let run_file = tempfile::Builder::new().tempfile_in(temp_dir.as_ref().unwrap())?;
             let mut writer = BufWriter::new(run_file);
+            let document_count = chunk.len();
             for doc in chunk {
                 doc.to_writer(&mut writer)?;
             }
             let mut file = writer.into_inner().map_err(|e| e.into_error())?;
             file.seek(SeekFrom::Start(0))?;
-            runs.push(file);
+            runs.push(SpillRun {
+                file,
+                document_count,
+            });
         }
     }
 
@@ -191,8 +188,15 @@ struct MergeIterator {
     heap: BinaryHeap<HeapItem>,
     /// Buffered readers for each run's temporary file.
     readers: Vec<BufReader<NamedTempFile>>,
+    /// Number of documents still expected from each run.
+    remaining_documents: Vec<usize>,
     /// Temporary directory for cleanup on drop.
     _temp_dir: TempDir, // kept for its Drop side effect
+}
+
+struct SpillRun {
+    file: NamedTempFile,
+    document_count: usize,
 }
 
 struct HeapItem {
@@ -226,32 +230,36 @@ impl MergeIterator {
     /// Creates a new `MergeIterator` from sorted runs, sort fields, and a temp directory.
     /// Loads the first document from each run into the heap.
     fn new(
-        mut runs: Vec<NamedTempFile>,
+        runs: Vec<SpillRun>,
         sort_fields: Arc<Vec<SortField>>,
         temp_dir: TempDir,
     ) -> Result<Self> {
-        let mut readers = runs.drain(..).map(BufReader::new).collect::<Vec<_>>();
+        let mut remaining_documents: Vec<usize> =
+            runs.iter().map(|run| run.document_count).collect();
+        let mut readers = runs
+            .into_iter()
+            .map(|run| BufReader::new(run.file))
+            .collect::<Vec<_>>();
         let mut heap = BinaryHeap::new();
 
         for (i, reader) in readers.iter_mut().enumerate() {
-            match Document::from_reader(reader) {
-                Ok(doc) => {
-                    heap.push(HeapItem {
-                        doc,
-                        run_index: i,
-                        sort_fields: sort_fields.clone(),
-                    });
-                }
-                Err(e) if is_bson_stream_exhausted(&e) => {
-                    // Empty run, which is fine.
-                }
-                Err(e) => return Err(e.into()),
+            if remaining_documents[i] == 0 {
+                continue;
             }
+
+            let doc = Document::from_reader(reader)?;
+            remaining_documents[i] -= 1;
+            heap.push(HeapItem {
+                doc,
+                run_index: i,
+                sort_fields: sort_fields.clone(),
+            });
         }
 
         Ok(MergeIterator {
             heap,
             readers,
+            remaining_documents,
             _temp_dir: temp_dir,
         })
     }
@@ -264,25 +272,21 @@ impl Iterator for MergeIterator {
     /// and loading the next document from the corresponding run.
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(smallest) = self.heap.pop() {
-            let next_item = match Document::from_reader(&mut self.readers[smallest.run_index]) {
-                Ok(doc) => {
-                    self.heap.push(HeapItem {
-                        doc,
-                        run_index: smallest.run_index,
-                        sort_fields: smallest.sort_fields.clone(),
-                    });
-                    Some(Ok(smallest.doc))
+            let run_index = smallest.run_index;
+            if self.remaining_documents[run_index] > 0 {
+                match Document::from_reader(&mut self.readers[run_index]) {
+                    Ok(doc) => {
+                        self.remaining_documents[run_index] -= 1;
+                        self.heap.push(HeapItem {
+                            doc,
+                            run_index,
+                            sort_fields: smallest.sort_fields.clone(),
+                        });
+                    }
+                    Err(e) => return Some(Err(e.into())),
                 }
-                Err(e) if is_bson_stream_exhausted(&e) => {
-                    // This run is exhausted.
-                    Some(Ok(smallest.doc))
-                }
-                Err(e) => {
-                    // An actual error occurred.
-                    Some(Err(e.into()))
-                }
-            };
-            next_item
+            }
+            Some(Ok(smallest.doc))
         } else {
             None // Heap is empty, we are done.
         }
@@ -295,6 +299,7 @@ mod tests {
     use crate::query::{SortField, SortOrder, make_sort_field};
     use bson::doc;
     use std::cmp::Ordering;
+    use std::io::{Seek, Write};
     use std::sync::Arc;
 
     #[test]
@@ -515,6 +520,45 @@ mod tests {
             );
             assert_eq!(created_temp_dir, successful_rows > 2);
         }
+    }
+
+    #[test]
+    fn test_merge_iterator_rejects_truncated_first_document() {
+        let temp_dir = tempdir().unwrap();
+        let mut file = tempfile::Builder::new().tempfile_in(&temp_dir).unwrap();
+        file.write_all(&[5, 0, 0]).unwrap();
+
+        let result = MergeIterator::new(
+            vec![SpillRun {
+                file,
+                document_count: 1,
+            }],
+            Arc::new(vec![]),
+            temp_dir,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_iterator_rejects_truncated_later_document() {
+        let temp_dir = tempdir().unwrap();
+        let mut file = tempfile::Builder::new().tempfile_in(&temp_dir).unwrap();
+        doc! { "_id": 1 }.to_writer(&mut file).unwrap();
+        file.write_all(&[5, 0, 0]).unwrap();
+        file.rewind().unwrap();
+
+        let mut iterator = MergeIterator::new(
+            vec![SpillRun {
+                file,
+                document_count: 2,
+            }],
+            Arc::new(vec![]),
+            temp_dir,
+        )
+        .unwrap();
+
+        assert!(iterator.next().unwrap().is_err());
     }
 
     #[test]
