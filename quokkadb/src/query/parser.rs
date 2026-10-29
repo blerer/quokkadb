@@ -24,6 +24,7 @@ static SCALAR_OPERATIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "$size",
         "$all",
         "$elemMatch",
+        "$not",
     ])
 });
 
@@ -124,6 +125,14 @@ fn parse_predicates(value: &Bson) -> Result<Vec<Arc<Expr>>, Error> {
                 "$lte" => predicates.push(new_predicate(Lte, value)),
                 "$in" => predicates.push(new_predicate(In, value)),
                 "$nin" => predicates.push(new_predicate(Nin, value)),
+                "$not" => {
+                    if !matches!(value, Bson::Document(_)) {
+                        return Err(Error::InvalidRequest("$not must be a document".to_string()));
+                    }
+                    predicates.push(Arc::new(Expr::Not(Arc::new(Expr::And(parse_predicates(
+                        value,
+                    )?)))));
+                }
                 "$exists" => {
                     if let Bson::Boolean(exists) = value {
                         predicates.push(Arc::new(Expr::Exists(*exists)));

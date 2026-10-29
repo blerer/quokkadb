@@ -236,20 +236,23 @@ impl Expr {
                     })
                     .collect();
 
-                Arc::new(Expr::FieldFilters {
-                    field: field.clone(),
-                    filters: vec![Arc::new(Expr::Or(field_predicates))],
-                })
+                Arc::new(Expr::Or(field_predicates))
             }
+            // Opposite range comparisons are not complements for arrays or missing fields.
+            Expr::Comparison {
+                operator:
+                    ComparisonOperator::Gt
+                    | ComparisonOperator::Gte
+                    | ComparisonOperator::Lt
+                    | ComparisonOperator::Lte,
+                ..
+            } => Arc::new(Expr::Not(Arc::new(self.clone()))),
             Expr::Comparison { operator, value } => Arc::new(Expr::Comparison {
                 operator: operator.negate(),
                 value: value.clone(),
             }),
             Expr::Exists(bool) => Arc::new(Expr::Exists(!*bool)),
-            Expr::All(values) => Arc::new(Expr::Comparison {
-                operator: ComparisonOperator::Nin,
-                value: values.clone(),
-            }),
+            Expr::All(_) => Arc::new(Expr::Not(Arc::new(self.clone()))),
             Expr::Type {
                 bson_type,
                 negated: not,

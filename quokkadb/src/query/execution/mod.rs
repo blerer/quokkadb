@@ -3,6 +3,8 @@ use bson::{Bson, Document};
 
 mod executor;
 mod filters;
+#[cfg(test)]
+pub(crate) use filters::to_filter;
 pub(crate) mod indexes;
 mod projections;
 pub(crate) mod query_executor;

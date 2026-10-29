@@ -2,9 +2,18 @@
 //!
 //! This module implements a sequence of normalization rules that are applied to a logical query plan
 //! to simplify it and prepare it for optimization and execution. The rules are applied in a specific
-//! order to ensure correctness and maximize simplification opportunities. The pipeline is designed to
-//! be idempotent, meaning applying it multiple times to the same plan will not change the result
-//! after the first application.
+//! order to ensure correctness and enable subsequent simplifications within a single pipeline pass.
+//! Each rule is applied once, in order; individual rules perform their own tree traversals.
+//!
+//! QuokkaDB prioritizes low normalization overhead as a lightweight embedded database. Normalization
+//! does not restart the pipeline or repeat it until no further changes occur (a fixed point).
+//! This means some further simplifications may remain after the pass. New rules should account for
+//! dependencies on earlier and later rules through their ordering, rather than introduce repeated
+//! pipeline execution. Idempotence on repeated application is not part of the pipeline contract.
+//!
+//! The examples below show expression shapes rather than Rust constructors. In the examples, `A`,
+//! `B`, and `C` are predicates, and `x` is a field. An interval is written using mathematical
+//! bounds, for example `x in (5, +inf)` means `x > 5`.
 //!
 //! The normalization pipeline consists of the following rules, applied in sequence:
 //!
@@ -15,7 +24,7 @@
 //!
 //! 2.  **`PushDownNotExpressions`**: This rule pushes `NOT` operators down the expression tree,
 //!     closer to the leaf nodes. For example, `NOT(AND(A, B))` becomes `OR(NOT(A), NOT(B))`, and
-//!     `NOT(x > 5)` becomes `x <= 5`. This helps in simplifying expressions by removing negations
+//!     range negations remain structural because arrays may have multiple witnesses. This removes negations
 //!     at higher levels.
 //!
 //! 3.  **`SimplifyLogicalOperators`**: This is a crucial cleanup rule that works from the bottom up.
@@ -24,10 +33,8 @@
 //!     (`A AND NOT A` becomes `FALSE`) and tautologies (`A OR NOT A` becomes `TRUE`), which can
 //!     significantly simplify or even eliminate parts of the query.
 //!
-//! 4.  **`CombineComparisonsToInterval`**: This rule identifies multiple range comparison predicates
-//!     (`$gt`, `$gte`, `$lt`, `$lte`, `$eq`) on the same field and combines them into a single,
-//!     more compact `Interval` expression. For example, `x > 5 AND x < 10` becomes `x IN (5, 10)`.
-//!     This simplifies the representation of range queries.
+//! 4.  **`CombineComparisonsToInterval`**: Converts each comparison to its own interval.
+//!     Separate predicates retain separate witnesses, including on array-valued fields.
 //!
 //! 5.  **`CoalesceSameFieldDisjunctions`**: This rule simplifies `OR` expressions that contain
 //!     multiple predicates on the same field. It unions overlapping or adjacent intervals, merges
@@ -35,11 +42,10 @@
 //!     `x > 5 OR x > 2` becomes `x > 2`). This reduces the complexity of disjunctive predicates,
 //!     potentially enabling further optimizations.
 //!
-//! 6.  **`CoalesceFieldPredicates`**: This rule further refines predicates on a single field. It
-//!     intersects multiple `$in` lists, filters the values of an `$in` list against an `Interval`
-//!     on the same field, and removes redundant `$exists: true` predicates if a more specific
-//!     sargable predicate (like `$in` or an interval) is already present. This ensures that each
-//!     field has at most one of each kind of sargable predicate, simplifying index matching.
+//! 6.  **`CoalesceFieldPredicates`**: Canonicalizes each `$in` list separately and
+//!     removes `$exists: true` only when another predicate requires a present value.
+//!     Independent predicates are never intersected: array elements may provide
+//!     different witnesses for each predicate.
 //!
 //! 7.  **`EliminateRedundantFilter`**: After all expression simplifications, this rule cleans up
 //!     the logical plan tree. If a `Filter` node has a condition that has been simplified to
@@ -51,15 +57,49 @@
 //!     allows the storage engine to use indexes or perform efficient filtering at the data source,
 //!     significantly reducing the amount of data that needs to be processed by higher-level
 //!     operators.
+//!
+//! ## Expression-level examples
+//!
+//! ```text
+//! NOR(A, B)                         -> AND(NOT(A), NOT(B))
+//! NOT(AND(A, B))                    -> OR(NOT(A), NOT(B))
+//! AND(A, TRUE, A)                   -> A
+//! AND(A, NOT(A))                    -> FALSE
+//! OR(A, FALSE, A)                   -> A
+//! OR(A, NOT(A))                     -> TRUE
+//! x > 5 AND x < 10                  -> x in (5, +inf) AND x in (-inf, 10)
+//! x > 5 OR x > 10                   -> x > 5
+//! x IN [3, 1, 3]                    -> x IN [1, 3]
+//! Filter(TRUE, scan)                -> scan
+//! Filter(FALSE, scan)               -> NoOp
+//! ```
+//!
+//! The interval example is intentionally not an intersection. A document such as
+//! `{ x: [1, 10] }` may satisfy `x > 5` with one array element and `x < 10` with another.
+//! Rewriting those predicates to `x in (5, 10)` would incorrectly require one element to satisfy
+//! both conditions.
+//!
+//! Similarly, `NOT(x > 5)` remains structural rather than becoming `x <= 5`, because arrays and
+//! missing fields do not have the scalar complement semantics required for that rewrite. The same
+//! care applies to `$all`, `$size`, `$elemMatch`, array equality, and `$in`/`$nin`: these operations
+//! are not interchangeable with ordinary scalar intervals.
+//!
+//! Filter pushdown preserves a residual expression when the scan cannot evaluate every predicate:
+//!
+//! ```text
+//! Filter(AND(x > 5, SIZE(x) = 2), CollectionScan)
+//!     -> Filter(SIZE(x) = 2, CollectionScan(filter = x > 5))
+//! ```
+//!
+//! An `OR` containing a residual predicate remains residual as a whole, so pushdown does not
+//! change the query's boolean or array semantics.
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter, transform_up_filter};
 use crate::query::tree_node::TreeNode;
 use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr};
 use crate::util::interval::Interval;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ops::RangeBounds;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::util::bson_utils;
 use bson::Bson;
 
 const MAX_OR_CARTESIAN_PRODUCT: usize = 64;
@@ -68,7 +108,12 @@ pub trait NormalisationRule: Send + Sync {
     fn apply(&self, plan: Arc<LogicalPlan>) -> Arc<LogicalPlan>;
 }
 
-/// Returns the list of normalization rules to be applied in sequence.
+/// Returns the ordered normalization pipeline, which applies each rule once per invocation.
+///
+/// The returned composite applies the rules in the same order described in the module
+/// documentation. For example, `NOR(x > 5, x < 1)` becomes
+/// `AND(NOT(x > 5), NOT(x < 1))` before later simplification and pushdown.
+/// Rules have their own tree traversals; the pipeline does not iterate to a fixed point.
 pub fn all_normalization_rules() -> impl NormalisationRule {
     CompositeRule::new(vec![
         Arc::new(DeMorganNorToAnd {}),
@@ -82,6 +127,10 @@ pub fn all_normalization_rules() -> impl NormalisationRule {
     ])
 }
 
+/// Applies a sequence of rules once in the supplied order.
+///
+/// Each rule receives the previous rule's output. Rules are not revisited when a later rule
+/// exposes another simplification opportunity; callers must choose the order accordingly.
 #[derive(Clone)]
 pub struct CompositeRule {
     rules: Vec<Arc<dyn NormalisationRule>>,
@@ -101,6 +150,10 @@ impl NormalisationRule for CompositeRule {
 
 /// Normalization rule to apply De Morgan's Law for NOR expressions in logical plans.
 /// This rule transforms NOR expressions into AND expressions with negated conditions.
+///
+/// ```text
+/// NOR(A, B, C) -> AND(NOT(A), NOT(B), NOT(C))
+/// ```
 #[derive(Clone)]
 pub struct DeMorganNorToAnd;
 
@@ -128,6 +181,15 @@ impl DeMorganNorToAnd {
 }
 
 /// Normalization rule to simplify NOT expressions in logical plans.
+///
+/// ```text
+/// NOT(AND(A, B)) -> OR(NOT(A), NOT(B))
+/// NOT(OR(A, B))  -> AND(NOT(A), NOT(B))
+/// NOT(EXISTS(x)) -> NOT-EXISTS(x)
+/// ```
+///
+/// Range comparisons remain wrapped in `NOT`: `NOT(x > 5)` is not rewritten to `x <= 5`,
+/// because arrays and missing fields do not have the required scalar complement semantics.
 #[derive(Clone)]
 pub struct PushDownNotExpressions;
 
@@ -148,6 +210,13 @@ impl PushDownNotExpressions {
 
 /// Normalization rule to simplify logical operators in expressions by flattening nested AND/OR,
 /// removing duplicates, folding constants, and detecting contradictions or tautologies.
+///
+/// ```text
+/// AND(A, AND(B, TRUE), A) -> AND(A, B)
+/// OR(A, OR(B, FALSE), A)  -> OR(A, B)
+/// AND(A, NOT(A))           -> FALSE
+/// OR(A, NOT(A))            -> TRUE
+/// ```
 #[derive(Clone)]
 pub struct SimplifyLogicalOperators;
 
@@ -164,22 +233,16 @@ impl SimplifyLogicalOperators {
             Expr::And(conditions) => Self::simplify_and(conditions),
             Expr::Or(conditions) => Self::simplify_or(conditions),
             Expr::FieldFilters { field, filters } => Self::simplify_field_filters(field, filters),
-            Expr::Comparison { operator, value }
-                if *operator == ComparisonOperator::In || *operator == ComparisonOperator::Nin =>
-            {
-                if let Expr::Literal(bson_val) = value.as_ref() {
-                    if let Bson::Array(arr) = bson_val.to_bson() {
-                        if arr.is_empty() {
-                            return if *operator == ComparisonOperator::In {
-                                Arc::new(Expr::AlwaysFalse) // IN [] => FALSE
-                            } else {
-                                Arc::new(Expr::AlwaysTrue) // NIN [] => TRUE
-                            };
-                        }
-                    }
-                }
-                expr.clone()
+            Expr::Comparison {
+                operator: ComparisonOperator::In | ComparisonOperator::Nin,
+                ..
             }
+            | Expr::All(_) => canonicalize_set_predicate(expr),
+            Expr::Not(child) => match child.as_ref() {
+                Expr::AlwaysTrue => Arc::new(Expr::AlwaysFalse),
+                Expr::AlwaysFalse => Arc::new(Expr::AlwaysTrue),
+                _ => expr,
+            },
             Expr::Nor(_) => {
                 unreachable!("De Morgan's Law should have been applied before this rule")
             }
@@ -199,7 +262,7 @@ impl SimplifyLogicalOperators {
         }
 
         // Group FieldFilters by field and collect other expressions.
-        let mut field_filters_map: HashMap<Arc<Expr>, Vec<Arc<Expr>>> = HashMap::new();
+        let mut field_filters_map: BTreeMap<Arc<Expr>, Vec<Arc<Expr>>> = BTreeMap::new();
         let mut other_exprs: Vec<Arc<Expr>> = Vec::new();
 
         for e in flattened {
@@ -220,13 +283,18 @@ impl SimplifyLogicalOperators {
         let mut result = other_exprs;
         for (field, filters) in field_filters_map {
             if !filters.is_empty() {
-                result.push(Arc::new(Expr::FieldFilters { field, filters }));
+                let merged = Self::simplify_field_filters(&field, &filters);
+                match merged.as_ref() {
+                    Expr::AlwaysFalse => return merged,
+                    Expr::AlwaysTrue => {}
+                    _ => result.push(merged),
+                }
             }
         }
 
         // Apply deduplication and contradiction detection
         let mut final_result: Vec<Arc<Expr>> = Vec::new();
-        let mut seen: HashSet<Arc<Expr>> = HashSet::new();
+        let mut seen: BTreeSet<Arc<Expr>> = BTreeSet::new();
 
         for e in result {
             let neg = e.negate();
@@ -241,6 +309,7 @@ impl SimplifyLogicalOperators {
             }
         }
         // Sort the result to ensure consistent ordering (important when comparing queries shape
+        remove_absorbed(&mut final_result, true);
         final_result.sort();
         match final_result.len() {
             0 => Arc::new(Expr::AlwaysTrue), // AND() == TRUE
@@ -262,7 +331,7 @@ impl SimplifyLogicalOperators {
 
         // Apply constant folding, deduplication, and tautology detection
         let mut result: Vec<Arc<Expr>> = Vec::new();
-        let mut seen: HashSet<Arc<Expr>> = HashSet::new();
+        let mut seen: BTreeSet<Arc<Expr>> = BTreeSet::new();
 
         for e in flattened {
             match e.as_ref() {
@@ -283,6 +352,7 @@ impl SimplifyLogicalOperators {
             }
         }
         // Sort the result to ensure consistent ordering (important when comparing queries shape
+        remove_absorbed(&mut result, false);
         result.sort();
         match result.len() {
             0 => Arc::new(Expr::AlwaysFalse), // OR() == FALSE
@@ -294,7 +364,7 @@ impl SimplifyLogicalOperators {
     fn simplify_field_filters(field: &Arc<Expr>, filters: &[Arc<Expr>]) -> Arc<Expr> {
         // Apply constant folding, deduplication, and contradiction detection
         let mut result: Vec<Arc<Expr>> = Vec::new();
-        let mut seen: HashSet<Arc<Expr>> = HashSet::new();
+        let mut seen: BTreeSet<Arc<Expr>> = BTreeSet::new();
 
         for e in filters {
             match e.as_ref() {
@@ -314,6 +384,13 @@ impl SimplifyLogicalOperators {
                 result.push(e.clone());
             }
         }
+        if result
+            .iter()
+            .any(|filter| matches!(filter.as_ref(), Expr::Exists(false)))
+            && result.iter().any(|filter| predicate_requires_value(filter))
+        {
+            return Arc::new(Expr::AlwaysFalse);
+        }
         // Sort the result to ensure consistent ordering (important when comparing queries shape
         result.sort();
         match result.len() {
@@ -326,8 +403,17 @@ impl SimplifyLogicalOperators {
     }
 }
 
-/// Normalization rule to combine multiple range/equality comparisons on the same field
-/// into a single interval expression.
+/// Converts range/equality comparisons into independent interval expressions.
+/// Combining them would incorrectly require a single array element to satisfy all predicates.
+///
+/// ```text
+/// x = 5  -> x in [5, 5]
+/// x >= 5 -> x in [5, +inf)
+/// x < 10 -> x in (-inf, 10)
+/// ```
+///
+/// When several predicates address an array-valued field, each interval remains independent:
+/// `x > 5 AND x < 10` is not collapsed into the single interval `x in (5, 10)`.
 #[derive(Clone)]
 pub struct CombineComparisonsToInterval;
 
@@ -340,7 +426,8 @@ impl NormalisationRule for CombineComparisonsToInterval {
 impl CombineComparisonsToInterval {
     fn combine_comparisons_to_interval(expr: Arc<Expr>) -> Arc<Expr> {
         if let Expr::FieldFilters { field, filters } = expr.as_ref() {
-            let mut combined_interval: Interval<Arc<Expr>> = Interval::all();
+            // Each predicate may match a different array element. Preserve its
+            // own interval until scalar or same-element semantics are proven.
             let mut other_filters = Vec::new();
             let mut comparisons_found = false;
 
@@ -367,12 +454,7 @@ impl CombineComparisonsToInterval {
 
                     if let Some(interval) = interval {
                         comparisons_found = true;
-                        if let Some(intersection) = combined_interval.intersection(&interval) {
-                            combined_interval = intersection;
-                        } else {
-                            // The intersection is empty, which means a contradiction.
-                            return Arc::new(Expr::AlwaysFalse);
-                        }
+                        other_filters.push(Arc::new(Expr::Interval(interval)));
                     } else {
                         other_filters.push(f.clone());
                     }
@@ -383,10 +465,6 @@ impl CombineComparisonsToInterval {
 
             if !comparisons_found {
                 return expr.clone();
-            }
-
-            if combined_interval != Interval::all() {
-                other_filters.push(Arc::new(Expr::Interval(combined_interval)));
             }
 
             other_filters.sort();
@@ -404,10 +482,19 @@ impl CombineComparisonsToInterval {
     }
 }
 
-/// Normalization rule to coalesce multiple sargable predicates on the same field
-/// into a single predicate where possible. This rule intersects multiple `$in` clauses,
-/// filters `$in` values against `$gt`/`$lt` intervals, and removes redundant `$exists: true`
-/// predicates.
+/// Canonicalizes field predicates without intersecting independent array matches.
+///
+/// This rule canonicalizes each set predicate separately and removes predicates that are implied
+/// by a narrower numeric interval, while preserving independent witnesses:
+///
+/// ```text
+/// x IN [3, 1, 3] AND x IN [2, 1] -> x IN [1, 3] AND x IN [1, 2]
+/// x > 5 AND x > 10               -> x > 10
+/// ```
+///
+/// It deliberately does not intersect independent array predicates. An array such as `[1, 10]`
+/// can satisfy `x < 5 AND x > 5`, so rewriting that expression as an unsatisfiable scalar range
+/// would change its meaning.
 #[derive(Clone)]
 pub struct CoalesceFieldPredicates;
 
@@ -420,97 +507,54 @@ impl NormalisationRule for CoalesceFieldPredicates {
 impl CoalesceFieldPredicates {
     fn coalesce_field_predicates(expr: Arc<Expr>) -> Arc<Expr> {
         if let Expr::FieldFilters { field, filters } = expr.as_ref() {
-            // Previous rules ensure that filters are sorted and deduplicated. Therefore,
-            // based on the Expr enum order we will have: Comparison, Interval, Exists and then others in that order.
-            let mut new_filters: Vec<Arc<Expr>> = Vec::new();
-            let mut previous: Option<Arc<Expr>> = None;
-
-            for f in filters {
-                match f.as_ref() {
-                    Expr::Comparison {
-                        operator: ComparisonOperator::In,
-                        value,
-                    } => {
-                        if let Some(expr) = &previous {
-                            match expr.as_ref() {
-                                Expr::Comparison {
-                                    operator: ComparisonOperator::In,
-                                    value: _,
-                                } => {
-                                    // Merge two IN clauses by intersecting their values
-                                    let merged = coalesce_in_with_in(expr, f);
-                                    if matches!(merged.as_ref(), Expr::AlwaysFalse) {
-                                        return Arc::new(Expr::AlwaysFalse);
-                                    }
-                                    previous = Some(merged);
-                                }
-                                _ => unreachable!(
-                                    "Unexpected expression before IN clause: {:?}",
-                                    expr
-                                ),
-                            }
-                        } else {
-                            if let Expr::Literal(BsonValue(Bson::Array(array))) = value.as_ref() {
-                                let mut array = array.iter().cloned().collect::<Vec<_>>();
-                                array.sort_by(|a, b| bson_utils::cmp_bson(a, b));
-                                previous = Some(Arc::new(Expr::Comparison {
-                                    operator: ComparisonOperator::In,
-                                    value: Arc::new(Expr::Literal(BsonValue::from(array))),
-                                }));
-                            } else {
-                                unreachable!("IN operator requires an array literal as its value");
-                            }
-                        }
-                    }
-                    Expr::Interval(..) => {
-                        if let Some(expr) = &previous {
-                            match expr.as_ref() {
-                                Expr::Comparison {
-                                    operator: ComparisonOperator::In,
-                                    value: _,
-                                } => {
-                                    // Merge IN clause with Interval by filtering IN values against the interval
-                                    let merged = coalesce_in_with_interval(expr, f);
-                                    if matches!(merged.as_ref(), Expr::AlwaysFalse) {
-                                        return Arc::new(Expr::AlwaysFalse);
-                                    }
-                                    previous = Some(merged);
-                                }
-                                _ => unreachable!(
-                                    "Unexpected expression before an interval clause: {:?}",
-                                    expr
-                                ),
-                            }
-                        } else {
-                            previous = Some(f.clone());
-                        }
-                    }
-                    Expr::Exists(true) => {
-                        if previous.is_some() {
-                            continue; // Drop redundant Exists(true)
-                        } else {
-                            previous = Some(f.clone());
-                        }
-                    }
-                    _ => new_filters.push(f.clone()),
+            // Canonicalize each set separately: independent predicates may
+            // have different array elements as witnesses.
+            let mut filters: Vec<_> = filters
+                .iter()
+                .cloned()
+                .map(canonicalize_set_predicate)
+                .collect();
+            if filters
+                .iter()
+                .any(|filter| predicate_requires_value(filter))
+            {
+                if filters
+                    .iter()
+                    .any(|filter| matches!(filter.as_ref(), Expr::Exists(false)))
+                {
+                    return Arc::new(Expr::AlwaysFalse);
                 }
+                filters.retain(|filter| !matches!(filter.as_ref(), Expr::Exists(true)));
             }
+            filters.sort();
+            filters.dedup();
 
-            if previous.is_some() {
-                new_filters.push(previous.unwrap());
-            }
-            new_filters.sort();
-
-            if new_filters.is_empty() {
-                Arc::new(Expr::AlwaysTrue)
-            } else {
-                Arc::new(Expr::FieldFilters {
-                    field: field.clone(),
-                    filters: new_filters,
+            // A narrower numeric interval supplies a witness for a containing
+            // interval, even when another predicate needs an independent witness.
+            // Never intersect independent predicates: that would change array matches.
+            let intervals: Vec<_> = filters
+                .iter()
+                .filter_map(|filter| match filter.as_ref() {
+                    Expr::Interval(interval) if interval_has_numeric_bounds(interval) => {
+                        Some(interval.clone())
+                    }
+                    _ => None,
                 })
-            }
+                .collect();
+            filters.retain(|filter| match filter.as_ref() {
+                Expr::Interval(interval) if interval_has_numeric_bounds(interval) => !intervals
+                    .iter()
+                    .any(|other| other != interval && interval.contains_interval(other)),
+                _ => true,
+            });
+            SimplifyLogicalOperators::simplify_field_filters(field, &filters)
         } else {
-            expr.clone()
+            match expr.as_ref() {
+                Expr::And(_) | Expr::Or(_) | Expr::Not(_) => {
+                    SimplifyLogicalOperators::simplify_operators(expr)
+                }
+                _ => expr,
+            }
         }
     }
 }
@@ -518,6 +562,15 @@ impl CoalesceFieldPredicates {
 /// Normalization rule to coalesce multiple disjunctive predicates on the same field
 /// into a single predicate where possible. This rule unions multiple `$in` clauses,
 /// unions overlapping or adjacent intervals, and handles `Exists(true)` subsumption.
+///
+/// ```text
+/// (x > 5) OR (x > 10)             -> x > 5
+/// (x IN [1, 2]) OR (x IN [2, 3])   -> x IN [1, 2, 3]
+/// (x > 5) OR (x < 1)               -> (x > 5) OR (x < 1)
+/// ```
+///
+/// Only compatible numeric intervals are unioned. Array equality and set predicates are kept in
+/// their original operation family instead of being converted into scalar ranges.
 #[derive(Clone)]
 pub struct CoalesceSameFieldDisjunctions;
 
@@ -530,7 +583,7 @@ impl NormalisationRule for CoalesceSameFieldDisjunctions {
 impl CoalesceSameFieldDisjunctions {
     fn coalesce_disjunctions(expr: Arc<Expr>) -> Arc<Expr> {
         if let Expr::Or(disjuncts) = expr.as_ref() {
-            let mut field_filters_map: HashMap<Arc<Expr>, Vec<Arc<Expr>>> = HashMap::new();
+            let mut field_filters_map: BTreeMap<Arc<Expr>, Vec<Arc<Expr>>> = BTreeMap::new();
             let mut other_disjuncts: Vec<Arc<Expr>> = Vec::new();
 
             for d in disjuncts {
@@ -553,19 +606,11 @@ impl CoalesceSameFieldDisjunctions {
 
             let mut new_disjuncts = other_disjuncts;
             for (field, filters) in field_filters_map {
-                if let Some(coalesced) = Self::coalesce_same_field_disjuncts(&filters) {
-                    new_disjuncts.push(Arc::new(Expr::FieldFilters {
-                        field,
-                        filters: vec![coalesced],
-                    }));
-                } else {
-                    // Could not coalesce, add original FieldFilters back.
-                    for filter in filters {
-                        new_disjuncts.push(Arc::new(Expr::FieldFilters {
-                            field: field.clone(),
-                            filters: vec![filter],
-                        }));
-                    }
+                for filter in Self::coalesce_same_field_disjuncts(&filters) {
+                    new_disjuncts.push(SimplifyLogicalOperators::simplify_field_filters(
+                        &field,
+                        &[filter],
+                    ));
                 }
             }
 
@@ -575,43 +620,209 @@ impl CoalesceSameFieldDisjunctions {
         }
     }
 
-    /// Attempts to coalesce a list of disjunctive predicates on the same field.
-    fn coalesce_same_field_disjuncts(filters: &[Arc<Expr>]) -> Option<Arc<Expr>> {
-        let mut previous = None;
-
-        for f in filters {
-            match f.as_ref() {
+    /// Coalesces compatible subsets while preserving other alternatives.
+    fn coalesce_same_field_disjuncts(filters: &[Arc<Expr>]) -> Vec<Arc<Expr>> {
+        let has_exists = filters
+            .iter()
+            .any(|filter| matches!(filter.as_ref(), Expr::Exists(true)));
+        let mut result = Vec::new();
+        let mut membership = None;
+        let mut intervals = Vec::new();
+        for filter in filters {
+            if has_exists && predicate_requires_value(filter) {
+                continue;
+            }
+            match filter.as_ref() {
                 Expr::Comparison {
                     operator: ComparisonOperator::In,
-                    value: _value,
-                } => {
-                    previous = if previous.is_none() {
-                        Some(f.clone())
-                    } else {
-                        coalesce_in_disjunctions(&previous.unwrap(), f)
+                    value,
+                } if matches!(value.as_ref(), Expr::Literal(BsonValue(Bson::Array(_)))) => {
+                    membership = match membership {
+                        None => Some(filter.clone()),
+                        Some(previous) => coalesce_in_disjunctions(&previous, filter),
                     };
                 }
-                Expr::Interval(i) => {
-                    previous = if previous.is_none() {
-                        Some(f.clone())
-                    } else {
-                        if let Expr::Interval(prev_i) = previous.as_ref().unwrap().as_ref() {
-                            if let Some(union) = prev_i.union(i) {
-                                Some(Arc::new(Expr::Interval(union)))
-                            } else {
-                                return None; // Disjoint intervals cannot be coalesced
-                            }
-                        } else {
-                            return None; // Cannot coalesce Interval with non-Interval
-                        }
-                    };
+                // Numeric intervals share element-wise comparison semantics.
+                // Array/null equality must not be folded into a range.
+                Expr::Interval(interval) if interval_has_numeric_bounds(interval) => {
+                    intervals.push(interval.clone())
                 }
-                Expr::Exists(true) => return Some(f.clone()), // Exists(true) subsumes all other predicates
-                _ => return None, // Cannot coalesce if there are other types of predicates
+                _ => result.push(filter.clone()),
             }
         }
-        previous
+        intervals.sort();
+        let mut merged: Vec<Interval<Arc<Expr>>> = Vec::new();
+        for interval in intervals {
+            if let Some(previous) = merged.last_mut()
+                && let Some(union) = previous.union(&interval)
+            {
+                *previous = union;
+            } else {
+                merged.push(interval);
+            }
+        }
+        result.extend(
+            merged
+                .into_iter()
+                .map(|interval| Arc::new(Expr::Interval(interval))),
+        );
+        if let Some(membership) = membership {
+            result.push(canonicalize_set_predicate(membership));
+        }
+        result
     }
+}
+
+/// Canonicalizes literal set operands without touching placeholders or scalar literals.
+fn canonicalize_set_predicate(expr: Arc<Expr>) -> Arc<Expr> {
+    let value = match expr.as_ref() {
+        Expr::Comparison {
+            operator: ComparisonOperator::In | ComparisonOperator::Nin,
+            value,
+        }
+        | Expr::All(value) => value,
+        _ => return expr,
+    };
+    let Expr::Literal(BsonValue(Bson::Array(values))) = value.as_ref() else {
+        return expr;
+    };
+    if values.is_empty() {
+        return Arc::new(
+            if matches!(
+                expr.as_ref(),
+                Expr::Comparison {
+                    operator: ComparisonOperator::Nin,
+                    ..
+                }
+            ) {
+                Expr::AlwaysTrue
+            } else {
+                Expr::AlwaysFalse
+            },
+        );
+    }
+    let values: BTreeSet<_> = values.iter().map(BsonValueRef).collect();
+    let value = Arc::new(Expr::Literal(BsonValue::from(values)));
+    Arc::new(match expr.as_ref() {
+        Expr::Comparison { operator, .. } => Expr::Comparison {
+            operator: *operator,
+            value,
+        },
+        Expr::All(_) => Expr::All(value),
+        _ => unreachable!(),
+    })
+}
+
+/// Structural implication only: leaves are compared exactly, without range reasoning.
+fn structurally_implies(left: &Arc<Expr>, right: &Arc<Expr>) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.as_ref(), right.as_ref()) {
+        (_, Expr::And(children)) => children
+            .iter()
+            .all(|child| structurally_implies(left, child)),
+        (Expr::Or(children), _) => children
+            .iter()
+            .all(|child| structurally_implies(child, right)),
+        (Expr::And(children), _) => children
+            .iter()
+            .any(|child| structurally_implies(child, right)),
+        (_, Expr::Or(children)) => children
+            .iter()
+            .any(|child| structurally_implies(left, child)),
+        (
+            Expr::FieldFilters {
+                field: left_field,
+                filters: left_filters,
+            },
+            Expr::FieldFilters {
+                field: right_field,
+                filters: right_filters,
+            },
+        ) => {
+            left_field == right_field
+                && right_filters
+                    .iter()
+                    .all(|filter| left_filters.contains(filter))
+        }
+        _ => false,
+    }
+}
+
+fn remove_absorbed(expressions: &mut Vec<Arc<Expr>>, conjunction: bool) {
+    if expressions.len() < 2 {
+        return;
+    }
+    let retained: Vec<_> = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expr)| {
+            let redundant = expressions.iter().enumerate().any(|(other_index, other)| {
+                if index == other_index {
+                    return false;
+                }
+                let (stronger, weaker) = if conjunction {
+                    (other, expr)
+                } else {
+                    (expr, other)
+                };
+                structurally_implies(stronger, weaker)
+                    && (other_index < index || !structurally_implies(weaker, stronger))
+            });
+            (!redundant).then(|| expr.clone())
+        })
+        .collect();
+    *expressions = retained;
+}
+
+fn predicate_requires_value(expr: &Expr) -> bool {
+    match expr {
+        Expr::Type { negated: false, .. }
+        | Expr::Size { negated: false, .. }
+        | Expr::ElemMatch(_) => true,
+        Expr::Comparison {
+            operator: ComparisonOperator::Eq,
+            value,
+        } => {
+            matches!(value.as_ref(), Expr::Literal(BsonValue(value)) if !matches!(value, Bson::Null))
+        }
+        Expr::Comparison {
+            operator:
+                ComparisonOperator::Gt
+                | ComparisonOperator::Gte
+                | ComparisonOperator::Lt
+                | ComparisonOperator::Lte,
+            ..
+        } => true,
+        Expr::Interval(interval) => {
+            !interval.is_point()
+                || !matches!(
+                    interval.start_bound_value().as_deref(),
+                    Some(Expr::Literal(BsonValue(Bson::Null)))
+                )
+        }
+        Expr::Comparison {
+            operator: ComparisonOperator::In,
+            value,
+        } => matches!(value.as_ref(),
+            Expr::Literal(BsonValue(Bson::Array(values))) if !values.iter().any(|value| matches!(value, Bson::Null))),
+        _ => false,
+    }
+}
+
+fn interval_has_numeric_bounds(interval: &Interval<Arc<Expr>>) -> bool {
+    [interval.start_bound_value(), interval.end_bound_value()]
+        .into_iter()
+        .flatten()
+        .all(|bound| {
+            matches!(
+                bound.as_ref(),
+                Expr::Literal(BsonValue(
+                    Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_)
+                ))
+            )
+        })
 }
 
 fn coalesce_in_disjunctions(left: &Arc<Expr>, right: &Arc<Expr>) -> Option<Arc<Expr>> {
@@ -647,85 +858,14 @@ fn coalesce_in_disjunctions(left: &Arc<Expr>, right: &Arc<Expr>) -> Option<Arc<E
     }))
 }
 
-fn coalesce_in_with_in(left: &Arc<Expr>, right: &Arc<Expr>) -> Arc<Expr> {
-    let (
-        Expr::Comparison {
-            operator: ComparisonOperator::In,
-            value: left_value,
-        },
-        Expr::Comparison {
-            operator: ComparisonOperator::In,
-            value: right_value,
-        },
-    ) = (left.as_ref(), right.as_ref())
-    else {
-        unreachable!("merge_in_with_in should only be called with two IN expressions");
-    };
-
-    let (
-        Expr::Literal(BsonValue(Bson::Array(left_arr))),
-        Expr::Literal(BsonValue(Bson::Array(right_arr))),
-    ) = (left_value.as_ref(), right_value.as_ref())
-    else {
-        unreachable!("IN values must be arrays");
-    };
-
-    let set: HashSet<_> = left_arr.into_iter().map(BsonValueRef).collect();
-    let mut intersection: Vec<_> = right_arr
-        .into_iter()
-        .filter(|e| set.contains(&BsonValueRef(e)))
-        .cloned()
-        .collect();
-
-    if intersection.is_empty() {
-        return Arc::new(Expr::AlwaysFalse);
-    }
-
-    intersection.sort_by(|a, b| bson_utils::cmp_bson(a, b));
-
-    Arc::new(Expr::Comparison {
-        operator: ComparisonOperator::In,
-        value: Arc::new(Expr::Literal(BsonValue::from(intersection))),
-    })
-}
-
-fn coalesce_in_with_interval(left: &Arc<Expr>, right: &Arc<Expr>) -> Arc<Expr> {
-    match (left.as_ref(), right.as_ref()) {
-        (
-            Expr::Comparison {
-                operator: ComparisonOperator::In,
-                value: left_values,
-            },
-            Expr::Interval(interval),
-        ) => {
-            if let Expr::Literal(array) = left_values.as_ref() {
-                if let Bson::Array(array) = array.to_bson() {
-                    let remaining: Vec<_> = array
-                        .into_iter()
-                        .filter(|e| {
-                            interval.contains(&Arc::new(Expr::Literal(BsonValue(e.clone()))))
-                        })
-                        .collect();
-
-                    return if remaining.is_empty() {
-                        Arc::new(Expr::AlwaysFalse)
-                    } else {
-                        Arc::new(Expr::Comparison {
-                            operator: ComparisonOperator::In,
-                            value: Arc::new(Expr::Literal(BsonValue::from(remaining))),
-                        })
-                    };
-                }
-            }
-        }
-        _ => {}
-    }
-    unreachable!("merge_in_with_interval should only be called with IN and Interval expressions");
-}
-
 /// Normalization rule to eliminate redundant filters.
 /// A filter with an `AlwaysTrue` condition is removed.
 /// A filter with an `AlwaysFalse` condition replaces the sub-plan with a `NoOp` node.
+///
+/// ```text
+/// Filter(TRUE, input)  -> input
+/// Filter(FALSE, input) -> NoOp
+/// ```
 #[derive(Clone)]
 pub struct EliminateRedundantFilter;
 
@@ -852,6 +992,16 @@ fn distribute_or(expr: Arc<Expr>) -> Arc<Expr> {
 
 /// Normalization rule to push down filters to the scan level.
 /// This allows the storage engine to use indexes or perform byte-level filtering.
+///
+/// ```text
+/// Filter(AND(x > 5, SIZE(x) = 2), CollectionScan)
+///     -> Filter(SIZE(x) = 2, CollectionScan(filter = x > 5))
+/// ```
+///
+/// Comparisons, intervals, `$in`, `$exists: true`, and positive `$type` predicates can be pushed
+/// down. Operations such as `$size` and `$elemMatch` remain residual. If an `OR` contains any
+/// residual predicate, the entire `OR` remains residual so that boolean and array semantics are
+/// preserved.
 #[derive(Clone)]
 pub struct PushDownFiltersToScan;
 
@@ -992,6 +1142,108 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn normalization_preserves_array_matches_and_parameter_binding() {
+        use crate::query::execution::to_filter;
+        use crate::query::{Parameters, parser};
+        use bson::{Document, doc};
+        use std::cell::RefCell;
+
+        fn matches(plan: &LogicalPlan, doc: &Document) -> bool {
+            let evaluate = |expr: &Arc<Expr>| {
+                let parameters = RefCell::new(Parameters::new());
+                let bound = expr.clone().transform_up(&|expr| match expr.as_ref() {
+                    Expr::Literal(value) => {
+                        parameters.borrow_mut().collect_parameter(value.clone())
+                    }
+                    _ => expr,
+                });
+                to_filter(bound, &parameters.into_inner())(doc)
+            };
+            match plan {
+                LogicalPlan::CollectionScan { filter, .. } => filter.as_ref().is_none_or(evaluate),
+                LogicalPlan::Filter { input, condition } => {
+                    matches(input, doc) && evaluate(condition)
+                }
+                LogicalPlan::NoOp => false,
+                _ => panic!("unexpected test plan: {plan:?}"),
+            }
+        }
+        let documents = [
+            doc! {},
+            doc! {"a": null},
+            doc! {"a": []},
+            doc! {"a": 1},
+            doc! {"a": 7},
+            doc! {"a": [7, 1]},
+            doc! {"a": 10.0},
+            doc! {"a": [3, 10]},
+            doc! {"a": "string"},
+            doc! {"a": {"b": 1}},
+            doc! {"a": [1, 10]},
+            doc! {"a": [[1, 10]]},
+            doc! {"a": [null, 1]},
+            doc! {"a": [5, 5_i64, 5.0]},
+            doc! {"items": [{"x": 1}, {"y": 10}]},
+            doc! {"items": [{"x": 1, "y": 10}]},
+        ];
+        let queries = [
+            doc! {"$and": [{"a": 1}, {"a": {"$ne": 1}}]},
+            doc! {"a": {"$eq": 7, "$gt": 5, "$lt": 3}},
+            doc! {"a": {"$gt": 5, "$gte": 10}},
+            doc! {"a": {"$gt": 5, "$gte": 5}},
+            doc! {"a": {"$all": [7, 1, 7]}},
+            doc! {"a": {"$not": {"$all": []}}},
+            doc! {"a": {"$nin": [5, 1, 5_i64, 5.0]}},
+            doc! {"a": {"$exists": false, "$size": 0}},
+            doc! {"a": {"$exists": false, "$type": "null"}},
+            doc! {"a": {"$exists": false, "$elemMatch": {"$gt": 0}}},
+            doc! {"a": {"$exists": false, "$eq": null}},
+            doc! {"a": {"$exists": false, "$nin": [1]}},
+            doc! {"$or": [{"a": 1}, {"a": 1, "b": 2}]},
+            doc! {"$and": [{"a": 1}, {"$or": [{"a": 1}, {"b": 2}]}]},
+            doc! {"$or": [{"a": {"$gt": 8}}, {"a": {"$in": [1]}}, {"a": {"$in": [5]}}]},
+            doc! {"$or": [{"a": {"$exists": true}}, {"a": {"$gt": 8}}, {"a": null}]},
+            doc! {"$or": [{"a": {"$lt": 5}}, {"a": {"$lte": 3}}, {"a": {"$gt": 8}}]},
+            doc! {"items.x": {"$exists": false, "$type": "int"}},
+            doc! {"items.x": {"$exists": false, "$eq": null}},
+            doc! {"items.x": {"$all": [1, 1]}},
+            doc! {"a": {"$gt": 8, "$lt": 3}},
+            doc! {"a": {"$elemMatch": {"$gt": 8, "$lt": 3}}},
+            doc! {"a": [1, 10]},
+            doc! {"a": []},
+            doc! {"a": {"$gt": [1]}},
+            doc! {"a": {"$ne": 1}},
+            doc! {"a": {"$nin": [null, 5]}},
+            doc! {"a": {"$not": {"$gt": 8, "$lt": 3}}},
+            doc! {"a": {"$not": {"$all": [1, 10]}}},
+            doc! {"a": {"$all": []}},
+            doc! {"$and": [{"a": {"$in": [1]}}, {"a": {"$in": [10]}}]},
+            doc! {"a": {"$in": [1], "$gt": 8}},
+            doc! {"a": {"$in": [null], "$exists": true}},
+            doc! {"$or": [{"a": null}, {"a": {"$exists": true}}]},
+            doc! {"$or": [{"a": {"$in": [null]}}, {"a": {"$exists": true}}]},
+            doc! {"$or": [{"a": {"$gt": 8}}, {"a": {"$in": [1]}}, {"a": {"$in": [5]}}]},
+            doc! {"items.x": 1, "items.y": 10},
+            doc! {"items": {"$elemMatch": {"x": 1, "y": 10}}},
+            doc! {"items.x": {"$ne": 1}},
+            doc! {"items.x": {"$exists": false}},
+            doc! {"items.x": null},
+            doc! {"$nor": [{"a": {"$gt": 8, "$lt": 3}}]},
+        ];
+        for query in queries {
+            let original = scan_with_filter(parser::parse_conditions(&query).unwrap());
+            let normalized = all_normalization_rules().apply(original.clone());
+            for document in &documents {
+                assert_eq!(
+                    matches(&original, document),
+                    matches(&normalized, document),
+                    "query {query:?}, document {document:?}, normalized {normalized:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_not_normalization() {
         // Test Double Negation: NOT(NOT(X)) → X
         let original = not(not(eq(lit(5))));
@@ -999,20 +1251,20 @@ mod tests {
 
         check_expr_transformation(PushDownNotExpressions {}, original, transformed);
 
-        // Test Negation of Comparison Operators
-        check_expr_transformation(PushDownNotExpressions {}, not(gt(lit(5))), lte(lit(5)));
-        check_expr_transformation(PushDownNotExpressions {}, not(lt(lit(5))), gte(lit(5)));
+        // Equality complements are safe; range negation must remain structural.
+        check_expr_transformation(PushDownNotExpressions {}, not(gt(lit(5))), not(gt(lit(5))));
+        check_expr_transformation(PushDownNotExpressions {}, not(lt(lit(5))), not(lt(lit(5))));
         check_expr_transformation(PushDownNotExpressions {}, not(eq(lit(5))), ne(lit(5)));
         check_expr_transformation(PushDownNotExpressions {}, not(ne(lit(5))), eq(lit(5)));
 
         // Test De Morgan's Laws
         let original = not(and([eq(lit(1)), gt(lit(2))]));
-        let transformed = or([ne(lit(1)), lte(lit(2))]);
+        let transformed = or([ne(lit(1)), not(gt(lit(2)))]);
 
         check_expr_transformation(PushDownNotExpressions {}, original, transformed);
 
         let original = not(or([eq(lit(1)), lt(lit(2))]));
-        let transformed = and([ne(lit(1)), gte(lit(2))]);
+        let transformed = and([ne(lit(1)), not(lt(lit(2)))]);
 
         check_expr_transformation(PushDownNotExpressions {}, original, transformed);
     }
@@ -1089,6 +1341,174 @@ mod tests {
         let transformed = or([p1, p2, p3]);
 
         check_expr_transformation(SimplifyLogicalOperators {}, original, transformed);
+    }
+
+    #[test]
+    fn merged_field_predicates_detect_contradictions() {
+        check_expr_transformation(
+            SimplifyLogicalOperators,
+            and([
+                field_filters(field(["a"]), [eq(lit(1))]),
+                field_filters(field(["a"]), [ne(lit(1))]),
+            ]),
+            Arc::new(Expr::AlwaysFalse),
+        );
+    }
+
+    #[test]
+    fn absorption_handles_boolean_and_merged_field_conjunctions() {
+        let a = field_filters(field(["a"]), [eq(lit(1))]);
+        for b in [
+            field_filters(field(["b"]), [eq(lit(2))]),
+            field_filters(field(["a"]), [gt(lit(0))]),
+        ] {
+            check_expr_transformation(
+                SimplifyLogicalOperators,
+                or([a.clone(), and([a.clone(), b.clone()])]),
+                a.clone(),
+            );
+            check_expr_transformation(
+                SimplifyLogicalOperators,
+                and([a.clone(), or([a.clone(), b])]),
+                a.clone(),
+            );
+        }
+    }
+
+    #[test]
+    fn conjunction_removes_only_containing_numeric_intervals() {
+        for (weaker, stronger) in [
+            (Interval::greater_than(lit(5)), Interval::at_least(lit(10))),
+            (Interval::at_least(lit(5)), Interval::greater_than(lit(5))),
+            (Interval::at_most(lit(5)), Interval::less_than(lit(5))),
+            (Interval::at_least(lit(5)), Interval::at_least(lit(5_i64))),
+        ] {
+            let stronger = interval(stronger);
+            check_expr_transformation(
+                CoalesceFieldPredicates,
+                field_filters(field(["a"]), [interval(weaker), stronger.clone()]),
+                field_filters(field(["a"]), [stronger]),
+            );
+        }
+    }
+
+    #[test]
+    fn disjunction_coalesces_compatible_subsets() {
+        let rules = CompositeRule::new(vec![
+            Arc::new(CombineComparisonsToInterval),
+            Arc::new(CoalesceSameFieldDisjunctions),
+        ]);
+        let input = or([
+            field_filters(field(["a"]), [lt(lit(5))]),
+            field_filters(field(["a"]), [lt(lit(3))]),
+            field_filters(field(["a"]), [gt(lit(8))]),
+            field_filters(field(["a"]), [within(lit(vec![1, 2]))]),
+            field_filters(field(["a"]), [within(lit(vec![2, 7]))]),
+            field_filters(field(["a"]), [size(lit(2), false)]),
+        ]);
+        let expected = SimplifyLogicalOperators::simplify_or(&[
+            field_filters(field(["a"]), [interval(Interval::less_than(lit(5)))]),
+            field_filters(field(["a"]), [interval(Interval::greater_than(lit(8)))]),
+            field_filters(field(["a"]), [within(lit(vec![1, 2, 7]))]),
+            field_filters(field(["a"]), [size(lit(2), false)]),
+        ]);
+        check_expr_transformation(rules, input, expected);
+    }
+
+    #[test]
+    fn disjunction_handles_empty_membership_and_touching_bounds() {
+        check_expr_transformation(
+            CoalesceSameFieldDisjunctions,
+            or([
+                field_filters(field(["a"]), [within(lit(Vec::<i32>::new()))]),
+                field_filters(field(["a"]), [within(lit(vec![1]))]),
+            ]),
+            field_filters(field(["a"]), [within(lit(vec![1]))]),
+        );
+        let left = field_filters(field(["a"]), [interval(Interval::less_than(lit(5)))]);
+        let right = field_filters(field(["a"]), [interval(Interval::greater_than(lit(5)))]);
+        let disjoint = or([left.clone(), right]);
+        check_expr_transformation(CoalesceSameFieldDisjunctions, disjoint.clone(), disjoint);
+        check_expr_transformation(
+            CoalesceSameFieldDisjunctions,
+            or([
+                left,
+                field_filters(field(["a"]), [interval(Interval::at_least(lit(5)))]),
+            ]),
+            field_filters(field(["a"]), [interval(Interval::all())]),
+        );
+    }
+
+    #[test]
+    fn disjunction_presence_subsumes_only_present_alternatives() {
+        let null = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(lit(Bson::Null), lit(Bson::Null)))],
+        );
+        let present = field_filters(field(["a"]), [exists(true)]);
+        let expected = SimplifyLogicalOperators::simplify_or(&[null.clone(), present.clone()]);
+        check_expr_transformation(
+            CoalesceSameFieldDisjunctions,
+            or([
+                null,
+                present,
+                field_filters(field(["a"]), [interval(Interval::greater_than(lit(5)))]),
+            ]),
+            expected,
+        );
+    }
+
+    #[test]
+    fn set_operands_are_canonical_and_empty_all_folds() {
+        for constructor in [within, nin, all] {
+            check_expr_transformation(
+                SimplifyLogicalOperators,
+                field_filters(field(["a"]), [constructor(lit(vec![3, 1, 3, 2]))]),
+                field_filters(field(["a"]), [constructor(lit(vec![1, 2, 3]))]),
+            );
+        }
+        check_expr_transformation(
+            SimplifyLogicalOperators,
+            field_filters(field(["a"]), [all(lit(Vec::<i32>::new()))]),
+            Arc::new(Expr::AlwaysFalse),
+        );
+        check_expr_transformation(
+            SimplifyLogicalOperators,
+            field_filters(field(["a"]), [not(all(lit(Vec::<i32>::new())))]),
+            Arc::new(Expr::AlwaysTrue),
+        );
+    }
+
+    #[test]
+    fn missing_field_contradictions_respect_null_and_negation() {
+        for predicate in [
+            eq(lit(1)),
+            gt(lit(1)),
+            within(lit(vec![1])),
+            size(lit(0), false),
+            Arc::new(Expr::Type {
+                bson_type: lit("null"),
+                negated: false,
+            }),
+            elem_match([gt(lit(1))]),
+        ] {
+            check_expr_transformation(
+                SimplifyLogicalOperators,
+                field_filters(field(["a"]), [exists(false), predicate]),
+                Arc::new(Expr::AlwaysFalse),
+            );
+        }
+        for predicate in [
+            eq(lit(Bson::Null)),
+            within(lit(vec![Bson::Null])),
+            nin(lit(vec![1])),
+            size(lit(0), true),
+        ] {
+            let mut filters = vec![exists(false), predicate];
+            filters.sort();
+            let input = field_filters(field(["a"]), filters);
+            check_expr_transformation(SimplifyLogicalOperators, input.clone(), input);
+        }
     }
 
     fn check_expr_transformation(
@@ -1829,25 +2249,48 @@ mod tests {
 
     #[test]
     fn test_combine_comparisons_to_interval() {
-        // a > 5 AND a < 10  => a in (5, 10)
+        // Separate range predicates may match different array elements.
         let original = field_filters(field(["a"]), [gt(lit(5)), lt(lit(10))]);
-        let transformed = field_filters(field(["a"]), [interval(Interval::open(lit(5), lit(10)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::less_than(lit(10))),
+                interval(Interval::greater_than(lit(5))),
+            ],
+        );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
 
-        // a >= 5 AND a <= 10 => a in [5, 10]
+        // Inclusive bounds also retain separate witnesses.
         let original = field_filters(field(["a"]), [gte(lit(5)), lte(lit(10))]);
-        let transformed =
-            field_filters(field(["a"]), [interval(Interval::closed(lit(5), lit(10)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::at_most(lit(10))),
+                interval(Interval::at_least(lit(5))),
+            ],
+        );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
 
-        // a > 5 AND a < 3 => FALSE
+        // Disjoint ranges are satisfiable by an array such as [1, 10].
         let original = field_filters(field(["a"]), [gt(lit(5)), lt(lit(3))]);
-        let transformed = Arc::new(Expr::AlwaysFalse);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::less_than(lit(3))),
+                interval(Interval::greater_than(lit(5))),
+            ],
+        );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
 
-        // a > 5 AND a == 7 => a in [7, 7]
+        // Equality does not subsume another predicate on an array.
         let original = field_filters(field(["a"]), [gt(lit(5)), eq(lit(7))]);
-        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(7), lit(7)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::greater_than(lit(5))),
+                interval(Interval::closed(lit(7), lit(7))),
+            ],
+        );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
 
         // a > 5 AND a != 7 => remains as is, but a > 5 becomes interval
@@ -1869,7 +2312,7 @@ mod tests {
     fn test_merge_field_filters_and_combine_to_interval() {
         // This test checks the interaction of two rules:
         // 1. SimplifyLogicalOperators should merge multiple FieldFilters on the same field under an AND.
-        // 2. CombineComparisonsToInterval should then convert the combined comparisons into an Interval.
+        // 2. CombineComparisonsToInterval preserves independent intervals.
         let original_filter = and([
             field_filters(field(["b"]), [eq(lit(100))]),
             field_filters(field(["a"]), [lt(lit(10))]),
@@ -1884,12 +2327,15 @@ mod tests {
         let final_plan = CombineComparisonsToInterval {}.apply(plan_after_simplify);
 
         // Define the expected outcome.
-        // The comparisons on "a" should become a single interval [5, 10).
+        // The comparisons on "a" retain separate intervals.
         let filter_a = field_filters(
             field(["a"]),
-            [interval(Interval::closed_open(lit(5), lit(10)))],
+            [
+                interval(Interval::less_than(lit(10))),
+                interval(Interval::at_least(lit(5))),
+            ],
         );
-        // The comparisons on "a" should become a single interval (100, 100).
+        // Equality on "b" becomes a point interval.
         let filter_b = field_filters(
             field(["b"]),
             [interval(Interval::closed(lit(100), lit(100)))],
@@ -1906,7 +2352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coalesce_intersect_in_clauses() {
+    fn test_coalesce_preserves_independent_in_clauses() {
         let original = field_filters(
             field(["a"]),
             [
@@ -1914,18 +2360,21 @@ mod tests {
                 within(lit(vec![4, 3, 2])), // Unsorted
             ],
         );
-        // Intersection is [2, 3], which should be sorted.
-        let transformed = field_filters(field(["a"]), [within(lit(vec![2, 3]))]);
+        // Sort each list without intersecting independent matches.
+        let transformed = field_filters(
+            field(["a"]),
+            [within(lit(vec![1, 2, 3])), within(lit(vec![2, 3, 4]))],
+        );
         check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
     }
 
     #[test]
-    fn test_coalesce_intersect_in_clauses_empty_result() {
+    fn test_coalesce_preserves_disjoint_in_clauses() {
         let original = field_filters(
             field(["a"]),
             [within(lit(vec![1, 2])), within(lit(vec![3, 4]))],
         );
-        let transformed = Arc::new(Expr::AlwaysFalse);
+        let transformed = original.clone();
         check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
     }
 
@@ -1946,16 +2395,22 @@ mod tests {
         let plan_after_combine = CombineComparisonsToInterval {}.apply(plan);
         let final_plan = CoalesceFieldPredicates {}.apply(plan_after_combine);
 
-        // Expected: gt(3) and lte(10) become interval (3, 10].
-        // Then IN is filtered by interval, resulting in [5, 10], which should be sorted.
-        let expected_filter = field_filters(field(["a"]), [within(lit(vec![5, 10]))]);
+        // Preserve each witness while canonicalizing the IN alternatives.
+        let expected_filter = field_filters(
+            field(["a"]),
+            [
+                within(lit(vec![1, 5, 10, 12])),
+                interval(Interval::at_most(lit(10))),
+                interval(Interval::greater_than(lit(3))),
+            ],
+        );
         let expected_plan = scan_with_filter(expected_filter);
 
         assert_eq!(final_plan, expected_plan);
     }
 
     #[test]
-    fn test_coalesce_in_with_interval_empty_result() {
+    fn test_coalesce_preserves_disjoint_membership_and_range() {
         let original_filter = field_filters(field(["a"]), [within(lit(vec![1, 2, 3])), gt(lit(5))]);
 
         let plan = scan_with_filter(original_filter);
@@ -1963,7 +2418,13 @@ mod tests {
         let plan_after_combine = CombineComparisonsToInterval {}.apply(plan);
         let final_plan = CoalesceFieldPredicates {}.apply(plan_after_combine);
 
-        let expected_plan = scan_with_filter(Arc::new(Expr::AlwaysFalse));
+        let expected_plan = scan_with_filter(field_filters(
+            field(["a"]),
+            [
+                within(lit(vec![1, 2, 3])),
+                interval(Interval::greater_than(lit(5))),
+            ],
+        ));
         assert_eq!(final_plan, expected_plan);
     }
 
@@ -2019,12 +2480,24 @@ mod tests {
 
         // a > 5
         let original = field_filters(field(["a"]), [within(lit(vec![1, 10, 6])), gt(lit(5))]);
-        let transformed = field_filters(field(["a"]), [within(lit(vec![6, 10]))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                within(lit(vec![1, 6, 10])),
+                interval(Interval::greater_than(lit(5))),
+            ],
+        );
         check_expr_transformation(rules.clone(), original, transformed);
 
         // a <= 6
         let original = field_filters(field(["a"]), [within(lit(vec![10, 1, 6])), lte(lit(6))]);
-        let transformed = field_filters(field(["a"]), [within(lit(vec![1, 6]))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                within(lit(vec![1, 6, 10])),
+                interval(Interval::at_most(lit(6))),
+            ],
+        );
         check_expr_transformation(rules, original, transformed);
     }
 
@@ -2119,15 +2592,56 @@ mod tests {
     }
 
     #[test]
+    fn test_coalesce_range_containing_equality_point() {
+        let original = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::greater_than(lit(5))),
+                interval(Interval::closed(lit(7), lit(7))),
+            ],
+        );
+        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(7), lit(7)))]);
+        check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
+
+        let original = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::at_most(lit(10))),
+                interval(Interval::closed(lit(7), lit(7))),
+            ],
+        );
+        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(7), lit(7)))]);
+        check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
+    }
+
+    #[test]
+    fn test_coalesce_does_not_intersect_disjoint_array_predicates() {
+        let original = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::greater_than(lit(5))),
+                interval(Interval::less_than(lit(3))),
+                interval(Interval::closed(lit(7), lit(7))),
+            ],
+        );
+        let transformed = field_filters(
+            field(["a"]),
+            [
+                interval(Interval::less_than(lit(3))),
+                interval(Interval::closed(lit(7), lit(7))),
+            ],
+        );
+        check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
+    }
+
+    #[test]
     fn test_full_pipeline_simplification() {
         // Original: NOR( a > 10, OR(b < 5, b < 2), NOT(c == 1) )
         // After DeMorgan: AND( NOT(a > 10), NOT(OR(b < 5, b < 2)), NOT(NOT(c == 1)) )
-        // After PushDownNot: AND( a <= 10, AND(b >= 5, b >= 2), c == 1 )
-        // After Simplify: AND( a <= 10, b >= 5, c == 1 )
-        // After Combine + Pushdown: Scan with filter AND( a <= 10, b >= 5, c == 1 ) converted to intervals
+        // Range negations stay above the scan; equality remains pushable.
         let original = nor([
             field_filters(field(["a"]), [gt(lit(10))]),
-            // Use OR to test disjunction coalescing. OR(b<5, b<2) -> b<5. NOT(b<5) -> b>=5
+            // Negated ranges retain their separate predicates.
             or([
                 field_filters(field(["b"]), [lt(lit(5))]),
                 field_filters(field(["b"]), [lt(lit(2))]),
@@ -2138,22 +2652,19 @@ mod tests {
         let plan = scan_with_filter(original);
         let normalized_plan = all_normalization_rules().apply(plan);
 
-        let filter_a = field_filters(field(["a"]), [interval(Interval::at_most(lit(10)))]);
-        let filter_b = field_filters(field(["b"]), [interval(Interval::at_least(lit(5)))]);
+        let filter_a = field_filters(field(["a"]), [not(gt(lit(10)))]);
+        let filter_b = field_filters(field(["b"]), [not(lt(lit(2))), not(lt(lit(5)))]);
         let filter_c = field_filters(field(["c"]), [interval(Interval::closed(lit(1), lit(1)))]);
-
-        let mut expected_filters = vec![filter_a, filter_b, filter_c];
-        expected_filters.sort();
-        let expected_filter = and(expected_filters);
-
-        let expected_plan = Arc::new(LogicalPlan::CollectionScan {
-            collection: 22,
-            hint: None,
-            projection: None,
-            filter: Some(expected_filter),
-            sort: None,
+        let expected_plan = Arc::new(LogicalPlan::Filter {
+            input: Arc::new(LogicalPlan::CollectionScan {
+                collection: 22,
+                hint: None,
+                projection: None,
+                filter: Some(filter_c),
+                sort: None,
+            }),
+            condition: and([filter_a, filter_b]),
         });
-
         assert_eq!(normalized_plan, expected_plan);
     }
 
@@ -2161,8 +2672,8 @@ mod tests {
     fn test_full_pipeline_coalesce_and_interval() {
         // Original: AND( a > 5, a < 15, a IN [1, 8, 20], exists(true) )
         // After Simplify: FieldFilters(a, [gt(5), lt(15), in([1,8,20]), exists(true)])
-        // After Combine: FieldFilters(a, [interval((5, 15)), in([1,8,20]), exists(true)])
-        // After Coalesce: FieldFilters(a, [in([8])])
+        // After Combine: independent intervals and membership remain.
+        // Coalescing removes only the redundant existence check.
         // After Pushdown: Scan with filter
         let original = and([
             field_filters(field(["a"]), [gt(lit(5)), lt(lit(15))]),
@@ -2171,7 +2682,14 @@ mod tests {
         let plan = scan_with_filter(original);
         let normalized_plan = all_normalization_rules().apply(plan);
 
-        let expected_filter = field_filters(field(["a"]), [within(lit(vec![8]))]);
+        let expected_filter = field_filters(
+            field(["a"]),
+            [
+                within(lit(vec![1, 8, 20])),
+                interval(Interval::less_than(lit(15))),
+                interval(Interval::greater_than(lit(5))),
+            ],
+        );
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
             collection: 22,
             hint: None,
@@ -2184,15 +2702,26 @@ mod tests {
     }
 
     #[test]
-    fn test_full_pipeline_contradiction_to_noop() {
+    fn test_full_pipeline_preserves_disjoint_array_bounds() {
         // Original: AND( a > 10, a < 5 )
-        // After Combine: AlwaysFalse
-        // After EliminateFilter: NoOp plan
+        // Different elements can satisfy each bound; do not replace the scan with NoOp.
         let original = field_filters(field(["a"]), [gt(lit(10)), lt(lit(5))]);
         let plan = scan_with_filter(original);
         let normalized_plan = all_normalization_rules().apply(plan);
 
-        let expected_plan = Arc::new(LogicalPlan::NoOp);
+        let expected_plan = Arc::new(LogicalPlan::CollectionScan {
+            collection: 22,
+            hint: None,
+            projection: None,
+            sort: None,
+            filter: Some(field_filters(
+                field(["a"]),
+                [
+                    interval(Interval::less_than(lit(5))),
+                    interval(Interval::greater_than(lit(10))),
+                ],
+            )),
+        });
         assert_eq!(normalized_plan, expected_plan);
     }
 

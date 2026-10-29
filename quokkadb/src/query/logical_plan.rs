@@ -245,7 +245,7 @@ impl LogicalPlan {
     }
 
     pub fn compute_hash(&self) -> u64 {
-        const HASH_SEED: u64 = 20250309;
+        const HASH_SEED: u64 = 20261028;
 
         let mut writer = ByteWriter::new();
         self.write_to(&mut writer, 0);

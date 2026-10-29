@@ -1,8 +1,7 @@
-use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters, get_path_value};
+use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters, PathComponent};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
 use bson::{Bson, Document};
-use std::collections::HashSet;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
@@ -99,51 +98,68 @@ fn compare_value(
     comparison_value: BsonValueRef,
     document_value: Option<BsonValueRef>,
 ) -> bool {
-    // Handle special cases for array comparisons
-    if let Some(BsonValueRef(Bson::Array(array))) = document_value {
-        if operator != ComparisonOperator::In && operator != ComparisonOperator::Nin {
-            return array
-                .iter()
-                .any(|elem| compare_value(operator, comparison_value, Some(BsonValueRef(elem))));
-        }
-    }
+    compare_value_with_array_traversal(operator, comparison_value, document_value, true)
+}
 
-    let document_value = match document_value {
-        Some(v) => v,
-        None => {
-            return match operator {
-                ComparisonOperator::Ne => !comparison_value.0.as_null().is_some(),
+fn compare_value_with_array_traversal(
+    operator: ComparisonOperator,
+    comparison_value: BsonValueRef,
+    document_value: Option<BsonValueRef>,
+    expand_arrays: bool,
+) -> bool {
+    use ComparisonOperator::*;
+    match operator {
+        Ne => {
+            return !compare_value_with_array_traversal(
+                Eq,
+                comparison_value,
+                document_value,
+                expand_arrays,
+            );
+        }
+        Nin => {
+            return !compare_value_with_array_traversal(
+                In,
+                comparison_value,
+                document_value,
+                expand_arrays,
+            );
+        }
+        In => {
+            return match comparison_value.0 {
+                Bson::Array(values) => values.iter().any(|value| {
+                    compare_value_with_array_traversal(
+                        Eq,
+                        BsonValueRef(value),
+                        document_value,
+                        expand_arrays,
+                    )
+                }),
                 _ => false,
             };
         }
-    };
-
-    match operator {
-        ComparisonOperator::Eq => document_value == comparison_value,
-        ComparisonOperator::Gt => document_value > comparison_value,
-        ComparisonOperator::Gte => document_value >= comparison_value,
-        ComparisonOperator::Lt => document_value < comparison_value,
-        ComparisonOperator::Lte => document_value <= comparison_value,
-        ComparisonOperator::Ne => document_value != comparison_value,
-        ComparisonOperator::In => {
-            if let BsonValueRef(Bson::Array(array)) = comparison_value {
-                array
-                    .iter()
-                    .any(|item| BsonValueRef(item) == document_value)
-            } else {
-                false
-            }
-        }
-        ComparisonOperator::Nin => {
-            if let BsonValueRef(Bson::Array(array)) = comparison_value {
-                !array
-                    .iter()
-                    .any(|item| BsonValueRef(item) == document_value)
-            } else {
-                true
-            }
-        }
+        _ => {}
     }
+    let Some(document_value) = document_value else {
+        return operator == Eq && matches!(comparison_value.0, Bson::Null);
+    };
+    let compare = |value: BsonValueRef| match operator {
+        Eq => value.cmp(&comparison_value).is_eq(),
+        Gt => value > comparison_value,
+        Gte => value >= comparison_value,
+        Lt => value < comparison_value,
+        Lte => value <= comparison_value,
+        _ => unreachable!("negative and membership comparisons handled above"),
+    };
+    if expand_arrays && let Bson::Array(values) = document_value.0 {
+        // Array equality also checks the whole array. Only immediate elements
+        // participate in membership: nested arrays are values, not flattened lists.
+        if matches!(comparison_value.0, Bson::Array(_)) && compare(document_value) {
+            return true;
+        }
+        return values.iter().any(|value| compare(BsonValueRef(value)));
+    }
+    compare(document_value)
 }
 
 /// Converts a value filter expression into a function that can be applied to document values.
@@ -151,26 +167,29 @@ pub fn to_value_filter(
     filter: Arc<Expr>,
     parameters: &Parameters,
 ) -> Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync> {
+    to_value_filter_with_array_traversal(filter, parameters, true)
+}
+
+fn to_value_filter_with_array_traversal(
+    filter: Arc<Expr>,
+    parameters: &Parameters,
+    expand_arrays: bool,
+) -> Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync> {
     match filter.as_ref() {
         Expr::FieldFilters { field, filters } => {
-            let path = match field.as_ref() {
-                Expr::Field(path) => path.clone(),
-                _ => unreachable!("Expected a field expression"),
-            };
-            let value_filters = to_value_filters(filters, parameters);
-            Box::new(move |field_value| {
-                if field_value.is_none() {
-                    return false; // If the field is missing, no filters can match
-                }
-                let doc = match field_value.unwrap() {
-                    BsonValueRef(Bson::Document(doc)) => doc,
-                    _ => return false, // If the field value is not a document, no filters can match
-                };
-                // Resolve the field value using the path
-                let field_value = get_path_value(doc, &path);
-                value_filters.iter().all(|f| f(field_value))
+            let document_filter = to_filter(
+                Arc::new(Expr::FieldFilters {
+                    field: field.clone(),
+                    filters: filters.clone(),
+                }),
+                parameters,
+            );
+            Box::new(move |field_value| match field_value {
+                Some(BsonValueRef(Bson::Document(doc))) => document_filter(doc),
+                _ => false,
             })
         }
+
         Expr::Comparison { operator, value } => {
             let operator = *operator;
             let comparison_value = match value.as_ref() {
@@ -182,18 +201,50 @@ pub fn to_value_filter(
                 ),
             };
             Box::new(move |field_value| {
-                compare_value(operator, comparison_value.as_ref(), field_value)
+                compare_value_with_array_traversal(
+                    operator,
+                    comparison_value.as_ref(),
+                    field_value,
+                    expand_arrays,
+                )
             })
         }
         Expr::Interval(interval) => {
             let start = resolve_bound(interval.start_bound(), parameters);
             let end = resolve_bound(interval.end_bound(), parameters);
             let interval = Interval::new(start, end);
+            let point_value = interval
+                .is_point()
+                .then(|| interval.start_bound_value().unwrap());
+            // Array-valued bounds can compare the entire array as well as
+            // its immediate elements, just like the original comparison.
+            let array_bound = [interval.start_bound(), interval.end_bound()]
+                .into_iter()
+                .any(|bound| {
+                    matches!(
+                        bound,
+                        Bound::Included(BsonValue(Bson::Array(_)))
+                            | Bound::Excluded(BsonValue(Bson::Array(_)))
+                    )
+                });
 
             Box::new(move |field_value| {
+                if let Some(value) = &point_value {
+                    return compare_value_with_array_traversal(
+                        ComparisonOperator::Eq,
+                        value.as_ref(),
+                        field_value,
+                        expand_arrays,
+                    );
+                }
+                if array_bound && let Some(value @ BsonValueRef(Bson::Array(_))) = field_value {
+                    if contains(&interval, value) {
+                        return true;
+                    }
+                }
                 match field_value {
                     // Arrays are compared element-wise. $eq: null matches if any element is null or if the whole field is missing
-                    Some(BsonValueRef(Bson::Array(array))) => array
+                    Some(BsonValueRef(Bson::Array(array))) if expand_arrays => array
                         .iter()
                         .any(|val| contains(&interval, BsonValueRef(&val))),
                     Some(val) => contains(&interval, val),
@@ -234,7 +285,12 @@ pub fn to_value_filter(
                     })
                 })
             } else {
-                let elem_filters = to_value_filters(filters, parameters);
+                let elem_filters: Vec<_> = filters
+                    .iter()
+                    .map(|filter| {
+                        to_value_filter_with_array_traversal(filter.clone(), parameters, false)
+                    })
+                    .collect();
                 Box::new(move |field_value| {
                     elem_match_array(field_value, |elem| {
                         let elem = BsonValueRef(elem);
@@ -305,32 +361,46 @@ pub fn to_value_filter(
             };
 
             Box::new(move |field_value| {
-                if let Some(BsonValueRef(Bson::Array(array))) = field_value {
-                    let set: HashSet<_> = array.iter().map(BsonValueRef).collect();
-                    comparison_array
-                        .iter()
-                        .all(|val| set.contains(&BsonValueRef(val)))
-                } else {
-                    false
-                }
+                !comparison_array.is_empty()
+                    && comparison_array.iter().all(|value| {
+                        compare_value(ComparisonOperator::Eq, BsonValueRef(value), field_value)
+                    })
             })
         }
         Expr::Not(child) => {
-            let inner = to_value_filter(child.clone(), parameters);
+            let inner =
+                to_value_filter_with_array_traversal(child.clone(), parameters, expand_arrays);
             Box::new(move |field_value| !inner(field_value))
         }
         Expr::And(children) => {
-            let filters = to_value_filters(children, parameters);
+            let filters: Vec<_> = children
+                .iter()
+                .map(|child| {
+                    to_value_filter_with_array_traversal(child.clone(), parameters, expand_arrays)
+                })
+                .collect();
             Box::new(move |field_value| filters.iter().all(|f| f(field_value)))
         }
         Expr::Or(children) => {
-            let filters = to_value_filters(children, parameters);
+            let filters: Vec<_> = children
+                .iter()
+                .map(|child| {
+                    to_value_filter_with_array_traversal(child.clone(), parameters, expand_arrays)
+                })
+                .collect();
             Box::new(move |field_value| filters.iter().any(|f| f(field_value)))
         }
         Expr::Nor(children) => {
-            let filters = to_value_filters(children, parameters);
+            let filters: Vec<_> = children
+                .iter()
+                .map(|child| {
+                    to_value_filter_with_array_traversal(child.clone(), parameters, expand_arrays)
+                })
+                .collect();
             Box::new(move |field_value| !filters.iter().any(|f| f(field_value)))
         }
+        Expr::AlwaysTrue => Box::new(|_| true),
+        Expr::AlwaysFalse => Box::new(|_| false),
         _ => unreachable!("Unsupported value filter: {:?}", filter),
     }
 }
@@ -411,24 +481,134 @@ pub fn to_filter(
                 Expr::Field(path) => path.clone(),
                 _ => unreachable!("Expected a field expression"),
             };
-            let value_filters = to_value_filters(filters, parameters);
-            Box::new(move |doc: &Document| {
-                let field_value = get_path_value(doc, &path);
-                value_filters.iter().all(|f| f(field_value))
-            })
+            let filters: Vec<_> = filters
+                .iter()
+                .map(|filter| to_path_filter(path.clone(), filter.clone(), parameters))
+                .collect();
+            Box::new(move |doc: &Document| filters.iter().all(|filter| filter(doc)))
         }
+        Expr::AlwaysTrue => Box::new(|_| true),
+        Expr::AlwaysFalse => Box::new(|_| false),
         _ => unreachable!("Unsupported top-level filter: {:?}", expr),
     }
 }
 
-fn to_value_filters(
-    filters: &Vec<Arc<Expr>>,
+/// Compiles a predicate over all values reached by a filter path. Negation must
+/// surround the traversal: one nonmatching branch cannot negate a matching one.
+fn to_path_filter(
+    path: Vec<PathComponent>,
+    expr: Arc<Expr>,
     parameters: &Parameters,
-) -> Vec<Box<dyn Fn(Option<BsonValueRef>) -> bool + Send + Sync>> {
-    filters
-        .iter()
-        .map(|f| to_value_filter(f.clone(), parameters))
-        .collect()
+) -> Box<dyn Fn(&Document) -> bool + Send + Sync> {
+    if let Expr::All(value) = expr.as_ref() {
+        let values = match value.as_ref() {
+            Expr::Placeholder(index) => &parameters.get(*index).0,
+            Expr::Literal(value) => &value.0,
+            _ => unreachable!("$all requires a literal or placeholder"),
+        };
+        let Bson::Array(values) = values else {
+            unreachable!("$all requires an array");
+        };
+        let filters: Vec<_> = values
+            .iter()
+            .map(|value| {
+                to_path_filter(
+                    path.clone(),
+                    Arc::new(Expr::Comparison {
+                        operator: ComparisonOperator::Eq,
+                        value: Arc::new(Expr::Literal(BsonValue(value.clone()))),
+                    }),
+                    parameters,
+                )
+            })
+            .collect();
+        return Box::new(move |doc| {
+            !filters.is_empty() && filters.iter().all(|filter| filter(doc))
+        });
+    }
+    let positive = match expr.as_ref() {
+        Expr::Not(child) => Some(child.clone()),
+        Expr::Comparison {
+            operator: ComparisonOperator::Ne,
+            value,
+        } => Some(Arc::new(Expr::Comparison {
+            operator: ComparisonOperator::Eq,
+            value: value.clone(),
+        })),
+        Expr::Comparison {
+            operator: ComparisonOperator::Nin,
+            value,
+        } => Some(Arc::new(Expr::Comparison {
+            operator: ComparisonOperator::In,
+            value: value.clone(),
+        })),
+        Expr::Exists(false) => Some(Arc::new(Expr::Exists(true))),
+        Expr::Type {
+            bson_type,
+            negated: true,
+        } => Some(Arc::new(Expr::Type {
+            bson_type: bson_type.clone(),
+            negated: false,
+        })),
+        Expr::Size {
+            size,
+            negated: true,
+        } => Some(Arc::new(Expr::Size {
+            size: size.clone(),
+            negated: false,
+        })),
+        _ => None,
+    };
+    if let Some(positive) = positive {
+        let filter = to_path_filter(path, positive, parameters);
+        return Box::new(move |doc| !filter(doc));
+    }
+    if let Expr::And(children) | Expr::Or(children) | Expr::Nor(children) = expr.as_ref() {
+        let filters: Vec<_> = children
+            .iter()
+            .map(|child| to_path_filter(path.clone(), child.clone(), parameters))
+            .collect();
+        return match expr.as_ref() {
+            Expr::And(_) => Box::new(move |doc| filters.iter().all(|filter| filter(doc))),
+            Expr::Or(_) => Box::new(move |doc| filters.iter().any(|filter| filter(doc))),
+            _ => Box::new(move |doc| !filters.iter().any(|filter| filter(doc))),
+        };
+    }
+    let filter = to_value_filter(expr, parameters);
+    Box::new(move |doc| {
+        let Some((PathComponent::FieldName(name), rest)) = path.split_first() else {
+            return filter(None);
+        };
+        any_path_value(doc.get(name), rest, filter.as_ref())
+    })
+}
+
+/// Filter-only traversal; strict projection and update lookup remains unchanged.
+fn any_path_value(
+    value: Option<&Bson>,
+    path: &[PathComponent],
+    predicate: &dyn Fn(Option<BsonValueRef>) -> bool,
+) -> bool {
+    let Some((component, rest)) = path.split_first() else {
+        return predicate(value.map(BsonValueRef));
+    };
+    match (value, component) {
+        (Some(Bson::Document(doc)), PathComponent::FieldName(name)) => {
+            any_path_value(doc.get(name), rest, predicate)
+        }
+        (Some(Bson::Array(array)), PathComponent::ArrayElement(index)) => {
+            any_path_value(array.get(*index), rest, predicate)
+        }
+        (Some(Bson::Array(array)), PathComponent::FieldName(_)) => {
+            if array.is_empty() {
+                return predicate(None);
+            }
+            array
+                .iter()
+                .any(|element| any_path_value(Some(element), path, predicate))
+        }
+        _ => predicate(None),
+    }
 }
 
 fn to_filters(

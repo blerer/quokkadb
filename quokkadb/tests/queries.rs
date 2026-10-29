@@ -139,7 +139,8 @@ fn test_logical_nor() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_ids(&results, &[6, 8]);
+    // Neither predicate matches documents with missing qty and status.
+    assert_ids(&results, &[6, 8, 9, 10]);
 }
 
 #[test]
@@ -153,7 +154,8 @@ fn test_logical_not() {
         .map(Result::unwrap)
         .collect();
 
-    assert_ids(&results, &[1, 5, 6, 8]);
+    // Missing qty does not satisfy the positive range, so its negation matches.
+    assert_ids(&results, &[1, 5, 6, 8, 9, 10]);
 }
 
 #[test]
