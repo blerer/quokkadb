@@ -1,6 +1,10 @@
 use super::{ExecutionOutput, ExecutionRow, Metrics, bind};
 use crate::error::{Error, Result};
-use crate::query::execution::{filters, indexes::Index, projections, sorts};
+use crate::query::execution::{
+    filters,
+    indexes::{extract_id_from_entry_bytes, index_reader::IndexReadCodec},
+    projections, sorts,
+};
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::storage::Direction;
@@ -422,8 +426,8 @@ impl ReadExecutor {
                     .unwrap_or_else(|| format!("index id {index}")),
                 id: Some(*index),
             })?;
-        let index_codec = Index::from(*collection, &index_metadata);
-        let bound_range = index_codec.bind_range_expr(range, parameters)?;
+        let read_codec = IndexReadCodec::from(&index_metadata);
+        let bound_range = read_codec.bind_range_expr(range, parameters)?;
 
         let filter = filter
             .clone()
@@ -452,7 +456,7 @@ impl ReadExecutor {
                             OperationType::Delete => return None,
                             OperationType::Put => {
                                 let user_key = extract_record_key(&k);
-                                match Index::extract_id_from_entry_bytes(user_key, &v) {
+                                match extract_id_from_entry_bytes(user_key, &v) {
                                     Ok(id) => id.to_vec(),
                                     Err(e) => return Some(Err(e.into())),
                                 }

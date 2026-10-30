@@ -9,7 +9,7 @@ use crate::util::bson_utils;
 use crate::util::bson_utils::{BsonKey, TypedKey};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
-use bson::{Bson, Document, RawArray, RawBsonRef, RawDocument};
+use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1032,6 +1032,15 @@ pub enum PathComponent {
     ArrayElement(usize), // An array index (e.g., "0" in "array.0")
 }
 
+impl PathComponent {
+    pub(crate) fn expect_field_name(&self) -> &str {
+        match self {
+            Self::FieldName(name) => name,
+            Self::ArrayElement(_) => unreachable!("expected a field-name path component"),
+        }
+    }
+}
+
 impl PartialOrd for PathComponent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -1139,33 +1148,6 @@ pub fn get_path_value<'a>(doc: &'a Document, path: &[PathComponent]) -> Option<B
     }
 
     Some(BsonValueRef(current))
-}
-
-fn raw_array_get(array: &RawArray, index: usize) -> Option<RawBsonRef<'_>> {
-    array.get(index).ok().flatten()
-}
-
-pub fn get_path_value_from_raw(doc: &RawDocument, path: &[PathComponent]) -> Option<BsonValue> {
-    if path.is_empty() {
-        return None;
-    }
-
-    let mut current = match path.first()? {
-        PathComponent::FieldName(name) => doc.get(name).ok().flatten()?,
-        _ => return None,
-    };
-
-    for component in path.iter().skip(1) {
-        current = match (component, current) {
-            (PathComponent::FieldName(name), RawBsonRef::Document(d)) => {
-                d.get(name).ok().flatten()?
-            }
-            (PathComponent::ArrayElement(index), RawBsonRef::Array(a)) => raw_array_get(a, *index)?,
-            _ => return None,
-        };
-    }
-
-    Some(BsonValue(Bson::try_from(current).ok()?))
 }
 
 pub fn format_path(path: &[PathComponent]) -> String {

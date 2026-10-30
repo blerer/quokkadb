@@ -1079,7 +1079,7 @@ fn decode_decimal128_metadata(key_type: &ByteReader<&[u8]>) -> std::io::Result<D
 ///
 /// Produced by [`BsonKey::try_into_typed_key`].  Keeping the two byte vectors in a named
 /// struct prevents accidentally swapping `key` and `key_type` at call sites.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TypedKey {
     /// The encoded, byte-comparable sort key.
     pub key: Vec<u8>,

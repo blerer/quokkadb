@@ -5,7 +5,7 @@ use super::{ExecutionRow, Metrics};
 use super::{ExecutorFailpoint, invoke_executor_test_hook};
 use crate::error::Error;
 use crate::error::Result;
-use crate::query::execution::indexes::Indexes;
+use crate::query::execution::indexes::indexes::Indexes;
 use crate::query::execution::projections;
 use crate::query::execution::updates;
 use crate::query::physical_plan::PhysicalPlan;
@@ -1029,7 +1029,7 @@ impl WriteExecutor {
         new_doc: Document,
         new_doc_bytes: Vec<u8>,
         sync: bool,
-    ) -> std::result::Result<(), StorageError> {
+    ) -> Result<()> {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
 
@@ -1071,7 +1071,7 @@ impl WriteExecutor {
         );
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
-        self.storage_engine.write(batch, sync)
+        self.storage_engine.write(batch, sync).map_err(Into::into)
     }
 
     fn delete_document(
@@ -1081,7 +1081,7 @@ impl WriteExecutor {
         user_key: Vec<u8>,
         old_doc: &ExecutionRow,
         sync: bool,
-    ) -> std::result::Result<(), StorageError> {
+    ) -> Result<()> {
         let mut operations = Vec::new();
         let mut count_stats = CountStatsBuilder::new();
 
@@ -1108,7 +1108,7 @@ impl WriteExecutor {
         );
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
-        self.storage_engine.write(batch, sync)
+        self.storage_engine.write(batch, sync).map_err(Into::into)
     }
 
     fn prepare_replacement_document(
@@ -1200,11 +1200,9 @@ impl RetryState {
         }
     }
 
-    fn retry_on_version_conflict(&mut self, error: StorageError) -> Result<()> {
+    fn retry_on_version_conflict(&mut self, error: Error) -> Result<()> {
         match error {
-            StorageError::VersionConflict { .. } | StorageError::SchemaVersionConflict { .. } => {
-                self.retry_after_conflict(error)
-            }
+            Error::VersionConflict(_) => self.retry_after_conflict(error),
             _ => Err(error.into()),
         }
     }
@@ -1216,7 +1214,7 @@ impl RetryState {
         }
     }
 
-    fn retry_after_conflict(&mut self, error: StorageError) -> Result<()> {
+    fn retry_after_conflict(&mut self, error: impl Into<Error>) -> Result<()> {
         if self.start_time.elapsed() >= RETRY_TIMEOUT {
             tracing::debug!(
                 attempts = self.attempt,

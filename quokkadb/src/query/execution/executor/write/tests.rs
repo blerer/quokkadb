@@ -207,6 +207,74 @@ fn test_delete_one_removes_index_entries() -> Result<()> {
 }
 
 #[test]
+fn multikey_entries_follow_insert_replace_and_delete() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage = &runtime.storage_engine;
+    let executor = &runtime.executor;
+    let collection = storage.create_collection("multikey_writes", true)?.id;
+    let index = storage.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    insert_one(executor, collection, &doc! {"_id": 1, "value": [1, 2, 2]})?;
+    assert_eq!(index_scan_eq(executor, collection, index.id, 1)?.len(), 1);
+    assert_eq!(index_scan_eq(executor, collection, index.id, 2)?.len(), 1);
+    execute_find_one_and_replace(
+        executor,
+        collection,
+        1,
+        doc! {"value": [2, 3]},
+        false,
+        ReturnDocument::Before,
+    )?;
+    assert!(index_scan_eq(executor, collection, index.id, 1)?.is_empty());
+    assert_eq!(index_scan_eq(executor, collection, index.id, 3)?.len(), 1);
+    execute_delete_one(executor, collection, 1)?;
+    assert!(index_scan_eq(executor, collection, index.id, 2)?.is_empty());
+    assert!(index_scan_eq(executor, collection, index.id, 3)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn parallel_array_write_errors_are_invalid_requests() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage = &runtime.storage_engine;
+    let executor = &runtime.executor;
+    let collection = storage.create_collection("parallel_array_writes", true)?.id;
+    storage.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![
+            OrderedIndexField::asc("a"),
+            OrderedIndexField::asc("b"),
+        ]),
+        IndexOptions::default(),
+    )?;
+    let invalid = doc! {"_id": 1, "a": [1], "b": [2]};
+    assert!(matches!(
+        insert_one(executor, collection, &invalid),
+        Err(Error::InvalidRequest(_))
+    ));
+    insert_one(executor, collection, &doc! {"_id": 1, "a": 1, "b": 2})?;
+    assert!(matches!(
+        execute_find_one_and_replace(
+            executor,
+            collection,
+            1,
+            invalid,
+            false,
+            ReturnDocument::Before
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(
+        read_stored_doc(storage, collection, 1)?,
+        doc! {"_id": 1, "a": 1, "b": 2}
+    );
+    Ok(())
+}
+
+#[test]
 fn test_delete_many_removes_index_entries() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
