@@ -169,6 +169,33 @@ impl Indexes {
         Ok(result)
     }
 
+    pub(crate) fn append_update_ops(
+        &self,
+        operations: &mut Vec<Operation>,
+        old_document: &Document,
+        new_document: &Document,
+        count_stats: &mut CountStatsBuilder,
+    ) -> crate::error::Result<OperationsCountAndSize> {
+        let old_source = IndexSource::from_document(old_document);
+        let new_source = IndexSource::from_document(new_document);
+        let old_doc_id = Self::extract_id_key(old_source)?;
+        let new_doc_id = Self::extract_id_key(new_source)?;
+        let mut result = OperationsCountAndSize::default();
+
+        for index in &self.indices {
+            result.add(index.append_update_ops(
+                operations,
+                old_source,
+                new_source,
+                &old_doc_id,
+                &new_doc_id,
+                count_stats,
+            )?);
+        }
+
+        Ok(result)
+    }
+
     fn extract_id_key(source: IndexSource<'_>) -> Result<TypedKey> {
         encode_source_value(source.get_field("_id"), &SortOrder::Ascending)
     }
@@ -208,10 +235,7 @@ impl Index {
         let entries = self.generate_entries(source, doc_id)?;
         let mut result = OperationsCountAndSize::default();
         for IndexKeyValue { key, value } in entries {
-            let operation = Operation::new_put(self.collection_id, self.id, key, value);
-            result.add_operation(operation.payload_size_bytes());
-            operations.push(operation);
-            count_stats.inc_index(self.collection_id, self.id, 1);
+            self.append_put_op(operations, key, value, &mut result, count_stats);
         }
         Ok(result)
     }
@@ -226,11 +250,79 @@ impl Index {
         let entries = self.generate_entries(source, doc_id)?;
         let mut result = OperationsCountAndSize::default();
         for IndexKeyValue { key, value: _ } in entries {
-            let operation = Operation::new_delete(self.collection_id, self.id, key);
-            result.add_operation(operation.payload_size_bytes());
-            operations.push(operation);
-            count_stats.inc_index(self.collection_id, self.id, -1);
+            self.append_delete_op(operations, key, &mut result, count_stats);
         }
+        Ok(result)
+    }
+
+    fn append_put_op(
+        &self,
+        operations: &mut Vec<Operation>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        result: &mut OperationsCountAndSize,
+        count_stats: &mut CountStatsBuilder,
+    ) {
+        let operation = Operation::new_put(self.collection_id, self.id, key, value);
+        result.add_operation(operation.payload_size_bytes());
+        operations.push(operation);
+        count_stats.inc_index(self.collection_id, self.id, 1);
+    }
+
+    fn append_delete_op(
+        &self,
+        operations: &mut Vec<Operation>,
+        key: Vec<u8>,
+        result: &mut OperationsCountAndSize,
+        count_stats: &mut CountStatsBuilder,
+    ) {
+        let operation = Operation::new_delete(self.collection_id, self.id, key);
+        result.add_operation(operation.payload_size_bytes());
+        operations.push(operation);
+        count_stats.inc_index(self.collection_id, self.id, -1);
+    }
+
+    fn append_update_ops(
+        &self,
+        operations: &mut Vec<Operation>,
+        old_source: IndexSource<'_>,
+        new_source: IndexSource<'_>,
+        old_doc_id: &TypedKey,
+        new_doc_id: &TypedKey,
+        count_stats: &mut CountStatsBuilder,
+    ) -> crate::error::Result<OperationsCountAndSize> {
+        let old_entries = self.generate_entries(old_source, old_doc_id)?;
+        let mut new_entries = self
+            .generate_entries(new_source, new_doc_id)?
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect::<BTreeMap<_, _>>();
+        let mut result = OperationsCountAndSize::default();
+
+        for IndexKeyValue {
+            key,
+            value: old_value,
+        } in old_entries
+        {
+            let Some(new_value) = new_entries.remove(&key) else {
+                self.append_delete_op(operations, key, &mut result, count_stats);
+                continue;
+            };
+
+            if new_value == old_value {
+                continue;
+            }
+
+            // Delete first so a changed entry with the same key is replaced by
+            // the new value at the same storage sequence number.
+            self.append_delete_op(operations, key.clone(), &mut result, count_stats);
+            self.append_put_op(operations, key, new_value, &mut result, count_stats);
+        }
+
+        for (key, value) in new_entries {
+            self.append_put_op(operations, key, value, &mut result, count_stats);
+        }
+
         Ok(result)
     }
 
@@ -484,6 +576,7 @@ impl IndexExpansion {
 #[cfg(test)]
 mod tests {
     use super::{Index, IndexSource, Indexes};
+    use crate::io::byte_writer::ByteWriter;
     use crate::storage::catalog::{
         CollectionMetadata, CollectionOptions, IndexDefinition, IndexDirection, IndexMetadata,
         IndexPath, OrderedIndexField,
@@ -494,6 +587,24 @@ mod tests {
     use bson::{Bson, doc, raw::RawDocumentBuf};
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    fn expected_index_entry(index_value: Bson, id: Bson) -> (Vec<u8>, Vec<u8>) {
+        let index_key = index_value.try_into_typed_key().unwrap();
+        let id_key = id.try_into_typed_key().unwrap();
+
+        let mut key = index_key.key.clone();
+        key.extend_from_slice(&id_key.key);
+
+        let mut value_writer = ByteWriter::new();
+        value_writer
+            .write_varint_u32(id_key.key.len() as u32)
+            .write_length_prefixed_slice(&id_key.key_type)
+            .write_varint_u32(index_key.key.len() as u32);
+        let mut value = value_writer.take_buffer();
+        value.extend_from_slice(&index_key.key_type);
+
+        (key, value)
+    }
 
     #[test]
     fn tree_extraction_rejects_parallel_arrays_at_different_depths() {
@@ -758,6 +869,123 @@ mod tests {
             }),
             Some(-1)
         );
+    }
+
+    #[test]
+    fn append_update_ops_skips_unchanged_entries() {
+        let collection = make_collection(vec![make_index_metadata(
+            1,
+            vec![("name", IndexDirection::Ascending)],
+        )]);
+        let indices = Indexes::from_collection(&collection);
+        let old_document = doc! { "_id": 7i64, "name": "alice", "other": 1 };
+        let new_document = doc! { "_id": 7i64, "name": "alice", "other": 2 };
+        let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
+
+        let result = indices
+            .append_update_ops(
+                &mut operations,
+                &old_document,
+                &new_document,
+                &mut count_stats,
+            )
+            .unwrap();
+
+        assert_eq!(result.count, 0);
+        assert_eq!(result.size_in_bytes, 0);
+        assert!(operations.is_empty());
+        assert_eq!(count_stats.build(), Default::default());
+    }
+
+    #[test]
+    fn append_update_ops_diffs_multikey_entries() {
+        let collection = make_collection(vec![make_index_metadata(
+            1,
+            vec![("tags", IndexDirection::Ascending)],
+        )]);
+        let indices = Indexes::from_collection(&collection);
+        let old_document = doc! { "_id": 7i64, "tags": [1, 2] };
+        let new_document = doc! { "_id": 7i64, "tags": [2, 3] };
+        let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
+
+        let result = indices
+            .append_update_ops(
+                &mut operations,
+                &old_document,
+                &new_document,
+                &mut count_stats,
+            )
+            .unwrap();
+
+        let (removed_key, _) = expected_index_entry(Bson::Int32(1), Bson::Int64(7));
+        let (added_key, added_value) = expected_index_entry(Bson::Int32(3), Bson::Int64(7));
+
+        assert_eq!(result.count, 2);
+        assert_eq!(operations.len(), 2);
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| {
+                    (
+                        operation.operation_type,
+                        operation.collection,
+                        operation.index,
+                        operation.user_key().to_vec(),
+                        operation.value().to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (OperationType::Delete, 42, 1, removed_key, Vec::new(),),
+                (OperationType::Put, 42, 1, added_key, added_value),
+            ]
+        );
+        assert_eq!(count_stats.build(), Default::default());
+    }
+
+    #[test]
+    fn append_update_ops_replaces_value_when_key_is_unchanged() {
+        let collection = make_collection(vec![make_index_metadata(
+            1,
+            vec![("value", IndexDirection::Ascending)],
+        )]);
+        let indices = Indexes::from_collection(&collection);
+        let old_document = doc! { "_id": 7i64, "value": 1_i32 };
+        let new_document = doc! { "_id": 7i64, "value": 1_i64 };
+        let mut operations = Vec::new();
+        let mut count_stats = CountStatsBuilder::new();
+
+        let result = indices
+            .append_update_ops(
+                &mut operations,
+                &old_document,
+                &new_document,
+                &mut count_stats,
+            )
+            .unwrap();
+
+        let (old_key, old_value) = expected_index_entry(Bson::Int32(1), Bson::Int64(7));
+        let (new_key, new_value) = expected_index_entry(Bson::Int64(1), Bson::Int64(7));
+        assert_eq!(old_key, new_key);
+        assert_ne!(old_value, new_value);
+        assert_eq!(result.count, 2);
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| (
+                    operation.operation_type,
+                    operation.user_key().to_vec(),
+                    operation.value().to_vec(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (OperationType::Delete, old_key, Vec::new()),
+                (OperationType::Put, new_key, new_value),
+            ]
+        );
+        assert_eq!(count_stats.build(), Default::default());
     }
 
     #[test]

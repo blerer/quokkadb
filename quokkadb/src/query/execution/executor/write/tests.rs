@@ -388,6 +388,36 @@ fn test_find_one_and_update_rewrites_index_entries() -> Result<()> {
 }
 
 #[test]
+fn update_preserves_index_entries_when_indexed_value_is_unchanged() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine
+        .create_collection("test_update_unchanged_index", true)?
+        .id;
+    let index = storage_engine.create_queryable_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+
+    insert_one(
+        &executor,
+        collection_id,
+        &doc! { "_id": 1, "value": "alpha", "other": "before" },
+    )?;
+    let update_expr = update([set([field_name("other")], "after")]);
+    execute_update_one_with_expr(&executor, collection_id, 1, update_expr)?;
+
+    assert_eq!(
+        index_scan_eq(&executor, collection_id, index.id, "alpha")?,
+        vec![doc! { "_id": 1, "value": "alpha", "other": "after" }]
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_replace_one_preserves_existing_id_when_replacement_omits_id() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();

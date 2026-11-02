@@ -1037,15 +1037,20 @@ impl WriteExecutor {
         self.ensure_writes_allowed(&metadata)?;
         let indices = Indexes::from_collection(&metadata);
 
-        if let Some(doc) = old_doc.as_ref() {
-            indices.append_delete_ops(&mut operations, &doc.document, &mut count_stats)?;
-        }
-
         let old_size = old_doc.as_ref().map_or(0, |row| row.source_bson_size);
         count_stats.inc_collection_document_bytes(
             collection,
             document_size_as_i64(new_doc_bytes.len()) - document_size_as_i64(old_size),
         );
+
+        if let Some(doc) = old_doc.as_ref() {
+            indices.append_update_ops(
+                &mut operations,
+                &doc.document,
+                &new_doc,
+                &mut count_stats,
+            )?;
+        }
 
         operations.push(Operation::new_put(
             collection,
@@ -1056,8 +1061,8 @@ impl WriteExecutor {
 
         if old_doc.is_none() {
             count_stats.inc_collection(collection, 1);
+            indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
         }
-        indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
 
         let precondition = Precondition::VersionMatch {
             collection,
