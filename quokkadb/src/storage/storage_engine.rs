@@ -1,3 +1,4 @@
+use crate::io::bitset::BitSet;
 use crate::io::{mark_file_as_corrupted, sync_dir, truncate_file};
 use crate::obs::metrics::{self, DerivedGauge, MetricRegistry};
 use crate::options::options::Options;
@@ -6,7 +7,7 @@ use crate::storage::ScanCachePolicy;
 use crate::storage::append_log::LogReplayError;
 use crate::storage::callback::Callback;
 use crate::storage::catalog::{
-    Catalog, CollectionMetadata, CollectionOptions, IndexDefinition, IndexOptions,
+    Catalog, CollectionMetadata, CollectionOptions, IndexDefinition, IndexMetadata, IndexOptions,
 };
 use crate::storage::compaction::compaction_manager::CompactionManager;
 use crate::storage::compaction::compaction_picker::CompactionJob;
@@ -403,7 +404,7 @@ impl StorageEngine {
             for (number, path) in &scan_results.sst_files {
                 if !live_ssts.contains(number) {
                     tracing::debug!(path = %path.display(), "deleting orphaned SST file at startup");
-                    fs::remove_file(path)?;
+                    remove_file(path)?;
                     deleted_orphaned_ssts.push(path.clone());
                 }
             }
@@ -880,6 +881,53 @@ impl StorageEngine {
 
         let _lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
         Ok(())
+    }
+
+    pub fn update_index_multikey_fields(
+        self: &Arc<Self>,
+        collection_id: u32,
+        index_id: u32,
+        multikey_fields: BitSet,
+    ) -> StorageResult<Arc<IndexMetadata>> {
+        self.check_error_mode()?;
+
+        let mut wal_and_manifest = self.db_mutex.lock().unwrap();
+        self.check_error_mode()?;
+        let lsm_tree = self.lsm_tree.load();
+        let updated_at = self.next_seq_number.load(Ordering::Relaxed);
+        let catalog = lsm_tree.catalog();
+        let collection = catalog
+            .get_collection_at(collection_id, updated_at)
+            .ok_or_else(|| StorageError::CollectionNotFound {
+                name: String::new(),
+                id: Some(collection_id),
+            })?;
+        let index = collection
+            .get_index_at(index_id, updated_at)
+            .ok_or_else(|| StorageError::IndexNotFound {
+                collection_name: collection.name.clone(),
+                index_name: format!("index id {index_id}"),
+                id: Some(index_id),
+            })?;
+
+        let mut merged_fields = index.multikey_fields;
+        if !merged_fields.union(multikey_fields) {
+            return Ok(index);
+        }
+
+        let edit = ManifestEdit::UpdateIndexMultikeyFields {
+            collection_id,
+            index_id,
+            multikey_fields,
+            updated_at,
+        };
+        let new_lsm_tree = self.append_schema_edit(&lsm_tree, &mut wal_and_manifest, &edit)?;
+        Ok(new_lsm_tree
+            .catalog()
+            .get_collection_by_id(&collection_id)
+            .unwrap()
+            .get_index_by_id(index_id)
+            .unwrap())
     }
 
     /// Acquires a real snapshot lease for the current visible sequence.
@@ -1642,7 +1690,7 @@ impl StorageEngine {
                 metrics::names::storage::sstable_count_level(level),
                 DerivedGauge::new(Arc::new(move || {
                     let levels = lsm.load().levels();
-                    let may_be_level = levels.level(level as usize);
+                    let may_be_level = levels.level(level);
                     may_be_level.map_or(0, |l| l.sst_count() as u64)
                 })),
             );
@@ -1652,7 +1700,7 @@ impl StorageEngine {
                 metrics::names::storage::sstable_size_level(level),
                 DerivedGauge::new(Arc::new(move || {
                     let levels = lsm.load().levels();
-                    let may_be_level = levels.level(level as usize);
+                    let may_be_level = levels.level(level);
                     may_be_level.map_or(0, |l| l.total_bytes())
                 })),
             );

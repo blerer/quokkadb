@@ -5,7 +5,7 @@ use super::{ExecutionRow, Metrics};
 use super::{ExecutorFailpoint, invoke_executor_test_hook};
 use crate::error::Error;
 use crate::error::Result;
-use crate::query::execution::indexes::indexes::Indexes;
+use crate::query::execution::indexes::indexes::{IndexAppendError, Indexes};
 use crate::query::execution::projections;
 use crate::query::execution::updates;
 use crate::query::physical_plan::PhysicalPlan;
@@ -32,6 +32,19 @@ use tracing::trace_span;
 const RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
+
+impl From<IndexAppendError> for Error {
+    fn from(error: IndexAppendError) -> Self {
+        match error {
+            IndexAppendError::Io(error) => Self::Io(error),
+            IndexAppendError::Bson(error) => Self::BsonError(error),
+            IndexAppendError::InvalidRequest(message) => Self::InvalidRequest(message),
+            IndexAppendError::MultikeyFieldsChanged { .. } => {
+                unreachable!("multikey metadata changes must be handled before conversion")
+            }
+        }
+    }
+}
 
 pub(crate) struct WriteExecutor {
     pub(super) storage_engine: Arc<StorageEngine>,
@@ -249,6 +262,37 @@ impl WriteExecutor {
                 name: String::new(),
                 id: Some(collection),
             })
+    }
+
+    /// Rebuild only uncommitted operations when indexing discovers new metadata.
+    /// The closure retains input documents and any original record snapshot.
+    fn prepare_indexed_write<T>(
+        &self,
+        collection: u32,
+        mut prepare: impl FnMut(
+            &CollectionMetadata,
+            &Indexes,
+        ) -> Result<std::result::Result<T, IndexAppendError>>,
+    ) -> Result<T> {
+        loop {
+            let metadata = self.collection_metadata(collection)?;
+            self.ensure_writes_allowed(&metadata)?;
+            let indexes = Indexes::from_collection(&metadata);
+            match prepare(&metadata, &indexes)? {
+                Ok(value) => return Ok(value),
+                Err(IndexAppendError::MultikeyFieldsChanged {
+                    index_id,
+                    multikey_fields,
+                }) => {
+                    self.storage_engine.update_index_multikey_fields(
+                        collection,
+                        index_id,
+                        multikey_fields,
+                    )?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn preconditions(
@@ -835,47 +879,58 @@ impl WriteExecutor {
         let mut retry_state = RetryState::new();
 
         loop {
-            let metadata = self.collection_metadata(collection)?;
-            self.ensure_writes_allowed(&metadata)?;
-            let mut operations = Vec::new();
-            let mut count_stats = CountStatsBuilder::new();
-            operations.push(Operation::new_put(
-                collection,
-                0,
-                user_key.clone(),
-                doc.clone(),
-            ));
-
-            let indices = Indexes::from_collection(&metadata);
-            let raw_doc = RawDocument::from_bytes(&doc)?;
-            count_stats.inc_collection(collection, 1);
-            count_stats.inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
-            indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
-
-            let snapshot = self.storage_engine.acquire_snapshot();
-            let batch = if id_strategy == IdCreationStrategy::Generated {
-                WriteBatch::new_with_preconditions(
-                    operations,
-                    count_stats.build(),
-                    Self::preconditions(snapshot, &metadata, vec![]),
-                )
-            } else {
-                if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)?
+            let batch = self.prepare_indexed_write(collection, |metadata, indices| {
+                let raw_doc = RawDocument::from_bytes(&doc).map_err(Error::from)?;
+                let snapshot = self.storage_engine.acquire_snapshot();
+                if id_strategy != IdCreationStrategy::Generated
+                    && Self::primary_key_exists(
+                        &self.storage_engine,
+                        collection,
+                        &user_key,
+                        &snapshot,
+                    )?
                 {
                     return Err(Self::duplicate_key_error(&id));
                 }
 
-                let precondition = Precondition::VersionMatch {
-                    collection,
-                    index: 0,
-                    user_key: user_key.clone(),
-                };
-                WriteBatch::new_with_preconditions(
-                    operations,
-                    count_stats.build(),
-                    Self::preconditions(snapshot, &metadata, vec![precondition]),
-                )
-            };
+                let result = (|| -> std::result::Result<WriteBatch, IndexAppendError> {
+                    let mut operations = Vec::new();
+                    let mut count_stats = CountStatsBuilder::new();
+                    operations.push(Operation::new_put(
+                        collection,
+                        0,
+                        user_key.clone(),
+                        doc.clone(),
+                    ));
+
+                    count_stats.inc_collection(collection, 1);
+                    count_stats
+                        .inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
+                    indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
+
+                    let batch = if id_strategy == IdCreationStrategy::Generated {
+                        WriteBatch::new_with_preconditions(
+                            operations,
+                            count_stats.build(),
+                            Self::preconditions(snapshot, &metadata, vec![]),
+                        )
+                    } else {
+                        let precondition = Precondition::VersionMatch {
+                            collection,
+                            index: 0,
+                            user_key: user_key.clone(),
+                        };
+                        WriteBatch::new_with_preconditions(
+                            operations,
+                            count_stats.build(),
+                            Self::preconditions(snapshot, &metadata, vec![precondition]),
+                        )
+                    };
+
+                    Ok(batch)
+                })();
+                Ok(result)
+            })?;
 
             #[cfg(test)]
             self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
@@ -919,87 +974,115 @@ impl WriteExecutor {
             documents_with_ids.push((doc, id, user_key));
         }
 
-        let indices = Indexes::from_collection(&metadata);
+        let (batch, ids, seen_keys) =
+            self.prepare_indexed_write(collection, |metadata, indices| {
+                let raw_docs = documents_with_ids
+                    .iter()
+                    .map(|(doc, _, _)| RawDocument::from_bytes(doc).map_err(Error::from))
+                    .collect::<Result<Vec<_>>>()?;
 
-        let (batch, ids, seen_keys) = if id_strategy == IdCreationStrategy::Generated {
-            let mut operations = Vec::new();
-            let mut count_stats = CountStatsBuilder::new();
-            let mut ids = Vec::with_capacity(documents_with_ids.len());
-            for (doc, id, user_key) in documents_with_ids {
-                ids.push(id);
-                count_stats.inc_collection(collection, 1);
-                count_stats
-                    .inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
-                operations.push(Operation::new_put(
-                    collection,
-                    0,
-                    user_key.clone(),
-                    doc.clone(),
-                ));
-                let raw_doc = RawDocument::from_bytes(&doc)?;
-                indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
-            }
-            let snapshot = self.storage_engine.acquire_snapshot();
-            (
-                WriteBatch::new_with_preconditions(
-                    operations,
-                    count_stats.build(),
-                    Self::preconditions(snapshot, &metadata, vec![]),
-                ),
-                ids,
-                None,
-            )
-        } else {
-            let snapshot = self.storage_engine.acquire_snapshot();
+                let result = if id_strategy == IdCreationStrategy::Generated {
+                    let result = (|| {
+                        let mut operations = Vec::new();
+                        let mut count_stats = CountStatsBuilder::new();
+                        let mut ids = Vec::with_capacity(documents_with_ids.len());
+                        for ((doc, id, user_key), raw_doc) in
+                            documents_with_ids.iter().zip(&raw_docs)
+                        {
+                            ids.push(id.clone());
+                            count_stats.inc_collection(collection, 1);
+                            count_stats.inc_collection_document_bytes(
+                                collection,
+                                document_size_as_i64(doc.len()),
+                            );
+                            operations.push(Operation::new_put(
+                                collection,
+                                0,
+                                user_key.clone(),
+                                doc.clone(),
+                            ));
+                            indices.append_put_ops_raw(
+                                &mut operations,
+                                raw_doc,
+                                &mut count_stats,
+                            )?;
+                        }
+                        let snapshot = self.storage_engine.acquire_snapshot();
+                        Ok((
+                            WriteBatch::new_with_preconditions(
+                                operations,
+                                count_stats.build(),
+                                Self::preconditions(snapshot, &metadata, vec![]),
+                            ),
+                            ids,
+                            None,
+                        ))
+                    })();
+                    result
+                } else {
+                    let snapshot = self.storage_engine.acquire_snapshot();
 
-            let mut seen_keys = HashMap::new();
-            for (_, id, user_key) in &documents_with_ids {
-                if seen_keys.insert(user_key.clone(), id.clone()).is_some()
-                    || Self::primary_key_exists(
-                        &self.storage_engine,
-                        collection,
-                        user_key,
-                        &snapshot,
-                    )?
-                {
-                    return Err(Self::duplicate_key_error(id));
-                }
-            }
+                    let mut seen_keys = HashMap::new();
+                    for (_, id, user_key) in &documents_with_ids {
+                        if seen_keys.insert(user_key.clone(), id.clone()).is_some()
+                            || Self::primary_key_exists(
+                                &self.storage_engine,
+                                collection,
+                                user_key,
+                                &snapshot,
+                            )?
+                        {
+                            return Err(Self::duplicate_key_error(id));
+                        }
+                    }
 
-            let mut operations = Vec::new();
-            let mut count_stats = CountStatsBuilder::new();
-            let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
-            let mut ids = Vec::with_capacity(documents_with_ids.len());
-            for (doc, id, user_key) in documents_with_ids {
-                count_stats.inc_collection(collection, 1);
-                count_stats
-                    .inc_collection_document_bytes(collection, document_size_as_i64(doc.len()));
-                preconditions_vec.push(Precondition::VersionMatch {
-                    collection,
-                    index: 0,
-                    user_key: user_key.clone(),
-                });
-                operations.push(Operation::new_put(
-                    collection,
-                    0,
-                    user_key.clone(),
-                    doc.clone(),
-                ));
-                let raw_doc = RawDocument::from_bytes(&doc)?;
-                indices.append_put_ops_raw(&mut operations, raw_doc, &mut count_stats)?;
-                ids.push(id);
-            }
+                    let result = (|| {
+                        let mut operations = Vec::new();
+                        let mut count_stats = CountStatsBuilder::new();
+                        let mut preconditions_vec = Vec::with_capacity(documents_with_ids.len());
+                        let mut ids = Vec::with_capacity(documents_with_ids.len());
+                        for ((doc, id, user_key), raw_doc) in
+                            documents_with_ids.iter().zip(&raw_docs)
+                        {
+                            count_stats.inc_collection(collection, 1);
+                            count_stats.inc_collection_document_bytes(
+                                collection,
+                                document_size_as_i64(doc.len()),
+                            );
+                            preconditions_vec.push(Precondition::VersionMatch {
+                                collection,
+                                index: 0,
+                                user_key: user_key.clone(),
+                            });
+                            operations.push(Operation::new_put(
+                                collection,
+                                0,
+                                user_key.clone(),
+                                doc.clone(),
+                            ));
+                            indices.append_put_ops_raw(
+                                &mut operations,
+                                raw_doc,
+                                &mut count_stats,
+                            )?;
+                            ids.push(id.clone());
+                        }
 
-            (
-                WriteBatch::new_with_preconditions(
-                    operations,
-                    count_stats.build(),
-                    Self::preconditions(snapshot, &metadata, preconditions_vec),
-                ),
-                ids,
-                Some(seen_keys),
-            )
-        };
+                        Ok((
+                            WriteBatch::new_with_preconditions(
+                                operations,
+                                count_stats.build(),
+                                Self::preconditions(snapshot, &metadata, preconditions_vec),
+                            ),
+                            ids,
+                            Some(seen_keys),
+                        ))
+                    })();
+                    result
+                };
+
+                Ok(result)
+            })?;
 
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
@@ -1030,50 +1113,55 @@ impl WriteExecutor {
         new_doc_bytes: Vec<u8>,
         sync: bool,
     ) -> Result<()> {
-        let mut operations = Vec::new();
-        let mut count_stats = CountStatsBuilder::new();
+        let new_size = new_doc_bytes.len();
+        let mut new_doc_bytes = Some(new_doc_bytes);
+        let batch = self.prepare_indexed_write(collection, |metadata, indices| {
+            let result = (|| -> std::result::Result<WriteBatch, IndexAppendError> {
+                let mut operations = Vec::new();
+                let mut count_stats = CountStatsBuilder::new();
 
-        let metadata = self.collection_metadata(collection)?;
-        self.ensure_writes_allowed(&metadata)?;
-        let indices = Indexes::from_collection(&metadata);
+                let old_size = old_doc.as_ref().map_or(0, |row| row.source_bson_size);
+                count_stats.inc_collection_document_bytes(
+                    collection,
+                    document_size_as_i64(new_size) - document_size_as_i64(old_size),
+                );
 
-        let old_size = old_doc.as_ref().map_or(0, |row| row.source_bson_size);
-        count_stats.inc_collection_document_bytes(
-            collection,
-            document_size_as_i64(new_doc_bytes.len()) - document_size_as_i64(old_size),
-        );
+                if let Some(doc) = old_doc.as_ref() {
+                    indices.append_update_ops(
+                        &mut operations,
+                        &doc.document,
+                        &new_doc,
+                        &mut count_stats,
+                    )?;
+                }
 
-        if let Some(doc) = old_doc.as_ref() {
-            indices.append_update_ops(
-                &mut operations,
-                &doc.document,
-                &new_doc,
-                &mut count_stats,
-            )?;
-        }
+                if old_doc.is_none() {
+                    count_stats.inc_collection(collection, 1);
+                    indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
+                }
 
-        operations.push(Operation::new_put(
-            collection,
-            0,
-            user_key.clone(),
-            new_doc_bytes,
-        ));
+                // No preparation errors remain: transfer the bytes only once.
+                operations.push(Operation::new_put(
+                    collection,
+                    0,
+                    user_key.clone(),
+                    new_doc_bytes.take().unwrap(),
+                ));
 
-        if old_doc.is_none() {
-            count_stats.inc_collection(collection, 1);
-            indices.append_put_ops(&mut operations, &new_doc, &mut count_stats)?;
-        }
-
-        let precondition = Precondition::VersionMatch {
-            collection,
-            index: 0,
-            user_key,
-        };
-        let batch = WriteBatch::new_with_preconditions(
-            operations,
-            count_stats.build(),
-            Self::preconditions(snapshot.clone(), &metadata, vec![precondition]),
-        );
+                let precondition = Precondition::VersionMatch {
+                    collection,
+                    index: 0,
+                    user_key: user_key.clone(),
+                };
+                let batch = WriteBatch::new_with_preconditions(
+                    operations,
+                    count_stats.build(),
+                    Self::preconditions(snapshot.clone(), &metadata, vec![precondition]),
+                );
+                Ok(batch)
+            })();
+            Ok(result)
+        })?;
         #[cfg(test)]
         self.invoke_test_hook(ExecutorFailpoint::BeforeCommit);
         self.storage_engine.write(batch, sync).map_err(Into::into)
@@ -1093,7 +1181,9 @@ impl WriteExecutor {
         let metadata = self.collection_metadata(collection)?;
         self.ensure_writes_allowed(&metadata)?;
         let indices = Indexes::from_collection(&metadata);
-        indices.append_delete_ops(&mut operations, &old_doc.document, &mut count_stats)?;
+        indices
+            .append_delete_ops(&mut operations, &old_doc.document, &mut count_stats)
+            .map_err(Error::from)?;
         operations.push(Operation::new_delete(collection, 0, user_key.clone()));
         count_stats.inc_collection(collection, -1);
         count_stats.inc_collection_document_bytes(

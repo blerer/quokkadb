@@ -30,7 +30,11 @@ fn reader_codec_round_trip() {
     };
     let source = IndexSource::from_document(&document);
     let id = to_typed_key(document.get("_id").unwrap().clone());
-    let entry = writer.generate_entries(source, &id).unwrap().remove(0);
+    let entry = writer
+        .generate_entries(source, &id)
+        .unwrap()
+        .entries
+        .remove(0);
 
     assert_eq!(decoder.decode(entry).unwrap(), document);
 }
@@ -58,6 +62,7 @@ fn array_expansion_is_local_to_each_shared_array_element() {
         let actual: Vec<_> = index
             .generate_entries(source, &id)
             .unwrap()
+            .entries
             .into_iter()
             .map(|entry| decode_index_entry(&decoder, entry).unwrap())
             .collect();
@@ -93,10 +98,12 @@ fn tree_extraction_preserves_key_order_and_nested_array_correlation() {
     let id = to_typed_key(1);
     let decoded_entries = index
         .generate_entries(IndexSource::from_document(&document), &id)
-        .unwrap();
+        .unwrap()
+        .entries;
     let raw_entries = index
         .generate_entries(IndexSource::from_raw_document(&raw), &id)
-        .unwrap();
+        .unwrap()
+        .entries;
     let decoded_bytes: Vec<_> = decoded_entries
         .iter()
         .map(|entry| (entry.key.clone(), entry.value.clone()))
@@ -133,7 +140,7 @@ fn correlated_generation_preserves_pairs_and_missing_values() {
     let document = doc! {"_id": 1, "items": [{"sku": "A", "price": 10}, {"sku": "B", "price": 20}, {"sku": "C"}]};
     let id = to_typed_key(document.get("_id").unwrap().clone());
     let source = IndexSource::from_document(&document);
-    let entries = index.generate_entries(source, &id).unwrap();
+    let entries = index.generate_entries(source, &id).unwrap().entries;
     let decoded: Vec<_> = entries
         .into_iter()
         .map(|entry| decode_index_entry(&decoder, entry).unwrap())
@@ -161,6 +168,7 @@ fn correlated_nested_arrays_and_empty_paths() {
     let decoded: Vec<_> = index
         .generate_entries(source, &id)
         .unwrap()
+        .entries
         .into_iter()
         .map(|entry| decode_index_entry(&decoder, entry).unwrap())
         .collect();
@@ -178,7 +186,11 @@ fn correlated_nested_arrays_and_empty_paths() {
         let source = IndexSource::from_document(&document);
         let decoded = decode_index_entry(
             &terminal_decoder,
-            terminal.generate_entries(source, &id).unwrap().remove(0),
+            terminal
+                .generate_entries(source, &id)
+                .unwrap()
+                .entries
+                .remove(0),
         )
         .unwrap();
         assert_eq!(
@@ -346,6 +358,7 @@ fn value_layout_id_length_matches_key_suffix() {
     let entry = index
         .generate_entries(key_source, &id_key)
         .unwrap()
+        .entries
         .remove(0);
 
     let (id_len, _) = varint::read_u32(&entry.value, 0);
@@ -388,6 +401,7 @@ fn value_layout_id_key_type_bytes_are_stored() {
     let entry = index
         .generate_entries(key_source, &id_key)
         .unwrap()
+        .entries
         .remove(0);
 
     let (id_len, offset) = varint::read_u32(&entry.value, 0);
@@ -635,6 +649,7 @@ fn decode_index_entry_returns_error_for_truncated_value() {
     let mut entry = index
         .generate_entries(key_source, &id_key)
         .unwrap()
+        .entries
         .remove(0);
     entry.value.truncate(1);
 
@@ -675,6 +690,7 @@ fn extract_and_decode(index: &Index, decoder: &IndexReadCodec, doc: &Document) -
     let entry = index
         .generate_entries(key_source, &doc_id)
         .expect("extract should succeed")
+        .entries
         .remove(0);
     decode_index_entry(decoder, entry).expect("decode should succeed")
 }
@@ -689,6 +705,7 @@ fn extract_key(index: &Index, doc: &Document) -> Vec<u8> {
     index
         .generate_entries(key_source, &doc_id)
         .expect("extract should succeed")
+        .entries
         .remove(0)
         .key
 }

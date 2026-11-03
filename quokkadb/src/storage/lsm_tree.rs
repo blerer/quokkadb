@@ -76,6 +76,7 @@ impl LsmTree {
             | ManifestEdit::RenameCollection { .. }
             | ManifestEdit::CreateIndex { .. }
             | ManifestEdit::MarkIndexQueryable { .. }
+            | ManifestEdit::UpdateIndexMultikeyFields { .. }
             | ManifestEdit::DropIndex { .. }
             | ManifestEdit::Flush { .. }
             | ManifestEdit::DiscardPendingCatalogEditsAfter { .. }

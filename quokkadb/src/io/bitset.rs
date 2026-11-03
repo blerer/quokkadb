@@ -3,7 +3,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 
 /// A simple BitSet implementation using an u64 to store bits.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BitSet(u64);
 
 impl BitSet {
@@ -21,6 +21,13 @@ impl BitSet {
     /// Check if the BitSet contains a bit.
     pub fn contains(&self, bit: u8) -> bool {
         (self.0 & (1 << bit)) != 0
+    }
+
+    /// Adds all bits from `other` and returns whether the set changed.
+    pub fn union(&mut self, other: Self) -> bool {
+        let previous = self.0;
+        self.0 |= other.0;
+        self.0 != previous
     }
 }
 
@@ -72,6 +79,21 @@ mod tests {
         bs.insert(10);
         bs.insert(10);
         assert!(bs.contains(10));
+    }
+
+    #[test]
+    fn union_adds_bits_and_reports_changes() {
+        let mut bs = BitSet::new();
+        bs.insert(1);
+
+        let mut other = BitSet::new();
+        other.insert(1);
+        other.insert(7);
+
+        assert!(bs.union(other));
+        assert!(bs.contains(1));
+        assert!(bs.contains(7));
+        assert!(!bs.union(other));
     }
 
     #[test]

@@ -218,6 +218,15 @@ fn multikey_entries_follow_insert_replace_and_delete() -> Result<()> {
         IndexOptions::default(),
     )?;
     insert_one(executor, collection, &doc! {"_id": 1, "value": [1, 2, 2]})?;
+    let metadata = storage.catalog().get_collection_by_id(&collection).unwrap();
+    assert!(
+        metadata
+            .get_index_by_id(index.id)
+            .unwrap()
+            .multikey_fields
+            .contains(0)
+    );
+    let version = metadata.version;
     assert_eq!(index_scan_eq(executor, collection, index.id, 1)?.len(), 1);
     assert_eq!(index_scan_eq(executor, collection, index.id, 2)?.len(), 1);
     execute_find_one_and_replace(
@@ -233,6 +242,156 @@ fn multikey_entries_follow_insert_replace_and_delete() -> Result<()> {
     execute_delete_one(executor, collection, 1)?;
     assert!(index_scan_eq(executor, collection, index.id, 2)?.is_empty());
     assert!(index_scan_eq(executor, collection, index.id, 3)?.is_empty());
+    assert_eq!(
+        storage
+            .catalog()
+            .get_collection_by_id(&collection)
+            .unwrap()
+            .version,
+        version
+    );
+    Ok(())
+}
+
+#[test]
+fn insert_many_preparation_refreshes_each_index_without_duplicate_counts() -> Result<()> {
+    for strategy in [IdCreationStrategy::Generated, IdCreationStrategy::Mixed] {
+        let runtime = executor_test_runtime()?;
+        let storage = &runtime.storage_engine;
+        let executor = &runtime.executor;
+        let collection = storage
+            .create_collection_with_options(
+                "multikey_batch",
+                CollectionOptions {
+                    id_creation_strategy: strategy,
+                    ..CollectionOptions::default()
+                },
+                true,
+            )?
+            .id;
+        let a = storage.create_queryable_index(
+            collection,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+            IndexOptions::default(),
+        )?;
+        let b = storage.create_queryable_index(
+            collection,
+            IndexDefinition::Regular(vec![OrderedIndexField::asc("b")]),
+            IndexOptions::default(),
+        )?;
+        let version = storage
+            .catalog()
+            .get_collection_by_id(&collection)
+            .unwrap()
+            .version;
+        let result = insert_many(
+            executor,
+            collection,
+            &[doc! {"a": 1, "b": 2}, doc! {"a": [3, 4], "b": [5, 6]}],
+        )?;
+        let WriteResult::InsertMany { inserted_ids } = result else {
+            panic!("expected inserted IDs")
+        };
+        assert_eq!(inserted_ids.len(), 2);
+        assert_ne!(inserted_ids[0], inserted_ids[1]);
+        let snapshot = storage.acquire_snapshot();
+        for id in &inserted_ids {
+            assert!(
+                storage
+                    .read_at_snapshot(collection, 0, &id.try_into_key()?, &snapshot)?
+                    .is_some()
+            );
+        }
+        let metadata = storage.catalog().get_collection_by_id(&collection).unwrap();
+        assert_eq!(metadata.version, version + 2);
+        for index in [a.id, b.id] {
+            assert!(
+                metadata
+                    .get_index_by_id(index)
+                    .unwrap()
+                    .multikey_fields
+                    .contains(0)
+            );
+            assert_eq!(
+                storage.count_stat(&CountStatsKey::Index { collection, index }),
+                Some(3)
+            );
+        }
+        assert_eq!(
+            storage.count_stat(&CountStatsKey::Collection(collection)),
+            Some(2)
+        );
+        assert_collection_bytes(executor, storage, collection)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn update_many_preparation_does_not_repeat_updates_or_committed_documents() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage = &runtime.storage_engine;
+    let executor = &runtime.executor;
+    let collection = storage.create_collection("multikey_update_many", true)?.id;
+    let index = storage.create_queryable_index(
+        collection,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
+    insert_docs(
+        executor,
+        collection,
+        [
+            &doc! {"_id": 1, "value": 1, "source": 3, "n": 0},
+            &doc! {"_id": 2, "value": 2, "source": [3, 4], "n": 0},
+        ],
+    )?;
+    let version = storage
+        .catalog()
+        .get_collection_by_id(&collection)
+        .unwrap()
+        .version;
+    let result = execute_update_many(
+        executor,
+        collection,
+        full_scan_plan(collection),
+        update([
+            inc([field_name("n")], 1),
+            rename([field_name("source")], [field_name("value")]),
+        ]),
+        false,
+    )?;
+    assert!(matches!(
+        result,
+        WriteResult::Update {
+            matched_count: 2,
+            modified_count: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        read_stored_doc(storage, collection, 1)?,
+        doc! {"_id": 1, "value": 3, "n": 1}
+    );
+    assert_eq!(
+        read_stored_doc(storage, collection, 2)?,
+        doc! {"_id": 2, "value": [3, 4], "n": 1}
+    );
+    assert_eq!(
+        storage
+            .catalog()
+            .get_collection_by_id(&collection)
+            .unwrap()
+            .version,
+        version + 1
+    );
+    assert_eq!(
+        storage.count_stat(&CountStatsKey::Index {
+            collection,
+            index: index.id
+        }),
+        Some(3)
+    );
+    assert_collection_bytes(executor, storage, collection)?;
     Ok(())
 }
 
@@ -2412,6 +2571,11 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
     let executor = runtime.executor.clone();
     let collection_id = storage_engine.create_collection("test_retry", true)?.id;
 
+    storage_engine.create_queryable_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("value")]),
+        IndexOptions::default(),
+    )?;
     let doc1 = doc! { "_id": 1, "value": "initial" };
     insert_one(&executor, collection_id, &doc1)?;
 
@@ -2420,7 +2584,7 @@ fn test_update_many_does_not_retry_on_conflict() -> Result<()> {
         hook.clone(),
         collection_id,
         full_scan_plan(collection_id),
-        update([set([field_name("value")], "updated")]),
+        update([set([field_name("value")], bson::bson!([1, 2]))]),
         false,
     );
 
@@ -2458,8 +2622,13 @@ fn test_insert_many_rejects_schema_change_before_commit() -> Result<()> {
             false,
         )?
         .id;
+    storage_engine.create_queryable_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("multikey")]),
+        IndexOptions::default(),
+    )?;
     let docs = vec![
-        doc! { "schema_value": "first" },
+        doc! { "schema_value": "first", "multikey": [1, 2] },
         doc! { "schema_value": "second" },
     ];
 

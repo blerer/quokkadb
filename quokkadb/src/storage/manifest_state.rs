@@ -1,3 +1,4 @@
+use crate::io::bitset::BitSet;
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::storage::catalog::{Catalog, CollectionOptions, IndexDefinition, IndexOptions};
@@ -176,6 +177,18 @@ impl ManifestState {
                     *queryable_at,
                 ));
             }
+            ManifestEdit::UpdateIndexMultikeyFields {
+                collection_id,
+                index_id,
+                multikey_fields,
+                ..
+            } => {
+                self.catalog = Arc::new(self.catalog.update_index_multikey_fields(
+                    *collection_id,
+                    *index_id,
+                    *multikey_fields,
+                ));
+            }
             ManifestEdit::DropIndex {
                 collection_id,
                 index_id,
@@ -214,6 +227,7 @@ impl ManifestState {
             | ManifestEdit::RenameCollection { .. }
             | ManifestEdit::CreateIndex { .. }
             | ManifestEdit::MarkIndexQueryable { .. }
+            | ManifestEdit::UpdateIndexMultikeyFields { .. }
             | ManifestEdit::DropIndex { .. }) => self.queue_catalog_edit(edit),
             ManifestEdit::FilesDetectedOnRestart { next_file_number } => ManifestState {
                 lsm: Arc::new(self.lsm.adjust_file_number(*next_file_number)),
@@ -339,6 +353,7 @@ mod tags {
     pub const DROP_INDEX: u8 = 11;
     pub const DISCARD_PENDING_CATALOG_EDITS_AFTER: u8 = 12;
     pub const MARK_INDEX_QUERYABLE: u8 = 13;
+    pub const UPDATE_INDEX_MULTIKEY_FIELDS: u8 = 14;
 }
 
 fn apply_count_stats_delta(current: &CountStats, delta: &CountStats) -> CountStats {
@@ -468,6 +483,14 @@ pub enum ManifestEdit {
         queryable_at: u64,
     },
 
+    /// Adds multikey field positions to an index in a collection.
+    UpdateIndexMultikeyFields {
+        collection_id: u32,
+        index_id: u32,
+        multikey_fields: BitSet,
+        updated_at: u64,
+    },
+
     /// Marks an index as dropped in a collection.
     DropIndex {
         collection_id: u32,
@@ -487,6 +510,7 @@ impl ManifestEdit {
             ManifestEdit::DropCollection { dropped_at, .. }
             | ManifestEdit::DropIndex { dropped_at, .. } => Some(*dropped_at),
             ManifestEdit::MarkIndexQueryable { queryable_at, .. } => Some(*queryable_at),
+            ManifestEdit::UpdateIndexMultikeyFields { updated_at, .. } => Some(*updated_at),
             ManifestEdit::RenameCollection { renamed_at, .. } => Some(*renamed_at),
             _ => None,
         }
@@ -524,6 +548,12 @@ impl ManifestEdit {
                 index_id,
                 queryable_at,
             } => catalog.mark_index_queryable(*collection_id, *index_id, *queryable_at),
+            ManifestEdit::UpdateIndexMultikeyFields {
+                collection_id,
+                index_id,
+                multikey_fields,
+                ..
+            } => catalog.update_index_multikey_fields(*collection_id, *index_id, *multikey_fields),
             ManifestEdit::DropIndex {
                 collection_id,
                 index_id,
@@ -681,6 +711,12 @@ impl Serializable for ManifestEdit {
                 index_id: reader.read_varint_u32()?,
                 queryable_at: reader.read_varint_u64()?,
             }),
+            tags::UPDATE_INDEX_MULTIKEY_FIELDS => Ok(ManifestEdit::UpdateIndexMultikeyFields {
+                collection_id: reader.read_varint_u32()?,
+                index_id: reader.read_varint_u32()?,
+                multikey_fields: BitSet::read_from(reader, version)?,
+                updated_at: reader.read_varint_u64()?,
+            }),
             tags::DISCARD_PENDING_CATALOG_EDITS_AFTER => {
                 Ok(ManifestEdit::DiscardPendingCatalogEditsAfter {
                     sequence: reader.read_varint_u64()?,
@@ -816,6 +852,18 @@ impl Serializable for ManifestEdit {
                 writer.write_varint_u32(*index_id);
                 writer.write_varint_u64(*queryable_at);
             }
+            ManifestEdit::UpdateIndexMultikeyFields {
+                collection_id,
+                index_id,
+                multikey_fields,
+                updated_at,
+            } => {
+                writer.write_u8(tags::UPDATE_INDEX_MULTIKEY_FIELDS);
+                writer.write_varint_u32(*collection_id);
+                writer.write_varint_u32(*index_id);
+                multikey_fields.write_to(writer, version);
+                writer.write_varint_u64(*updated_at);
+            }
             ManifestEdit::DiscardPendingCatalogEditsAfter { sequence } => {
                 writer
                     .write_u8(tags::DISCARD_PENDING_CATALOG_EDITS_AFTER)
@@ -933,6 +981,16 @@ impl fmt::Display for ManifestEdit {
                 "MarkIndexQueryable {{ collection_id: {}, index_id: {}, queryable_at: {} }}",
                 collection_id, index_id, queryable_at
             ),
+            ManifestEdit::UpdateIndexMultikeyFields {
+                collection_id,
+                index_id,
+                multikey_fields,
+                updated_at,
+            } => write!(
+                f,
+                "UpdateIndexMultikeyFields {{ collection_id: {}, index_id: {}, multikey_fields: {:?}, updated_at: {} }}",
+                collection_id, index_id, multikey_fields, updated_at
+            ),
             ManifestEdit::DiscardPendingCatalogEditsAfter { sequence } => write!(
                 f,
                 "DiscardPendingCatalogEditsAfter {{ sequence: {} }}",
@@ -957,7 +1015,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ManifestEdit:")]
     fn test_manifest_edit_rejects_invalid_tag() {
-        let _ = ManifestEdit::read_from(&ByteReader::new([0xfe]), 1);
+        let _ = ManifestEdit::read_from(&ByteReader::new([0xfe]), MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1644,6 +1702,59 @@ mod tests {
         assert_eq!(
             collection.get_index_by_id(1).unwrap().queryable_at,
             Some(100)
+        );
+    }
+
+    #[test]
+    fn test_update_index_multikey_fields_serialization_and_application() {
+        let mut multikey_fields = BitSet::new();
+        multikey_fields.insert(1);
+        let edit = ManifestEdit::UpdateIndexMultikeyFields {
+            collection_id: 10,
+            index_id: 1,
+            multikey_fields,
+            updated_at: 100,
+        };
+        check_edit_serialization_roundtrip(edit.clone(), MANIFEST_FORMAT_VERSION);
+
+        let state = ManifestState::new(1, 2, 3)
+            .apply(&ManifestEdit::CreateCollection {
+                name: "docs".to_string(),
+                id: 10,
+                created_at: 98,
+                options: CollectionOptions::default(),
+            })
+            .apply(&ManifestEdit::CreateIndex {
+                collection_id: 10,
+                index_id: 1,
+                definition: IndexDefinition::Regular(vec![
+                    OrderedIndexField::asc("name"),
+                    OrderedIndexField::asc("age"),
+                ]),
+                options: IndexOptions::default(),
+                created_at: 99,
+            })
+            .apply(&edit);
+
+        let visible_collection = state.visible_catalog().get_collection_by_id(&10).unwrap();
+        assert!(
+            visible_collection
+                .get_index_by_id(1)
+                .unwrap()
+                .multikey_fields
+                .contains(1)
+        );
+
+        let committed = flush_pending_catalog_edits(state, 100);
+        assert!(
+            committed
+                .catalog
+                .get_collection_by_id(&10)
+                .unwrap()
+                .get_index_by_id(1)
+                .unwrap()
+                .multikey_fields
+                .contains(1)
         );
     }
 

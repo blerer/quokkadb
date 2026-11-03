@@ -64,6 +64,16 @@ impl Serializable for Catalog {
 }
 
 impl Catalog {
+    fn with_collection(&self, id: u32, collection: CollectionMetadata) -> Self {
+        let mut collections = self.collections.clone();
+        collections.insert(id, Arc::new(collection));
+        Catalog {
+            next_collection_id: self.next_collection_id,
+            collections,
+            id_by_name: self.id_by_name.clone(),
+        }
+    }
+
     /// Removes committed dropped metadata whose data cleanup has completed.
     /// Name mappings and schema versions already reflect the logical drops.
     pub(crate) fn reclaim_dropped_if_needed(
@@ -280,30 +290,14 @@ impl Catalog {
             queryable_at: None,
             dropped_at: None,
             options: options.clone(),
+            multikey_fields: BitSet::new(),
         };
-        let updated = Arc::new(col.add_index(index));
-        let mut collections = self.collections.clone();
-        collections.insert(collection_id, updated);
-        Catalog {
-            next_collection_id: self.next_collection_id,
-            collections,
-            id_by_name: self.id_by_name.clone(),
-        }
+        self.with_collection(collection_id, col.add_index(index))
     }
 
     pub fn drop_index(&self, collection_id: u32, index_id: u32, dropped_at: u64) -> Self {
         let col = self.collections.get(&collection_id).cloned().unwrap();
-        let mut collections = self.collections.clone();
-        collections.insert(
-            collection_id,
-            Arc::new(col.drop_index(index_id, dropped_at)),
-        );
-
-        Catalog {
-            next_collection_id: self.next_collection_id,
-            collections,
-            id_by_name: self.id_by_name.clone(),
-        }
+        self.with_collection(collection_id, col.drop_index(index_id, dropped_at))
     }
 
     pub fn mark_index_queryable(
@@ -313,17 +307,23 @@ impl Catalog {
         queryable_at: u64,
     ) -> Self {
         let col = self.collections.get(&collection_id).cloned().unwrap();
-        let mut collections = self.collections.clone();
-        collections.insert(
+        self.with_collection(
             collection_id,
-            Arc::new(col.mark_index_queryable(index_id, queryable_at)),
-        );
+            col.mark_index_queryable(index_id, queryable_at),
+        )
+    }
 
-        Catalog {
-            next_collection_id: self.next_collection_id,
-            collections,
-            id_by_name: self.id_by_name.clone(),
-        }
+    pub fn update_index_multikey_fields(
+        &self,
+        collection_id: u32,
+        index_id: u32,
+        multikey_fields: BitSet,
+    ) -> Self {
+        let col = self.collections.get(&collection_id).cloned().unwrap();
+        self.with_collection(
+            collection_id,
+            col.update_index_multikey_fields(index_id, multikey_fields),
+        )
     }
 }
 
@@ -593,16 +593,12 @@ impl CollectionMetadata {
             .expect("Collection metadata version must not overflow")
     }
 
-    fn add_index(&self, index: IndexMetadata) -> CollectionMetadata {
-        assert_eq!(self.dropped_at, None);
-        assert_eq!(self.next_index_id, index.id);
-        let next_index_id = self.next_index_id + 1;
-        let mut indexes = self.indexes.clone();
-        let mut index_id_by_name = self.index_id_by_name.clone();
-        let index_id = index.id;
-        let index_name = index.name();
-        indexes.insert(index_id, Arc::new(index));
-        index_id_by_name.insert(index_name, index_id);
+    fn with_indexes(
+        &self,
+        next_index_id: u32,
+        indexes: BTreeMap<u32, Arc<IndexMetadata>>,
+        index_id_by_name: HashMap<String, u32>,
+    ) -> Self {
         CollectionMetadata {
             next_index_id,
             id: self.id,
@@ -616,62 +612,49 @@ impl CollectionMetadata {
         }
     }
 
-    fn drop_index(&self, id: u32, dropped_at: u64) -> Self {
-        let index = self.indexes.get(&id).cloned().unwrap();
-        let name = &index.name();
-        let mut id_by_name = self.index_id_by_name.clone();
-        let index_id = id_by_name.remove(name);
-        assert_eq!(index_id, Some(id));
-        let dropped_index = Arc::new(IndexMetadata {
-            id,
-            definition: index.definition.clone(),
-            created_at: index.created_at,
-            queryable_at: index.queryable_at,
-            dropped_at: Some(dropped_at),
-            options: index.options.clone(),
-        });
+    fn update_index(
+        &self,
+        id: u32,
+        update: impl FnOnce(&mut IndexMetadata, &mut HashMap<String, u32>),
+    ) -> Self {
+        let mut updated_index = self.indexes.get(&id).cloned().unwrap().as_ref().clone();
+        let mut index_id_by_name = self.index_id_by_name.clone();
+        update(&mut updated_index, &mut index_id_by_name);
 
         let mut indexes = self.indexes.clone();
-        indexes.insert(id, dropped_index);
+        indexes.insert(id, Arc::new(updated_index));
+        self.with_indexes(self.next_index_id, indexes, index_id_by_name)
+    }
 
-        CollectionMetadata {
-            next_index_id: self.next_index_id,
-            id: self.id,
-            name: self.name.clone(),
-            created_at: self.created_at,
-            version: self.next_version(),
-            dropped_at: self.dropped_at,
-            indexes,
-            index_id_by_name: id_by_name,
-            options: self.options.clone(),
-        }
+    fn add_index(&self, index: IndexMetadata) -> CollectionMetadata {
+        assert_eq!(self.dropped_at, None);
+        assert_eq!(self.next_index_id, index.id);
+        let next_index_id = self.next_index_id + 1;
+        let mut indexes = self.indexes.clone();
+        let mut index_id_by_name = self.index_id_by_name.clone();
+        let index_id = index.id;
+        let index_name = index.name();
+        indexes.insert(index_id, Arc::new(index));
+        index_id_by_name.insert(index_name, index_id);
+        self.with_indexes(next_index_id, indexes, index_id_by_name)
+    }
+
+    fn drop_index(&self, id: u32, dropped_at: u64) -> Self {
+        self.update_index(id, |index, index_id_by_name| {
+            let index_id = index_id_by_name.remove(&index.name());
+            assert_eq!(index_id, Some(id));
+            index.dropped_at = Some(dropped_at);
+        })
     }
 
     fn mark_index_queryable(&self, id: u32, queryable_at: u64) -> Self {
-        let index = self.indexes.get(&id).cloned().unwrap();
-        let updated_index = Arc::new(IndexMetadata {
-            id,
-            definition: index.definition.clone(),
-            created_at: index.created_at,
-            queryable_at: Some(queryable_at),
-            dropped_at: index.dropped_at,
-            options: index.options.clone(),
-        });
+        self.update_index(id, |index, _| index.queryable_at = Some(queryable_at))
+    }
 
-        let mut indexes = self.indexes.clone();
-        indexes.insert(id, updated_index);
-
-        CollectionMetadata {
-            next_index_id: self.next_index_id,
-            id: self.id,
-            name: self.name.clone(),
-            created_at: self.created_at,
-            version: self.next_version(),
-            dropped_at: self.dropped_at,
-            indexes,
-            index_id_by_name: self.index_id_by_name.clone(),
-            options: self.options.clone(),
-        }
+    fn update_index_multikey_fields(&self, id: u32, multikey_fields: BitSet) -> Self {
+        self.update_index(id, |index, _| {
+            index.multikey_fields.union(multikey_fields);
+        })
     }
 
     pub fn get_queryable_index_at(&self, id: u32, snapshot: u64) -> Option<Arc<IndexMetadata>> {
@@ -851,6 +834,7 @@ impl IndexBuilder {
             queryable_at: self.queryable_at,
             dropped_at: self.dropped_at,
             options: self.options,
+            multikey_fields: BitSet::new(),
         }
     }
 }
@@ -1049,6 +1033,8 @@ pub struct IndexMetadata {
     pub dropped_at: Option<u64>,
     /// Additional index options.
     pub options: IndexOptions,
+    /// Positions of index fields that traverse arrays in indexed documents.
+    pub multikey_fields: BitSet,
 }
 
 impl IndexMetadata {
@@ -1061,6 +1047,7 @@ impl IndexMetadata {
             queryable_at: None,
             dropped_at: None,
             options: IndexOptions::default(),
+            multikey_fields: BitSet::new(),
         }
     }
 
@@ -1109,6 +1096,7 @@ impl Serializable for IndexMetadata {
         let queryable_at = Option::<u64>::read_from(&reader, version)?;
         let dropped_at = Option::<u64>::read_from(&reader, version)?;
         let config = IndexOptions::read_from(reader, version)?;
+        let multikey_fields = BitSet::read_from(reader, version)?;
         Ok(IndexMetadata {
             id,
             definition,
@@ -1116,6 +1104,7 @@ impl Serializable for IndexMetadata {
             queryable_at,
             dropped_at,
             options: config,
+            multikey_fields,
         })
     }
 
@@ -1126,6 +1115,7 @@ impl Serializable for IndexMetadata {
         self.queryable_at.write_to(writer, version);
         self.dropped_at.write_to(writer, version);
         self.options.write_to(writer, version);
+        self.multikey_fields.write_to(writer, version);
     }
 }
 
@@ -1133,6 +1123,7 @@ impl Serializable for IndexMetadata {
 mod tests {
     use super::*;
     use crate::io::serializable::check_serialization_round_trip;
+    use crate::storage::manifest_state::MANIFEST_FORMAT_VERSION;
     use crate::storage::{INTERNAL_INDEX_BUILD_COLLECTION_ID, RESERVED_COLLECTION_ID_COUNT};
 
     #[test]
@@ -1218,8 +1209,13 @@ mod tests {
                 options: IndexOptions {
                     name: Some("by_name".to_string()),
                 },
+                multikey_fields: {
+                    let mut fields = BitSet::new();
+                    fields.insert(1);
+                    fields
+                },
             },
-            1,
+            MANIFEST_FORMAT_VERSION,
         );
 
         check_serialization_round_trip(
@@ -1230,37 +1226,80 @@ mod tests {
                 queryable_at: Some(1627846270),
                 dropped_at: Some(1627846300),
                 options: IndexOptions::default(),
+                multikey_fields: BitSet::new(),
             },
-            1,
+            MANIFEST_FORMAT_VERSION,
         );
     }
 
     #[test]
+    fn test_multikey_fields_initialization_and_metadata_updates() {
+        let catalog = Catalog::new()
+            .add_collection("users", 10, 1)
+            .add_index_to_collection(
+                10,
+                1,
+                &IndexDefinition::Regular(vec![
+                    OrderedIndexField::asc("name"),
+                    OrderedIndexField::asc("age"),
+                ]),
+                &IndexOptions::default(),
+                2,
+            );
+        let empty_index = catalog
+            .get_collection_by_id(&10)
+            .unwrap()
+            .get_index_by_id(1)
+            .unwrap();
+        assert_eq!(empty_index.multikey_fields, BitSet::new());
+
+        let mut first_field = BitSet::new();
+        first_field.insert(0);
+        let catalog = catalog.update_index_multikey_fields(10, 1, first_field);
+        let mut second_field = BitSet::new();
+        second_field.insert(1);
+        let catalog = catalog.update_index_multikey_fields(10, 1, second_field);
+        let collection = catalog.get_collection_by_id(&10).unwrap();
+        let index = collection.get_index_by_id(1).unwrap();
+        assert!(index.multikey_fields.contains(0));
+        assert!(index.multikey_fields.contains(1));
+        assert_eq!(collection.version, 4);
+
+        let queryable = collection.mark_index_queryable(1, 3);
+        assert!(queryable.indexes[&1].multikey_fields.contains(0));
+        assert!(queryable.indexes[&1].multikey_fields.contains(1));
+
+        let dropped = queryable.drop_index(1, 4);
+        assert!(dropped.indexes[&1].multikey_fields.contains(0));
+        assert!(dropped.indexes[&1].multikey_fields.contains(1));
+    }
+
+    #[test]
     fn test_index_config_serialization() {
-        check_serialization_round_trip(IndexOptions::default(), 1);
+        check_serialization_round_trip(IndexOptions::default(), MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
     fn test_collections_metadata_serialization() {
         let metadata = create_collections_with_indexes();
         assert_eq!(metadata.version, 3);
-        check_serialization_round_trip(metadata, 1);
+        check_serialization_round_trip(metadata, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
     fn test_collection_options_serialization() {
-        check_serialization_round_trip(CollectionOptions::default(), 1);
+        check_serialization_round_trip(CollectionOptions::default(), MANIFEST_FORMAT_VERSION);
         check_serialization_round_trip(
             CollectionOptions {
                 id_creation_strategy: IdCreationStrategy::Generated,
             },
-            1,
+            MANIFEST_FORMAT_VERSION,
         );
         check_serialization_round_trip(
             CollectionOptions {
                 id_creation_strategy: IdCreationStrategy::Manual,
             },
-            1,
+            MANIFEST_FORMAT_VERSION,
         );
     }
 
@@ -1274,7 +1313,7 @@ mod tests {
                 id_creation_strategy: IdCreationStrategy::Generated,
             },
         );
-        check_serialization_round_trip(metadata, 1);
+        check_serialization_round_trip(metadata, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1320,7 +1359,7 @@ mod tests {
             .add_index_to_collection(11, 1, &products_definition, &IndexOptions::default(), 210)
             .drop_collection(11, 300);
 
-        check_serialization_round_trip(catalog, 1);
+        check_serialization_round_trip(catalog, MANIFEST_FORMAT_VERSION);
     }
 
     #[test]
@@ -1660,6 +1699,7 @@ mod tests {
                 options: IndexOptions {
                     name: Some("by_name".to_string()),
                 },
+                multikey_fields: BitSet::new(),
             })
             .add_index(IndexMetadata {
                 id: 2,
@@ -1670,6 +1710,7 @@ mod tests {
                 options: IndexOptions {
                     name: Some("by_price".to_string()),
                 },
+                multikey_fields: BitSet::new(),
             })
     }
 }

@@ -1,7 +1,9 @@
 use crate::obs::metrics::names::index_build;
 use crate::obs::metrics::{AtomicGauge, Counter, MetricRegistry};
 use crate::options::options::Options;
-use crate::query::execution::indexes::indexes::{Indexes, OperationsCountAndSize};
+use crate::query::execution::indexes::indexes::{
+    IndexAppendError, Indexes, OperationsCountAndSize,
+};
 use crate::storage::Direction;
 use crate::storage::ScanCachePolicy;
 use crate::storage::count_stats::{CountStats, CountStatsBuilder};
@@ -24,6 +26,12 @@ struct Batch {
     count_stats: CountStatsBuilder,
     document_count: usize,
     payload_bytes: usize,
+}
+
+enum BatchRead {
+    Batch(Batch),
+    Completed,
+    Cancelled,
 }
 
 enum BatchCommitStatus {
@@ -170,7 +178,7 @@ impl IndexBuilder {
         &self,
         key: IndexBuildKey,
         snapshot: &Snapshot,
-        indexes: Indexes,
+        mut indexes: Indexes,
     ) -> Result<BackfillOutcome> {
         let mut state = self.load_state(key)?;
         if state.processed_document_count > 0 {
@@ -190,8 +198,13 @@ impl IndexBuilder {
         )?;
 
         loop {
-            let Some(batch) = self.read_batch(&mut entries, &indexes, &mut state)? else {
-                break;
+            let batch = match self.read_batch(key, &mut entries, &mut indexes, &mut state)? {
+                BatchRead::Batch(batch) => batch,
+                BatchRead::Completed => break,
+                BatchRead::Cancelled => {
+                    self.delete_state(key)?;
+                    return Ok(BackfillOutcome::Cancelled);
+                }
             };
             match self.commit_batch(key, &state, batch)? {
                 BatchCommitStatus::Committed => {
@@ -252,10 +265,11 @@ impl IndexBuilder {
 
     fn read_batch(
         &self,
+        key: IndexBuildKey,
         entries: &mut dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
-        indexes: &Indexes,
+        indexes: &mut Indexes,
         state: &mut IndexBuildState,
-    ) -> Result<Option<Batch>> {
+    ) -> Result<BatchRead> {
         let mut batch = Batch {
             operations: Vec::new(),
             count_stats: CountStatsBuilder::new(),
@@ -281,12 +295,50 @@ impl IndexBuilder {
             let OperationsCountAndSize {
                 count,
                 size_in_bytes: size_bytes,
-            } = indexes
-                .append_put_ops_raw(&mut batch.operations, document, &mut batch.count_stats)
-                .map_err(|error| match error {
-                    crate::error::Error::Io(error) => error,
-                    error => Error::new(ErrorKind::InvalidInput, error.to_string()),
-                })?;
+            } = loop {
+                // This builder targets one index. A metadata signal is returned
+                // before the current document changes operations or statistics.
+                match indexes.append_put_ops_raw(
+                    &mut batch.operations,
+                    document,
+                    &mut batch.count_stats,
+                ) {
+                    Ok(result) => break result,
+                    Err(IndexAppendError::Io(error)) => return Err(error),
+                    Err(IndexAppendError::Bson(error)) => {
+                        return Err(Error::new(ErrorKind::InvalidInput, error.to_string()));
+                    }
+                    Err(IndexAppendError::InvalidRequest(message)) => {
+                        return Err(Error::new(ErrorKind::InvalidInput, message));
+                    }
+                    Err(IndexAppendError::MultikeyFieldsChanged {
+                        index_id,
+                        multikey_fields,
+                    }) => {
+                        match self.storage_engine.update_index_multikey_fields(
+                            key.collection_id,
+                            index_id,
+                            multikey_fields,
+                        ) {
+                            Ok(_) => {}
+                            Err(
+                                StorageError::CollectionNotFound { .. }
+                                | StorageError::IndexNotFound { .. },
+                            ) => return Ok(BatchRead::Cancelled),
+                            Err(error) => {
+                                return Err(Error::new(
+                                    error.as_io_error().map_or(ErrorKind::Other, Error::kind),
+                                    error.to_string(),
+                                ));
+                            }
+                        }
+                        let Some(refreshed) = self.pending_index_for_build(key) else {
+                            return Ok(BatchRead::Cancelled);
+                        };
+                        *indexes = refreshed;
+                    }
+                }
+            };
             let user_key = extract_user_key(&internal_key);
             state.last_processed_primary_key = Some(user_key.to_vec());
             batch.payload_bytes += size_bytes;
@@ -296,9 +348,9 @@ impl IndexBuilder {
         }
 
         if batch.document_count == 0 {
-            Ok(None)
+            Ok(BatchRead::Completed)
         } else {
-            Ok(Some(batch))
+            Ok(BatchRead::Batch(batch))
         }
     }
 
@@ -460,7 +512,7 @@ mod tests {
     use crate::storage::storage_engine::{CreatedIndex, StorageEngine};
     use crate::storage::write_batch::WriteBatch;
     use crate::util::bson_utils::BsonKey;
-    use bson::{Bson, doc};
+    use bson::{doc, Bson, Document};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
@@ -644,7 +696,7 @@ mod tests {
         for parallel in [false, true] {
             let options = test_options();
             let mut registry = MetricRegistry::default();
-            let (_directory, storage, collection) =
+            let (directory, storage, collection) =
                 index_build_test_storage(&mut registry, &options);
             let document = if parallel {
                 doc! {"_id": 1, "a": [1, 2], "b": [3]}
@@ -653,18 +705,22 @@ mod tests {
             };
             storage
                 .write(
-                    WriteBatch::new_for_test(
-                        vec![Operation::new_put(
-                            collection,
-                            0,
-                            Bson::Int32(1).try_into_key().unwrap(),
-                            document.to_vec().unwrap(),
-                        )],
-                        CountStats::default(),
-                    ),
+                    write_batch(collection, 1, &document),
                     false,
                 )
                 .unwrap();
+            if !parallel {
+                storage
+                    .write(
+                        write_batch(
+                            collection,
+                            2,
+                            &doc! {"_id": 2, "a": 3, "b": [4, 5]}
+                        ),
+                        false,
+                    )
+                    .unwrap();
+            }
             let created = storage
                 .create_index(
                     collection,
@@ -690,9 +746,52 @@ mod tests {
             } else {
                 result.unwrap();
                 assert_index_queryable(&storage, collection, created.id);
-                assert_record_count(&storage, collection, created.id, 2);
+                assert_record_count(&storage, collection, created.id, 4);
+                assert_eq!(
+                    storage.count_stat(&CountStatsKey::Index {
+                        collection,
+                        index: created.id
+                    }),
+                    Some(4)
+                );
+                let metadata = storage.catalog().get_collection_by_id(&collection).unwrap();
+                let fields = metadata
+                    .get_index_by_id(created.id)
+                    .unwrap()
+                    .multikey_fields;
+                assert!(fields.contains(0));
+                assert!(fields.contains(1));
+                drop(builder);
+                drop(storage);
+                let (restarted, pending_builds) = reopen_index_build_test_storage(&directory);
+                assert!(pending_builds.is_empty());
+                let recovered = restarted
+                    .catalog()
+                    .get_collection_by_id(&collection)
+                    .unwrap();
+                assert_eq!(
+                    recovered
+                        .get_index_by_id(created.id)
+                        .unwrap()
+                        .multikey_fields,
+                    fields
+                );
+                assert_record_count(&restarted, collection, created.id, 4);
+                restarted.shutdown().unwrap();
             }
         }
+    }
+
+    fn write_batch(collection: u32, user_key: i32, document: &Document) -> WriteBatch {
+        WriteBatch::new_for_test(
+            vec![Operation::new_put(
+                collection,
+                0,
+                Bson::Int32(user_key).try_into_key().unwrap(),
+                document.to_vec().unwrap(),
+            )],
+            CountStats::default(),
+        )
     }
 
     #[test]

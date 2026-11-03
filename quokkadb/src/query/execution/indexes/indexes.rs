@@ -1,4 +1,5 @@
 use super::{EncodedIndexKeyPrefix, IndexKeyValue, sort_order, to_typed_key, validated_index_path};
+use crate::io::bitset::BitSet;
 use crate::io::varint;
 use crate::query::{BsonValue, PathComponent, SortOrder};
 use crate::storage::catalog::{
@@ -9,7 +10,30 @@ use crate::storage::operation::Operation;
 use crate::util::bson_utils::TypedKey;
 use bson::{Bson, Document, RawBsonRef, RawDocument};
 use std::collections::BTreeMap;
-use std::io::Result;
+use std::io::Result as IoResult;
+
+#[derive(Debug)]
+pub(crate) enum IndexAppendError {
+    Io(std::io::Error),
+    Bson(bson::error::Error),
+    InvalidRequest(String),
+    MultikeyFieldsChanged {
+        index_id: u32,
+        multikey_fields: BitSet,
+    },
+}
+
+impl From<std::io::Error> for IndexAppendError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<bson::error::Error> for IndexAppendError {
+    fn from(error: bson::error::Error) -> Self {
+        Self::Bson(error)
+    }
+}
 
 /// Borrowed BSON input used while traversing an index path.
 #[derive(Clone, Copy)]
@@ -62,7 +86,7 @@ enum IndexArrayIter<'a> {
 }
 
 impl<'a> Iterator for IndexArrayIter<'a> {
-    type Item = crate::error::Result<IndexSource<'a>>;
+    type Item = Result<IndexSource<'a>, IndexAppendError>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Bson(iter) => iter.next().map(|value| Ok(IndexSource::Bson(value))),
@@ -119,7 +143,7 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &Document,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
         self.append_put_ops_from_source(
             operations,
             IndexSource::from_document(document),
@@ -132,7 +156,7 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &RawDocument,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
         self.append_put_ops_from_source(
             operations,
             IndexSource::from_raw_document(document),
@@ -145,7 +169,7 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         source: IndexSource<'_>,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
         let doc_id = Self::extract_id_key(source)?;
         let mut result = OperationsCountAndSize::default();
         for index in &self.indices {
@@ -159,7 +183,7 @@ impl Indexes {
         operations: &mut Vec<Operation>,
         document: &Document,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
         let source = IndexSource::from_document(document);
         let doc_id = Self::extract_id_key(source)?;
         let mut result = OperationsCountAndSize::default();
@@ -175,7 +199,7 @@ impl Indexes {
         old_document: &Document,
         new_document: &Document,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
         let old_source = IndexSource::from_document(old_document);
         let new_source = IndexSource::from_document(new_document);
         let old_doc_id = Self::extract_id_key(old_source)?;
@@ -196,7 +220,7 @@ impl Indexes {
         Ok(result)
     }
 
-    fn extract_id_key(source: IndexSource<'_>) -> Result<TypedKey> {
+    fn extract_id_key(source: IndexSource<'_>) -> IoResult<TypedKey> {
         encode_source_value(source.get_field("_id"), &SortOrder::Ascending)
     }
 }
@@ -205,6 +229,12 @@ pub(crate) struct Index {
     collection_id: u32,
     id: u32,
     extraction: IndexCodecTree,
+    multikey_fields: BitSet,
+}
+
+pub(super) struct GeneratedIndexEntries {
+    pub(super) entries: Vec<IndexKeyValue>,
+    pub(super) multikey_fields: BitSet,
 }
 
 impl Index {
@@ -220,9 +250,20 @@ impl Index {
                     collection_id,
                     id,
                     extraction,
+                    multikey_fields: index.multikey_fields,
                 }
             }
         }
+    }
+
+    fn multikey_fields_changed(&self, fields: BitSet) -> Option<IndexAppendError> {
+        let mut known = self.multikey_fields;
+        known
+            .union(fields)
+            .then_some(IndexAppendError::MultikeyFieldsChanged {
+                index_id: self.id,
+                multikey_fields: fields,
+            })
     }
 
     fn append_put_ops(
@@ -231,8 +272,12 @@ impl Index {
         source: IndexSource<'_>,
         doc_id: &TypedKey,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
-        let entries = self.generate_entries(source, doc_id)?;
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
+        let generated = self.generate_entries(source, doc_id)?;
+        if let Some(outcome) = self.multikey_fields_changed(generated.multikey_fields) {
+            return Err(outcome);
+        }
+        let entries = generated.entries;
         let mut result = OperationsCountAndSize::default();
         for IndexKeyValue { key, value } in entries {
             self.append_put_op(operations, key, value, &mut result, count_stats);
@@ -246,8 +291,8 @@ impl Index {
         source: IndexSource<'_>,
         doc_id: &TypedKey,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
-        let entries = self.generate_entries(source, doc_id)?;
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
+        let entries = self.generate_entries(source, doc_id)?.entries;
         let mut result = OperationsCountAndSize::default();
         for IndexKeyValue { key, value: _ } in entries {
             self.append_delete_op(operations, key, &mut result, count_stats);
@@ -290,10 +335,14 @@ impl Index {
         old_doc_id: &TypedKey,
         new_doc_id: &TypedKey,
         count_stats: &mut CountStatsBuilder,
-    ) -> crate::error::Result<OperationsCountAndSize> {
-        let old_entries = self.generate_entries(old_source, old_doc_id)?;
-        let mut new_entries = self
-            .generate_entries(new_source, new_doc_id)?
+    ) -> Result<OperationsCountAndSize, IndexAppendError> {
+        let old_entries = self.generate_entries(old_source, old_doc_id)?.entries;
+        let generated = self.generate_entries(new_source, new_doc_id)?;
+        if let Some(outcome) = self.multikey_fields_changed(generated.multikey_fields) {
+            return Err(outcome);
+        }
+        let mut new_entries = generated
+            .entries
             .into_iter()
             .map(|entry| (entry.key, entry.value))
             .collect::<BTreeMap<_, _>>();
@@ -330,8 +379,11 @@ impl Index {
         &self,
         source: IndexSource<'_>,
         doc_id: &TypedKey,
-    ) -> crate::error::Result<Vec<IndexKeyValue>> {
-        let expansion = self.extraction.evaluate(Some(source), &[])?;
+    ) -> Result<GeneratedIndexEntries, IndexAppendError> {
+        let mut multikey_fields = BitSet::new();
+        let expansion = self
+            .extraction
+            .evaluate(Some(source), &[], false, &mut multikey_fields)?;
         let mut entries = BTreeMap::new();
         for mut assignments in expansion.rows {
             assignments.sort_unstable_by_key(|(position, _)| *position);
@@ -352,10 +404,13 @@ impl Index {
                 .entry(key)
                 .or_insert_with(|| self.encode_index_entry_value(&prefix, doc_id));
         }
-        Ok(entries
-            .into_iter()
-            .map(|(key, value)| IndexKeyValue { key, value })
-            .collect())
+        Ok(GeneratedIndexEntries {
+            entries: entries
+                .into_iter()
+                .map(|(key, value)| IndexKeyValue { key, value })
+                .collect(),
+            multikey_fields,
+        })
     }
 
     fn encode_full_index_key(
@@ -461,12 +516,16 @@ impl IndexCodecTree {
         &self,
         value: Option<IndexSource<'a>>,
         path: &[PathComponent],
-    ) -> crate::error::Result<IndexExpansion> {
+        array_seen: bool,
+        multikey_fields: &mut BitSet,
+    ) -> Result<IndexExpansion, IndexAppendError> {
         match self {
             Self::Leaf { order, position } => {
                 // A terminal array expands once; its array-valued elements
                 // remain whole key values. An empty array is itself a key value.
                 if let Some(array) = value.and_then(IndexSource::array_iter) {
+                    assert!(*position < 64, "multikey field position must fit in BitSet");
+                    multikey_fields.insert(*position as u8);
                     let mut rows = Vec::new();
                     for element in array {
                         rows.push(vec![(
@@ -485,6 +544,10 @@ impl IndexCodecTree {
                         }),
                     })
                 } else {
+                    if array_seen {
+                        assert!(*position < 64, "multikey field position must fit in BitSet");
+                        multikey_fields.insert(*position as u8);
+                    }
                     Ok(IndexExpansion {
                         rows: vec![vec![(*position, encode_source_value(value, order)?)]],
                         array_field: None,
@@ -496,11 +559,14 @@ impl IndexCodecTree {
                     let array_field = self.first_field(path);
                     let mut rows = Vec::new();
                     for element in array {
-                        rows.extend(self.evaluate(Some(element?), path)?.rows);
+                        rows.extend(
+                            self.evaluate(Some(element?), path, true, multikey_fields)?
+                                .rows,
+                        );
                     }
                     // An empty intermediate array supplies missing descendants.
                     if rows.is_empty() {
-                        rows = self.evaluate(None, path)?.rows;
+                        rows = self.evaluate(None, path, true, multikey_fields)?.rows;
                     }
                     return Ok(IndexExpansion {
                         rows,
@@ -514,8 +580,12 @@ impl IndexCodecTree {
                 for (name, child) in children {
                     let mut child_path = path.to_vec();
                     child_path.push(name.as_str().into());
-                    let child = child
-                        .evaluate(value.and_then(|value| value.get_field(name)), &child_path)?;
+                    let child = child.evaluate(
+                        value.and_then(|value| value.get_field(name)),
+                        &child_path,
+                        array_seen,
+                        multikey_fields,
+                    )?;
                     result.combine(child)?;
                 }
                 Ok(result)
@@ -536,20 +606,20 @@ struct IndexArrayField {
     path: Vec<PathComponent>,
 }
 
-fn encode_source_value(value: Option<IndexSource<'_>>, order: &SortOrder) -> Result<TypedKey> {
+fn encode_source_value(value: Option<IndexSource<'_>>, order: &SortOrder) -> IoResult<TypedKey> {
     let value = BsonValue(value.and_then(IndexSource::into_bson).unwrap_or(Bson::Null));
     to_typed_key(&value, order)
 }
 
 impl IndexExpansion {
-    fn combine(&mut self, other: Self) -> crate::error::Result<()> {
+    fn combine(&mut self, other: Self) -> Result<(), IndexAppendError> {
         if let (Some(left), Some(right)) = (&self.array_field, &other.array_field) {
             let (first, second) = if left.position < right.position {
                 (left, right)
             } else {
                 (right, left)
             };
-            return Err(crate::error::Error::InvalidRequest(format!(
+            return Err(IndexAppendError::InvalidRequest(format!(
                 "Cannot index parallel arrays for paths '{}' and '{}'",
                 crate::query::format_path(&first.path),
                 crate::query::format_path(&second.path)
@@ -576,7 +646,8 @@ impl IndexExpansion {
 #[cfg(test)]
 mod tests {
     use super::super::test_utils::{make_index_metadata, to_raw, to_typed_key};
-    use super::{Index, IndexSource, Indexes};
+    use super::{Index, IndexAppendError, IndexSource, Indexes};
+    use crate::io::bitset::BitSet;
     use crate::io::byte_writer::ByteWriter;
     use crate::storage::catalog::{
         CollectionMetadata, CollectionOptions, IndexDefinition, IndexDirection, IndexMetadata,
@@ -608,6 +679,112 @@ mod tests {
     }
 
     #[test]
+    fn append_signals_new_fields_before_mutating_operations_or_stats() {
+        let metadata = make_index_metadata(
+            7,
+            vec![
+                ("a", IndexDirection::Ascending),
+                ("b", IndexDirection::Ascending),
+            ],
+        );
+        let index = Index::from(42, &metadata);
+        let document = doc! {"_id": 1, "a": 2, "b": [3, 4]};
+        let mut ops = Vec::new();
+        let mut stats = CountStatsBuilder::new();
+        let append_error = match index.append_put_ops(
+            &mut ops,
+            IndexSource::from_document(&document),
+            &to_typed_key(1),
+            &mut stats,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("expected a multikey metadata update"),
+        };
+        match append_error {
+            IndexAppendError::MultikeyFieldsChanged {
+                index_id,
+                multikey_fields,
+            } => {
+                assert_eq!(index_id, 7);
+                assert!(!multikey_fields.contains(0));
+                assert!(multikey_fields.contains(1));
+            }
+            error => panic!("unexpected index error: {error:?}"),
+        }
+        assert!(ops.is_empty());
+        assert_eq!(stats.build(), Default::default());
+    }
+
+    #[test]
+    fn append_update_ignores_arrays_only_in_deleted_document() {
+        let metadata = make_index_metadata(7, vec![("a", IndexDirection::Ascending)]);
+        let indexes = Indexes::for_index(42, &metadata);
+        let old = doc! {"_id": 1, "a": [1, 2]};
+        let new = doc! {"_id": 1, "a": 3};
+        assert_eq!(
+            indexes
+                .append_update_ops(&mut Vec::new(), &old, &new, &mut CountStatsBuilder::new())
+                .unwrap()
+                .count,
+            3
+        );
+        let mut known = metadata;
+        known.multikey_fields.insert(0);
+        let indexes = Indexes::for_index(42, &known);
+        assert_eq!(
+            indexes
+                .append_update_ops(&mut Vec::new(), &old, &new, &mut CountStatsBuilder::new())
+                .unwrap()
+                .count,
+            3
+        );
+    }
+
+    #[test]
+    fn generated_entries_report_array_traversal() {
+        let index = make_index(vec![
+            ("z.y", IndexDirection::Ascending),
+            ("a", IndexDirection::Ascending),
+            ("z.x", IndexDirection::Ascending),
+        ]);
+        for (document, positions) in [
+            (doc! {"_id": 1}, vec![]),
+            (doc! {"_id": 1, "a": 2, "z": {"x": 3, "y": 4}}, vec![]),
+            (doc! {"_id": 1, "a": []}, vec![1]),
+            (doc! {"_id": 1, "a": [2]}, vec![1]),
+            (doc! {"_id": 1, "a": [[1, 2], [3]]}, vec![1]),
+            (doc! {"_id": 1, "a": [5, 5_i64, 5.0]}, vec![1]),
+            (doc! {"_id": 1, "z": {"y": [1]}}, vec![0]),
+            (doc! {"_id": 1, "z": []}, vec![0, 2]),
+            (doc! {"_id": 1, "z": [{}]}, vec![0, 2]),
+            (doc! {"_id": 1, "z": [[{"x": 1}]]}, vec![0, 2]),
+            (doc! {"_id": 1, "z": [{"x": [1]}, {"y": [2]}]}, vec![0, 2]),
+        ] {
+            let mut expected = BitSet::new();
+            for position in positions {
+                expected.insert(position);
+            }
+            let raw = to_raw(&document);
+            let id = to_typed_key(1);
+            let decoded = index
+                .generate_entries(IndexSource::from_document(&document), &id)
+                .unwrap();
+            let raw = index
+                .generate_entries(IndexSource::from_raw_document(&raw), &id)
+                .unwrap();
+            assert_eq!(decoded.multikey_fields, expected, "{document:?}");
+            assert_eq!(raw.multikey_fields, expected, "{document:?}");
+            let bytes = |entries: Vec<super::IndexKeyValue>| {
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.key, entry.value))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bytes(decoded.entries), bytes(raw.entries));
+        }
+    }
+
+    #[test]
     fn tree_extraction_rejects_parallel_arrays_at_different_depths() {
         let index = make_index(vec![
             ("z.parts.x", IndexDirection::Ascending),
@@ -623,10 +800,13 @@ mod tests {
                 IndexSource::from_raw_document(&to_raw(&document)),
             ] {
                 let error = index.generate_entries(source, &id).err().unwrap();
-                assert_eq!(
-                    error.to_string(),
-                    "Cannot index parallel arrays for paths 'z.parts.x' and 'a'"
-                );
+                match error {
+                    IndexAppendError::InvalidRequest(message) => assert_eq!(
+                        message,
+                        "Cannot index parallel arrays for paths 'z.parts.x' and 'a'"
+                    ),
+                    error => panic!("unexpected index error: {error:?}"),
+                }
             }
         }
     }
@@ -642,7 +822,10 @@ mod tests {
             let document = doc! {"_id": 1, "a": value};
             let id = to_typed_key(1);
             let source = IndexSource::from_document(&document);
-            assert_eq!(index.generate_entries(source, &id).unwrap().len(), expected);
+            assert_eq!(
+                index.generate_entries(source, &id).unwrap().entries.len(),
+                expected
+            );
         }
     }
 
@@ -669,11 +852,17 @@ mod tests {
                 .append_put_ops_raw(&mut operations, &raw, &mut stats)
                 .err()
                 .unwrap();
+            let error_message = |error| match error {
+                IndexAppendError::InvalidRequest(message) => message,
+                error => panic!("unexpected index error: {error:?}"),
+            };
+            let decoded_message = error_message(decoded_error);
+            let raw_message = error_message(raw_error);
             assert_eq!(
-                decoded_error.to_string(),
+                decoded_message,
                 "Cannot index parallel arrays for paths 'a' and 'b'"
             );
-            assert_eq!(decoded_error.to_string(), raw_error.to_string());
+            assert_eq!(decoded_message, raw_message);
             assert!(operations.is_empty());
         }
     }
@@ -692,19 +881,22 @@ mod tests {
             .append_put_ops(&mut operations, &document, &mut CountStatsBuilder::new())
             .err()
             .unwrap();
-        assert!(matches!(error, crate::error::Error::InvalidRequest(_)));
-        assert_eq!(
-            error.to_string(),
-            "Cannot index parallel arrays for paths 'items.x' and 'items.y'"
-        );
+        match error {
+            IndexAppendError::InvalidRequest(message) => assert_eq!(
+                message,
+                "Cannot index parallel arrays for paths 'items.x' and 'items.y'"
+            ),
+            error => panic!("unexpected index error: {error:?}"),
+        }
         assert!(operations.is_empty());
     }
 
     #[test]
     fn multikey_raw_put_and_delete_counts_agree() {
-        let indexes = Indexes {
+        let mut indexes = Indexes {
             indices: vec![make_index(vec![("a", IndexDirection::Ascending)])],
         };
+        indexes.indices[0].multikey_fields.insert(0);
         let document = doc! {"_id": 1, "a": [1, 2, 2]};
         let raw = to_raw(&document);
         let mut decoded_ops = Vec::new();
@@ -744,6 +936,7 @@ mod tests {
             asc_index
                 .generate_entries(ks, &id_key)
                 .unwrap()
+                .entries
                 .remove(0)
                 .key
         };
@@ -753,6 +946,7 @@ mod tests {
             asc_index
                 .generate_entries(ks, &id_key)
                 .unwrap()
+                .entries
                 .remove(0)
                 .key
         };
@@ -762,6 +956,7 @@ mod tests {
             desc_index
                 .generate_entries(ks, &id_key)
                 .unwrap()
+                .entries
                 .remove(0)
                 .key
         };
@@ -771,6 +966,7 @@ mod tests {
             desc_index
                 .generate_entries(ks, &id_key)
                 .unwrap()
+                .entries
                 .remove(0)
                 .key
         };
@@ -903,7 +1099,8 @@ mod tests {
             1,
             vec![("tags", IndexDirection::Ascending)],
         )]);
-        let indices = Indexes::from_collection(&collection);
+        let mut indices = Indexes::from_collection(&collection);
+        indices.indices[0].multikey_fields.insert(0);
         let old_document = doc! { "_id": 7i64, "tags": [1, 2] };
         let new_document = doc! { "_id": 7i64, "tags": [2, 3] };
         let mut operations = Vec::new();

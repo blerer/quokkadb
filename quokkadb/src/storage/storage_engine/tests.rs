@@ -1,4 +1,5 @@
 use super::*;
+use crate::io::bitset::BitSet;
 use crate::obs::metrics::{assert_counter_eq, assert_gauge_eq};
 use crate::options::options::WalDurability;
 use crate::options::storage_quantity::StorageUnit::Mebibytes;
@@ -2901,6 +2902,126 @@ fn test_create_index() {
     assert_eq!(index.id, created_index.id);
     assert_eq!(index.name(), created_index.name);
     assert_eq!(index.definition, simple_index_definition());
+}
+
+#[test]
+fn test_update_index_multikey_fields_unions_and_persists() {
+    let dir = tempdir().unwrap();
+    let options = Options::lightweight();
+    let engine = new_engine(&mut MetricRegistry::default(), options.clone(), dir.path());
+
+    let collection_id = engine.create_collection("docs", true).unwrap().id;
+    let index_definition = IndexDefinition::Regular(vec![
+        OrderedIndexField::asc("name"),
+        OrderedIndexField::asc("age"),
+        OrderedIndexField::asc("score"),
+    ]);
+    let index = engine
+        .create_index(collection_id, index_definition, IndexOptions::default())
+        .unwrap();
+
+    let sequence_before_empty_update = engine.last_visible_seq.load(Ordering::Acquire);
+    let unchanged_index = engine
+        .update_index_multikey_fields(collection_id, index.id, BitSet::new())
+        .unwrap();
+    assert_eq!(unchanged_index.multikey_fields, BitSet::new());
+    assert_eq!(
+        engine.last_visible_seq.load(Ordering::Acquire),
+        sequence_before_empty_update
+    );
+
+    let mut first_field = BitSet::new();
+    first_field.insert(0);
+    let first_updated_index = engine
+        .update_index_multikey_fields(collection_id, index.id, first_field)
+        .unwrap();
+    assert!(first_updated_index.multikey_fields.contains(0));
+    assert!(!first_updated_index.multikey_fields.contains(2));
+    let sequence_after_first_update = engine.last_visible_seq.load(Ordering::Acquire);
+
+    let mut second_field = BitSet::new();
+    second_field.insert(2);
+    let second_updated_index = engine
+        .update_index_multikey_fields(collection_id, index.id, second_field)
+        .unwrap();
+    assert!(second_updated_index.multikey_fields.contains(0));
+    assert!(second_updated_index.multikey_fields.contains(2));
+    let sequence_after_second_update = engine.last_visible_seq.load(Ordering::Acquire);
+    assert_eq!(
+        sequence_after_second_update,
+        sequence_after_first_update + 1
+    );
+
+    let unchanged_index = engine
+        .update_index_multikey_fields(collection_id, index.id, second_field)
+        .unwrap();
+    assert_eq!(
+        unchanged_index.multikey_fields,
+        second_updated_index.multikey_fields
+    );
+    assert_eq!(
+        engine.last_visible_seq.load(Ordering::Acquire),
+        sequence_after_second_update
+    );
+
+    let updated_index = engine
+        .catalog()
+        .get_collection_by_id(&collection_id)
+        .unwrap()
+        .get_index_by_id(index.id)
+        .unwrap();
+    assert!(updated_index.multikey_fields.contains(0));
+    assert!(updated_index.multikey_fields.contains(2));
+
+    engine.shutdown().unwrap();
+    drop(engine);
+
+    let reopened = new_engine(&mut MetricRegistry::default(), options, dir.path());
+    let recovered_index = reopened
+        .catalog()
+        .get_collection_by_id(&collection_id)
+        .unwrap()
+        .get_index_by_id(index.id)
+        .unwrap();
+    assert!(recovered_index.multikey_fields.contains(0));
+    assert!(recovered_index.multikey_fields.contains(2));
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn test_update_index_multikey_fields_requires_active_targets() {
+    let dir = tempdir().unwrap();
+    let engine = new_engine(
+        &mut MetricRegistry::default(),
+        Options::lightweight(),
+        dir.path(),
+    );
+    let fields = BitSet::new();
+
+    assert!(matches!(
+        engine.update_index_multikey_fields(999, 1, fields),
+        Err(StorageError::CollectionNotFound { .. })
+    ));
+
+    let collection_id = engine.create_collection("docs", true).unwrap().id;
+    assert!(matches!(
+        engine.update_index_multikey_fields(collection_id, 99, fields),
+        Err(StorageError::IndexNotFound { .. })
+    ));
+
+    let index = engine
+        .create_index(
+            collection_id,
+            simple_index_definition(),
+            IndexOptions::default(),
+        )
+        .unwrap();
+    engine.drop_index(collection_id, index.id).unwrap();
+    assert!(matches!(
+        engine.update_index_multikey_fields(collection_id, index.id, fields),
+        Err(StorageError::IndexNotFound { .. })
+    ));
+    engine.shutdown().unwrap();
 }
 
 #[test]
