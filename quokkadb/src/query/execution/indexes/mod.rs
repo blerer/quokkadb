@@ -6,6 +6,40 @@ use crate::util::bson_utils::{BsonKey, TypedKey};
 pub(crate) mod index_reader;
 pub(crate) mod indexes;
 
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use super::TypedKey;
+    use crate::storage::catalog::{
+        IndexDefinition, IndexDirection, IndexMetadata, IndexPath, OrderedIndexField,
+    };
+    use crate::util::bson_utils::BsonKey;
+    use bson::{Bson, Document, raw::RawDocumentBuf};
+
+    pub(crate) fn to_typed_key(value: impl Into<Bson>) -> TypedKey {
+        value.into().try_into_typed_key().unwrap()
+    }
+
+    pub(crate) fn to_raw(document: &Document) -> RawDocumentBuf {
+        RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap()
+    }
+
+    pub(crate) fn make_index_metadata(
+        id: u32,
+        fields: Vec<(&str, IndexDirection)>,
+    ) -> IndexMetadata {
+        let ordered_fields = fields
+            .into_iter()
+            .map(|(name, direction)| OrderedIndexField {
+                path: IndexPath {
+                    components: name.split('.').map(|s| s.to_string()).collect(),
+                },
+                direction,
+            })
+            .collect();
+        IndexMetadata::new(id, IndexDefinition::Regular(ordered_fields), 1)
+    }
+}
+
 pub struct IndexKeyValue {
     key: Vec<u8>,
     value: Vec<u8>,

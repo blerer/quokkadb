@@ -575,6 +575,7 @@ impl IndexExpansion {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_utils::{make_index_metadata, to_raw, to_typed_key};
     use super::{Index, IndexSource, Indexes};
     use crate::io::byte_writer::ByteWriter;
     use crate::storage::catalog::{
@@ -584,13 +585,13 @@ mod tests {
     use crate::storage::count_stats::{CountStatsBuilder, CountStatsKey};
     use crate::storage::operation::OperationType;
     use crate::util::bson_utils::BsonKey;
-    use bson::{Bson, doc, raw::RawDocumentBuf};
+    use bson::{Bson, doc};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn expected_index_entry(index_value: Bson, id: Bson) -> (Vec<u8>, Vec<u8>) {
         let index_key = index_value.try_into_typed_key().unwrap();
-        let id_key = id.try_into_typed_key().unwrap();
+        let id_key = to_typed_key(id);
 
         let mut key = index_key.key.clone();
         key.extend_from_slice(&id_key.key);
@@ -616,11 +617,10 @@ mod tests {
             doc! {"_id": 1, "z": {"parts": [{"x": 1}]}, "a": []},
             doc! {"_id": 1, "z": [{"parts": []}], "a": [2]},
         ] {
-            let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
-            let id = Bson::Int32(1).try_into_typed_key().unwrap();
+            let id = to_typed_key(1);
             for source in [
                 IndexSource::from_document(&document),
-                IndexSource::from_raw_document(&raw),
+                IndexSource::from_raw_document(&to_raw(&document)),
             ] {
                 let error = index.generate_entries(source, &id).err().unwrap();
                 assert_eq!(
@@ -640,7 +640,7 @@ mod tests {
             (bson::bson!([5, 5_i64, 5.0]), 1),
         ] {
             let document = doc! {"_id": 1, "a": value};
-            let id = document.get("_id").unwrap().try_into_typed_key().unwrap();
+            let id = to_typed_key(1);
             let source = IndexSource::from_document(&document);
             assert_eq!(index.generate_entries(source, &id).unwrap().len(), expected);
         }
@@ -658,8 +658,7 @@ mod tests {
             doc! {"_id": 1, "a": [1], "b": [2]},
             doc! {"_id": 1, "a": [], "b": []},
         ] {
-            let raw =
-                RawDocumentBuf::from_bytes(bson::serialize_to_vec(&document).unwrap()).unwrap();
+            let raw = to_raw(&document);
             let mut operations = Vec::new();
             let mut stats = CountStatsBuilder::new();
             let decoded_error = indexes
@@ -707,7 +706,7 @@ mod tests {
             indices: vec![make_index(vec![("a", IndexDirection::Ascending)])],
         };
         let document = doc! {"_id": 1, "a": [1, 2, 2]};
-        let raw = RawDocumentBuf::from_bytes(bson::serialize_to_vec(&document).unwrap()).unwrap();
+        let raw = to_raw(&document);
         let mut decoded_ops = Vec::new();
         let mut raw_ops = Vec::new();
         let mut deletes = Vec::new();
@@ -999,7 +998,7 @@ mod tests {
             "_id": 7i64,
             "address": { "city": "London" }
         };
-        let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
+        let raw = to_raw(&document);
         let mut bson_ops = Vec::new();
         let mut raw_ops = Vec::new();
         let mut bson_count_stats = CountStatsBuilder::new();
@@ -1033,18 +1032,5 @@ mod tests {
         collection.next_index_id = next_index_id;
         collection.indexes = indexes;
         collection
-    }
-
-    fn make_index_metadata(id: u32, fields: Vec<(&str, IndexDirection)>) -> IndexMetadata {
-        let ordered_fields = fields
-            .into_iter()
-            .map(|(name, direction)| OrderedIndexField {
-                path: IndexPath {
-                    components: name.split('.').map(|s| s.to_string()).collect(),
-                },
-                direction,
-            })
-            .collect();
-        IndexMetadata::new(id, IndexDefinition::Regular(ordered_fields), 1)
     }
 }

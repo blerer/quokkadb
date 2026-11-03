@@ -2,16 +2,15 @@ use super::super::IndexKeyValue;
 use super::IndexReadCodec;
 use crate::io::varint;
 use crate::query::execution::indexes::indexes::{Index, IndexSource};
+use crate::query::execution::indexes::test_utils::{make_index_metadata, to_raw, to_typed_key};
 use crate::query::physical_plan::IndexScanRangeExpr;
 use crate::query::{BsonValue, Expr, Parameters};
-use crate::storage::catalog::{
-    IndexDefinition, IndexDirection, IndexMetadata, IndexPath, OrderedIndexField,
-};
+use crate::storage::catalog::IndexDirection;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::{
     Binary, Bson, DateTime, Decimal128, Document, Timestamp, doc, oid::ObjectId,
-    raw::RawDocumentBuf, spec::BinarySubtype,
+    spec::BinarySubtype,
 };
 use std::sync::Arc;
 
@@ -30,7 +29,7 @@ fn reader_codec_round_trip() {
         "rank": 3_i32,
     };
     let source = IndexSource::from_document(&document);
-    let id = document.get("_id").unwrap().try_into_typed_key().unwrap();
+    let id = to_typed_key(document.get("_id").unwrap().clone());
     let entry = writer.generate_entries(source, &id).unwrap().remove(0);
 
     assert_eq!(decoder.decode(entry).unwrap(), document);
@@ -50,8 +49,8 @@ fn array_expansion_is_local_to_each_shared_array_element() {
             {"x": 3, "y": [20, 30]}
         ]
     };
-    let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
-    let id = Bson::Int32(1).try_into_typed_key().unwrap();
+    let raw = to_raw(&document);
+    let id = to_typed_key(1);
     for source in [
         IndexSource::from_document(&document),
         IndexSource::from_raw_document(&raw),
@@ -90,8 +89,8 @@ fn tree_extraction_preserves_key_order_and_nested_array_correlation() {
             {"parts": [{"x": [7, 8], "y": 6}]}
         ]
     };
-    let raw = RawDocumentBuf::from_bytes(document.to_vec().unwrap()).unwrap();
-    let id = Bson::Int32(1).try_into_typed_key().unwrap();
+    let raw = to_raw(&document);
+    let id = to_typed_key(1);
     let decoded_entries = index
         .generate_entries(IndexSource::from_document(&document), &id)
         .unwrap();
@@ -132,7 +131,7 @@ fn correlated_generation_preserves_pairs_and_missing_values() {
         ("items.price", IndexDirection::Descending),
     ]);
     let document = doc! {"_id": 1, "items": [{"sku": "A", "price": 10}, {"sku": "B", "price": 20}, {"sku": "C"}]};
-    let id = document.get("_id").unwrap().try_into_typed_key().unwrap();
+    let id = to_typed_key(document.get("_id").unwrap().clone());
     let source = IndexSource::from_document(&document);
     let entries = index.generate_entries(source, &id).unwrap();
     let decoded: Vec<_> = entries
@@ -157,7 +156,7 @@ fn correlated_nested_arrays_and_empty_paths() {
     ]);
     let document =
         doc! {"_id": 1, "items": [{"parts": [{"x": 1, "y": 2}, {"x": 3, "y": 4}]}, {"parts": []}]};
-    let id = document.get("_id").unwrap().try_into_typed_key().unwrap();
+    let id = to_typed_key(document.get("_id").unwrap().clone());
     let source = IndexSource::from_document(&document);
     let decoded: Vec<_> = index
         .generate_entries(source, &id)
@@ -632,7 +631,7 @@ fn decode_index_entry_returns_error_for_truncated_value() {
     let (index, decoder) = make_index_and_read_codec(vec![("name", IndexDirection::Ascending)]);
     let document = doc! { "_id": 7i64, "name": "alice" };
     let key_source = IndexSource::from_document(&document);
-    let id_key = document.get("_id").unwrap().try_into_typed_key().unwrap();
+    let id_key = to_typed_key(document.get("_id").unwrap().clone());
     let mut entry = index
         .generate_entries(key_source, &id_key)
         .unwrap()
@@ -669,9 +668,7 @@ fn make_index_and_read_codec(fields: Vec<(&str, IndexDirection)>) -> (Index, Ind
 fn extract_and_decode(index: &Index, decoder: &IndexReadCodec, doc: &Document) -> Document {
     let doc_id = {
         let id_val = doc.get("_id").expect("document must have _id");
-        id_val
-            .try_into_typed_key()
-            .expect("_id must be convertible to key")
+        to_typed_key(id_val.clone())
     };
 
     let key_source = IndexSource::from_document(doc);
@@ -685,9 +682,7 @@ fn extract_and_decode(index: &Index, decoder: &IndexReadCodec, doc: &Document) -
 fn extract_key(index: &Index, doc: &Document) -> Vec<u8> {
     let doc_id = {
         let id_val = doc.get("_id").expect("document must have _id");
-        id_val
-            .try_into_typed_key()
-            .expect("_id must be convertible to key")
+        to_typed_key(id_val.clone())
     };
 
     let key_source = IndexSource::from_document(doc);
@@ -696,19 +691,6 @@ fn extract_key(index: &Index, doc: &Document) -> Vec<u8> {
         .expect("extract should succeed")
         .remove(0)
         .key
-}
-
-fn make_index_metadata(id: u32, fields: Vec<(&str, IndexDirection)>) -> IndexMetadata {
-    let ordered_fields = fields
-        .into_iter()
-        .map(|(name, direction)| OrderedIndexField {
-            path: IndexPath {
-                components: name.split('.').map(|s| s.to_string()).collect(),
-            },
-            direction,
-        })
-        .collect();
-    IndexMetadata::new(id, IndexDefinition::Regular(ordered_fields), 1)
 }
 
 fn supported_id_values() -> Vec<(&'static str, Bson)> {
@@ -773,8 +755,8 @@ fn assert_id_round_trip(label: &str, actual: &Bson, expected: &Bson) {
     match (actual, expected) {
         (Bson::Decimal128(actual), Bson::Decimal128(expected)) => {
             assert_eq!(
-                Bson::Decimal128(*actual).try_into_key().unwrap(),
-                Bson::Decimal128(*expected).try_into_key().unwrap(),
+                to_typed_key(Bson::Decimal128(*actual)).key,
+                to_typed_key(Bson::Decimal128(*expected)).key,
                 "failed id round trip for {label}"
             );
         }
