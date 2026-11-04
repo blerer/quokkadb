@@ -1,6 +1,6 @@
 mod common;
 
-use bson::{Document, doc};
+use bson::{Bson, Document, doc};
 use quokkadb::QuokkaDB;
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -638,6 +638,24 @@ fn test_id_point_query() {
 
         assert_ids(&results, &[5]);
     }
+}
+
+#[test]
+fn id_queries_reject_array_and_regular_expression_values() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+    let regex = Bson::RegularExpression(bson::Regex {
+        pattern: bson::raw::CString::try_from("x").unwrap(),
+        options: bson::raw::CString::try_from("").unwrap(),
+    });
+
+    assert!(
+        collection
+            .find(doc! {"_id": Bson::Array(vec![Bson::Int32(1)])})
+            .execute()
+            .is_err()
+    );
+    assert!(collection.find(doc! {"_id": regex}).execute().is_err());
 }
 
 #[test]

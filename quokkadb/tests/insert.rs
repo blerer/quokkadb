@@ -59,6 +59,22 @@ fn mixed_strategy_uses_provided_id() {
 }
 
 #[test]
+fn rejects_array_and_regular_expression_ids() {
+    let (_dir, db) = setup();
+    let collection = db.collection("test").create_if_missing();
+    let regex = Bson::RegularExpression(bson::Regex {
+        pattern: bson::raw::CString::try_from("x").unwrap(),
+        options: bson::raw::CString::try_from("").unwrap(),
+    });
+
+    for id in [Bson::Array(vec![Bson::Int32(1)]), regex] {
+        assert!(collection.insert_one(doc! {"_id": id, "x": 1}).is_err());
+    }
+
+    assert_eq!(collection.estimated_document_count().unwrap(), 0);
+}
+
+#[test]
 fn mixed_strategy_insert_many_generates_ids_when_missing() {
     let (_dir, db) = setup();
     let collection = db.collection("test").create_if_missing();

@@ -337,7 +337,7 @@ impl WriteExecutor {
                 let old_doc = doc_result?;
                 matched_count += 1;
                 let new_doc = updater(old_doc.document.clone())?;
-                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+                let user_key = new_doc.get("_id").unwrap().try_into_id_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
                 self.write_document(
                     collection,
@@ -355,7 +355,7 @@ impl WriteExecutor {
             let (new_doc, generated_id) = self.perform_upsert(&query, update, parameters)?;
             upserted_id = Some(generated_id.clone());
 
-            let user_key = generated_id.try_into_key()?;
+            let user_key = generated_id.try_into_id_key()?;
             if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
                 return Err(Self::duplicate_key_error(&generated_id));
             }
@@ -602,7 +602,7 @@ impl WriteExecutor {
 
         while let Some(doc_result) = iter.next() {
             let old_doc = doc_result?;
-            let user_key = old_doc.document.get("_id").unwrap().try_into_key()?;
+            let user_key = old_doc.document.get("_id").unwrap().try_into_id_key()?;
 
             self.delete_document(collection, &snapshot, user_key, &old_doc, sync)?;
             deleted_count += 1;
@@ -676,7 +676,7 @@ impl WriteExecutor {
                 let old_doc = doc_result?;
                 let updater = updates::to_updater(update, false)?;
                 let new_doc = updater(old_doc.document.clone())?;
-                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+                let user_key = new_doc.get("_id").unwrap().try_into_id_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
                 #[cfg(test)]
@@ -708,7 +708,7 @@ impl WriteExecutor {
             }
 
             let (new_doc, upserted_id) = self.perform_upsert(&query, update, parameters)?;
-            let user_key = upserted_id.clone().try_into_key()?;
+            let user_key = upserted_id.clone().try_into_id_key()?;
             if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
                 return Err(Self::duplicate_key_error(&upserted_id));
             }
@@ -760,7 +760,7 @@ impl WriteExecutor {
             if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
                 let new_doc = self.prepare_replacement_document(&old_doc.document, &replacement)?;
-                let user_key = new_doc.get("_id").unwrap().try_into_key()?;
+                let user_key = new_doc.get("_id").unwrap().try_into_id_key()?;
                 let new_doc_bytes = serialize_to_vec(&new_doc)?;
 
                 #[cfg(test)]
@@ -793,7 +793,7 @@ impl WriteExecutor {
 
             let (new_doc, upserted_id) =
                 self.perform_replacement_upsert(&query, &replacement, parameters)?;
-            let user_key = upserted_id.clone().try_into_key()?;
+            let user_key = upserted_id.clone().try_into_id_key()?;
             if Self::primary_key_exists(&self.storage_engine, collection, &user_key, &snapshot)? {
                 return Err(Self::duplicate_key_error(&upserted_id));
             }
@@ -840,7 +840,7 @@ impl WriteExecutor {
 
             if let Some(doc_result) = iter.next() {
                 let old_doc = doc_result?;
-                let user_key = old_doc.document.get("_id").unwrap().try_into_key()?;
+                let user_key = old_doc.document.get("_id").unwrap().try_into_id_key()?;
 
                 #[cfg(test)]
                 self.invoke_test_hook(ExecutorFailpoint::AfterRead);
@@ -875,7 +875,7 @@ impl WriteExecutor {
             .id_creation_strategy
             .clone();
         let id = self.ensure_id(&mut doc, &id_strategy)?;
-        let user_key = id.try_into_key()?;
+        let user_key = id.try_into_id_key()?;
         let mut retry_state = RetryState::new();
 
         loop {
@@ -970,7 +970,7 @@ impl WriteExecutor {
 
         for mut doc in documents {
             let id = self.ensure_id(&mut doc, &id_strategy)?;
-            let user_key = id.try_into_key()?;
+            let user_key = id.try_into_id_key()?;
             documents_with_ids.push((doc, id, user_key));
         }
 

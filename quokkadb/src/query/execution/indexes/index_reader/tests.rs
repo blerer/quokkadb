@@ -754,17 +754,6 @@ fn supported_id_values() -> Vec<(&'static str, Bson)> {
             "document_nested",
             Bson::Document(doc! { "outer": { "inner": 9_i32 }, "flag": true }),
         ),
-        (
-            "array_scalar",
-            Bson::Array(vec![Bson::Int32(1), Bson::String("two".to_string())]),
-        ),
-        (
-            "array_nested",
-            Bson::Array(vec![
-                Bson::Document(doc! { "x": 1_i32 }),
-                Bson::Array(vec![Bson::Boolean(true), Bson::Null]),
-            ]),
-        ),
     ]
 }
 

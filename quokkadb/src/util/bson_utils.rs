@@ -1096,6 +1096,19 @@ pub trait BsonKey {
     /// Encode this value into a sort key **and** its type metadata
     /// needed to decode the key back into a [`Bson`] value later.
     fn try_into_typed_key(&self) -> std::io::Result<TypedKey>;
+
+    /// Encode this value as a primary `_id` key.
+    ///
+    /// Primary keys have stricter BSON type restrictions than secondary index
+    /// values. In particular, arrays and regular expressions are not valid
+    /// `_id` values, while arrays may still be encoded as secondary index
+    /// values.
+    fn try_into_id_key(&self) -> std::io::Result<Vec<u8>> {
+        Ok(self.try_into_id_typed_key()?.key)
+    }
+
+    /// Encode this value as a primary `_id` key together with its type metadata.
+    fn try_into_id_typed_key(&self) -> std::io::Result<TypedKey>;
 }
 
 impl BsonKey for Bson {
@@ -1108,6 +1121,17 @@ impl BsonKey for Bson {
         let mut key_type = Vec::new();
         encode_bson_into_key_typed(self, &mut key, &mut key_type)?;
         Ok(TypedKey { key, key_type })
+    }
+
+    fn try_into_id_typed_key(&self) -> std::io::Result<TypedKey> {
+        if matches!(self, Bson::Array(_) | Bson::RegularExpression(_)) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Unsupported BSON type for _id key: {:?}", self),
+            ));
+        }
+
+        self.try_into_typed_key()
     }
 }
 

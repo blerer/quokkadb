@@ -400,6 +400,19 @@ mod bson_key {
         .try_into_key();
         assert!(regex_result.is_err());
     }
+
+    #[test]
+    fn id_keys_reject_arrays_and_regular_expressions() {
+        let array = Bson::Array(vec![Bson::Int32(1)]);
+        assert!(array.try_into_key().is_ok());
+        assert!(array.try_into_id_key().is_err());
+
+        let regex = Bson::RegularExpression(bson::Regex {
+            pattern: CString::try_from("x").unwrap(),
+            options: CString::try_from("").unwrap(),
+        });
+        assert!(regex.try_into_id_key().is_err());
+    }
 }
 
 mod bson_cmp {

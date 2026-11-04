@@ -225,7 +225,7 @@ impl ReadExecutor {
         let collection = *collection;
         let snapshot_for_reads = snapshot.clone();
 
-        let iter = key_iterator.filter_map(move |key| match key.try_into_key() {
+        let iter = key_iterator.filter_map(move |key| match key.try_into_id_key() {
             Ok(storage_key) => match storage_engine.read_at_snapshot(
                 collection,
                 0,

@@ -246,7 +246,7 @@ pub(crate) fn read_stored_doc(
     collection_id: u32,
     id: impl Into<BsonValue>,
 ) -> Result<Document> {
-    let user_key = id.into().try_into_key()?;
+    let user_key = id.into().try_into_id_key()?;
     let snapshot = storage_engine.acquire_snapshot();
     let doc_bytes = storage_engine
         .read_at_snapshot(collection_id, 0, &user_key, &snapshot)?

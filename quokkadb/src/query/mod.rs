@@ -1299,6 +1299,10 @@ impl BsonKey for BsonValue {
     fn try_into_typed_key(&self) -> Result<TypedKey> {
         self.0.try_into_typed_key()
     }
+
+    fn try_into_id_typed_key(&self) -> Result<TypedKey> {
+        self.0.try_into_id_typed_key()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

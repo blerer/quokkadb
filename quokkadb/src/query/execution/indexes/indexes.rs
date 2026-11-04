@@ -7,7 +7,7 @@ use crate::storage::catalog::{
 };
 use crate::storage::count_stats::CountStatsBuilder;
 use crate::storage::operation::Operation;
-use crate::util::bson_utils::TypedKey;
+use crate::util::bson_utils::{BsonKey, TypedKey};
 use bson::{Bson, Document, RawBsonRef, RawDocument};
 use std::collections::BTreeMap;
 use std::io::Result as IoResult;
@@ -221,7 +221,7 @@ impl Indexes {
     }
 
     fn extract_id_key(source: IndexSource<'_>) -> IoResult<TypedKey> {
-        encode_source_value(source.get_field("_id"), &SortOrder::Ascending)
+        encode_source_id_value(source.get_field("_id"))
     }
 }
 
@@ -609,6 +609,11 @@ struct IndexArrayField {
 fn encode_source_value(value: Option<IndexSource<'_>>, order: &SortOrder) -> IoResult<TypedKey> {
     let value = BsonValue(value.and_then(IndexSource::into_bson).unwrap_or(Bson::Null));
     to_typed_key(&value, order)
+}
+
+fn encode_source_id_value(value: Option<IndexSource<'_>>) -> IoResult<TypedKey> {
+    let value = BsonValue(value.and_then(IndexSource::into_bson).unwrap_or(Bson::Null));
+    value.try_into_id_typed_key()
 }
 
 impl IndexExpansion {

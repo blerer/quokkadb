@@ -19,8 +19,12 @@ fn bind_key_bound_parameter(
     parameters: &Parameters,
 ) -> Result<Bound<Vec<u8>>> {
     let bound = match bound {
-        Bound::Included(expr) => Bound::Included(bind_parameter(expr, parameters).try_into_key()?),
-        Bound::Excluded(expr) => Bound::Excluded(bind_parameter(expr, parameters).try_into_key()?),
+        Bound::Included(expr) => {
+            Bound::Included(bind_parameter(expr, parameters).try_into_id_key()?)
+        }
+        Bound::Excluded(expr) => {
+            Bound::Excluded(bind_parameter(expr, parameters).try_into_id_key()?)
+        }
         Bound::Unbounded => Bound::Unbounded,
     };
     Ok(bound)
@@ -28,7 +32,7 @@ fn bind_key_bound_parameter(
 
 pub(super) fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result<Vec<u8>> {
     if let Expr::Placeholder(idx) = expr {
-        Ok(parameters.get(*idx).try_into_key()?)
+        Ok(parameters.get(*idx).try_into_id_key()?)
     } else {
         unreachable!("Expecting placeholder but was: {:?}", expr);
     }
