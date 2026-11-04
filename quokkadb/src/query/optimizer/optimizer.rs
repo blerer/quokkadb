@@ -792,12 +792,13 @@ impl Optimizer {
                     residual,
                     req,
                     index_fields,
+                    index.multikey_fields,
                 ));
-            } else if req
-                .order
-                .as_ref()
-                .is_some_and(|order| index_scan_direction(index_fields, order.as_slice()).is_some())
-            {
+            } else if req.order.as_ref().is_some_and(|order| {
+                index_scan_direction(index_fields, order.as_slice()).is_some()
+                    && (hint == Some(index.id)
+                        || index_sort_prefix_is_scalar(index.multikey_fields, order.len()))
+            }) {
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
                     collection.id,
@@ -809,6 +810,7 @@ impl Optimizer {
                     filter.clone(),
                     req,
                     index_fields,
+                    index.multikey_fields,
                 ));
             } else if hint == Some(index.id) && filter.is_none() && req.order.is_none() {
                 candidates.push(self.create_index_scan_candidate(
@@ -822,6 +824,7 @@ impl Optimizer {
                     None,
                     req,
                     index_fields,
+                    index.multikey_fields,
                 ));
             }
         }
@@ -903,9 +906,12 @@ impl Optimizer {
         residual: Option<Arc<Expr>>,
         req: &ReqProps,
         index_fields: &[OrderedIndexField],
+        multikey_fields: BitSet,
     ) -> Candidate {
         let (direction, provides_order) = if let Some(req_order) = req.order.as_ref() {
-            if let Some(direction) = index_scan_direction(index_fields, req_order.as_slice()) {
+            if let Some(direction) = index_scan_direction(index_fields, req_order.as_slice())
+                && index_sort_prefix_is_scalar(multikey_fields, req_order.len())
+            {
                 (direction, Some(req_order.clone()))
             } else {
                 (Direction::Forward, None)
@@ -1162,6 +1168,13 @@ fn index_fields_as_sort_fields(index_fields: &[OrderedIndexField]) -> Vec<SortFi
 fn index_provides_order(provided_order: &[SortField], requested_order: &[SortField]) -> bool {
     requested_order.len() <= provided_order.len()
         && requested_order == &provided_order[..requested_order.len()]
+}
+
+fn index_sort_prefix_is_scalar(multikey_fields: BitSet, prefix_len: usize) -> bool {
+    // Document sorting compares whole array values, while index entries order
+    // expanded elements. Only scalar sort fields can provide document ordering;
+    // multikey fields beyond the requested prefix do not affect that ordering.
+    (0..prefix_len).all(|position| !multikey_fields.contains(position as u8))
 }
 
 fn index_scan_direction(
@@ -2038,6 +2051,125 @@ mod optimizer_tests {
             fields.insert(position);
         }
         fields
+    }
+
+    #[test]
+    fn test_multikey_sort_requires_document_sort() {
+        for reverse in [false, true] {
+            for bounded in [false, true] {
+                for hinted in [false, true] {
+                    for limited in [false, true] {
+                        let sort_fields = Arc::new(vec![if reverse {
+                            SortField::desc(field(["a"]))
+                        } else {
+                            SortField::asc(field(["a"]))
+                        }]);
+                        let mut input = LogicalPlanBuilder::scan(COLLECTION, hinted.then_some(1));
+                        if bounded {
+                            input = input.filter(field_filters(field(["a"]), vec![gt(lit(1))]));
+                        }
+                        input = input.sort(Some(sort_fields.clone()));
+                        if limited {
+                            input = input.limit(None, Some(2));
+                        }
+                        let scan = if bounded || hinted {
+                            PhysicalPlan::IndexScan {
+                                collection: COLLECTION,
+                                index: 1,
+                                range: IndexScanRangeExpr {
+                                    equal_prefix: vec![],
+                                    tail: bounded.then(|| Interval::greater_than(placeholder(0))),
+                                },
+                                direction: Direction::Forward,
+                                filter: None,
+                                projection: None,
+                            }
+                        } else {
+                            full_scan_plan()
+                        };
+                        let output = if limited {
+                            PhysicalPlan::TopKHeapSort {
+                                input: Arc::new(scan),
+                                sort_fields,
+                                k: 2,
+                            }
+                        } else {
+                            PhysicalPlan::ExternalMergeSort {
+                                input: Arc::new(scan),
+                                sort_fields,
+                                max_in_memory_rows: 4096,
+                            }
+                        };
+                        check_optimization_with_metadata(
+                            input.build_arc(),
+                            &test_metadata_with_multikey_index(multikey_fields(&[0])),
+                            output,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_multikey_sort_preserves_only_scalar_prefix_order() {
+        for reverse in [false, true] {
+            for bounded in [false, true] {
+                for include_multikey in [false, true] {
+                    let fields = if include_multikey {
+                        vec!["a", "b"]
+                    } else {
+                        vec!["a"]
+                    };
+                    let sort_fields = Arc::new(
+                        fields
+                            .into_iter()
+                            .map(|name| {
+                                if reverse {
+                                    SortField::desc(field([name]))
+                                } else {
+                                    SortField::asc(field([name]))
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    let mut input = LogicalPlanBuilder::scan(COLLECTION, Some(1));
+                    if bounded {
+                        input = input.filter(field_filters(field(["a"]), vec![gt(lit(1))]));
+                    }
+                    let input = input.sort(Some(sort_fields.clone())).build_arc();
+                    let scan = PhysicalPlan::IndexScan {
+                        collection: COLLECTION,
+                        index: 1,
+                        range: IndexScanRangeExpr {
+                            equal_prefix: vec![],
+                            tail: bounded.then(|| Interval::greater_than(placeholder(0))),
+                        },
+                        direction: if reverse && !include_multikey {
+                            Direction::Reverse
+                        } else {
+                            Direction::Forward
+                        },
+                        filter: None,
+                        projection: None,
+                    };
+                    let output = if include_multikey {
+                        PhysicalPlan::ExternalMergeSort {
+                            input: Arc::new(scan),
+                            sort_fields,
+                            max_in_memory_rows: 4096,
+                        }
+                    } else {
+                        scan
+                    };
+                    check_optimization_with_metadata(
+                        input,
+                        &test_metadata_with_multikey_index(multikey_fields(&[1])),
+                        output,
+                    );
+                }
+            }
+        }
     }
 
     #[test]

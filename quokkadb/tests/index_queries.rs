@@ -503,6 +503,63 @@ fn explain_observes_missing_collection_policy() {
 }
 
 #[test]
+fn multikey_sort_replans_and_matches_document_sort() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("multikey_sort").create_if_missing();
+    collection.insert_one(doc! {"_id": 1, "a": 5}).unwrap();
+    let index = collection.create_index(doc! {"a": 1}).unwrap();
+    for direction in [1, -1] {
+        collection
+            .find(doc! {})
+            .hint(index.clone())
+            .sort(doc! {"a": direction})
+            .execute_collect()
+            .unwrap();
+    }
+    // Array value ordering differs from the order of the first matching index element.
+    collection
+        .insert_many([
+            doc! {"_id": 2, "a": [9, 1]},
+            doc! {"_id": 3, "a": [2, 8]},
+            doc! {"_id": 4, "a": [4, 7]},
+        ])
+        .unwrap();
+    for direction in [1, -1] {
+        for filter in [doc! {}, doc! {"a": {"$gt": 3}}, doc! {"_id": {"$gt": 1}}] {
+            for page in [false, true] {
+                let mut indexed = collection
+                    .find(filter.clone())
+                    .hint(index.clone())
+                    .sort(doc! {"a": direction});
+                let mut scanned = collection
+                    .find(filter.clone())
+                    .hint_collection_scan()
+                    .sort(doc! {"a": direction});
+                if page {
+                    indexed = indexed.skip(1).limit(2);
+                    scanned = scanned.skip(1).limit(2);
+                }
+                let explain = indexed.explain().unwrap();
+                assert!(explain_index_scan(&explain.root).is_some());
+                assert!(
+                    explain
+                        .root
+                        .contains_operator(ExplainOperatorKind::ExternalMergeSort)
+                        || explain
+                            .root
+                            .contains_operator(ExplainOperatorKind::TopKHeapSort)
+                );
+                assert_eq!(
+                    indexed.execute_collect().unwrap(),
+                    scanned.execute_collect().unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn compound_multikey_bounds_replan_and_match_collection_scan() {
     let directory = TempDir::new().unwrap();
     let db = common::open_db(directory.path());
