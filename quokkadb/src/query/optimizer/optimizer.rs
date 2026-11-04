@@ -607,34 +607,40 @@ impl Optimizer {
                     filters,
                 }) = field_filters_map.get(&primary_key).map(|e| *e)
                 {
-                    // After normalization, we know that:
-                    // * if the field filters exists it must contain at least one filter
-                    // * if there is a sargable filter it will be the first filter
                     assert!(!filters.is_empty(), "There should be at least one filter");
 
-                    let first_filter = filters.first().unwrap();
-
-                    if is_sargable(first_filter) {
-                        let sargable = first_filter;
-                        let residual = compute_residual_filter(expr.clone(), &primary_key);
+                    if let Some((position, sargable)) = filters
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, filter)| is_sargable(filter))
+                        .min_by_key(|(_, filter)| match filter.as_ref() {
+                            Expr::Interval(interval) if interval.is_point() => 0,
+                            Expr::Comparison {
+                                operator: ComparisonOperator::In,
+                                ..
+                            } => 1,
+                            Expr::Interval(_) => 2,
+                            _ => 3,
+                        })
+                    {
+                        let residual =
+                            compute_residual_filter(expr.clone(), &primary_key, position);
 
                         match sargable.as_ref() {
-                            Expr::Comparison { operator, value } => match operator {
-                                ComparisonOperator::In => {
-                                    let residual =
-                                        compute_residual_filter(expr.clone(), &primary_key);
-                                    let candidate = self.create_multipoint_search_candidate(
-                                        count_stats,
-                                        metadata.id,
-                                        value.clone(),
-                                        residual,
-                                        req,
-                                    );
-                                    // This is likely the best plan, so we can just return it.
-                                    return Ok(vec![candidate]);
-                                }
-                                _ => unreachable!(), // Should be filtered by is_sargable_leaf
-                            },
+                            Expr::Comparison {
+                                operator: ComparisonOperator::In,
+                                value,
+                            } => {
+                                let candidate = self.create_multipoint_search_candidate(
+                                    count_stats,
+                                    metadata.id,
+                                    value.clone(),
+                                    residual,
+                                    req,
+                                );
+                                // This is likely the best plan, so we can just return it.
+                                return Ok(vec![candidate]);
+                            }
                             Expr::Interval(interval) => {
                                 if interval.is_point() {
                                     // Point search
@@ -768,9 +774,9 @@ impl Optimizer {
             if let Some((range, used_fields)) = maybe_range {
                 let residual = filter.clone().and_then(|original_filter| {
                     let mut residual = Some(original_filter);
-                    for field in used_fields {
+                    for (field, position) in used_fields {
                         if let Some(current) = residual {
-                            residual = compute_residual_filter(current, field.as_ref());
+                            residual = compute_residual_filter(current, field.as_ref(), position);
                         }
                     }
                     residual
@@ -1080,7 +1086,7 @@ impl Optimizer {
 fn build_index_scan_range_expr(
     index_fields: &[OrderedIndexField],
     field_filters_map: &HashMap<&Expr, &Expr>,
-) -> Option<(IndexScanRangeExpr, Vec<Arc<Expr>>)> {
+) -> Option<(IndexScanRangeExpr, Vec<(Arc<Expr>, usize)>)> {
     let mut equal_prefix = Vec::new();
     let mut used_fields = Vec::new();
     let mut tail = None;
@@ -1093,22 +1099,26 @@ fn build_index_scan_range_expr(
             break;
         };
 
-        let Some(first_filter) = filters.first() else {
+        let Some((position, selected_filter)) = filters
+            .iter()
+            .enumerate()
+            .filter(|(_, filter)| matches!(filter.as_ref(), Expr::Interval(_)))
+            .min_by_key(|(_, filter)| match filter.as_ref() {
+                Expr::Interval(interval) => !interval.is_point(),
+                _ => unreachable!(),
+            })
+        else {
             break;
         };
 
-        if !is_sargable(first_filter) {
-            break;
-        }
-
-        match first_filter.as_ref() {
+        match selected_filter.as_ref() {
             Expr::Interval(interval) if interval.is_point() => {
                 equal_prefix.push(interval.start_bound_value().unwrap().clone());
-                used_fields.push(field_expr);
+                used_fields.push((field_expr, position));
             }
             Expr::Interval(interval) => {
                 tail = Some(interval.clone());
-                used_fields.push(field_expr);
+                used_fields.push((field_expr, position));
                 break;
             }
             _ => break,
@@ -1162,7 +1172,11 @@ fn index_scan_direction(
     }
 }
 
-fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc<Expr>> {
+fn compute_residual_filter(
+    original: Arc<Expr>,
+    used_field: &Expr,
+    used_position: usize,
+) -> Option<Arc<Expr>> {
     let filters = match original.as_ref() {
         Expr::And(filters) => filters,
         Expr::FieldFilters { .. } => &vec![original],
@@ -1174,15 +1188,18 @@ fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc
         .filter_map(|filter| {
             if let Expr::FieldFilters { field, filters } = filter.as_ref() {
                 if field.as_ref() == used_field {
-                    return if filters.len() > 1 {
-                        // Keep the residual filters for the used field.
-                        Some(Arc::new(Expr::FieldFilters {
-                            field: field.clone(),
-                            filters: filters.iter().skip(1).cloned().collect(),
-                        }))
-                    } else {
+                    let mut residual_filters = filters.clone();
+                    residual_filters.remove(used_position);
+
+                    return if residual_filters.is_empty() {
                         // The only filter was used, so this part is gone.
                         None
+                    } else {
+                        // Keep the remaining filters for the used field.
+                        Some(Arc::new(Expr::FieldFilters {
+                            field: field.clone(),
+                            filters: residual_filters,
+                        }))
                     };
                 }
             }
@@ -1200,12 +1217,12 @@ fn compute_residual_filter(original: Arc<Expr>, used_field: &Expr) -> Option<Arc
 /// Returns true if an expression is sargable (can be used with an index).
 fn is_sargable(expr: &Arc<Expr>) -> bool {
     match expr.as_ref() {
-        // $eq, $gte, $gte, $lt, and $lte have been converted into interval expressions during normalization.
-        // So we only need to check for intervals, $in and $exists here.
-        Expr::Comparison { operator, value } => {
-            matches!(value.as_ref(), Expr::Placeholder(_))
-                && matches!(operator, ComparisonOperator::In)
-        }
+        // $eq, $gte, $gt, $lt, and $lte have been converted into interval expressions during
+        // normalization. `$in` intentionally remains a Comparison for multipoint lookups.
+        Expr::Comparison {
+            operator: ComparisonOperator::In,
+            value,
+        } => matches!(value.as_ref(), Expr::Placeholder(_)),
         Expr::Interval(_) => true,
         Expr::Exists(true) => true,
         _ => false,
@@ -1338,8 +1355,8 @@ mod optimizer_tests {
     use super::*;
     use crate::options::storage_quantity::StorageQuantity;
     use crate::query::expr_fn::{
-        and, eq, exists, field, field_filters, gt, include, interval, lit, placeholder, proj_field,
-        proj_fields, within,
+        and, eq, exists, field, field_filters, gt, gte, include, interval, lit, lte, ne,
+        placeholder, proj_field, proj_fields, within,
     };
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::storage::catalog::{CollectionBuilder, IndexBuilder};
@@ -1348,6 +1365,120 @@ mod optimizer_tests {
     use std::collections::BTreeMap;
 
     const COLLECTION: u32 = 10;
+
+    #[test]
+    fn test_compound_index_selects_points_and_preserves_other_predicates() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![gt(lit(15)), eq(lit(10))]),
+                field_filters(field(["b"]), vec![gte(lit(0)), lte(lit(20))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 2,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: Some(Interval::at_most(placeholder(2))),
+            },
+            direction: Direction::Forward,
+            filter: Some(and([
+                field_filters(
+                    field(["a"]),
+                    [interval(Interval::greater_than(placeholder(1)))],
+                ),
+                field_filters(field(["b"]), [interval(Interval::at_least(placeholder(3)))]),
+            ])),
+            projection: None,
+        };
+
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
+    }
+
+    #[test]
+    fn test_primary_key_selects_point_and_preserves_same_field_residual() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(
+                field(["_id"]),
+                vec![gt(lit(15)), eq(lit(10))],
+            ))
+            .build_arc();
+
+        let output = PhysicalPlan::PointSearch {
+            collection: COLLECTION,
+            key: placeholder(0),
+            filter: Some(field_filters(
+                field(["_id"]),
+                [interval(Interval::greater_than(placeholder(1)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_primary_key_multipoint_preserves_same_field_residual() {
+        let values = Bson::Array(vec![Bson::Int32(10), Bson::Int32(20)]);
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(
+                field(["_id"]),
+                vec![within(lit(values)), ne(lit(10))],
+            ))
+            .build_arc();
+
+        let output = PhysicalPlan::Filter {
+            input: Arc::new(PhysicalPlan::MultiPointSearch {
+                collection: COLLECTION,
+                keys: placeholder(1),
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            predicate: field_filters(field(["_id"]), [ne(placeholder(0))]),
+        };
+
+        check_optimization(input, output);
+    }
+
+    #[test]
+    fn test_index_scan_skips_non_interval_predicate_and_preserves_residual() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(field(["a"]), vec![ne(lit(1)), eq(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::Filter {
+            input: Arc::new(PhysicalPlan::IndexScan {
+                collection: COLLECTION,
+                index: 1,
+                range: IndexScanRangeExpr {
+                    equal_prefix: vec![placeholder(1)],
+                    tail: None,
+                },
+                direction: Direction::Forward,
+                filter: None,
+                projection: None,
+            }),
+            predicate: field_filters(field(["a"]), [ne(placeholder(0))]),
+        };
+
+        check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
+    }
+
+    #[test]
+    fn test_primary_key_without_usable_predicate_keeps_full_scan_and_filter() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(field(["_id"]), [ne(lit(10))]))
+            .build_arc();
+
+        let output = PhysicalPlan::Filter {
+            input: Arc::new(full_scan_plan()),
+            predicate: field_filters(field(["_id"]), [ne(placeholder(0))]),
+        };
+
+        check_optimization(input, output);
+    }
 
     #[test]
     fn test_optimize_noop() {
