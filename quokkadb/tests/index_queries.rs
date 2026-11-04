@@ -501,3 +501,74 @@ fn explain_observes_missing_collection_policy() {
         .unwrap();
     assert_eq!(explain.root.operator, ExplainOperator::NoOp);
 }
+
+#[test]
+fn compound_multikey_bounds_replan_and_match_collection_scan() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("items").create_if_missing();
+    collection
+        .insert_one(doc! {"_id": 1, "items": {"x": 1, "y": 2}})
+        .unwrap();
+    let index = collection
+        .create_index(doc! {"items.x": 1, "items.y": 1})
+        .unwrap();
+    let filter = doc! {"items.x": 1, "items.y": 2};
+    // Populate the cache while both indexed paths are scalar.
+    assert_eq!(
+        collection
+            .find(filter.clone())
+            .hint(index.clone())
+            .execute_collect()
+            .unwrap()
+            .len(),
+        1
+    );
+    let explain = collection
+        .find(filter.clone())
+        .hint(index.clone())
+        .explain()
+        .unwrap();
+    assert_eq!(explain_index_scan(&explain.root).unwrap().2, 2);
+
+    collection
+        .insert_many([
+            doc! {"_id": 2, "items": [{"x": 1, "y": 0}, {"x": 0, "y": 2}]},
+            doc! {"_id": 3, "items": [{"x": 1, "y": 0}, {"x": 1, "y": 3}]},
+            doc! {"_id": 4, "items": [{"x": 0, "y": 2}]},
+        ])
+        .unwrap();
+    let explain = collection
+        .find(filter.clone())
+        .hint(index.clone())
+        .explain()
+        .unwrap();
+    assert_eq!(explain_index_scan(&explain.root).unwrap().2, 1);
+    let ids = |documents: Vec<Document>| {
+        let mut ids: Vec<_> = documents
+            .iter()
+            .map(|d| d.get_i32("_id").unwrap())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let indexed = collection
+        .find(filter.clone())
+        .hint(index.clone())
+        .execute_collect()
+        .unwrap();
+    let scanned = collection
+        .find(filter.clone())
+        .hint_collection_scan()
+        .execute_collect()
+        .unwrap();
+    assert_eq!(ids(indexed), vec![1, 2]);
+    assert_eq!(ids(scanned), vec![1, 2]);
+    let limited = collection
+        .find(filter)
+        .hint(index)
+        .limit(2)
+        .execute_collect()
+        .unwrap();
+    assert_eq!(ids(limited), vec![1, 2]);
+}

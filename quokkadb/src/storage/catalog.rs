@@ -797,6 +797,7 @@ pub(crate) struct IndexBuilder {
     queryable_at: Option<u64>,
     dropped_at: Option<u64>,
     options: IndexOptions,
+    multikey_fields: BitSet,
 }
 
 #[cfg(test)]
@@ -808,6 +809,7 @@ impl IndexBuilder {
             queryable_at: None,
             dropped_at: None,
             options: IndexOptions::default(),
+            multikey_fields: BitSet::new(),
         }
     }
 
@@ -826,6 +828,11 @@ impl IndexBuilder {
         self
     }
 
+    pub(crate) fn multikey_fields(mut self, multikey_fields: BitSet) -> Self {
+        self.multikey_fields = multikey_fields;
+        self
+    }
+
     fn build(self, id: u32) -> IndexMetadata {
         IndexMetadata {
             id,
@@ -834,7 +841,7 @@ impl IndexBuilder {
             queryable_at: self.queryable_at,
             dropped_at: self.dropped_at,
             options: self.options,
-            multikey_fields: BitSet::new(),
+            multikey_fields: self.multikey_fields,
         }
     }
 }

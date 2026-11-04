@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::io::bitset::BitSet;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::options::options::Options;
@@ -768,8 +769,9 @@ impl Optimizer {
                 IndexDefinition::Regular(fields) => fields,
             };
 
-            let maybe_range = field_filters_map
-                .and_then(|filters| build_index_scan_range_expr(index_fields, filters));
+            let maybe_range = field_filters_map.and_then(|filters| {
+                build_index_scan_range_expr(index_fields, index.multikey_fields, filters)
+            });
 
             if let Some((range, used_fields)) = maybe_range {
                 let residual = filter.clone().and_then(|original_filter| {
@@ -1085,13 +1087,25 @@ impl Optimizer {
 
 fn build_index_scan_range_expr(
     index_fields: &[OrderedIndexField],
+    multikey_fields: BitSet,
     field_filters_map: &HashMap<&Expr, &Expr>,
 ) -> Option<(IndexScanRangeExpr, Vec<(Arc<Expr>, usize)>)> {
     let mut equal_prefix = Vec::new();
     let mut used_fields = Vec::new();
     let mut tail = None;
 
-    for index_field in index_fields {
+    let mut used_multikey_field = false;
+    for (field_position, index_field) in index_fields.iter().enumerate() {
+        if multikey_fields.contains(field_position as u8) {
+            // Independent predicates can match different array elements. Without
+            // correlation evidence, bounding a second multikey field can miss
+            // documents. Stop here to preserve a contiguous index prefix and
+            // leave this field's predicates in the residual filter.
+            if used_multikey_field {
+                break;
+            }
+            used_multikey_field = true;
+        }
         let field_expr = Arc::new(Expr::Field((&index_field.path).into()));
         let Some(Expr::FieldFilters { filters, .. }) =
             field_filters_map.get(field_expr.as_ref()).copied()
@@ -2002,6 +2016,207 @@ mod optimizer_tests {
             .index(IndexBuilder::new(3).asc("a").queryable_at(5))
             .index(IndexBuilder::new(4).asc("a").desc("b").queryable_at(6))
             .build()
+    }
+
+    fn test_metadata_with_multikey_index(multikey_fields: BitSet) -> Arc<CollectionMetadata> {
+        CollectionBuilder::new(COLLECTION, "test", 2)
+            .index(
+                IndexBuilder::new(3)
+                    .asc("a")
+                    .asc("b")
+                    .asc("c")
+                    .asc("d")
+                    .queryable_at(5)
+                    .multikey_fields(multikey_fields),
+            )
+            .build()
+    }
+
+    fn multikey_fields(positions: &[u8]) -> BitSet {
+        let mut fields = BitSet::new();
+        for &position in positions {
+            fields.insert(position);
+        }
+        fields
+    }
+
+    #[test]
+    fn test_optimize_compound_index_without_multikey_fields_uses_all_bounds() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![eq(lit(1))]),
+                field_filters(field(["b"]), vec![eq(lit(2))]),
+                field_filters(field(["c"]), vec![eq(lit(3))]),
+                field_filters(field(["d"]), vec![eq(lit(4))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![
+                    placeholder(0),
+                    placeholder(1),
+                    placeholder(2),
+                    placeholder(3),
+                ],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(BitSet::new()),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_compound_index_stops_before_second_multikey_field() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![eq(lit(1))]),
+                field_filters(field(["b"]), vec![eq(lit(2))]),
+                field_filters(field(["c"]), vec![eq(lit(3))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: Some(and([
+                field_filters(
+                    field(["b"]),
+                    [interval(Interval::closed(placeholder(1), placeholder(1)))],
+                ),
+                field_filters(
+                    field(["c"]),
+                    [interval(Interval::closed(placeholder(2), placeholder(2)))],
+                ),
+            ])),
+            projection: None,
+        };
+
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(multikey_fields(&[0, 1])),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_compound_index_uses_scalar_field_before_second_multikey_field() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![eq(lit(1))]),
+                field_filters(field(["b"]), vec![eq(lit(2))]),
+                field_filters(field(["c"]), vec![eq(lit(3))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0), placeholder(1)],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["c"]),
+                [interval(Interval::closed(placeholder(2), placeholder(2)))],
+            )),
+            projection: None,
+        };
+
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(multikey_fields(&[0, 2])),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_compound_index_allows_scalar_fields_after_one_multikey_field() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![eq(lit(1))]),
+                field_filters(field(["b"]), vec![eq(lit(2))]),
+                field_filters(field(["c"]), vec![eq(lit(3))]),
+                field_filters(field(["d"]), vec![eq(lit(4))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![
+                    placeholder(0),
+                    placeholder(1),
+                    placeholder(2),
+                    placeholder(3),
+                ],
+                tail: None,
+            },
+            direction: Direction::Forward,
+            filter: None,
+            projection: None,
+        };
+
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(multikey_fields(&[1])),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_optimize_compound_index_keeps_fields_after_multikey_range_residual() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(and([
+                field_filters(field(["a"]), vec![eq(lit(1))]),
+                field_filters(field(["b"]), vec![gt(lit(2))]),
+                field_filters(field(["c"]), vec![eq(lit(3))]),
+                field_filters(field(["d"]), vec![eq(lit(4))]),
+            ]))
+            .build_arc();
+
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![placeholder(0)],
+                tail: Some(Interval::greater_than(placeholder(1))),
+            },
+            direction: Direction::Forward,
+            filter: Some(and([
+                field_filters(
+                    field(["c"]),
+                    [interval(Interval::closed(placeholder(2), placeholder(2)))],
+                ),
+                field_filters(
+                    field(["d"]),
+                    [interval(Interval::closed(placeholder(3), placeholder(3)))],
+                ),
+            ])),
+            projection: None,
+        };
+
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(multikey_fields(&[1, 3])),
+            output,
+        );
     }
 
     #[test]
