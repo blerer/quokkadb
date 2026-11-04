@@ -29,6 +29,11 @@ impl BitSet {
         self.0 |= other.0;
         self.0 != previous
     }
+
+    /// Check if the BitSet has no set bits.
+    pub fn has_no_set_bits(&self) -> bool {
+        self.0 == 0
+    }
 }
 
 impl Serializable for BitSet {

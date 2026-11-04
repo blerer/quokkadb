@@ -1,5 +1,6 @@
 use super::{ExecutionOutput, ExecutionRow, Metrics, bind};
 use crate::error::{Error, Result};
+use crate::io::bitset::BitSet;
 use crate::query::execution::{
     filters,
     indexes::{extract_id_from_entry_bytes, index_reader::IndexReadCodec},
@@ -15,6 +16,7 @@ use crate::storage::snapshot_manager::Snapshot;
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use bson::Bson;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tracing::{Span, trace_span};
 
@@ -438,6 +440,11 @@ impl ReadExecutor {
         let secondary_index = *index;
         let primary_lookup_span = access_span.clone();
         let snapshot_for_reads = snapshot.clone();
+        let mut seen_primary_keys = if index_metadata.multikey_fields.has_no_set_bits() {
+            None
+        } else {
+            Some(BTreeSet::new())
+        };
 
         let iter = storage_engine
             .range_scan_at_snapshot(
@@ -466,6 +473,12 @@ impl ReadExecutor {
                     }
                     Err(e) => return Some(Err(e.into())),
                 };
+
+                if let Some(seen_primary_keys) = seen_primary_keys.as_mut()
+                    && !seen_primary_keys.insert(primary_key.clone())
+                {
+                    return None;
+                }
 
                 let doc_bytes = {
                     let _lookup_span = trace_span!(

@@ -279,6 +279,54 @@ fn test_index_scan_single_field_equality_execution() -> Result<()> {
 }
 
 #[test]
+fn test_multikey_index_scan_deduplicates_before_limit() -> Result<()> {
+    let runtime = executor_test_runtime()?;
+    let storage_engine = runtime.storage_engine.clone();
+    let executor = runtime.executor.clone();
+    let collection_id = storage_engine
+        .create_collection("test_index_multikey", true)?
+        .id;
+    let index = storage_engine.create_queryable_index(
+        collection_id,
+        IndexDefinition::Regular(vec![OrderedIndexField::asc("a")]),
+        IndexOptions::default(),
+    )?;
+
+    for doc in [
+        doc! { "_id": 1_i32, "a": [2_i32, 3_i32] },
+        doc! { "_id": 2_i32, "a": [4_i32] },
+    ] {
+        insert_one(&executor, collection_id, &doc)?;
+    }
+
+    let mut params = Parameters::new();
+    let lower_bound = params.collect_parameter(1_i32.into());
+    let index_scan = Arc::new(PhysicalPlan::IndexScan {
+        collection: collection_id,
+        index: index.id,
+        range: IndexScanRangeExpr {
+            equal_prefix: vec![],
+            tail: Some(Interval::greater_than(lower_bound)),
+        },
+        direction: Direction::Forward,
+        filter: None,
+        projection: None,
+    });
+    let plan = Arc::new(PhysicalPlan::Limit {
+        input: index_scan,
+        skip: None,
+        limit: Some(2),
+    });
+
+    let results = executor.execute_cached(plan, &params)?;
+    let docs: Vec<Document> = results.collect::<Result<_>>()?;
+    let ids: Vec<i32> = docs.iter().map(|d| d.get_i32("_id").unwrap()).collect();
+    assert_eq!(ids, vec![1, 2]);
+
+    Ok(())
+}
+
+#[test]
 fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
     let runtime = executor_test_runtime()?;
     let storage_engine = runtime.storage_engine.clone();
