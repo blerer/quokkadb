@@ -567,6 +567,18 @@ impl LogicalPlanBuilder {
     }
 }
 
+fn arc_changed<T>(original: &Arc<T>, transformed: &Arc<T>) -> bool {
+    !Arc::ptr_eq(original, transformed)
+}
+
+fn optional_arc_changed<T>(original: Option<&Arc<T>>, transformed: Option<&Arc<T>>) -> bool {
+    match (original, transformed) {
+        (None, None) => false,
+        (Some(original), Some(transformed)) => arc_changed(original, transformed),
+        _ => true,
+    }
+}
+
 /// Transforms the logical plan in a bottom-up way by applying a function to all filter expressions,
 /// including those nested within projection expressions.
 pub fn transform_up_filter<F>(plan: Arc<LogicalPlan>, function: F) -> Arc<LogicalPlan>
@@ -576,46 +588,62 @@ where
     plan.transform_up(&|node: Arc<LogicalPlan>| match node.as_ref() {
         LogicalPlan::Filter { input, condition } => {
             let expr = condition.clone().transform_up(&|c| function(c));
-            Arc::new(LogicalPlan::Filter {
-                input: input.clone(),
-                condition: expr,
-            })
+            if !arc_changed(condition, &expr) {
+                node
+            } else {
+                Arc::new(LogicalPlan::Filter {
+                    input: input.clone(),
+                    condition: expr,
+                })
+            }
         }
         LogicalPlan::Projection { input, projection } => {
-            let projection = transform_up_projection(&projection, &function);
-            Arc::new(LogicalPlan::Projection {
-                input: input.clone(),
-                projection,
-            })
+            let new_projection = transform_up_projection(&projection, &function);
+            if !arc_changed(projection, &new_projection) {
+                node
+            } else {
+                Arc::new(LogicalPlan::Projection {
+                    input: input.clone(),
+                    projection: new_projection,
+                })
+            }
         }
         LogicalPlan::CollectionScan {
             collection,
             hint,
-            projection,
-            filter,
+            projection: old_projection,
+            filter: old_filter,
             sort,
         } => {
-            if filter.is_none() && projection.is_none() {
+            if old_filter.is_none() && old_projection.is_none() {
                 return node;
             }
 
-            let filter = if let Some(filter) = filter {
+            let new_filter = if let Some(filter) = old_filter {
                 Some(filter.clone().transform_up(&|c| function(c)))
             } else {
                 None
             };
 
-            let projection = if let Some(projection) = projection {
+            let new_projection = if let Some(projection) = old_projection {
                 Some(transform_up_projection(&projection, &function))
             } else {
                 None
             };
 
+            let filter_changed = optional_arc_changed(old_filter.as_ref(), new_filter.as_ref());
+            let projection_changed =
+                optional_arc_changed(old_projection.as_ref(), new_projection.as_ref());
+
+            if !filter_changed && !projection_changed {
+                return node;
+            }
+
             Arc::new(LogicalPlan::CollectionScan {
                 collection: *collection,
                 hint: hint.clone(),
-                projection,
-                filter,
+                projection: new_projection,
+                filter: new_filter,
                 sort: sort.clone(),
             })
         }
@@ -627,17 +655,24 @@ fn transform_up_projection<F>(projection: &Arc<Projection>, function: &F) -> Arc
 where
     F: Fn(Arc<Expr>) -> Arc<Expr> + Clone,
 {
-    let projection = Arc::new(match projection.as_ref() {
+    match projection.as_ref() {
         Projection::Include(proj_exprs) => {
             let new_projection = transform_up_proj_expr_filters(&function, &proj_exprs);
-            Projection::Include(new_projection)
+            if !arc_changed(proj_exprs, &new_projection) {
+                projection.clone()
+            } else {
+                Arc::new(Projection::Include(new_projection))
+            }
         }
         Projection::Exclude(proj_exprs) => {
             let new_projection = transform_up_proj_expr_filters(&function, &proj_exprs);
-            Projection::Exclude(new_projection)
+            if !arc_changed(proj_exprs, &new_projection) {
+                projection.clone()
+            } else {
+                Arc::new(Projection::Exclude(new_projection))
+            }
         }
-    });
-    projection
+    }
 }
 
 fn transform_up_proj_expr_filters<F>(
@@ -662,7 +697,11 @@ where
     match proj_expr.as_ref() {
         ProjectionExpr::ElemMatch { filter } => {
             let new_expr = filter.clone().transform_up(&|c| function(c));
-            Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
+            if !arc_changed(filter, &new_expr) {
+                proj_expr
+            } else {
+                Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
+            }
         }
         _ => proj_expr.clone(),
     }
@@ -677,46 +716,62 @@ where
     plan.transform_down(&|node: Arc<LogicalPlan>| match node.as_ref() {
         LogicalPlan::Filter { input, condition } => {
             let expr = condition.clone().transform_down(&function);
-            Arc::new(LogicalPlan::Filter {
-                input: input.clone(),
-                condition: expr,
-            })
+            if !arc_changed(condition, &expr) {
+                node
+            } else {
+                Arc::new(LogicalPlan::Filter {
+                    input: input.clone(),
+                    condition: expr,
+                })
+            }
         }
         LogicalPlan::Projection { input, projection } => {
-            let projection = transform_down_projection(&projection, &function);
-            Arc::new(LogicalPlan::Projection {
-                input: input.clone(),
-                projection,
-            })
+            let new_projection = transform_down_projection(&projection, &function);
+            if !arc_changed(projection, &new_projection) {
+                node
+            } else {
+                Arc::new(LogicalPlan::Projection {
+                    input: input.clone(),
+                    projection: new_projection,
+                })
+            }
         }
         LogicalPlan::CollectionScan {
             collection,
             hint,
-            projection,
-            filter,
+            projection: old_projection,
+            filter: old_filter,
             sort,
         } => {
-            if filter.is_none() && projection.is_none() {
+            if old_filter.is_none() && old_projection.is_none() {
                 return node;
             }
 
-            let filter = if let Some(filter) = filter {
+            let new_filter = if let Some(filter) = old_filter {
                 Some(filter.clone().transform_down(&|c| function(c)))
             } else {
                 None
             };
 
-            let projection = if let Some(projection) = projection {
+            let new_projection = if let Some(projection) = old_projection {
                 Some(transform_down_projection(&projection, &function))
             } else {
                 None
             };
 
+            let filter_changed = optional_arc_changed(old_filter.as_ref(), new_filter.as_ref());
+            let projection_changed =
+                optional_arc_changed(old_projection.as_ref(), new_projection.as_ref());
+
+            if !filter_changed && !projection_changed {
+                return node;
+            }
+
             Arc::new(LogicalPlan::CollectionScan {
                 collection: *collection,
                 hint: hint.clone(),
-                projection,
-                filter,
+                projection: new_projection,
+                filter: new_filter,
                 sort: sort.clone(),
             })
         }
@@ -731,17 +786,24 @@ pub(crate) fn transform_down_projection<F>(
 where
     F: Fn(Arc<Expr>) -> Arc<Expr>,
 {
-    let projection = Arc::new(match projection.as_ref() {
+    match projection.as_ref() {
         Projection::Include(proj_exprs) => {
             let new_projection = transform_down_proj_expr_filters(&function, proj_exprs);
-            Projection::Include(new_projection)
+            if !arc_changed(proj_exprs, &new_projection) {
+                projection.clone()
+            } else {
+                Arc::new(Projection::Include(new_projection))
+            }
         }
         Projection::Exclude(proj_exprs) => {
             let new_projection = transform_down_proj_expr_filters(&function, proj_exprs);
-            Projection::Exclude(new_projection)
+            if !arc_changed(proj_exprs, &new_projection) {
+                projection.clone()
+            } else {
+                Arc::new(Projection::Exclude(new_projection))
+            }
         }
-    });
-    projection
+    }
 }
 
 fn transform_down_proj_expr_filters<F>(
@@ -766,7 +828,11 @@ where
     match proj_expr.as_ref() {
         ProjectionExpr::ElemMatch { filter } => {
             let new_expr = filter.clone().transform_down(function);
-            Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
+            if !arc_changed(filter, &new_expr) {
+                proj_expr.clone()
+            } else {
+                Arc::new(ProjectionExpr::ElemMatch { filter: new_expr })
+            }
         }
         _ => proj_expr.clone(),
     }
@@ -858,6 +924,12 @@ mod tests {
         .project(Some(include(proj_elem_match(eq(original.clone())))))
         .build_arc();
 
+        let identity = |expr: Arc<Expr>| expr;
+        let unchanged_up = transform_up_filter(plan.clone(), identity.clone());
+        let unchanged_down = transform_down_filter(plan.clone(), identity);
+        assert!(Arc::ptr_eq(&unchanged_up, &plan));
+        assert!(Arc::ptr_eq(&unchanged_down, &plan));
+
         let transformed_up = transform_up_filter(plan.clone(), transformation.clone());
         let transformed_down = transform_down_filter(plan.clone(), transformation.clone());
 
@@ -873,5 +945,7 @@ mod tests {
 
         assert_eq!(transformed_up, expected);
         assert_eq!(transformed_down, expected);
+        assert!(!Arc::ptr_eq(&transformed_up, &plan));
+        assert!(!Arc::ptr_eq(&transformed_down, &plan));
     }
 }
