@@ -4,13 +4,14 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::options::options::Options;
 use crate::query::QueryEndpoint;
+use crate::query::expr::Expr;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter};
 use crate::query::optimizer::normalization_rules;
 use crate::query::optimizer::normalization_rules::NormalisationRule;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
 use crate::query::tree_node::TreeNode;
 use crate::query::{
-    ComparisonOperator, Expr, Interval, Limit, Parameters, Projection, SortField, SortOrder,
+    ComparisonOperator, Interval, Limit, Parameters, Projection, SortField, SortOrder,
 };
 use crate::storage::Direction;
 use crate::storage::catalog::{

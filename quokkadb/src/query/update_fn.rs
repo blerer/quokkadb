@@ -1,9 +1,10 @@
+use crate::query::BsonValue;
+use crate::query::expr::Expr;
 use crate::query::expr_fn::lit;
 use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePathComponent,
 };
-use crate::query::{BsonValue, Expr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

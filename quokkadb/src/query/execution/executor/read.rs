@@ -1,14 +1,14 @@
 use super::{ExecutionOutput, ExecutionRow, Metrics, bind};
 use crate::error::{Error, Result};
-use crate::io::bitset::BitSet;
 use crate::query::QueryEndpoint;
 use crate::query::execution::{
     filters,
     indexes::{extract_id_from_entry_bytes, index_reader::IndexReadCodec},
     projections, sorts,
 };
+use crate::query::expr::Expr;
 use crate::query::physical_plan::{IndexScanRangeExpr, PhysicalPlan};
-use crate::query::{BsonValue, Expr, Parameters};
+use crate::query::{BsonValue, Parameters};
 use crate::storage::Direction;
 use crate::storage::ScanCachePolicy;
 use crate::storage::internal_key::{extract_operation_type, extract_record_key};

@@ -1,7 +1,8 @@
 use crate::error::Result;
 use crate::query::BsonValueRef;
 use crate::query::execution::filters;
-use crate::query::{Parameters, PathComponent, Projection, ProjectionExpr};
+use crate::query::expr::{Expr, ProjectionExpr};
+use crate::query::{Parameters, PathComponent, Projection};
 use bson::{Bson, Document};
 use std::fmt;
 use std::sync::Arc;
@@ -76,7 +77,7 @@ fn build_projector(
 /// Creates a filter function for array elements inside a projection.
 /// This helper function assumes that array elements are documents when filtering.
 fn to_element_filter(
-    predicate: Arc<crate::query::Expr>,
+    predicate: Arc<Expr>,
     parameters: &Parameters,
 ) -> Box<dyn Fn(BsonValueRef) -> bool + Send + Sync> {
     let doc_filter = filters::to_value_filter(predicate, parameters);

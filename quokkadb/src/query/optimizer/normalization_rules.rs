@@ -94,9 +94,10 @@
 //! An `OR` containing a residual predicate remains residual as a whole, so pushdown does not
 //! change the query's boolean or array semantics.
 use crate::query::QueryEndpoint;
+use crate::query::expr::Expr;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter, transform_up_filter};
 use crate::query::tree_node::TreeNode;
-use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr};
+use crate::query::{BsonValue, BsonValueRef, ComparisonOperator};
 use crate::util::interval::Interval;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1148,10 +1149,11 @@ fn is_pushable_leaf_filter(expr: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::PathComponent;
     use crate::query::QueryEndpoint;
+    use crate::query::expr::ProjectionExpr;
     use crate::query::expr_fn::*;
     use crate::query::logical_plan::LogicalPlanBuilder;
-    use crate::query::{PathComponent, ProjectionExpr};
     use crate::util::interval::Interval;
     use std::sync::Arc;
 

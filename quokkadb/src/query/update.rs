@@ -1,5 +1,5 @@
 use crate::Error;
-use crate::query::Expr;
+use crate::query::expr::Expr;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;

@@ -1,7 +1,8 @@
 use super::executor::{ExecutionOutput, ExecutionRow};
 use crate::error::Result;
 use crate::obs::metrics::Counter;
-use crate::query::{BsonValueRef, Expr, SortField, SortOrder, get_path_value};
+use crate::query::expr::Expr;
+use crate::query::{BsonValueRef, SortField, SortOrder, get_path_value};
 use bson::{Bson, Document};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

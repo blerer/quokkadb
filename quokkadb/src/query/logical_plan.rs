@@ -1,9 +1,10 @@
 use crate::io::byte_reader::ByteReader;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
+use crate::query::expr::{Expr, ProjectionExpr};
 use crate::query::tree_node::TreeNode;
 use crate::query::update::UpdateExpr;
-use crate::query::{Expr, Limit, Projection, ProjectionExpr, ReturnDocument, SortField};
+use crate::query::{Limit, Projection, ReturnDocument, SortField};
 use crate::util::murmur_hash64::murmur_hash64a;
 use bson::Document;
 use std::io::Result;

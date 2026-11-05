@@ -1,7 +1,8 @@
 use crate::io::size_estimate::SizeEstimate;
 use crate::query::QueryEndpoint;
+use crate::query::expr::Expr;
 use crate::query::update::UpdateExpr;
-use crate::query::{Expr, Projection, ReturnDocument, SortField};
+use crate::query::{Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
 use crate::util::interval::Interval;
 use bson::Document;

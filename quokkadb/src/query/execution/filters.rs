@@ -1,5 +1,6 @@
 use crate::query::QueryEndpoint;
-use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters, PathComponent};
+use crate::query::expr::Expr;
+use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Parameters, PathComponent};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
 use bson::{Bson, Document};

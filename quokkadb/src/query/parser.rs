@@ -1,10 +1,11 @@
 use crate::Error;
+use crate::query::expr::{Expr, ProjectionExpr};
 use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePathComponent,
 };
-use crate::query::{BsonValue, ComparisonOperator, ComparisonOperator::*, Expr, PathComponent};
-use crate::query::{IndexKeyField, IndexKeySpec, Projection, ProjectionExpr, SortField, SortOrder};
+use crate::query::{BsonValue, ComparisonOperator, ComparisonOperator::*, PathComponent};
+use crate::query::{IndexKeyField, IndexKeySpec, Projection, SortField, SortOrder};
 use bson::{Bson, Document};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, LazyLock};

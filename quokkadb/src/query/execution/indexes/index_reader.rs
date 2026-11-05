@@ -2,8 +2,9 @@ use super::{EncodedIndexKeyPrefix, IndexKeyValue, sort_order, to_typed_key, vali
 use crate::io::byte_reader::ByteReader;
 use crate::io::unexpected_eof;
 use crate::query::QueryEndpoint;
+use crate::query::expr::Expr;
 use crate::query::physical_plan::IndexScanRangeExpr;
-use crate::query::{BsonValue, Expr, Parameters, PathComponent, SortOrder};
+use crate::query::{BsonValue, Parameters, PathComponent, SortOrder};
 use crate::storage::catalog::{IndexDefinition, IndexMetadata, OrderedIndexField};
 use crate::util::bson_utils::{TypedKey, decode_bson_from_key_readers};
 use crate::util::interval::Interval;

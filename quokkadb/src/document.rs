@@ -1,13 +1,13 @@
 use crate::error::Error;
+use crate::query::expr::{Expr, ProjectionExpr};
 use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePathComponent,
 };
 use crate::query::{
-    BsonValue, ComparisonOperator, IndexKeyField, IndexKeySpec, PathComponent, Projection,
-    ProjectionExpr, parser,
+    BsonValue, ComparisonOperator, IndexKeyField, IndexKeySpec, PathComponent, Projection, parser,
 };
-use crate::query::{Expr, SortField, SortOrder, format_path};
+use crate::query::{SortField, SortOrder, format_path};
 use bson::{Document, serialize_to_bson};
 use serde::Serialize;
 use serde::de::DeserializeOwned;

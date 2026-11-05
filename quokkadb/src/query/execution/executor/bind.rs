@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::query::QueryEndpoint;
-use crate::query::{BsonValue, Expr, Parameters};
+use crate::query::expr::Expr;
+use crate::query::{BsonValue, Parameters};
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
 use std::ops::{Bound, RangeBounds};

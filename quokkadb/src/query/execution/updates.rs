@@ -1,11 +1,12 @@
 use crate::error::{Error, Result};
 use crate::query::execution::filters;
 use crate::query::execution::updates::Mode::{CreateIfMissing, Get};
+use crate::query::expr::Expr;
 use crate::query::update::{
     CurrentDateType, EachOrSingle, PopFrom, PullCriterion, PushSort, PushSpec, UpdateExpr,
     UpdateOp, UpdatePath, UpdatePathComponent,
 };
-use crate::query::{BsonValue, BsonValueRef, Expr, Parameters, get_path_value};
+use crate::query::{BsonValue, BsonValueRef, Parameters, get_path_value};
 use crate::util::bson_utils::{
     BsonArithmeticError, add_numeric, multiply_numeric, perform_bitwise_op,
 };

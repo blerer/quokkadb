@@ -2,9 +2,10 @@ use super::bind;
 use super::write::WriteExecutor;
 use crate::error::Result;
 use crate::query::execution::{set_path_value, updates};
+use crate::query::expr::Expr;
 use crate::query::physical_plan::PhysicalPlan;
 use crate::query::update::UpdateExpr;
-use crate::query::{BsonValue, Expr, Parameters};
+use crate::query::{BsonValue, Parameters};
 use bson::{Bson, Document};
 use std::sync::Arc;
 
