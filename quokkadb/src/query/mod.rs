@@ -38,6 +38,13 @@ pub enum ReturnDocument {
     After,
 }
 
+/// Parameter classification needed for safe index planning and cache reuse.
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum ParameterKind {
+    NonArray,
+    Array,
+}
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Expr {
     /// Field reference
@@ -48,7 +55,10 @@ pub enum Expr {
     Literal(BsonValue),
     /// Placeholder for parameters. After normalization, literals would be replaced by placeholders
     /// and the parameters captured. Allowing optimizations output to be cached and reused.
-    Placeholder(u32),
+    Placeholder {
+        index: u32,
+        kind: ParameterKind,
+    },
     /// Multiple filters on the same field (e.g., `{ "price": { "$ne": 1.99, "$exists": true } }`)
     FieldFilters {
         field: Arc<Expr>,
@@ -90,7 +100,7 @@ impl SizeEstimate for Expr {
         match self {
             Expr::Field(path) | Expr::PositionalField(path) => path.estimated_heap_size(),
             Expr::Literal(value) => value.estimated_heap_size(),
-            Expr::Placeholder(_) | Expr::Exists(_) | Expr::AlwaysTrue | Expr::AlwaysFalse => 0,
+            Expr::Placeholder { .. } | Expr::Exists(_) | Expr::AlwaysTrue | Expr::AlwaysFalse => 0,
             Expr::FieldFilters { field, filters } => {
                 field.estimated_heap_size() + filters.estimated_heap_size()
             }
@@ -362,7 +372,12 @@ impl Serializable for Expr {
             }
             flags::PLACEHOLDER => {
                 let idx = reader.read_varint_u32()?;
-                Ok(Expr::Placeholder(idx))
+                let kind = match reader.read_u8()? {
+                    0 => ParameterKind::NonArray,
+                    1 => ParameterKind::Array,
+                    tag => unreachable!("Invalid parameter kind tag: {tag}"),
+                };
+                Ok(Expr::Placeholder { index: idx, kind })
             }
             flags::ELEM_MATCH => {
                 let predicates = Vec::<Arc<Expr>>::read_from(reader, version)?;
@@ -436,9 +451,13 @@ impl Serializable for Expr {
                 writer.write_u8(flags::POSITIONAL_FIELD);
                 path.write_to(writer, version);
             }
-            Expr::Placeholder(idx) => {
+            Expr::Placeholder { index: idx, kind } => {
                 writer.write_u8(flags::PLACEHOLDER);
                 writer.write_varint_u32(*idx); // Write the placeholder index for extra safety
+                writer.write_u8(match kind {
+                    ParameterKind::NonArray => 0,
+                    ParameterKind::Array => 1,
+                });
             }
             Expr::ElemMatch(predicates) => {
                 writer.write_u8(flags::ELEM_MATCH);
@@ -1376,8 +1395,13 @@ impl Parameters {
 
     pub fn collect_parameter(&mut self, value: BsonValue) -> Arc<Expr> {
         let idx = self.parameters.len() as u32;
+        let kind = if matches!(&value.0, Bson::Array(_)) {
+            ParameterKind::Array
+        } else {
+            ParameterKind::NonArray
+        };
         self.parameters.push(value);
-        Arc::new(Expr::Placeholder(idx))
+        Arc::new(Expr::Placeholder { index: idx, kind })
     }
 
     pub fn get(&self, index: u32) -> &BsonValue {
@@ -1402,6 +1426,22 @@ mod tests {
     use crate::query::expr_fn::*;
     use bson::raw::CString;
     use bson::{Bson, Regex, doc};
+
+    #[test]
+    fn parameter_kinds_classify_and_round_trip() {
+        for (value, kind) in [
+            (Bson::Int32(1), ParameterKind::NonArray),
+            (Bson::Document(doc! {"a": 1}), ParameterKind::NonArray),
+            (Bson::Array(vec![]), ParameterKind::Array),
+            (Bson::Array(vec![Bson::Array(vec![])]), ParameterKind::Array),
+        ] {
+            let mut parameters = Parameters::new();
+            let expr = parameters.collect_parameter(value.clone().into());
+            assert_eq!(expr.as_ref(), &Expr::Placeholder { index: 0, kind });
+            assert_eq!(parameters.get(0), &BsonValue(value));
+            check_serialization_round_trip(expr, 1);
+        }
+    }
 
     #[test]
     fn test_get_path_value() {
@@ -1652,7 +1692,13 @@ mod tests {
         check_serialization_round_trip(Expr::AlwaysTrue, 1);
         check_serialization_round_trip(Expr::AlwaysFalse, 1);
         check_serialization_round_trip(Expr::Exists(true), 1);
-        check_serialization_round_trip(Expr::Placeholder(42), 1);
+        check_serialization_round_trip(
+            Expr::Placeholder {
+                index: 42,
+                kind: ParameterKind::NonArray,
+            },
+            1,
+        );
 
         // Field expressions
         check_serialization_round_trip(Expr::Field(vec!["a".into(), "b".into()]), 1);
@@ -1661,7 +1707,10 @@ mod tests {
         // Comparison
         let comparison = Expr::Comparison {
             operator: ComparisonOperator::Eq,
-            value: Arc::new(Expr::Placeholder(0)),
+            value: Arc::new(Expr::Placeholder {
+                index: 0,
+                kind: ParameterKind::NonArray,
+            }),
         };
         check_serialization_round_trip(comparison, 1);
 
@@ -1673,7 +1722,10 @@ mod tests {
             Arc::new(Expr::Exists(true)),
             Arc::new(Expr::Comparison {
                 operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(1)),
+                value: Arc::new(Expr::Placeholder {
+                    index: 1,
+                    kind: ParameterKind::NonArray,
+                }),
             }),
         ]);
         check_serialization_round_trip(and_expr, 1);
@@ -1682,7 +1734,10 @@ mod tests {
             Arc::new(Expr::Exists(false)),
             Arc::new(Expr::Comparison {
                 operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(2)),
+                value: Arc::new(Expr::Placeholder {
+                    index: 2,
+                    kind: ParameterKind::NonArray,
+                }),
             }),
         ]);
         check_serialization_round_trip(or_expr, 1);
@@ -1691,7 +1746,10 @@ mod tests {
             Arc::new(Expr::Exists(true)),
             Arc::new(Expr::Comparison {
                 operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(3)),
+                value: Arc::new(Expr::Placeholder {
+                    index: 3,
+                    kind: ParameterKind::NonArray,
+                }),
             }),
         ]);
         check_serialization_round_trip(nor_expr, 1);
@@ -1702,7 +1760,10 @@ mod tests {
             filters: vec![
                 Arc::new(Expr::Comparison {
                     operator: ComparisonOperator::Gt,
-                    value: Arc::new(Expr::Placeholder(4)),
+                    value: Arc::new(Expr::Placeholder {
+                        index: 4,
+                        kind: ParameterKind::NonArray,
+                    }),
                 }),
                 Arc::new(Expr::Exists(true)),
             ],
@@ -1710,24 +1771,36 @@ mod tests {
         check_serialization_round_trip(field_filters, 1);
 
         // Array expressions
-        let all_expr = Expr::All(Arc::new(Expr::Placeholder(5)));
+        let all_expr = Expr::All(Arc::new(Expr::Placeholder {
+            index: 5,
+            kind: crate::query::ParameterKind::NonArray,
+        }));
         check_serialization_round_trip(all_expr, 1);
 
         let elem_match_expr = Expr::ElemMatch(vec![Arc::new(Expr::Comparison {
             operator: ComparisonOperator::Gte,
-            value: Arc::new(Expr::Placeholder(6)),
+            value: Arc::new(Expr::Placeholder {
+                index: 6,
+                kind: ParameterKind::NonArray,
+            }),
         })]);
         check_serialization_round_trip(elem_match_expr, 1);
 
         // Type and Size
         let type_expr = Expr::Type {
-            bson_type: Arc::new(Expr::Placeholder(7)),
+            bson_type: Arc::new(Expr::Placeholder {
+                index: 7,
+                kind: ParameterKind::NonArray,
+            }),
             negated: true,
         };
         check_serialization_round_trip(type_expr, 1);
 
         let size_expr = Expr::Size {
-            size: Arc::new(Expr::Placeholder(8)),
+            size: Arc::new(Expr::Placeholder {
+                index: 8,
+                kind: ParameterKind::NonArray,
+            }),
             negated: false,
         };
         check_serialization_round_trip(size_expr, 1);

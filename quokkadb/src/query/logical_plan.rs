@@ -876,7 +876,7 @@ mod tests {
         let plan_arc = LogicalPlanBuilder::scan(32, None)
             .filter(Arc::new(Expr::Comparison {
                 operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Placeholder(0)),
+                value: placeholder(0),
             }))
             .project(Some(include(proj_fields([("a", proj_field())]))))
             .sort(Some(Arc::new(vec![sort_asc(field(["b"]))])))

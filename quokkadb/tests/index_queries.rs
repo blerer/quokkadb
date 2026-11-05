@@ -503,6 +503,71 @@ fn explain_observes_missing_collection_policy() {
 }
 
 #[test]
+fn array_bounds_match_collection_scans_and_separate_cached_plans() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("array_bounds").create_if_missing();
+    collection
+        .insert_many([
+            doc! {"_id": 1, "category": 1, "a": [1, 2]},
+            doc! {"_id": 2, "category": 1, "a": [[1, 2], 3]},
+            doc! {"_id": 3, "category": 1, "a": []},
+            doc! {"_id": 4, "category": 1, "a": [[]]},
+            doc! {"_id": 5, "category": 2, "a": [1, 2]},
+            doc! {"_id": 6, "category": 1, "a": 1},
+            doc! {"_id": 7, "category": 1, "a": [2, 3]},
+        ])
+        .unwrap();
+    let single = collection.create_index(doc! {"a": 1}).unwrap();
+    let compound = collection
+        .create_index(doc! {"category": 1, "a": 1})
+        .unwrap();
+    // No writes below: all parameter variants execute under the same schema version.
+    for (index, prefix) in [(single, false), (compound, true)] {
+        for operator in ["$eq", "$gt", "$gte", "$lt", "$lte"] {
+            for value in [
+                bson::bson!(1),
+                bson::bson!([1, 2]),
+                bson::bson!(1),
+                bson::bson!([]),
+                bson::bson!([[1, 2]]),
+            ] {
+                // Scalar equality exercises cache separation in both directions.
+                // Scalar ranges over empty arrays have separate index semantics.
+                if operator != "$eq" && !matches!(&value, bson::Bson::Array(_)) {
+                    continue;
+                }
+                let mut comparison = Document::new();
+                comparison.insert(operator, value);
+                let mut filter = doc! {"a": comparison};
+                if prefix {
+                    filter.insert("category", 1);
+                }
+                let expected = collection
+                    .find(filter.clone())
+                    .hint_collection_scan()
+                    .sort(doc! {"_id": 1})
+                    .execute_collect()
+                    .unwrap();
+                let actual = collection
+                    .find(filter.clone())
+                    .hint(index.clone())
+                    .sort(doc! {"_id": 1})
+                    .execute_collect()
+                    .unwrap();
+                assert_eq!(actual, expected, "filter: {filter:?}");
+                let automatic = collection
+                    .find(filter.clone())
+                    .sort(doc! {"_id": 1})
+                    .execute_collect()
+                    .unwrap();
+                assert_eq!(automatic, expected, "filter: {filter:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn multikey_sort_replans_and_matches_document_sort() {
     let directory = TempDir::new().unwrap();
     let db = common::open_db(directory.path());
@@ -539,6 +604,14 @@ fn multikey_sort_replans_and_matches_document_sort() {
                 if page {
                     indexed = indexed.skip(1).limit(2);
                     scanned = scanned.skip(1).limit(2);
+                }
+                if !filter.contains_key("a") {
+                    assert!(matches!(
+                        indexed.explain(),
+                        Err(Error::InvalidRequest(message))
+                            if message.contains("Cannot use hinted index")
+                    ));
+                    continue;
                 }
                 let explain = indexed.explain().unwrap();
                 assert!(explain_index_scan(&explain.root).is_some());

@@ -186,7 +186,7 @@ impl WriteExecutor {
 
     fn resolve_expr_value(&self, expr: &Expr, parameters: &Parameters) -> Option<BsonValue> {
         match expr {
-            Expr::Placeholder(idx) => Some(parameters.get(*idx).clone()),
+            Expr::Placeholder { index: idx, .. } => Some(parameters.get(*idx).clone()),
             _ => None,
         }
     }

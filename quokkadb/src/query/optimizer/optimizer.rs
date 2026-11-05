@@ -624,8 +624,8 @@ impl Optimizer {
                             _ => 3,
                         })
                     {
-                        let residual =
-                            compute_residual_filter(expr.clone(), &primary_key, position);
+                        let used_predicates = [(Arc::new(primary_key.clone()), position)];
+                        let residual = compute_residual_filter(expr.clone(), &used_predicates);
 
                         match sargable.as_ref() {
                             Expr::Comparison {
@@ -764,6 +764,7 @@ impl Optimizer {
             if hint.is_some_and(|hinted_index| hinted_index != index.id) {
                 continue;
             }
+            let is_hinted = hint.is_some();
 
             let index_fields = match &index.definition {
                 IndexDefinition::Regular(fields) => fields,
@@ -773,15 +774,9 @@ impl Optimizer {
                 build_index_scan_range_expr(index_fields, index.multikey_fields, filters)
             });
 
-            if let Some((range, used_fields)) = maybe_range {
+            if let Some((range, used_predicates)) = maybe_range {
                 let residual = filter.clone().and_then(|original_filter| {
-                    let mut residual = Some(original_filter);
-                    for (field, position) in used_fields {
-                        if let Some(current) = residual {
-                            residual = compute_residual_filter(current, field.as_ref(), position);
-                        }
-                    }
-                    residual
+                    compute_residual_filter(original_filter, &used_predicates)
                 });
 
                 candidates.push(self.create_index_scan_candidate(
@@ -796,9 +791,14 @@ impl Optimizer {
                 ));
             } else if req.order.as_ref().is_some_and(|order| {
                 index_scan_direction(index_fields, order.as_slice()).is_some()
-                    && (hint == Some(index.id)
-                        || index_sort_prefix_is_scalar(index.multikey_fields, order.len()))
-            }) {
+                    && index_sort_prefix_is_scalar(index.multikey_fields, order.len())
+            }) || hinted_index_can_use_unbounded_scan(
+                is_hinted,
+                filter,
+                req,
+                index_fields,
+                field_filters_map,
+            ) {
                 candidates.push(self.create_index_scan_candidate(
                     count_stats,
                     collection.id,
@@ -808,20 +808,6 @@ impl Optimizer {
                         tail: None,
                     },
                     filter.clone(),
-                    req,
-                    index_fields,
-                    index.multikey_fields,
-                ));
-            } else if hint == Some(index.id) && filter.is_none() && req.order.is_none() {
-                candidates.push(self.create_index_scan_candidate(
-                    count_stats,
-                    collection.id,
-                    index.id,
-                    IndexScanRangeExpr {
-                        equal_prefix: vec![],
-                        tail: None,
-                    },
-                    None,
                     req,
                     index_fields,
                     index.multikey_fields,
@@ -1091,13 +1077,79 @@ impl Optimizer {
     }
 }
 
+/// Determines whether an explicitly hinted index can be considered without a
+/// bounded key range.
+///
+/// A hinted index may be scanned in full when the query has neither a filter
+/// nor an ordering requirement. It may also be scanned without bounds when a
+/// predicate on an indexed field has an array-valued interval bound. Such a
+/// bound is not safe for a secondary-index range because the index stores
+/// expanded array elements while document filtering compares the complete
+/// array; the original predicate therefore remains as a residual filter.
+///
+/// Unhinted indexes are never allowed through this fallback; unbounded scans
+/// that provide the requested ordering are considered separately by the caller.
+fn hinted_index_can_use_unbounded_scan(
+    is_hinted: bool,
+    filter: &Option<Arc<Expr>>,
+    req: &ReqProps,
+    index_fields: &[OrderedIndexField],
+    field_filters_map: Option<&HashMap<&Expr, &Expr>>,
+) -> bool {
+    if !is_hinted {
+        return false;
+    }
+
+    if filter.is_none() && req.order.is_none() {
+        return true;
+    }
+
+    field_filters_map.is_some_and(|filters| index_has_array_bound_filter(index_fields, filters))
+}
+
+fn index_has_array_bound_filter(
+    index_fields: &[OrderedIndexField],
+    field_filters_map: &HashMap<&Expr, &Expr>,
+) -> bool {
+    index_fields.iter().any(|index_field| {
+        let field = Expr::Field((&index_field.path).into());
+        let Some(Expr::FieldFilters { filters, .. }) = field_filters_map.get(&field) else {
+            return false;
+        };
+
+        filters.iter().any(|predicate| {
+            matches!(predicate.as_ref(), Expr::Interval(interval) if interval_has_array_bound(interval))
+        })
+    })
+}
+
+fn interval_has_array_bound(interval: &Interval<Arc<Expr>>) -> bool {
+    use std::ops::{Bound, RangeBounds};
+    [interval.start_bound(), interval.end_bound()].into_iter().any(|bound| {
+        matches!(bound, Bound::Included(value) | Bound::Excluded(value)
+            if matches!(value.as_ref(), Expr::Placeholder { kind: crate::query::ParameterKind::Array, .. }))
+    })
+}
+
+/// Builds the tightest safe range for the leading fields of a compound index.
+///
+/// Bounds must form a contiguous index prefix: point intervals extend the
+/// equality prefix, while the first non-point interval becomes the tail range
+/// and ends bound construction. Predicates that cannot be represented safely by
+/// index keys, including array-valued bounds, remain available to the caller as
+/// residual filters. Once one indexed field is known to be multikey, a second
+/// multikey field is not bounded because independent predicates may match
+/// different array elements without `$elemMatch` correlation.
+///
+/// The returned field positions identify which predicates were consumed so the
+/// optimizer can remove exactly those predicates from the residual filter.
 fn build_index_scan_range_expr(
     index_fields: &[OrderedIndexField],
     multikey_fields: BitSet,
     field_filters_map: &HashMap<&Expr, &Expr>,
 ) -> Option<(IndexScanRangeExpr, Vec<(Arc<Expr>, usize)>)> {
     let mut equal_prefix = Vec::new();
-    let mut used_fields = Vec::new();
+    let mut used_predicates = Vec::new();
     let mut tail = None;
 
     let mut used_multikey_field = false;
@@ -1119,37 +1171,45 @@ fn build_index_scan_range_expr(
             break;
         };
 
-        let Some((position, selected_filter)) = filters
-            .iter()
-            .enumerate()
-            .filter(|(_, filter)| matches!(filter.as_ref(), Expr::Interval(_)))
-            .min_by_key(|(_, filter)| match filter.as_ref() {
-                Expr::Interval(interval) => !interval.is_point(),
-                _ => unreachable!(),
-            })
-        else {
+        let Some((position, interval)) = select_index_interval(filters) else {
             break;
         };
 
-        match selected_filter.as_ref() {
-            Expr::Interval(interval) if interval.is_point() => {
-                equal_prefix.push(interval.start_bound_value().unwrap().clone());
-                used_fields.push((field_expr, position));
-            }
-            Expr::Interval(interval) => {
-                tail = Some(interval.clone());
-                used_fields.push((field_expr, position));
-                break;
-            }
-            _ => break,
+        if interval.is_point() {
+            equal_prefix.push(interval.start_bound_value().unwrap().clone());
+            used_predicates.push((field_expr, position));
+        } else {
+            tail = Some(interval.clone());
+            used_predicates.push((field_expr, position));
+            break;
         }
     }
 
     if equal_prefix.is_empty() && tail.is_none() {
         None
     } else {
-        Some((IndexScanRangeExpr { equal_prefix, tail }, used_fields))
+        Some((IndexScanRangeExpr { equal_prefix, tail }, used_predicates))
     }
+}
+
+/// Selects the safest interval that can be used for an index bound.
+///
+/// Array-valued bounds are excluded because a secondary index stores expanded
+/// array elements, while the document filter may compare the complete array.
+/// Among the remaining intervals, point intervals are preferred over ranges so
+/// they can extend the compound index's equality prefix. The returned position
+/// identifies the original filter for residual-filter bookkeeping.
+fn select_index_interval(filters: &[Arc<Expr>]) -> Option<(usize, &Interval<Arc<Expr>>)> {
+    filters
+        .iter()
+        .enumerate()
+        .filter_map(|(position, filter)| match filter.as_ref() {
+            Expr::Interval(interval) if !interval_has_array_bound(interval) => {
+                Some((position, interval))
+            }
+            _ => None,
+        })
+        .min_by_key(|(_, interval)| !interval.is_point())
 }
 
 fn index_fields_as_sort_fields(index_fields: &[OrderedIndexField]) -> Vec<SortField> {
@@ -1201,12 +1261,11 @@ fn index_scan_direction(
 
 fn compute_residual_filter(
     original: Arc<Expr>,
-    used_field: &Expr,
-    used_position: usize,
+    used_predicates: &[(Arc<Expr>, usize)],
 ) -> Option<Arc<Expr>> {
-    let filters = match original.as_ref() {
+    let filters: &[Arc<Expr>] = match original.as_ref() {
         Expr::And(filters) => filters,
-        Expr::FieldFilters { .. } => &vec![original],
+        Expr::FieldFilters { .. } => std::slice::from_ref(&original),
         _ => unreachable!("Unexpected expression: {:?}", original),
     };
 
@@ -1214,12 +1273,20 @@ fn compute_residual_filter(
         .iter()
         .filter_map(|filter| {
             if let Expr::FieldFilters { field, filters } = filter.as_ref() {
-                if field.as_ref() == used_field {
-                    let mut residual_filters = filters.clone();
-                    residual_filters.remove(used_position);
+                let residual_filters: Vec<Arc<Expr>> = filters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, filter)| {
+                        let is_used = used_predicates.iter().any(|(used_field, used_position)| {
+                            field.as_ref() == used_field.as_ref() && position == *used_position
+                        });
+                        (!is_used).then(|| filter.clone())
+                    })
+                    .collect();
 
+                if residual_filters.len() != filters.len() {
                     return if residual_filters.is_empty() {
-                        // The only filter was used, so this part is gone.
+                        // All filters for this field were used.
                         None
                     } else {
                         // Keep the remaining filters for the used field.
@@ -1249,7 +1316,7 @@ fn is_sargable(expr: &Arc<Expr>) -> bool {
         Expr::Comparison {
             operator: ComparisonOperator::In,
             value,
-        } => matches!(value.as_ref(), Expr::Placeholder(_)),
+        } => matches!(value.as_ref(), Expr::Placeholder { .. }),
         Expr::Interval(_) => true,
         Expr::Exists(true) => true,
         _ => false,
@@ -1382,8 +1449,8 @@ mod optimizer_tests {
     use super::*;
     use crate::options::storage_quantity::StorageQuantity;
     use crate::query::expr_fn::{
-        and, eq, exists, field, field_filters, gt, gte, include, interval, lit, lte, ne,
-        placeholder, proj_field, proj_fields, within,
+        and, array_placeholder, eq, exists, field, field_filters, gt, gte, include, interval, lit,
+        lte, ne, placeholder, proj_field, proj_fields, within,
     };
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::storage::catalog::{CollectionBuilder, IndexBuilder};
@@ -1392,6 +1459,36 @@ mod optimizer_tests {
     use std::collections::BTreeMap;
 
     const COLLECTION: u32 = 10;
+
+    #[test]
+    fn test_compute_residual_filter_removes_multiple_predicates() {
+        let field_a = field(["a"]);
+        let field_b = field(["b"]);
+        let original = and([
+            field_filters(field_a.clone(), [eq(placeholder(0)), gt(placeholder(1))]),
+            field_filters(field_b.clone(), [gte(placeholder(2)), lte(placeholder(3))]),
+        ]);
+        let used_predicates = [(field_a, 0), (field_b, 1)];
+
+        let residual = compute_residual_filter(original, &used_predicates);
+
+        assert_eq!(
+            residual,
+            Some(and([
+                field_filters(field(["a"]), [gt(placeholder(1))]),
+                field_filters(field(["b"]), [gte(placeholder(2))]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_compute_residual_filter_removes_all_predicates_for_a_field() {
+        let field_a = field(["a"]);
+        let original = field_filters(field_a.clone(), [eq(placeholder(0)), gt(placeholder(1))]);
+        let used_predicates = [(field_a.clone(), 0), (field_a, 1)];
+
+        assert_eq!(compute_residual_filter(original, &used_predicates), None);
+    }
 
     #[test]
     fn test_compound_index_selects_points_and_preserves_other_predicates() {
@@ -1458,7 +1555,7 @@ mod optimizer_tests {
         let output = PhysicalPlan::Filter {
             input: Arc::new(PhysicalPlan::MultiPointSearch {
                 collection: COLLECTION,
-                keys: placeholder(1),
+                keys: array_placeholder(1),
                 direction: Direction::Forward,
                 filter: None,
                 projection: None,
@@ -1890,7 +1987,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
-            keys: placeholder(0),
+            keys: array_placeholder(0),
             direction: Direction::Forward,
             filter: None,
             projection: None,
@@ -1911,7 +2008,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
-            keys: placeholder(0),
+            keys: array_placeholder(0),
             direction: Direction::Reverse,
             filter: None,
             projection: None,
@@ -1938,7 +2035,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
-            keys: placeholder(0),
+            keys: array_placeholder(0),
             direction: Direction::Forward,
             filter: Some(residual_filter),
             projection: None,
@@ -2054,6 +2151,256 @@ mod optimizer_tests {
     }
 
     #[test]
+    fn hinted_index_unbounded_scan_condition_is_explicit() {
+        let index_fields = vec![OrderedIndexField::asc("a")];
+        let field = field(["a"]);
+        let array_filter = field_filters(
+            field.clone(),
+            [interval(Interval::closed(
+                array_placeholder(0),
+                array_placeholder(0),
+            ))],
+        );
+        let scalar_filter = field_filters(
+            field.clone(),
+            [interval(Interval::closed(placeholder(0), placeholder(0)))],
+        );
+        let array_filter_option = Some(array_filter.clone());
+        let scalar_filter_option = Some(scalar_filter.clone());
+        let array_filters = HashMap::from([(field.as_ref(), array_filter.as_ref())]);
+        let scalar_filters = HashMap::from([(field.as_ref(), scalar_filter.as_ref())]);
+        let req = ReqProps::default();
+
+        assert!(hinted_index_can_use_unbounded_scan(
+            true,
+            &array_filter_option,
+            &req,
+            &index_fields,
+            Some(&array_filters),
+        ));
+        assert!(!hinted_index_can_use_unbounded_scan(
+            false,
+            &array_filter_option,
+            &req,
+            &index_fields,
+            Some(&array_filters),
+        ));
+        assert!(!hinted_index_can_use_unbounded_scan(
+            true,
+            &scalar_filter_option,
+            &req,
+            &index_fields,
+            Some(&scalar_filters),
+        ));
+        assert!(hinted_index_can_use_unbounded_scan(
+            true,
+            &None,
+            &req,
+            &index_fields,
+            None,
+        ));
+    }
+
+    #[test]
+    fn hinted_unbounded_scan_rejects_sort_alone() {
+        let index_fields = vec![OrderedIndexField::asc("a")];
+        for sort_field in [SortField::asc(field(["a"])), SortField::desc(field(["a"]))] {
+            let req = ReqProps {
+                order: Some(vec![sort_field]),
+                ..ReqProps::default()
+            };
+            assert!(!hinted_index_can_use_unbounded_scan(
+                false,
+                &None,
+                &req,
+                &index_fields,
+                None,
+            ));
+            assert!(!hinted_index_can_use_unbounded_scan(
+                true,
+                &None,
+                &req,
+                &index_fields,
+                None,
+            ));
+        }
+
+        let req = ReqProps {
+            order: Some(vec![SortField::asc(field(["b"]))]),
+            ..ReqProps::default()
+        };
+        assert!(!hinted_index_can_use_unbounded_scan(
+            true,
+            &None,
+            &req,
+            &index_fields,
+            None,
+        ));
+    }
+
+    #[test]
+    fn select_index_interval_prefers_points_and_skips_array_bounds() {
+        let array_interval = interval(Interval::closed(array_placeholder(0), array_placeholder(0)));
+        let range_interval = interval(Interval::greater_than(placeholder(1)));
+        let point_interval = interval(Interval::closed(placeholder(2), placeholder(2)));
+
+        let all_intervals = [
+            array_interval.clone(),
+            range_interval.clone(),
+            point_interval.clone(),
+        ];
+        let selected = select_index_interval(&all_intervals).unwrap();
+        assert_eq!(selected.0, 2);
+        assert!(selected.1.is_point());
+
+        let intervals_without_point = [array_interval, range_interval];
+        let selected_without_point = select_index_interval(&intervals_without_point).unwrap();
+        assert_eq!(selected_without_point.0, 1);
+        assert!(!selected_without_point.1.is_point());
+
+        let array_only = interval(Interval::closed(array_placeholder(3), array_placeholder(3)));
+        assert!(select_index_interval(&[array_only]).is_none());
+    }
+
+    #[test]
+    fn test_array_bound_retains_safe_prefix_and_residual() {
+        for range in [false, true] {
+            let array = lit(Bson::Array(vec![Bson::Int32(1), Bson::Int32(2)]));
+            let input = LogicalPlanBuilder::scan(COLLECTION, None)
+                .filter(and([
+                    field_filters(field(["a"]), vec![eq(lit(5))]),
+                    field_filters(
+                        field(["b"]),
+                        vec![if range { gt(array) } else { eq(array) }],
+                    ),
+                ]))
+                .build_arc();
+            let output = PhysicalPlan::IndexScan {
+                collection: COLLECTION,
+                index: 1,
+                range: IndexScanRangeExpr {
+                    equal_prefix: vec![placeholder(0)],
+                    tail: None,
+                },
+                direction: Direction::Forward,
+                filter: Some(field_filters(
+                    field(["b"]),
+                    [interval(if range {
+                        Interval::greater_than(array_placeholder(1))
+                    } else {
+                        Interval::closed(array_placeholder(1), array_placeholder(1))
+                    })],
+                )),
+                projection: None,
+            };
+            check_optimization_with_metadata(
+                input,
+                &test_metadata_with_multikey_index(multikey_fields(&[1])),
+                output,
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_bound_falls_back_to_document_filter() {
+        for hinted in [false, true] {
+            let input = LogicalPlanBuilder::scan(COLLECTION, hinted.then_some(1))
+                .filter(field_filters(
+                    field(["a"]),
+                    vec![eq(lit(Bson::Array(vec![])))],
+                ))
+                .build_arc();
+            let filter = Some(field_filters(
+                field(["a"]),
+                [interval(Interval::closed(
+                    array_placeholder(0),
+                    array_placeholder(0),
+                ))],
+            ));
+            let output = if hinted {
+                PhysicalPlan::IndexScan {
+                    collection: COLLECTION,
+                    index: 1,
+                    range: IndexScanRangeExpr {
+                        equal_prefix: vec![],
+                        tail: None,
+                    },
+                    direction: Direction::Forward,
+                    filter,
+                    projection: None,
+                }
+            } else {
+                PhysicalPlan::CollectionScan {
+                    collection: COLLECTION,
+                    range: Interval::all(),
+                    direction: Direction::Forward,
+                    filter,
+                    projection: None,
+                }
+            };
+            check_optimization_with_metadata(
+                input,
+                &test_metadata_with_multikey_index(multikey_fields(&[0])),
+                output,
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_bound_uses_alternate_scalar_predicate() {
+        let input = LogicalPlanBuilder::scan(COLLECTION, None)
+            .filter(field_filters(
+                field(["a"]),
+                vec![eq(lit(Bson::Array(vec![Bson::Int32(1)]))), gt(lit(0))],
+            ))
+            .build_arc();
+        // Normalization orders the scalar bound before the array equality.
+        let output = PhysicalPlan::IndexScan {
+            collection: COLLECTION,
+            index: 1,
+            range: IndexScanRangeExpr {
+                equal_prefix: vec![],
+                tail: Some(Interval::greater_than(placeholder(0))),
+            },
+            direction: Direction::Forward,
+            filter: Some(field_filters(
+                field(["a"]),
+                [interval(Interval::closed(
+                    array_placeholder(1),
+                    array_placeholder(1),
+                ))],
+            )),
+            projection: None,
+        };
+        check_optimization_with_metadata(
+            input,
+            &test_metadata_with_multikey_index(multikey_fields(&[0])),
+            output,
+        );
+    }
+
+    #[test]
+    fn test_parameter_kind_separates_plan_hashes() {
+        let optimizer = Optimizer::new(&Options::default());
+        let hash = |value: Bson| {
+            let input = LogicalPlanBuilder::scan(COLLECTION, None)
+                .filter(field_filters(field(["a"]), vec![eq(lit(value))]))
+                .build_arc();
+            let (plan, _) = optimizer.parametrize(optimizer.normalize(input));
+            plan.compute_hash()
+        };
+        assert_eq!(hash(Bson::Int32(1)), hash(Bson::Int32(2)));
+        assert_eq!(
+            hash(Bson::Array(vec![])),
+            hash(Bson::Array(vec![Bson::Int32(1)]))
+        );
+        assert_ne!(
+            hash(Bson::Int32(1)),
+            hash(Bson::Array(vec![Bson::Int32(1)]))
+        );
+    }
+
+    #[test]
     fn test_multikey_sort_requires_document_sort() {
         for reverse in [false, true] {
             for bounded in [false, true] {
@@ -2071,6 +2418,15 @@ mod optimizer_tests {
                         input = input.sort(Some(sort_fields.clone()));
                         if limited {
                             input = input.limit(None, Some(2));
+                        }
+                        if hinted && !bounded {
+                            check_optimization_fail(
+                                input.build_arc(),
+                                &test_metadata_with_multikey_index(multikey_fields(&[0])),
+                                CountStats::default(),
+                                "Cannot use hinted index 'a_1_b_1_c_1_d_1' on collection 'test': no candidate scan can use it for this query",
+                            );
+                            continue;
                         }
                         let scan = if bounded || hinted {
                             PhysicalPlan::IndexScan {
@@ -2138,6 +2494,15 @@ mod optimizer_tests {
                         input = input.filter(field_filters(field(["a"]), vec![gt(lit(1))]));
                     }
                     let input = input.sort(Some(sort_fields.clone())).build_arc();
+                    if include_multikey && !bounded {
+                        check_optimization_fail(
+                            input,
+                            &test_metadata_with_multikey_index(multikey_fields(&[1])),
+                            CountStats::default(),
+                            "Cannot use hinted index 'a_1_b_1_c_1_d_1' on collection 'test': no candidate scan can use it for this query",
+                        );
+                        continue;
+                    }
                     let scan = PhysicalPlan::IndexScan {
                         collection: COLLECTION,
                         index: 1,
@@ -2659,7 +3024,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
-            keys: placeholder(0),
+            keys: array_placeholder(0),
             direction: Direction::Forward,
             filter: None,
             projection: None,

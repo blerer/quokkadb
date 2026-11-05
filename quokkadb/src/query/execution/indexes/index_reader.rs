@@ -275,7 +275,7 @@ enum BoundSide {
 
 fn resolve_bound_expr(expr: &Arc<Expr>, parameters: &Parameters) -> BsonValue {
     match expr.as_ref() {
-        Expr::Placeholder(idx) => parameters.get(*idx).clone(),
+        Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
         Expr::Literal(value) => value.clone(),
         _ => unreachable!(
             "Index scan bounds only support placeholders and literals: {:?}",

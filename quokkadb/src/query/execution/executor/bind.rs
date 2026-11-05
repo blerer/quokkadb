@@ -31,7 +31,7 @@ fn bind_key_bound_parameter(
 }
 
 pub(super) fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result<Vec<u8>> {
-    if let Expr::Placeholder(idx) = expr {
+    if let Expr::Placeholder { index: idx, .. } = expr {
         Ok(parameters.get(*idx).try_into_id_key()?)
     } else {
         unreachable!("Expecting placeholder but was: {:?}", expr);
@@ -39,7 +39,7 @@ pub(super) fn bind_key_parameter(expr: &Expr, parameters: &Parameters) -> Result
 }
 
 pub(super) fn bind_parameter(expr: &Expr, parameters: &Parameters) -> BsonValue {
-    if let Expr::Placeholder(idx) = expr {
+    if let Expr::Placeholder { index: idx, .. } = expr {
         parameters.get(*idx).clone()
     } else {
         unreachable!("Expecting placeholder but was: {:?}", expr)

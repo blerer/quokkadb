@@ -1,5 +1,6 @@
 use crate::query::{
-    BsonValue, ComparisonOperator, Expr, PathComponent, Projection, ProjectionExpr, SortField,
+    BsonValue, ComparisonOperator, Expr, ParameterKind, PathComponent, Projection, ProjectionExpr,
+    SortField,
 };
 use crate::util::interval::Interval;
 use std::sync::Arc;
@@ -17,7 +18,17 @@ pub fn lit(value: impl Into<BsonValue>) -> Arc<Expr> {
 }
 
 pub fn placeholder(idx: u32) -> Arc<Expr> {
-    Arc::new(Expr::Placeholder(idx))
+    Arc::new(Expr::Placeholder {
+        index: idx,
+        kind: ParameterKind::NonArray,
+    })
+}
+
+pub fn array_placeholder(idx: u32) -> Arc<Expr> {
+    Arc::new(Expr::Placeholder {
+        index: idx,
+        kind: ParameterKind::Array,
+    })
 }
 
 pub fn exists(exists: bool) -> Arc<Expr> {

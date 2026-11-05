@@ -193,7 +193,7 @@ fn to_value_filter_with_array_traversal(
         Expr::Comparison { operator, value } => {
             let operator = *operator;
             let comparison_value = match value.as_ref() {
-                Expr::Placeholder(idx) => parameters.get(*idx).clone(),
+                Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
                 Expr::Literal(val) => val.clone(),
                 _ => unreachable!(
                     "Comparison value must be a placeholder or a literal but was {:?}",
@@ -305,7 +305,7 @@ fn to_value_filter_with_array_traversal(
         // - If negated, matches documents where the field's BSON type does not match the specified type.
         Expr::Type { bson_type, negated } => {
             let type_spec = match bson_type.as_ref() {
-                Expr::Placeholder(idx) => parameters.get(*idx).clone(),
+                Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
                 Expr::Literal(val) => val.clone(),
                 _ => unreachable!("$type value must be a placeholder or literal"),
             };
@@ -328,7 +328,7 @@ fn to_value_filter_with_array_traversal(
         // - If negated, matches documents where the array field does not have the specified size.
         Expr::Size { size, negated } => {
             let size = match size.as_ref() {
-                Expr::Placeholder(idx) => match &parameters.get(*idx).0 {
+                Expr::Placeholder { index: idx, .. } => match &parameters.get(*idx).0 {
                     Bson::Int32(i) => *i as usize,
                     Bson::Int64(i) => *i as usize,
                     _ => unreachable!("$size must be an integer"),
@@ -352,7 +352,7 @@ fn to_value_filter_with_array_traversal(
         // - The `$all` value must be an array placeholder.
         Expr::All(value) => {
             let comparison_array = match value.as_ref() {
-                Expr::Placeholder(idx) => match &parameters.get(*idx).0 {
+                Expr::Placeholder { index: idx, .. } => match &parameters.get(*idx).0 {
                     Bson::Array(arr) => arr.clone(),
                     _ => unreachable!("$all value must be an array placeholder"),
                 },
@@ -432,7 +432,7 @@ fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool {
 
 fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) -> Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
-        Expr::Placeholder(idx) => parameters.get(*idx).clone(),
+        Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
         Expr::Literal(val) => val.clone(),
         _ => unreachable!("Interval bound must be a placeholder or literal"),
     };
@@ -502,7 +502,7 @@ fn to_path_filter(
 ) -> Box<dyn Fn(&Document) -> bool + Send + Sync> {
     if let Expr::All(value) = expr.as_ref() {
         let values = match value.as_ref() {
-            Expr::Placeholder(index) => &parameters.get(*index).0,
+            Expr::Placeholder { index, .. } => &parameters.get(*index).0,
             Expr::Literal(value) => &value.0,
             _ => unreachable!("$all requires a literal or placeholder"),
         };
