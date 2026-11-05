@@ -1141,8 +1141,10 @@ fn interval_has_array_bound(interval: &Interval<Arc<Expr>>) -> bool {
 /// multikey field is not bounded because independent predicates may match
 /// different array elements without `$elemMatch` correlation.
 ///
-/// The returned field positions identify which predicates were consumed so the
-/// optimizer can remove exactly those predicates from the residual filter.
+/// The returned field positions identify predicates fully satisfied by the bounds
+/// and removable from the residual filter. Multikey range predicates still need
+/// document rechecking: an empty array's stored key may pass a scalar bound even
+/// though the array has no matching element.
 fn build_index_scan_range_expr(
     index_fields: &[OrderedIndexField],
     multikey_fields: BitSet,
@@ -1180,7 +1182,9 @@ fn build_index_scan_range_expr(
             used_predicates.push((field_expr, position));
         } else {
             tail = Some(interval.clone());
-            used_predicates.push((field_expr, position));
+            if !multikey_fields.contains(field_position as u8) {
+                used_predicates.push((field_expr, position));
+            }
             break;
         }
     }
@@ -2365,10 +2369,10 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["a"]),
-                [interval(Interval::closed(
-                    array_placeholder(1),
-                    array_placeholder(1),
-                ))],
+                [
+                    interval(Interval::greater_than(placeholder(0))),
+                    interval(Interval::closed(array_placeholder(1), array_placeholder(1))),
+                ],
             )),
             projection: None,
         };
@@ -2437,7 +2441,12 @@ mod optimizer_tests {
                                     tail: bounded.then(|| Interval::greater_than(placeholder(0))),
                                 },
                                 direction: Direction::Forward,
-                                filter: None,
+                                filter: bounded.then(|| {
+                                    field_filters(
+                                        field(["a"]),
+                                        [interval(Interval::greater_than(placeholder(0)))],
+                                    )
+                                }),
                                 projection: None,
                             }
                         } else {
@@ -2697,6 +2706,10 @@ mod optimizer_tests {
             },
             direction: Direction::Forward,
             filter: Some(and([
+                field_filters(
+                    field(["b"]),
+                    [interval(Interval::greater_than(placeholder(1)))],
+                ),
                 field_filters(
                     field(["c"]),
                     [interval(Interval::closed(placeholder(2), placeholder(2)))],

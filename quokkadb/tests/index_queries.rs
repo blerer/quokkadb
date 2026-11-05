@@ -503,6 +503,161 @@ fn explain_observes_missing_collection_policy() {
 }
 
 #[test]
+fn multikey_independent_predicates_and_elem_match_reach_executor() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("array_predicates").create_if_missing();
+    collection
+        .insert_many([
+            doc! {"_id": 1, "group": 1, "a": [1, 2, 10, 10]},
+            doc! {"_id": 2, "group": 1, "a": [2, 8]},
+            doc! {"_id": 3, "group": 1, "a": [6, 7]},
+            doc! {"_id": 4, "group": 1, "a": [1, 2]},
+            doc! {"_id": 5, "group": 2, "a": [1, 10]},
+        ])
+        .unwrap();
+    let index = collection.create_index(doc! {"group": 1, "a": 1}).unwrap();
+    for (filter, ids) in [
+        (doc! {"group": 1, "a": {"$gt": 5, "$lt": 3}}, vec![1, 2]),
+        (
+            doc! {"group": 1, "a": {"$elemMatch": {"$gt": 5, "$lt": 3}}},
+            vec![],
+        ),
+        (
+            doc! {"group": 1, "a": {"$elemMatch": {"$gt": 5, "$lt": 9}}},
+            vec![2, 3],
+        ),
+    ] {
+        assert_multikey_query_results(&collection, &index, filter, &ids);
+    }
+
+    // Without a sort, pagination consumes the index iterator directly. Document 1
+    // has multiple matching keys but must consume only one position in the page.
+    let page = collection
+        .find(doc! {"group": 1, "a": {"$gt": 5, "$lt": 3}})
+        .hint(index)
+        .skip(1)
+        .limit(1)
+        .execute_collect()
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].get_i32("_id").unwrap(), 2);
+}
+
+#[test]
+fn multikey_shared_paths_preserve_element_correlation() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("shared_paths").create_if_missing();
+    collection
+        .insert_many([
+            doc! {"_id": 1, "group": 1, "items": [{"x": 1, "y": 0}, {"x": 0, "y": 2}]},
+            doc! {"_id": 2, "group": 1, "items": [{"x": 1, "y": 2}, {"x": 1, "y": 2}]},
+            doc! {"_id": 3, "group": 1, "items": [{"x": 1, "y": 0}]},
+            doc! {"_id": 4, "group": 2, "items": [{"x": 1, "y": 2}]},
+        ])
+        .unwrap();
+    let index = collection
+        .create_index(doc! {"group": 1, "items.x": 1, "items.y": 1})
+        .unwrap();
+    assert_multikey_query_results(
+        &collection,
+        &index,
+        doc! {"group": 1, "items.x": 1, "items.y": 2},
+        &[1, 2],
+    );
+    assert_multikey_query_results(
+        &collection,
+        &index,
+        doc! {"group": 1, "items": {"$elemMatch": {"x": 1, "y": 2}}},
+        &[2],
+    );
+}
+
+#[test]
+fn multikey_empty_missing_and_null_values_match_collection_scans() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("array_nulls").create_if_missing();
+    collection
+        .insert_many([
+            doc! {"_id": 1, "group": 1},
+            doc! {"_id": 2, "group": 1, "a": null},
+            doc! {"_id": 3, "group": 1, "a": []},
+            doc! {"_id": 4, "group": 1, "a": [null, 1]},
+            doc! {"_id": 5, "group": 1, "a": [[]]},
+            doc! {"_id": 6, "group": 1, "a": [1]},
+        ])
+        .unwrap();
+    let index = collection.create_index(doc! {"group": 1, "a": 1}).unwrap();
+    for (predicate, ids) in [
+        (doc! {"$eq": null}, vec![1, 2, 4]),
+        (doc! {"$eq": []}, vec![3, 5]),
+        (doc! {"$exists": false}, vec![1]),
+        (doc! {"$exists": true}, vec![2, 3, 4, 5, 6]),
+    ] {
+        assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": predicate}, &ids);
+    }
+}
+
+// Exercise parsing, normalization, parameterization, planning, and execution through
+// the public API. Explicit IDs prevent two access paths sharing a bug from passing.
+fn assert_multikey_query_results(
+    collection: &quokkadb::Collection,
+    index: &str,
+    filter: Document,
+    expected_ids: &[i32],
+) {
+    for direction in [1, -1] {
+        let mut ordered_ids = expected_ids.to_vec();
+        if direction == -1 {
+            ordered_ids.reverse();
+        }
+        for page in [false, true] {
+            let mut indexed = collection
+                .find(filter.clone())
+                .hint(index.to_owned())
+                .sort(doc! {"_id": direction});
+            let mut scanned = collection
+                .find(filter.clone())
+                .hint_collection_scan()
+                .sort(doc! {"_id": direction});
+            let mut automatic = collection
+                .find(filter.clone())
+                .sort(doc! {"_id": direction});
+            let expected: Vec<_> = if page {
+                indexed = indexed.skip(1).limit(2);
+                scanned = scanned.skip(1).limit(2);
+                automatic = automatic.skip(1).limit(2);
+                ordered_ids.iter().copied().skip(1).take(2).collect()
+            } else {
+                ordered_ids.clone()
+            };
+            assert!(explain_index_scan(&indexed.explain().unwrap().root).is_some());
+            let actual = indexed.execute_collect().unwrap();
+            let ids: Vec<_> = actual
+                .iter()
+                .map(|doc| doc.get_i32("_id").unwrap())
+                .collect();
+            assert_eq!(
+                ids, expected,
+                "filter: {filter:?}, direction: {direction}, page: {page}"
+            );
+            assert_eq!(
+                actual,
+                scanned.execute_collect().unwrap(),
+                "filter: {filter:?}"
+            );
+            assert_eq!(
+                actual,
+                automatic.execute_collect().unwrap(),
+                "filter: {filter:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn array_bounds_match_collection_scans_and_separate_cached_plans() {
     let directory = TempDir::new().unwrap();
     let db = common::open_db(directory.path());
@@ -532,11 +687,6 @@ fn array_bounds_match_collection_scans_and_separate_cached_plans() {
                 bson::bson!([]),
                 bson::bson!([[1, 2]]),
             ] {
-                // Scalar equality exercises cache separation in both directions.
-                // Scalar ranges over empty arrays have separate index semantics.
-                if operator != "$eq" && !matches!(&value, bson::Bson::Array(_)) {
-                    continue;
-                }
                 let mut comparison = Document::new();
                 comparison.insert(operator, value);
                 let mut filter = doc! {"a": comparison};
