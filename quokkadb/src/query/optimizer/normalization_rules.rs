@@ -93,6 +93,7 @@
 //!
 //! An `OR` containing a residual predicate remains residual as a whole, so pushdown does not
 //! change the query's boolean or array semantics.
+use crate::query::QueryEndpoint;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter, transform_up_filter};
 use crate::query::tree_node::TreeNode;
 use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr};
@@ -442,13 +443,22 @@ impl CombineComparisonsToInterval {
                         // We convert only the operators that are shape stable. Even if $in, $nin and $ne
                         // could be converted to a set of intervals, converting them would lead to a combinatorial explosion
                         // of shapes.
-                        ComparisonOperator::Eq => {
-                            Some(Interval::closed(value.clone(), value.clone()))
+                        ComparisonOperator::Eq => Some(Interval::closed(
+                            QueryEndpoint::Value(value.clone()),
+                            QueryEndpoint::Value(value.clone()),
+                        )),
+                        ComparisonOperator::Gt => {
+                            Some(Interval::greater_than(QueryEndpoint::Value(value.clone())))
                         }
-                        ComparisonOperator::Gt => Some(Interval::greater_than(value.clone())),
-                        ComparisonOperator::Gte => Some(Interval::at_least(value.clone())),
-                        ComparisonOperator::Lt => Some(Interval::less_than(value.clone())),
-                        ComparisonOperator::Lte => Some(Interval::at_most(value.clone())),
+                        ComparisonOperator::Gte => {
+                            Some(Interval::at_least(QueryEndpoint::Value(value.clone())))
+                        }
+                        ComparisonOperator::Lt => {
+                            Some(Interval::less_than(QueryEndpoint::Value(value.clone())))
+                        }
+                        ComparisonOperator::Lte => {
+                            Some(Interval::at_most(QueryEndpoint::Value(value.clone())))
+                        }
                         _ => None,
                     };
 
@@ -651,7 +661,7 @@ impl CoalesceSameFieldDisjunctions {
             }
         }
         intervals.sort();
-        let mut merged: Vec<Interval<Arc<Expr>>> = Vec::new();
+        let mut merged: Vec<Interval<QueryEndpoint<Arc<Expr>>>> = Vec::new();
         for interval in intervals {
             if let Some(previous) = merged.last_mut()
                 && let Some(union) = previous.union(&interval)
@@ -798,7 +808,10 @@ fn predicate_requires_value(expr: &Expr) -> bool {
         Expr::Interval(interval) => {
             !interval.is_point()
                 || !matches!(
-                    interval.start_bound_value().as_deref(),
+                    interval
+                        .start_bound_value()
+                        .as_ref()
+                        .map(|endpoint| endpoint.value().as_ref()),
                     Some(Expr::Literal(BsonValue(Bson::Null)))
                 )
         }
@@ -811,13 +824,13 @@ fn predicate_requires_value(expr: &Expr) -> bool {
     }
 }
 
-fn interval_has_numeric_bounds(interval: &Interval<Arc<Expr>>) -> bool {
+fn interval_has_numeric_bounds(interval: &Interval<QueryEndpoint<Arc<Expr>>>) -> bool {
     [interval.start_bound_value(), interval.end_bound_value()]
         .into_iter()
         .flatten()
         .all(|bound| {
             matches!(
-                bound.as_ref(),
+                bound.value().as_ref(),
                 Expr::Literal(BsonValue(
                     Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_)
                 ))
@@ -1135,6 +1148,7 @@ fn is_pushable_leaf_filter(expr: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::QueryEndpoint;
     use crate::query::expr_fn::*;
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::query::{PathComponent, ProjectionExpr};
@@ -1378,10 +1392,22 @@ mod tests {
     #[test]
     fn conjunction_removes_only_containing_numeric_intervals() {
         for (weaker, stronger) in [
-            (Interval::greater_than(lit(5)), Interval::at_least(lit(10))),
-            (Interval::at_least(lit(5)), Interval::greater_than(lit(5))),
-            (Interval::at_most(lit(5)), Interval::less_than(lit(5))),
-            (Interval::at_least(lit(5)), Interval::at_least(lit(5_i64))),
+            (
+                Interval::greater_than(QueryEndpoint::Value(lit(5))),
+                Interval::at_least(QueryEndpoint::Value(lit(10))),
+            ),
+            (
+                Interval::at_least(QueryEndpoint::Value(lit(5))),
+                Interval::greater_than(QueryEndpoint::Value(lit(5))),
+            ),
+            (
+                Interval::at_most(QueryEndpoint::Value(lit(5))),
+                Interval::less_than(QueryEndpoint::Value(lit(5))),
+            ),
+            (
+                Interval::at_least(QueryEndpoint::Value(lit(5))),
+                Interval::at_least(QueryEndpoint::Value(lit(5_i64))),
+            ),
         ] {
             let stronger = interval(stronger);
             check_expr_transformation(
@@ -1407,8 +1433,16 @@ mod tests {
             field_filters(field(["a"]), [size(lit(2), false)]),
         ]);
         let expected = SimplifyLogicalOperators::simplify_or(&[
-            field_filters(field(["a"]), [interval(Interval::less_than(lit(5)))]),
-            field_filters(field(["a"]), [interval(Interval::greater_than(lit(8)))]),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::less_than(QueryEndpoint::Value(lit(5))))],
+            ),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                    8,
+                ))))],
+            ),
             field_filters(field(["a"]), [within(lit(vec![1, 2, 7]))]),
             field_filters(field(["a"]), [size(lit(2), false)]),
         ]);
@@ -1425,15 +1459,26 @@ mod tests {
             ]),
             field_filters(field(["a"]), [within(lit(vec![1]))]),
         );
-        let left = field_filters(field(["a"]), [interval(Interval::less_than(lit(5)))]);
-        let right = field_filters(field(["a"]), [interval(Interval::greater_than(lit(5)))]);
+        let left = field_filters(
+            field(["a"]),
+            [interval(Interval::less_than(QueryEndpoint::Value(lit(5))))],
+        );
+        let right = field_filters(
+            field(["a"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                5,
+            ))))],
+        );
         let disjoint = or([left.clone(), right]);
         check_expr_transformation(CoalesceSameFieldDisjunctions, disjoint.clone(), disjoint);
         check_expr_transformation(
             CoalesceSameFieldDisjunctions,
             or([
                 left,
-                field_filters(field(["a"]), [interval(Interval::at_least(lit(5)))]),
+                field_filters(
+                    field(["a"]),
+                    [interval(Interval::at_least(QueryEndpoint::Value(lit(5))))],
+                ),
             ]),
             field_filters(field(["a"]), [interval(Interval::all())]),
         );
@@ -1443,7 +1488,10 @@ mod tests {
     fn disjunction_presence_subsumes_only_present_alternatives() {
         let null = field_filters(
             field(["a"]),
-            [interval(Interval::closed(lit(Bson::Null), lit(Bson::Null)))],
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(Bson::Null)),
+                QueryEndpoint::Value(lit(Bson::Null)),
+            ))],
         );
         let present = field_filters(field(["a"]), [exists(true)]);
         let expected = SimplifyLogicalOperators::simplify_or(&[null.clone(), present.clone()]);
@@ -1452,7 +1500,12 @@ mod tests {
             or([
                 null,
                 present,
-                field_filters(field(["a"]), [interval(Interval::greater_than(lit(5)))]),
+                field_filters(
+                    field(["a"]),
+                    [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                        5,
+                    ))))],
+                ),
             ]),
             expected,
         );
@@ -1711,7 +1764,13 @@ mod tests {
 
     #[test]
     fn test_push_down_simple_filter() {
-        let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let filter = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
@@ -1731,7 +1790,13 @@ mod tests {
 
     #[test]
     fn test_push_down_filter_preserves_scan_hint() {
-        let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let filter = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let plan = LogicalPlanBuilder::scan(123, Some(17))
             .filter(filter.clone())
             .build_arc();
@@ -1750,8 +1815,13 @@ mod tests {
 
     #[test]
     fn test_push_down_partial_and() {
-        let pushable_filter =
-            field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let pushable_filter = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let residual_filter = field_filters(field(["b"]), [size(lit(2), false)]);
         let filter = and([pushable_filter.clone(), residual_filter.clone()]);
         let plan = LogicalPlanBuilder::scan(123, None)
@@ -1780,8 +1850,19 @@ mod tests {
 
     #[test]
     fn test_push_down_or_all_pushable() {
-        let filter1 = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
-        let filter2 = field_filters(field(["b"]), [interval(Interval::greater_than(lit(10)))]);
+        let filter1 = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
+        let filter2 = field_filters(
+            field(["b"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                10,
+            ))))],
+        );
         let filter = or([filter1.clone(), filter2.clone()]);
         let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
@@ -1965,7 +2046,10 @@ mod tests {
         let filter = field_filters(
             field(["a"]),
             [
-                interval(Interval::closed(lit(1), lit(1))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(1)),
+                    QueryEndpoint::Value(lit(1)),
+                )),
                 size(lit(2), false),
             ],
         );
@@ -1976,7 +2060,13 @@ mod tests {
         let rule = PushDownFiltersToScan {};
         let normalized_plan = rule.apply(plan);
 
-        let pushable = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let pushable = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let residual = field_filters(field(["a"]), [size(lit(2), false)]);
 
         let expected_plan = {
@@ -2047,9 +2137,26 @@ mod tests {
 
     #[test]
     fn test_push_down_or_unlocked_by_distribution() {
-        let a_eq = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
-        let b_gt = field_filters(field(["b"]), [interval(Interval::greater_than(lit(2)))]);
-        let c_eq = field_filters(field(["c"]), [interval(Interval::closed(lit(3), lit(3)))]);
+        let a_eq = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
+        let b_gt = field_filters(
+            field(["b"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                2,
+            ))))],
+        );
+        let c_eq = field_filters(
+            field(["c"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(3)),
+                QueryEndpoint::Value(lit(3)),
+            ))],
+        );
 
         // OR(AND(A, B), C) which is pushable after distribution
         let filter = or([and([a_eq.clone(), b_gt.clone()]), c_eq.clone()]);
@@ -2084,9 +2191,20 @@ mod tests {
 
     #[test]
     fn test_partial_push_down_or_unlocked_by_distribution() {
-        let pushable_a = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let pushable_a = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let non_pushable_x = field_filters(field(["x"]), [size(lit(2), false)]);
-        let pushable_b = field_filters(field(["b"]), [interval(Interval::greater_than(lit(10)))]);
+        let pushable_b = field_filters(
+            field(["b"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                10,
+            ))))],
+        );
 
         // OR(AND(A, X), B) -> AND(OR(A, B), OR(X, B))
         let filter = or([
@@ -2229,7 +2347,13 @@ mod tests {
 
     #[test]
     fn test_push_down_for_literal_comparison() {
-        let filter = field_filters(field(["a"]), [interval(Interval::closed(lit(0), lit(0)))]);
+        let filter = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(0)),
+                QueryEndpoint::Value(lit(0)),
+            ))],
+        );
         let plan = LogicalPlanBuilder::scan(123, None)
             .filter(filter.clone())
             .build_arc();
@@ -2254,8 +2378,8 @@ mod tests {
         let transformed = field_filters(
             field(["a"]),
             [
-                interval(Interval::less_than(lit(10))),
-                interval(Interval::greater_than(lit(5))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(10)))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
             ],
         );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
@@ -2265,8 +2389,8 @@ mod tests {
         let transformed = field_filters(
             field(["a"]),
             [
-                interval(Interval::at_most(lit(10))),
-                interval(Interval::at_least(lit(5))),
+                interval(Interval::at_most(QueryEndpoint::Value(lit(10)))),
+                interval(Interval::at_least(QueryEndpoint::Value(lit(5)))),
             ],
         );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
@@ -2276,8 +2400,8 @@ mod tests {
         let transformed = field_filters(
             field(["a"]),
             [
-                interval(Interval::less_than(lit(3))),
-                interval(Interval::greater_than(lit(5))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(3)))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
             ],
         );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
@@ -2287,15 +2411,21 @@ mod tests {
         let transformed = field_filters(
             field(["a"]),
             [
-                interval(Interval::greater_than(lit(5))),
-                interval(Interval::closed(lit(7), lit(7))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(7)),
+                    QueryEndpoint::Value(lit(7)),
+                )),
             ],
         );
         check_expr_transformation(CombineComparisonsToInterval {}, original, transformed);
 
         // a > 5 AND a != 7 => remains as is, but a > 5 becomes interval
         let original = field_filters(field(["a"]), [gt(lit(5)), ne(lit(7))]);
-        let mut filters = vec![ne(lit(7)), interval(Interval::greater_than(lit(5)))];
+        let mut filters = vec![
+            ne(lit(7)),
+            interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
+        ];
         filters.sort();
         let transformed = Arc::new(Expr::FieldFilters {
             field: field(["a"]),
@@ -2331,14 +2461,17 @@ mod tests {
         let filter_a = field_filters(
             field(["a"]),
             [
-                interval(Interval::less_than(lit(10))),
-                interval(Interval::at_least(lit(5))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(10)))),
+                interval(Interval::at_least(QueryEndpoint::Value(lit(5)))),
             ],
         );
         // Equality on "b" becomes a point interval.
         let filter_b = field_filters(
             field(["b"]),
-            [interval(Interval::closed(lit(100), lit(100)))],
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(100)),
+                QueryEndpoint::Value(lit(100)),
+            ))],
         );
 
         // The final expression should be an AND of the two, in canonical (sorted) order.
@@ -2400,8 +2533,8 @@ mod tests {
             field(["a"]),
             [
                 within(lit(vec![1, 5, 10, 12])),
-                interval(Interval::at_most(lit(10))),
-                interval(Interval::greater_than(lit(3))),
+                interval(Interval::at_most(QueryEndpoint::Value(lit(10)))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(3)))),
             ],
         );
         let expected_plan = scan_with_filter(expected_filter);
@@ -2422,7 +2555,7 @@ mod tests {
             field(["a"]),
             [
                 within(lit(vec![1, 2, 3])),
-                interval(Interval::greater_than(lit(5))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
             ],
         ));
         assert_eq!(final_plan, expected_plan);
@@ -2442,8 +2575,12 @@ mod tests {
 
         // With Interval
         let original_interval = field_filters(field(["a"]), [exists(true), gt(lit(5))]);
-        let transformed_interval =
-            field_filters(field(["a"]), [interval(Interval::greater_than(lit(5)))]);
+        let transformed_interval = field_filters(
+            field(["a"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                5,
+            ))))],
+        );
         check_expr_transformation(rules.clone(), original_interval, transformed_interval);
     }
 
@@ -2484,7 +2621,7 @@ mod tests {
             field(["a"]),
             [
                 within(lit(vec![1, 6, 10])),
-                interval(Interval::greater_than(lit(5))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
             ],
         );
         check_expr_transformation(rules.clone(), original, transformed);
@@ -2495,7 +2632,7 @@ mod tests {
             field(["a"]),
             [
                 within(lit(vec![1, 6, 10])),
-                interval(Interval::at_most(lit(6))),
+                interval(Interval::at_most(QueryEndpoint::Value(lit(6)))),
             ],
         );
         check_expr_transformation(rules, original, transformed);
@@ -2522,7 +2659,10 @@ mod tests {
             field_filters(field(["a"]), [lt(lit(5))]),
             field_filters(field(["a"]), [lt(lit(10))]),
         ]);
-        let transformed = field_filters(field(["a"]), [interval(Interval::less_than(lit(10)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::less_than(QueryEndpoint::Value(lit(10))))],
+        );
         check_expr_transformation(rules.clone(), original, transformed);
 
         // OR(a > 5, a > 2) => a > 2
@@ -2530,21 +2670,52 @@ mod tests {
             field_filters(field(["a"]), [gt(lit(5))]),
             field_filters(field(["a"]), [gt(lit(2))]),
         ]);
-        let transformed = field_filters(field(["a"]), [interval(Interval::greater_than(lit(2)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                2,
+            ))))],
+        );
         check_expr_transformation(rules.clone(), original, transformed);
 
         // OR([1, 5], [3, 7]) => [1, 7]
         let original = or([
-            field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(5)))]),
-            field_filters(field(["a"]), [interval(Interval::closed(lit(3), lit(7)))]),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::closed(
+                    QueryEndpoint::Value(lit(1)),
+                    QueryEndpoint::Value(lit(5)),
+                ))],
+            ),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::closed(
+                    QueryEndpoint::Value(lit(3)),
+                    QueryEndpoint::Value(lit(7)),
+                ))],
+            ),
         ]);
-        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(1), lit(7)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(7)),
+            ))],
+        );
         check_expr_transformation(rules.clone(), original, transformed);
 
         // Disjoint intervals are not coalesced
         let original = or([
-            field_filters(field(["a"]), [interval(Interval::at_most(lit(2)))]),
-            field_filters(field(["a"]), [interval(Interval::greater_than(lit(3)))]),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::at_most(QueryEndpoint::Value(lit(2))))],
+            ),
+            field_filters(
+                field(["a"]),
+                [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                    3,
+                ))))],
+            ),
         ]);
         check_expr_transformation(rules.clone(), original.clone(), original);
     }
@@ -2579,7 +2750,10 @@ mod tests {
     #[test]
     fn test_coalesce_no_change() {
         // A single interval should not be changed.
-        let original_interval = field_filters(field(["a"]), [interval(Interval::at_least(lit(5)))]);
+        let original_interval = field_filters(
+            field(["a"]),
+            [interval(Interval::at_least(QueryEndpoint::Value(lit(5))))],
+        );
         check_expr_transformation(
             CoalesceFieldPredicates {},
             original_interval.clone(),
@@ -2596,21 +2770,39 @@ mod tests {
         let original = field_filters(
             field(["a"]),
             [
-                interval(Interval::greater_than(lit(5))),
-                interval(Interval::closed(lit(7), lit(7))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(7)),
+                    QueryEndpoint::Value(lit(7)),
+                )),
             ],
         );
-        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(7), lit(7)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(7)),
+                QueryEndpoint::Value(lit(7)),
+            ))],
+        );
         check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
 
         let original = field_filters(
             field(["a"]),
             [
-                interval(Interval::at_most(lit(10))),
-                interval(Interval::closed(lit(7), lit(7))),
+                interval(Interval::at_most(QueryEndpoint::Value(lit(10)))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(7)),
+                    QueryEndpoint::Value(lit(7)),
+                )),
             ],
         );
-        let transformed = field_filters(field(["a"]), [interval(Interval::closed(lit(7), lit(7)))]);
+        let transformed = field_filters(
+            field(["a"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(7)),
+                QueryEndpoint::Value(lit(7)),
+            ))],
+        );
         check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
     }
 
@@ -2619,16 +2811,22 @@ mod tests {
         let original = field_filters(
             field(["a"]),
             [
-                interval(Interval::greater_than(lit(5))),
-                interval(Interval::less_than(lit(3))),
-                interval(Interval::closed(lit(7), lit(7))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(3)))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(7)),
+                    QueryEndpoint::Value(lit(7)),
+                )),
             ],
         );
         let transformed = field_filters(
             field(["a"]),
             [
-                interval(Interval::less_than(lit(3))),
-                interval(Interval::closed(lit(7), lit(7))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(3)))),
+                interval(Interval::closed(
+                    QueryEndpoint::Value(lit(7)),
+                    QueryEndpoint::Value(lit(7)),
+                )),
             ],
         );
         check_expr_transformation(CoalesceFieldPredicates {}, original, transformed);
@@ -2654,7 +2852,13 @@ mod tests {
 
         let filter_a = field_filters(field(["a"]), [not(gt(lit(10)))]);
         let filter_b = field_filters(field(["b"]), [not(lt(lit(2))), not(lt(lit(5)))]);
-        let filter_c = field_filters(field(["c"]), [interval(Interval::closed(lit(1), lit(1)))]);
+        let filter_c = field_filters(
+            field(["c"]),
+            [interval(Interval::closed(
+                QueryEndpoint::Value(lit(1)),
+                QueryEndpoint::Value(lit(1)),
+            ))],
+        );
         let expected_plan = Arc::new(LogicalPlan::Filter {
             input: Arc::new(LogicalPlan::CollectionScan {
                 collection: 22,
@@ -2686,8 +2890,8 @@ mod tests {
             field(["a"]),
             [
                 within(lit(vec![1, 8, 20])),
-                interval(Interval::less_than(lit(15))),
-                interval(Interval::greater_than(lit(5))),
+                interval(Interval::less_than(QueryEndpoint::Value(lit(15)))),
+                interval(Interval::greater_than(QueryEndpoint::Value(lit(5)))),
             ],
         );
         let expected_plan = Arc::new(LogicalPlan::CollectionScan {
@@ -2717,8 +2921,8 @@ mod tests {
             filter: Some(field_filters(
                 field(["a"]),
                 [
-                    interval(Interval::less_than(lit(5))),
-                    interval(Interval::greater_than(lit(10))),
+                    interval(Interval::less_than(QueryEndpoint::Value(lit(5)))),
+                    interval(Interval::greater_than(QueryEndpoint::Value(lit(10)))),
                 ],
             )),
         });
@@ -2737,7 +2941,12 @@ mod tests {
         let plan = scan_with_filter(original);
         let normalized_plan = all_normalization_rules().apply(plan);
 
-        let pushable = field_filters(field(["a"]), [interval(Interval::greater_than(lit(10)))]);
+        let pushable = field_filters(
+            field(["a"]),
+            [interval(Interval::greater_than(QueryEndpoint::Value(lit(
+                10,
+            ))))],
+        );
         let residual = field_filters(field(["b"]), [size(lit(2), false)]);
 
         let expected_scan = Arc::new(LogicalPlan::CollectionScan {

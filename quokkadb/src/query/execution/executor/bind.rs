@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::query::QueryEndpoint;
 use crate::query::{BsonValue, Expr, Parameters};
 use crate::util::bson_utils::BsonKey;
 use crate::util::interval::Interval;
@@ -6,7 +7,7 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 pub(super) fn bind_key_range_parameters(
-    range: &Interval<Arc<Expr>>,
+    range: &Interval<QueryEndpoint<Arc<Expr>>>,
     parameters: &Parameters,
 ) -> Result<Interval<Vec<u8>>> {
     let start = bind_key_bound_parameter(range.start_bound(), parameters)?;
@@ -15,15 +16,15 @@ pub(super) fn bind_key_range_parameters(
 }
 
 fn bind_key_bound_parameter(
-    bound: Bound<&Arc<Expr>>,
+    bound: Bound<&QueryEndpoint<Arc<Expr>>>,
     parameters: &Parameters,
 ) -> Result<Bound<Vec<u8>>> {
     let bound = match bound {
         Bound::Included(expr) => {
-            Bound::Included(bind_parameter(expr, parameters).try_into_id_key()?)
+            Bound::Included(bind_parameter(expr.value(), parameters).try_into_id_key()?)
         }
         Bound::Excluded(expr) => {
-            Bound::Excluded(bind_parameter(expr, parameters).try_into_id_key()?)
+            Bound::Excluded(bind_parameter(expr.value(), parameters).try_into_id_key()?)
         }
         Bound::Unbounded => Bound::Unbounded,
     };

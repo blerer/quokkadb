@@ -1,4 +1,5 @@
 use crate::io::size_estimate::SizeEstimate;
+use crate::query::QueryEndpoint;
 use crate::query::update::UpdateExpr;
 use crate::query::{Expr, Projection, ReturnDocument, SortField};
 use crate::storage::Direction;
@@ -19,7 +20,7 @@ pub struct IndexScanRangeExpr {
     /// Equality-constrained leading index fields, in index order.
     pub equal_prefix: Vec<Arc<Expr>>,
     /// Optional interval predicate on the first non-equality index field.
-    pub tail: Option<Interval<Arc<Expr>>>,
+    pub tail: Option<Interval<QueryEndpoint<Arc<Expr>>>>,
 }
 
 impl SizeEstimate for IndexScanRangeExpr {
@@ -43,7 +44,7 @@ pub enum PhysicalPlan {
         /// The identifier for the collection.
         collection: u32,
         /// The range for the scan on the user primary key.
-        range: Interval<Arc<Expr>>,
+        range: Interval<QueryEndpoint<Arc<Expr>>>,
         /// The direction in which the scan must be performed
         direction: Direction,
         /// An optional filter to apply at the binary level after scanning.

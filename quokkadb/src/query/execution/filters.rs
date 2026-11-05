@@ -1,3 +1,4 @@
+use crate::query::QueryEndpoint;
 use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Expr, Parameters, PathComponent};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
@@ -430,15 +431,18 @@ fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool {
     })
 }
 
-fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) -> Bound<BsonValue> {
+fn resolve_bound(
+    bound: Bound<&QueryEndpoint<Arc<Expr>>>,
+    parameters: &Parameters,
+) -> Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
         Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
         Expr::Literal(val) => val.clone(),
         _ => unreachable!("Interval bound must be a placeholder or literal"),
     };
     match bound {
-        Bound::Included(expr) => Bound::Included(get_value(expr)),
-        Bound::Excluded(expr) => Bound::Excluded(get_value(expr)),
+        Bound::Included(expr) => Bound::Included(get_value(expr.value())),
+        Bound::Excluded(expr) => Bound::Excluded(get_value(expr.value())),
         Bound::Unbounded => Bound::Unbounded,
     }
 }

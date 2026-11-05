@@ -1,4 +1,5 @@
 use super::*;
+use crate::query::QueryEndpoint;
 use crate::query::execution::QueryExecutor;
 use crate::query::execution::executor::test_utils::{
     assert_insert_one_result, executor_test_runtime, full_scan_plan, insert_docs, insert_one,
@@ -145,7 +146,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     let start_outside = params_scan_outside.collect_parameter(BsonValue(Bson::Int32(100)));
     let plan_scan_outside = Arc::new(PhysicalPlan::CollectionScan {
         collection: collection_id,
-        range: Interval::at_least(start_outside.clone()),
+        range: Interval::at_least(QueryEndpoint::Value(start_outside.clone())),
         direction: Direction::Forward,
         filter: None,
         projection: None,
@@ -163,7 +164,10 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
     let end_partial = params_scan_partial.collect_parameter(BsonValue(Bson::Int32(25)));
     let plan_scan_partial = Arc::new(PhysicalPlan::CollectionScan {
         collection: collection_id,
-        range: Interval::closed_open(start_partial.clone(), end_partial.clone()),
+        range: Interval::closed_open(
+            QueryEndpoint::Value(start_partial.clone()),
+            QueryEndpoint::Value(end_partial.clone()),
+        ),
         direction: Direction::Forward,
         filter: None,
         projection: None,
@@ -183,7 +187,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
         params_scan_unbounded_start.collect_parameter(BsonValue(Bson::Int32(20)));
     let plan_scan_unbounded_start = Arc::new(PhysicalPlan::CollectionScan {
         collection: collection_id,
-        range: Interval::less_than(end_unbounded_start.clone()),
+        range: Interval::less_than(QueryEndpoint::Value(end_unbounded_start.clone())),
         direction: Direction::Forward,
         filter: None,
         projection: None,
@@ -203,7 +207,7 @@ fn test_search_and_scan_edge_cases() -> Result<()> {
         params_scan_unbounded_end.collect_parameter(BsonValue(Bson::Int32(20)));
     let plan_scan_unbounded_end = Arc::new(PhysicalPlan::CollectionScan {
         collection: collection_id,
-        range: Interval::greater_than(start_unbounded_end.clone()),
+        range: Interval::greater_than(QueryEndpoint::Value(start_unbounded_end.clone())),
         direction: Direction::Forward,
         filter: None,
         projection: None,
@@ -306,7 +310,7 @@ fn test_multikey_index_scan_deduplicates_before_limit() -> Result<()> {
         index: index.id,
         range: IndexScanRangeExpr {
             equal_prefix: vec![],
-            tail: Some(Interval::greater_than(lower_bound)),
+            tail: Some(Interval::greater_than(QueryEndpoint::Value(lower_bound))),
         },
         direction: Direction::Forward,
         filter: None,
@@ -361,7 +365,7 @@ fn test_index_scan_compound_prefix_plus_tail_range_execution() -> Result<()> {
         index: index_id,
         range: IndexScanRangeExpr {
             equal_prefix: vec![a_eq],
-            tail: Some(Interval::greater_than(b_gt)),
+            tail: Some(Interval::greater_than(QueryEndpoint::Value(b_gt))),
         },
         direction: Direction::Forward,
         filter: None,

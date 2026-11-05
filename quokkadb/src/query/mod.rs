@@ -21,12 +21,14 @@ use std::sync::Arc;
 pub(crate) mod execution;
 #[cfg(test)]
 pub(crate) mod expr_fn;
+mod interval_endpoint;
 pub(crate) mod logical_plan;
 pub(crate) mod optimizer;
 pub(crate) mod parser;
 pub(crate) mod physical_plan;
 pub(crate) mod query_cache;
 mod tree_node;
+pub(crate) use interval_endpoint::QueryEndpoint;
 pub(crate) mod update;
 #[cfg(test)]
 pub(crate) mod update_fn;
@@ -70,7 +72,7 @@ pub enum Expr {
         value: Arc<Expr>,             // The literal value
     },
     /// Represents an interval for range queries
-    Interval(Interval<Arc<Expr>>),
+    Interval(Interval<QueryEndpoint<Arc<Expr>>>),
     And(Vec<Arc<Expr>>),
     Or(Vec<Arc<Expr>>),
     Not(Arc<Expr>),
@@ -142,10 +144,10 @@ impl TreeNode for Expr {
             Expr::Interval(interval) => {
                 let mut children = Vec::new();
                 if let Some(child) = interval.start_bound_value() {
-                    children.push(child);
+                    children.push(child.value().clone());
                 }
                 if let Some(child) = interval.end_bound_value() {
-                    children.push(child);
+                    children.push(child.value().clone());
                 }
                 children
             }
@@ -177,19 +179,35 @@ impl TreeNode for Expr {
             Expr::Nor(_) => Arc::new(Expr::Nor(children)),
             Expr::ElemMatch { .. } => Arc::new(Expr::ElemMatch(children)),
             Expr::Interval(interval) => {
+                let old_children = [interval.start_bound(), interval.end_bound()];
+                let old_children = old_children.iter().filter_map(|bound| match bound {
+                    Bound::Included(endpoint) | Bound::Excluded(endpoint) => Some(endpoint.value()),
+                    Bound::Unbounded => None,
+                });
+                assert_eq!(
+                    old_children.clone().count(),
+                    children.len(),
+                    "Interval child count mismatch"
+                );
+                if old_children
+                    .zip(&children)
+                    .all(|(old, new)| Arc::ptr_eq(old, new))
+                {
+                    return self;
+                }
                 let mut iter = children.into_iter();
-
-                let start_bound = match interval.start_bound() {
-                    Bound::Included(..) => Bound::Included(iter.next().unwrap()),
-                    Bound::Excluded(..) => Bound::Excluded(iter.next().unwrap()),
+                let mut replace = |bound| match bound {
+                    Bound::Included(_) => {
+                        Bound::Included(QueryEndpoint::Value(iter.next().unwrap()))
+                    }
+                    Bound::Excluded(_) => {
+                        Bound::Excluded(QueryEndpoint::Value(iter.next().unwrap()))
+                    }
                     Bound::Unbounded => Bound::Unbounded,
                 };
-                let end_bound = match interval.end_bound() {
-                    Bound::Included(..) => Bound::Included(iter.next().unwrap()),
-                    Bound::Excluded(..) => Bound::Excluded(iter.next().unwrap()),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                Arc::new(Expr::Interval(Interval::new(start_bound, end_bound)))
+                let start = replace(interval.start_bound());
+                let end = replace(interval.end_bound());
+                Arc::new(Expr::Interval(Interval::new(start, end)))
             }
             Expr::Type { negated, .. } => Arc::new(Expr::Type {
                 bson_type: Self::get_first(children),
@@ -384,7 +402,7 @@ impl Serializable for Expr {
                 Ok(Expr::ElemMatch(predicates))
             }
             flags::INTERVAL => {
-                let interval = Interval::<Arc<Expr>>::read_from(reader, version)?;
+                let interval = Interval::<QueryEndpoint<Arc<Expr>>>::read_from(reader, version)?;
                 Ok(Expr::Interval(interval))
             }
             _ => panic!("Unknown Expr tag: {}", tag),
