@@ -178,6 +178,17 @@ fn names(documents: &[Document]) -> Vec<String> {
         .collect()
 }
 
+fn same_comparison_family(lhs: &Bson, rhs: &Bson) -> bool {
+    use Bson::*;
+    match (lhs, rhs) {
+        (
+            Double(_) | Int32(_) | Int64(_) | Decimal128(_),
+            Double(_) | Int32(_) | Int64(_) | Decimal128(_),
+        ) => true,
+        _ => std::mem::discriminant(lhs) == std::mem::discriminant(rhs),
+    }
+}
+
 fn comparison_filter(field: &str, operator: &str, value: &Bson) -> Document {
     doc! { (field): { (operator): value.clone() } }
 }
@@ -264,14 +275,16 @@ fn indexed_and_non_indexed_comparison_results_match_for_every_value_pair() {
             );
 
             for (value_index, (value_name, _)) in values.iter().enumerate() {
-                let expected_match = match operator {
-                    "$eq" => value_index == bound_index,
-                    "$lt" => value_index < bound_index,
-                    "$lte" => value_index <= bound_index,
-                    "$gt" => value_index > bound_index,
-                    "$gte" => value_index >= bound_index,
-                    _ => unreachable!(),
-                };
+                let expected_match =
+                    same_comparison_family(&values[value_index].1, &values[bound_index].1)
+                        && match operator {
+                            "$eq" => value_index == bound_index,
+                            "$lt" => value_index < bound_index,
+                            "$lte" => value_index <= bound_index,
+                            "$gt" => value_index > bound_index,
+                            "$gte" => value_index >= bound_index,
+                            _ => unreachable!(),
+                        };
                 assert_eq!(
                     indexed_names.contains(&value_name.to_string()),
                     expected_match,

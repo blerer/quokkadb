@@ -6,7 +6,7 @@ use crate::io::size_estimate::SizeEstimate;
 use crate::query::expr::{Expr, ProjectionExpr};
 use crate::storage::catalog::{IndexDefinition, IndexDirection, IndexPath, OrderedIndexField};
 use crate::util::bson_utils;
-use crate::util::bson_utils::{BsonKey, TypedKey};
+use crate::util::bson_utils::{BsonKey, BsonTypeRank, TypedKey};
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
 use bson::{Bson, Document};
@@ -43,44 +43,6 @@ pub enum ReturnDocument {
 pub enum ParameterKind {
     NonArray,
     Array,
-}
-
-/// An endpoint of a query interval, distinct from the expression it contains.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum QueryEndpoint<T> {
-    Value(T),
-}
-
-impl<T> QueryEndpoint<T> {
-    pub(crate) fn value(&self) -> &T {
-        match self {
-            Self::Value(value) => value,
-        }
-    }
-}
-
-impl<T: SizeEstimate> SizeEstimate for QueryEndpoint<T> {
-    fn estimated_heap_size(&self) -> usize {
-        self.value().estimated_heap_size()
-    }
-}
-
-impl<T: Serializable> Serializable for QueryEndpoint<T> {
-    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, version: u32) -> Result<Self> {
-        match reader.read_u8()? {
-            0 => Ok(Self::Value(T::read_from(reader, version)?)),
-            tag => unreachable!("Invalid query endpoint tag: {tag}"),
-        }
-    }
-
-    fn write_to(&self, writer: &mut ByteWriter, version: u32) {
-        match self {
-            Self::Value(value) => {
-                writer.write_u8(0);
-                value.write_to(writer, version);
-            }
-        }
-    }
 }
 
 /// Projection for included or excluded fields
@@ -556,6 +518,10 @@ impl BsonValue {
     pub fn as_ref(&self) -> BsonValueRef<'_> {
         BsonValueRef(&self.0)
     }
+
+    pub fn type_rank(&self) -> BsonTypeRank {
+        BsonTypeRank::of(&self.0)
+    }
 }
 
 impl SizeEstimate for BsonValue {
@@ -784,14 +750,14 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_serialization_round_trip() {
-        let endpoint = QueryEndpoint::Value(placeholder(3));
+    fn expr_serialization_round_trip() {
+        let endpoint = placeholder(3);
         let mut writer = ByteWriter::new();
         endpoint.write_to(&mut writer, 0);
         let bytes = writer.take_buffer();
-        assert_eq!(bytes[0], 0);
-        let decoded = QueryEndpoint::<Arc<Expr>>::read_from(&ByteReader::new(bytes), 0).unwrap();
-        assert_eq!(decoded, endpoint);
+        assert_eq!(bytes[0], 15);
+        let decoded = Expr::read_from(&ByteReader::new(bytes), 0).unwrap();
+        assert_eq!(decoded, *endpoint);
     }
 
     #[test]

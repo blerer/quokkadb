@@ -180,7 +180,7 @@ impl WriteExecutor {
         match expr {
             Expr::Interval(interval) if interval.is_point() => interval
                 .start_bound_value()
-                .and_then(|e| self.resolve_expr_value(e.value(), parameters)),
+                .and_then(|value| self.resolve_expr_value(value.as_ref(), parameters)),
             _ => None,
         }
     }

@@ -1,7 +1,6 @@
 use super::{EncodedIndexKeyPrefix, IndexKeyValue, sort_order, to_typed_key, validated_index_path};
 use crate::io::byte_reader::ByteReader;
 use crate::io::unexpected_eof;
-use crate::query::QueryEndpoint;
 use crate::query::expr::Expr;
 use crate::query::physical_plan::IndexScanRangeExpr;
 use crate::query::{BsonValue, Parameters, PathComponent, SortOrder};
@@ -192,7 +191,7 @@ enum SuffixExtremum {
 fn bind_tail_bound(
     equal_prefix: &EncodedIndexKeyPrefix,
     remaining_fields: &[IndexFieldSpec],
-    bound: Bound<&QueryEndpoint<Arc<Expr>>>,
+    bound: Bound<&Arc<Expr>>,
     side: BoundSide,
     parameters: &Parameters,
 ) -> Result<Bound<Vec<u8>>> {
@@ -201,7 +200,7 @@ fn bind_tail_bound(
     let is_start = matches!(side, BoundSide::Start);
     let (tail, suffix_fields, inclusive, suffix_extremum) = match bound {
         Bound::Included(expr) => {
-            let value = resolve_bound_expr(expr.value(), parameters);
+            let value = resolve_bound_expr(expr, parameters);
             let tail = to_typed_key(&value, tail_order)?;
             let suffix_extremum = if is_start {
                 SuffixExtremum::Low
@@ -211,7 +210,7 @@ fn bind_tail_bound(
             (Some(tail), after_tail_fields, true, suffix_extremum)
         }
         Bound::Excluded(expr) => {
-            let value = resolve_bound_expr(expr.value(), parameters);
+            let value = resolve_bound_expr(expr, parameters);
             let tail = to_typed_key(&value, tail_order)?;
             let suffix_extremum = if is_start {
                 SuffixExtremum::High

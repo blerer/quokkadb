@@ -1,4 +1,7 @@
 use crate::io::byte_reader::ByteReader;
+use crate::io::byte_writer::ByteWriter;
+use crate::io::serializable::Serializable;
+use crate::io::size_estimate::SizeEstimate;
 use crate::io::{ZeroCopy, invalid_data, unexpected_eof, varint};
 use bson::spec::BinarySubtype;
 use bson::{Bson, Document, serialize_to_vec};
@@ -56,38 +59,156 @@ pub fn prepend_raw_bson_field(doc: &mut Vec<u8>, field: &[u8]) -> std::io::Resul
     Ok(())
 }
 
-/// Compare two [`Bson`] values using **MongoDB's canonical sort order**.
-pub fn cmp_bson(a: &Bson, b: &Bson) -> Ordering {
-    use Bson::*;
+/// BSON comparison families, in canonical BSON sort order.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(u8)]
+pub enum BsonTypeRank {
+    MinKey = 0,
+    Null = 1,
+    Numeric = 2,
+    String = 3,
+    Document = 4,
+    Array = 5,
+    Binary = 6,
+    ObjectId = 7,
+    Boolean = 8,
+    DateTime = 9,
+    Timestamp = 10,
+    RegularExpression = 11,
+    MaxKey = 12,
+}
 
-    fn rank(v: &Bson) -> u8 {
-        match v {
-            MinKey => 0,
-            Null => 1,
-            Double(_) | Int32(_) | Int64(_) | Decimal128(_) => 2,
-            String(_) => 3,
-            Document(_) => 4,
-            Array(_) => 5,
-            Binary(_) => 6,
-            ObjectId(_) => 7,
-            Boolean(_) => 8,
-            DateTime(_) => 9,
-            Timestamp(_) => 10,
-            RegularExpression(_) => 11,
-            MaxKey => 12,
+impl BsonTypeRank {
+    pub fn get_min(self) -> Bson {
+        match self {
+            Self::MinKey => Bson::MinKey,
+            Self::Null => Bson::Null,
+            Self::Numeric => Bson::Double(f64::NAN),
+            Self::String => Bson::String(String::new()),
+            Self::Document => Bson::Document(Document::new()),
+            Self::Array => Bson::Array(Vec::new()),
+            Self::Binary => Bson::Binary(bson::Binary {
+                subtype: BinarySubtype::Generic,
+                bytes: Vec::new(),
+            }),
+            Self::ObjectId => Bson::ObjectId(bson::oid::ObjectId::from_bytes([0; 12])),
+            Self::Boolean => Bson::Boolean(false),
+            Self::DateTime => Bson::DateTime(bson::DateTime::from_millis(i64::MIN)),
+            Self::Timestamp => Bson::Timestamp(bson::Timestamp {
+                time: u32::MIN,
+                increment: u32::MIN,
+            }),
+            Self::RegularExpression => Bson::RegularExpression(bson::Regex {
+                pattern: "".try_into().unwrap(),
+                options: "".try_into().unwrap(),
+            }),
+            Self::MaxKey => Bson::MaxKey,
+        }
+    }
+
+    pub fn next_min_value(self) -> Option<Bson> {
+        match self {
+            Self::MaxKey => None,
+            _ => Some(Self::from_tag(self.tag() + 1).get_min()),
+        }
+    }
+
+    pub fn get_max(self) -> Option<Bson> {
+        match self {
+            Self::MinKey => Some(Bson::MinKey),
+            Self::Null => Some(Bson::Null),
+            Self::Numeric => Some(Bson::Double(f64::INFINITY)),
+            Self::String
+            | Self::Document
+            | Self::Array
+            | Self::Binary
+            | Self::RegularExpression => None,
+            Self::ObjectId => Some(Bson::ObjectId(bson::oid::ObjectId::from_bytes(
+                [u8::MAX; 12],
+            ))),
+            Self::Boolean => Some(Bson::Boolean(true)),
+            Self::DateTime => Some(Bson::DateTime(bson::DateTime::from_millis(i64::MAX))),
+            Self::Timestamp => Some(Bson::Timestamp(bson::Timestamp {
+                time: u32::MAX,
+                increment: u32::MAX,
+            })),
+            Self::MaxKey => Some(Bson::MaxKey),
+        }
+    }
+
+    pub fn of(value: &Bson) -> Self {
+        use Bson::*;
+        match value {
+            MinKey => Self::MinKey,
+            Null => Self::Null,
+            Double(_) | Int32(_) | Int64(_) | Decimal128(_) => Self::Numeric,
+            String(_) => Self::String,
+            Document(_) => Self::Document,
+            Array(_) => Self::Array,
+            Binary(_) => Self::Binary,
+            ObjectId(_) => Self::ObjectId,
+            Boolean(_) => Self::Boolean,
+            DateTime(_) => Self::DateTime,
+            Timestamp(_) => Self::Timestamp,
+            RegularExpression(_) => Self::RegularExpression,
+            MaxKey => Self::MaxKey,
             _ => panic!(
                 "Unsupported BSON type for comparison: {:?}. Use only supported types.",
-                v
+                value
             ),
         }
     }
 
-    let (ra, rb) = (rank(a), rank(b));
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            0 => Self::MinKey,
+            1 => Self::Null,
+            2 => Self::Numeric,
+            3 => Self::String,
+            4 => Self::Document,
+            5 => Self::Array,
+            6 => Self::Binary,
+            7 => Self::ObjectId,
+            8 => Self::Boolean,
+            9 => Self::DateTime,
+            10 => Self::Timestamp,
+            11 => Self::RegularExpression,
+            12 => Self::MaxKey,
+            _ => unreachable!("Invalid BSON type rank tag: {tag}"),
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        self as u8
+    }
+}
+
+impl SizeEstimate for BsonTypeRank {
+    fn estimated_heap_size(&self) -> usize {
+        0
+    }
+}
+
+impl Serializable for BsonTypeRank {
+    fn read_from<B: AsRef<[u8]>>(reader: &ByteReader<B>, _version: u32) -> std::io::Result<Self> {
+        Ok(Self::from_tag(reader.read_u8()?))
+    }
+
+    fn write_to(&self, writer: &mut ByteWriter, _version: u32) {
+        writer.write_u8(self.tag());
+    }
+}
+
+/// Compare two [`Bson`] values using **MongoDB's canonical sort order**.
+pub fn cmp_bson(a: &Bson, b: &Bson) -> Ordering {
+    use Bson::*;
+
+    let (ra, rb) = (BsonTypeRank::of(a), BsonTypeRank::of(b));
     if ra != rb {
         return ra.cmp(&rb);
     }
 
-    if ra == 2 {
+    if ra == BsonTypeRank::Numeric {
         if let Some(ord) = numeric_cmp(a, b) {
             return ord;
         }
@@ -139,7 +260,9 @@ pub fn bson_eq(a: &Bson, b: &Bson) -> bool {
         (Bson::Double(x), Bson::Double(y)) if x.is_nan() && y.is_nan() => true,
         (Bson::Int32(x), Bson::Int32(y)) => x == y,
         (Bson::Int64(x), Bson::Int64(y)) => x == y,
-        (Bson::Double(x), Bson::Double(y)) => (x - y).abs() < f64::EPSILON,
+        (Bson::Double(x), Bson::Double(y)) => {
+            x == y || (x.is_finite() && y.is_finite() && (x - y).abs() < f64::EPSILON)
+        }
 
         (Bson::Int32(x), Bson::Int64(y)) => *x as i64 == *y,
         (Bson::Int32(x), Bson::Double(y)) => (*x as f64 - *y).abs() < f64::EPSILON,

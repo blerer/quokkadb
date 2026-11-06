@@ -116,7 +116,11 @@ fn array_query_semantics_across_scan_modes() {
         (doc! {"a": {"$ne": 1}}, vec![2, 3, 4, 5, 6], None),
         (doc! {"a": {"$nin": [1, 5]}}, vec![3, 4, 5, 6], None),
         (doc! {"a": {"$not": {"$eq": 1}}}, vec![2, 3, 4, 5, 6], None),
-        (doc! {"a": {"$not": {"$gt": 8}}}, vec![2, 3, 4, 5, 7], None),
+        (
+            doc! {"a": {"$not": {"$gt": 8}}},
+            vec![2, 3, 4, 5, 6, 7],
+            None,
+        ),
         (doc! {"a": null}, vec![4, 5, 7], a),
         (doc! {"a": {"$ne": null}}, vec![1, 2, 3, 6], None),
         (doc! {"a": {"$in": [null]}}, vec![4, 5, 7], None),
@@ -185,8 +189,8 @@ fn scalar_ranges_recheck_empty_array_index_entries() {
         .create_index(doc! {"test_group": 1, "a": 1})
         .unwrap();
     for (query, expected) in [
-        (doc! {"a": {"$gt": 5}}, vec![2, 3]),
-        (doc! {"a": {"$gte": 5}}, vec![2, 3, 4]),
+        (doc! {"a": {"$gt": 5}}, vec![3]),
+        (doc! {"a": {"$gte": 5}}, vec![3, 4]),
         (doc! {"a": {"$lt": 5}}, vec![3]),
         (doc! {"a": {"$lte": 5}}, vec![3, 4]),
     ] {

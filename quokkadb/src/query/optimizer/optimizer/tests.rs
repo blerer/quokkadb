@@ -42,10 +42,7 @@ mod parametrize_test {
         // Check plan
         let expected_filter = field_filters(
             field(["a"]),
-            vec![interval(Interval::closed(
-                QueryEndpoint::Value(placeholder(0)),
-                QueryEndpoint::Value(placeholder(0)),
-            ))],
+            vec![interval(Interval::closed(placeholder(0), placeholder(0)))],
         );
         let expected_plan = LogicalPlanBuilder::scan_with_filters_and_projections(
             collection,
@@ -122,6 +119,13 @@ mod optimizer_tests {
 
     const COLLECTION: u32 = 10;
 
+    fn bracketed_greater_than(index: u32) -> Interval<Arc<Expr>> {
+        Interval::new(
+            std::ops::Bound::Excluded(placeholder(index)),
+            std::ops::Bound::Included(placeholder(index + 1)),
+        )
+    }
+
     #[test]
     fn test_compute_residual_filter_removes_multiple_predicates() {
         let field_a = field(["a"]);
@@ -166,21 +170,20 @@ mod optimizer_tests {
             index: 2,
             range: IndexScanRangeExpr {
                 equal_prefix: vec![placeholder(0)],
-                tail: Some(Interval::at_most(QueryEndpoint::Value(placeholder(2)))),
+                tail: Some(Interval::new(
+                    std::ops::Bound::Included(placeholder(3)),
+                    std::ops::Bound::Included(placeholder(4)),
+                )),
             },
             direction: Direction::Forward,
             filter: Some(and([
-                field_filters(
-                    field(["a"]),
-                    [interval(Interval::greater_than(QueryEndpoint::Value(
-                        placeholder(1),
-                    )))],
-                ),
+                field_filters(field(["a"]), [interval(bracketed_greater_than(1))]),
                 field_filters(
                     field(["b"]),
-                    [interval(Interval::at_least(QueryEndpoint::Value(
-                        placeholder(3),
-                    )))],
+                    [interval(Interval::new(
+                        std::ops::Bound::Included(placeholder(5)),
+                        std::ops::Bound::Included(placeholder(6)),
+                    ))],
                 ),
             ])),
             projection: None,
@@ -203,9 +206,7 @@ mod optimizer_tests {
             key: placeholder(0),
             filter: Some(field_filters(
                 field(["_id"]),
-                [interval(Interval::greater_than(QueryEndpoint::Value(
-                    placeholder(1),
-                )))],
+                [interval(bracketed_greater_than(1))],
             )),
             projection: None,
         };
@@ -301,9 +302,7 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["a"]),
-                [interval(Interval::greater_than(QueryEndpoint::Value(
-                    placeholder(0),
-                )))],
+                [interval(bracketed_greater_than(0))],
             )),
             projection: None,
         };
@@ -366,7 +365,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
-            range: Interval::greater_than(QueryEndpoint::Value(placeholder(0))),
+            range: bracketed_greater_than(0),
             direction: Direction::Forward,
             filter: None,
             projection: None,
@@ -386,16 +385,11 @@ mod optimizer_tests {
             .build_arc();
 
         // The residual filter will also be normalized and parametrized.
-        let residual_filter = field_filters(
-            field(["a"]),
-            [interval(Interval::greater_than(QueryEndpoint::Value(
-                placeholder(1),
-            )))],
-        );
+        let residual_filter = field_filters(field(["a"]), [interval(bracketed_greater_than(2))]);
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
-            range: Interval::greater_than(QueryEndpoint::Value(placeholder(0))),
+            range: bracketed_greater_than(0),
             direction: Direction::Forward,
             filter: Some(residual_filter),
             projection: None,
@@ -614,7 +608,7 @@ mod optimizer_tests {
 
         let scan = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
-            range: Interval::greater_than(QueryEndpoint::Value(placeholder(0))),
+            range: bracketed_greater_than(0),
             direction: Direction::Forward,
             filter: None,
             projection: None,
@@ -703,12 +697,7 @@ mod optimizer_tests {
             .filter(filters)
             .build_arc();
 
-        let residual_filter = field_filters(
-            field(["a"]),
-            [interval(Interval::greater_than(QueryEndpoint::Value(
-                placeholder(1),
-            )))],
-        );
+        let residual_filter = field_filters(field(["a"]), [interval(bracketed_greater_than(1))]);
 
         let output = PhysicalPlan::MultiPointSearch {
             collection: COLLECTION,
@@ -834,16 +823,13 @@ mod optimizer_tests {
         let array_filter = field_filters(
             field.clone(),
             [interval(Interval::closed(
-                QueryEndpoint::Value(array_placeholder(0)),
-                QueryEndpoint::Value(array_placeholder(0)),
+                array_placeholder(0),
+                array_placeholder(0),
             ))],
         );
         let scalar_filter = field_filters(
             field.clone(),
-            [interval(Interval::closed(
-                QueryEndpoint::Value(placeholder(0)),
-                QueryEndpoint::Value(placeholder(0)),
-            ))],
+            [interval(Interval::closed(placeholder(0), placeholder(0)))],
         );
         let array_filter_option = Some(array_filter.clone());
         let scalar_filter_option = Some(scalar_filter.clone());
@@ -920,15 +906,9 @@ mod optimizer_tests {
 
     #[test]
     fn select_index_interval_prefers_points_and_skips_array_bounds() {
-        let array_interval = interval(Interval::closed(
-            QueryEndpoint::Value(array_placeholder(0)),
-            QueryEndpoint::Value(array_placeholder(0)),
-        ));
-        let range_interval = interval(Interval::greater_than(QueryEndpoint::Value(placeholder(1))));
-        let point_interval = interval(Interval::closed(
-            QueryEndpoint::Value(placeholder(2)),
-            QueryEndpoint::Value(placeholder(2)),
-        ));
+        let array_interval = interval(Interval::closed(array_placeholder(0), array_placeholder(0)));
+        let range_interval = interval(Interval::greater_than(placeholder(1)));
+        let point_interval = interval(Interval::closed(placeholder(2), placeholder(2)));
 
         let all_intervals = [
             array_interval.clone(),
@@ -944,10 +924,7 @@ mod optimizer_tests {
         assert_eq!(selected_without_point.0, 1);
         assert!(!selected_without_point.1.is_point());
 
-        let array_only = interval(Interval::closed(
-            QueryEndpoint::Value(array_placeholder(3)),
-            QueryEndpoint::Value(array_placeholder(3)),
-        ));
+        let array_only = interval(Interval::closed(array_placeholder(3), array_placeholder(3)));
         assert!(select_index_interval(&[array_only]).is_none());
     }
 
@@ -975,12 +952,12 @@ mod optimizer_tests {
                 filter: Some(field_filters(
                     field(["b"]),
                     [interval(if range {
-                        Interval::greater_than(QueryEndpoint::Value(array_placeholder(1)))
-                    } else {
-                        Interval::closed(
-                            QueryEndpoint::Value(array_placeholder(1)),
-                            QueryEndpoint::Value(array_placeholder(1)),
+                        Interval::new(
+                            std::ops::Bound::Excluded(array_placeholder(1)),
+                            std::ops::Bound::Excluded(placeholder(2)),
                         )
+                    } else {
+                        Interval::closed(array_placeholder(1), array_placeholder(1))
                     })],
                 )),
                 projection: None,
@@ -1005,8 +982,8 @@ mod optimizer_tests {
             let filter = Some(field_filters(
                 field(["a"]),
                 [interval(Interval::closed(
-                    QueryEndpoint::Value(array_placeholder(0)),
-                    QueryEndpoint::Value(array_placeholder(0)),
+                    array_placeholder(0),
+                    array_placeholder(0),
                 ))],
             ));
             let output = if hinted {
@@ -1052,17 +1029,14 @@ mod optimizer_tests {
             index: 1,
             range: IndexScanRangeExpr {
                 equal_prefix: vec![],
-                tail: Some(Interval::greater_than(QueryEndpoint::Value(placeholder(0)))),
+                tail: Some(bracketed_greater_than(0)),
             },
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["a"]),
                 [
-                    interval(Interval::greater_than(QueryEndpoint::Value(placeholder(0)))),
-                    interval(Interval::closed(
-                        QueryEndpoint::Value(array_placeholder(1)),
-                        QueryEndpoint::Value(array_placeholder(1)),
-                    )),
+                    interval(bracketed_greater_than(0)),
+                    interval(Interval::closed(array_placeholder(2), array_placeholder(2))),
                 ],
             )),
             projection: None,
@@ -1129,17 +1103,13 @@ mod optimizer_tests {
                                 index: 1,
                                 range: IndexScanRangeExpr {
                                     equal_prefix: vec![],
-                                    tail: bounded.then(|| {
-                                        Interval::greater_than(QueryEndpoint::Value(placeholder(0)))
-                                    }),
+                                    tail: bounded.then(|| bracketed_greater_than(0)),
                                 },
                                 direction: Direction::Forward,
                                 filter: bounded.then(|| {
                                     field_filters(
                                         field(["a"]),
-                                        [interval(Interval::greater_than(QueryEndpoint::Value(
-                                            placeholder(0),
-                                        )))],
+                                        [interval(bracketed_greater_than(0))],
                                     )
                                 }),
                                 projection: None,
@@ -1212,9 +1182,7 @@ mod optimizer_tests {
                         index: 1,
                         range: IndexScanRangeExpr {
                             equal_prefix: vec![],
-                            tail: bounded.then(|| {
-                                Interval::greater_than(QueryEndpoint::Value(placeholder(0)))
-                            }),
+                            tail: bounded.then(|| bracketed_greater_than(0)),
                         },
                         direction: if reverse && !include_multikey {
                             Direction::Reverse
@@ -1299,17 +1267,11 @@ mod optimizer_tests {
             filter: Some(and([
                 field_filters(
                     field(["b"]),
-                    [interval(Interval::closed(
-                        QueryEndpoint::Value(placeholder(1)),
-                        QueryEndpoint::Value(placeholder(1)),
-                    ))],
+                    [interval(Interval::closed(placeholder(1), placeholder(1)))],
                 ),
                 field_filters(
                     field(["c"]),
-                    [interval(Interval::closed(
-                        QueryEndpoint::Value(placeholder(2)),
-                        QueryEndpoint::Value(placeholder(2)),
-                    ))],
+                    [interval(Interval::closed(placeholder(2), placeholder(2)))],
                 ),
             ])),
             projection: None,
@@ -1342,10 +1304,7 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["c"]),
-                [interval(Interval::closed(
-                    QueryEndpoint::Value(placeholder(2)),
-                    QueryEndpoint::Value(placeholder(2)),
-                ))],
+                [interval(Interval::closed(placeholder(2), placeholder(2)))],
             )),
             projection: None,
         };
@@ -1408,29 +1367,18 @@ mod optimizer_tests {
             index: 1,
             range: IndexScanRangeExpr {
                 equal_prefix: vec![placeholder(0)],
-                tail: Some(Interval::greater_than(QueryEndpoint::Value(placeholder(1)))),
+                tail: Some(bracketed_greater_than(1)),
             },
             direction: Direction::Forward,
             filter: Some(and([
-                field_filters(
-                    field(["b"]),
-                    [interval(Interval::greater_than(QueryEndpoint::Value(
-                        placeholder(1),
-                    )))],
-                ),
+                field_filters(field(["b"]), [interval(bracketed_greater_than(1))]),
                 field_filters(
                     field(["c"]),
-                    [interval(Interval::closed(
-                        QueryEndpoint::Value(placeholder(2)),
-                        QueryEndpoint::Value(placeholder(2)),
-                    ))],
+                    [interval(Interval::closed(placeholder(3), placeholder(3)))],
                 ),
                 field_filters(
                     field(["d"]),
-                    [interval(Interval::closed(
-                        QueryEndpoint::Value(placeholder(3)),
-                        QueryEndpoint::Value(placeholder(3)),
-                    ))],
+                    [interval(Interval::closed(placeholder(4), placeholder(4)))],
                 ),
             ])),
             projection: None,
@@ -1550,7 +1498,7 @@ mod optimizer_tests {
             index: 2,
             range: IndexScanRangeExpr {
                 equal_prefix: vec![placeholder(0)],
-                tail: Some(Interval::greater_than(QueryEndpoint::Value(placeholder(1)))),
+                tail: Some(bracketed_greater_than(1)),
             },
             direction: Direction::Forward,
             filter: None,
@@ -1597,10 +1545,7 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["z"]),
-                [interval(Interval::closed(
-                    QueryEndpoint::Value(placeholder(0)),
-                    QueryEndpoint::Value(placeholder(0)),
-                ))],
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
             )),
             projection: None,
         };
@@ -1697,10 +1642,7 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["a"]),
-                [interval(Interval::closed(
-                    QueryEndpoint::Value(placeholder(0)),
-                    QueryEndpoint::Value(placeholder(0)),
-                ))],
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
             )),
             projection: None,
         };
@@ -1740,7 +1682,7 @@ mod optimizer_tests {
 
         let output = PhysicalPlan::CollectionScan {
             collection: COLLECTION,
-            range: Interval::greater_than(QueryEndpoint::Value(placeholder(0))),
+            range: bracketed_greater_than(0),
             direction: Direction::Forward,
             filter: None,
             projection: None,
@@ -1891,10 +1833,7 @@ mod optimizer_tests {
             direction: Direction::Forward,
             filter: Some(field_filters(
                 field(["a"]),
-                [interval(Interval::closed(
-                    QueryEndpoint::Value(placeholder(0)),
-                    QueryEndpoint::Value(placeholder(0)),
-                ))],
+                [interval(Interval::closed(placeholder(0), placeholder(0)))],
             )),
             projection: None,
         };

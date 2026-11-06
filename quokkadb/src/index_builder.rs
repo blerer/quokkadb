@@ -512,7 +512,7 @@ mod tests {
     use crate::storage::storage_engine::{CreatedIndex, StorageEngine};
     use crate::storage::write_batch::WriteBatch;
     use crate::util::bson_utils::BsonKey;
-    use bson::{doc, Bson, Document};
+    use bson::{Bson, Document, doc};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
@@ -704,19 +704,12 @@ mod tests {
                 doc! {"_id": 1, "a": [1, 2, 2], "b": 3}
             };
             storage
-                .write(
-                    write_batch(collection, 1, &document),
-                    false,
-                )
+                .write(write_batch(collection, 1, &document), false)
                 .unwrap();
             if !parallel {
                 storage
                     .write(
-                        write_batch(
-                            collection,
-                            2,
-                            &doc! {"_id": 2, "a": 3, "b": [4, 5]}
-                        ),
+                        write_batch(collection, 2, &doc! {"_id": 2, "a": 3, "b": [4, 5]}),
                         false,
                     )
                     .unwrap();

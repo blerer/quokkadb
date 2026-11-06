@@ -3,7 +3,6 @@ use crate::io::bitset::BitSet;
 use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::options::options::Options;
-use crate::query::QueryEndpoint;
 use crate::query::expr::Expr;
 use crate::query::logical_plan::{LogicalPlan, transform_down_filter};
 use crate::query::optimizer::normalization_rules;
@@ -342,14 +341,14 @@ impl Optimizer {
             Expr::Interval(interval) => {
                 if interval.is_point() {
                     let bound = interval.start_bound_value().unwrap();
-                    let bound = if let Expr::Literal(value) = bound.value().as_ref() {
-                        params.collect_parameter(value.clone())
-                    } else {
-                        unreachable!("Interval bound should be literals")
+                    let bound = match bound.as_ref() {
+                        Expr::Literal(value) => params.collect_parameter(value.clone()),
+                        Expr::Placeholder { .. } => bound.clone(),
+                        _ => unreachable!("Interval bound should be a value expression"),
                     };
                     Arc::new(Expr::Interval(Interval::closed(
-                        QueryEndpoint::Value(bound.clone()),
-                        QueryEndpoint::Value(bound.clone()),
+                        bound.clone(),
+                        bound.clone(),
                     )))
                 } else {
                     expr.clone()
@@ -645,9 +644,14 @@ impl Optimizer {
                                 return Ok(vec![candidate]);
                             }
                             Expr::Interval(interval) => {
-                                if interval.is_point() {
+                                if interval.is_point()
+                                    && matches!(
+                                        interval.start_bound_value().unwrap().as_ref(),
+                                        Expr::Literal(_) | Expr::Placeholder { .. }
+                                    )
+                                {
                                     // Point search
-                                    let key = interval.start_bound_value().unwrap().value().clone();
+                                    let key = interval.start_bound_value().unwrap().clone();
                                     let candidate = self.create_point_search_candidate(
                                         count_stats,
                                         metadata.id,
@@ -852,7 +856,7 @@ impl Optimizer {
         count_stats: &dyn CountStatSource,
         collection: u32,
         primary_key: Expr,
-        interval: Interval<QueryEndpoint<Arc<Expr>>>,
+        interval: Interval<Arc<Expr>>,
         residual: Option<Arc<Expr>>,
         req: &ReqProps,
     ) -> Candidate {
@@ -1125,11 +1129,11 @@ fn index_has_array_bound_filter(
     })
 }
 
-fn interval_has_array_bound(interval: &Interval<QueryEndpoint<Arc<Expr>>>) -> bool {
+fn interval_has_array_bound(interval: &Interval<Arc<Expr>>) -> bool {
     use std::ops::{Bound, RangeBounds};
     [interval.start_bound(), interval.end_bound()].into_iter().any(|bound| {
         matches!(bound, Bound::Included(value) | Bound::Excluded(value)
-            if matches!(value.value().as_ref(), Expr::Placeholder { kind: crate::query::ParameterKind::Array, .. }))
+            if matches!(value.as_ref(), Expr::Placeholder { kind: crate::query::ParameterKind::Array, .. }))
     })
 }
 
@@ -1179,8 +1183,13 @@ fn build_index_scan_range_expr(
             break;
         };
 
-        if interval.is_point() {
-            equal_prefix.push(interval.start_bound_value().unwrap().value().clone());
+        if interval.is_point()
+            && matches!(
+                interval.start_bound_value().unwrap().as_ref(),
+                Expr::Literal(_) | Expr::Placeholder { .. }
+            )
+        {
+            equal_prefix.push(interval.start_bound_value().unwrap().clone());
             used_predicates.push((field_expr, position));
         } else {
             tail = Some(interval.clone());
@@ -1205,9 +1214,7 @@ fn build_index_scan_range_expr(
 /// Among the remaining intervals, point intervals are preferred over ranges so
 /// they can extend the compound index's equality prefix. The returned position
 /// identifies the original filter for residual-filter bookkeeping.
-fn select_index_interval(
-    filters: &[Arc<Expr>],
-) -> Option<(usize, &Interval<QueryEndpoint<Arc<Expr>>>)> {
+fn select_index_interval(filters: &[Arc<Expr>]) -> Option<(usize, &Interval<Arc<Expr>>)> {
     filters
         .iter()
         .enumerate()

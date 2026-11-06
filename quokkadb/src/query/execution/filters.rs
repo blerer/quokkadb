@@ -1,6 +1,6 @@
-use crate::query::QueryEndpoint;
 use crate::query::expr::Expr;
 use crate::query::{BsonValue, BsonValueRef, ComparisonOperator, Parameters, PathComponent};
+use crate::util::bson_utils::BsonTypeRank;
 use crate::util::interval::Interval;
 use bson::spec::ElementType;
 use bson::{Bson, Document};
@@ -147,6 +147,11 @@ fn compare_value_with_array_traversal(
     };
     let compare = |value: BsonValueRef| match operator {
         Eq => value.cmp(&comparison_value).is_eq(),
+        Gt | Gte | Lt | Lte
+            if BsonTypeRank::of(value.0) != BsonTypeRank::of(comparison_value.0) =>
+        {
+            false
+        }
         Gt => value > comparison_value,
         Gte => value >= comparison_value,
         Lt => value < comparison_value,
@@ -215,9 +220,13 @@ fn to_value_filter_with_array_traversal(
             let start = resolve_bound(interval.start_bound(), parameters);
             let end = resolve_bound(interval.end_bound(), parameters);
             let interval = Interval::new(start, end);
-            let point_value = interval
-                .is_point()
-                .then(|| interval.start_bound_value().unwrap());
+            let point_value = match (interval.start_bound(), interval.end_bound()) {
+                (Bound::Included(start), Bound::Included(end)) if start == end => {
+                    Some(start.clone())
+                }
+                _ => None,
+            };
+            let is_point = point_value.is_some();
             // Array-valued bounds can compare the entire array as well as
             // its immediate elements, just like the original comparison.
             let array_bound = [interval.start_bound(), interval.end_bound()]
@@ -252,7 +261,7 @@ fn to_value_filter_with_array_traversal(
                     Some(val) => contains(&interval, val),
                     // $eq: null matches also missing fields so we need to check for point intervals with null bounds
                     None => {
-                        interval.is_point()
+                        is_point
                             && interval
                                 .start_bound_value()
                                 .and_then(|v| v.0.as_null())
@@ -422,28 +431,25 @@ fn is_document_elem_match_filter(expr: &Arc<Expr>) -> bool {
 
 fn contains(interval: &Interval<BsonValue>, item: BsonValueRef) -> bool {
     (match interval.start_bound() {
-        Bound::Included(start) => start.as_ref() <= item,
-        Bound::Excluded(start) => start.as_ref() < item,
+        Bound::Included(start) => start.as_ref().cmp(&item).is_le(),
+        Bound::Excluded(start) => start.as_ref().cmp(&item).is_lt(),
         Bound::Unbounded => true,
     }) && (match interval.end_bound() {
-        Bound::Included(end) => item <= end.as_ref(),
-        Bound::Excluded(end) => item < end.as_ref(),
+        Bound::Included(end) => end.as_ref().cmp(&item).is_ge(),
+        Bound::Excluded(end) => end.as_ref().cmp(&item).is_gt(),
         Bound::Unbounded => true,
     })
 }
 
-fn resolve_bound(
-    bound: Bound<&QueryEndpoint<Arc<Expr>>>,
-    parameters: &Parameters,
-) -> Bound<BsonValue> {
+fn resolve_bound(bound: Bound<&Arc<Expr>>, parameters: &Parameters) -> Bound<BsonValue> {
     let get_value = |expr: &Arc<Expr>| match expr.as_ref() {
         Expr::Placeholder { index: idx, .. } => parameters.get(*idx).clone(),
         Expr::Literal(val) => val.clone(),
         _ => unreachable!("Interval bound must be a placeholder or literal"),
     };
     match bound {
-        Bound::Included(expr) => Bound::Included(get_value(expr.value())),
-        Bound::Excluded(expr) => Bound::Excluded(get_value(expr.value())),
+        Bound::Included(expr) => Bound::Included(get_value(expr)),
+        Bound::Excluded(expr) => Bound::Excluded(get_value(expr)),
         Bound::Unbounded => Bound::Unbounded,
     }
 }
@@ -717,5 +723,25 @@ mod tests {
         assert!(!matches_type_spec(&Bson::from(&i32), &Bson::from(12345)));
         // Invalid spec type
         assert!(!matches_type_spec(&Bson::from(&i32), &Bson::from(true)));
+    }
+
+    #[test]
+    fn null_range_does_not_match_missing_fields() {
+        let mut parameters = Parameters::new();
+        let start = parameters.collect_parameter(BsonValue(Bson::Null));
+        let end = parameters.collect_parameter(BsonValue(Bson::Double(f64::NAN)));
+        let filter = to_value_filter(
+            Arc::new(Expr::Interval(Interval::new(
+                Bound::Included(start),
+                Bound::Excluded(end),
+            ))),
+            &parameters,
+        );
+
+        let null = Bson::Null;
+        let number = Bson::Int32(1);
+        assert!(!filter(None));
+        assert!(filter(Some(BsonValueRef(&null))));
+        assert!(!filter(Some(BsonValueRef(&number))));
     }
 }

@@ -1,7 +1,6 @@
 use super::super::IndexKeyValue;
 use super::IndexReadCodec;
 use crate::io::varint;
-use crate::query::QueryEndpoint;
 use crate::query::execution::indexes::indexes::{Index, IndexSource};
 use crate::query::execution::indexes::test_utils::{make_index_metadata, to_raw, to_typed_key};
 use crate::query::expr::Expr;
@@ -502,7 +501,7 @@ fn bind_range_expr_compound_prefix_plus_tail_range_contains_expected_keys() {
         .bind_range_expr(
             &IndexScanRangeExpr {
                 equal_prefix: vec![prefix],
-                tail: Some(Interval::less_than(QueryEndpoint::Value(tail))),
+                tail: Some(Interval::less_than(tail)),
             },
             &parameters,
         )
@@ -533,8 +532,8 @@ fn bind_range_expr_tail_inclusive_and_exclusive_bounds_are_respected() {
             &IndexScanRangeExpr {
                 equal_prefix: vec![prefix],
                 tail: Some(Interval::new(
-                    std::ops::Bound::Included(QueryEndpoint::Value(included)),
-                    std::ops::Bound::Excluded(QueryEndpoint::Value(excluded)),
+                    std::ops::Bound::Included(included),
+                    std::ops::Bound::Excluded(excluded),
                 )),
             },
             &parameters,
@@ -560,7 +559,7 @@ fn bind_range_expr_descending_single_field_swaps_interval_orientation() {
         .bind_range_expr(
             &IndexScanRangeExpr {
                 equal_prefix: vec![],
-                tail: Some(Interval::greater_than(QueryEndpoint::Value(lower))),
+                tail: Some(Interval::greater_than(lower)),
             },
             &parameters,
         )
@@ -627,8 +626,8 @@ fn bind_range_expr_allows_literal_tail_sentinels() {
             &IndexScanRangeExpr {
                 equal_prefix: vec![prefix],
                 tail: Some(Interval::closed(
-                    QueryEndpoint::Value(Arc::new(Expr::Literal(BsonValue(Bson::MinKey)))),
-                    QueryEndpoint::Value(Arc::new(Expr::Literal(BsonValue(Bson::MaxKey)))),
+                    Arc::new(Expr::Literal(BsonValue(Bson::MinKey))),
+                    Arc::new(Expr::Literal(BsonValue(Bson::MaxKey))),
                 )),
             },
             &parameters,

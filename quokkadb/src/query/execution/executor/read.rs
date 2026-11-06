@@ -1,6 +1,5 @@
 use super::{ExecutionOutput, ExecutionRow, Metrics, bind};
 use crate::error::{Error, Result};
-use crate::query::QueryEndpoint;
 use crate::query::execution::{
     filters,
     indexes::{extract_id_from_entry_bytes, index_reader::IndexReadCodec},
@@ -322,7 +321,7 @@ impl ReadExecutor {
         parameters: &Parameters,
         snapshot: Snapshot,
         collection: &u32,
-        range: &Interval<QueryEndpoint<Arc<Expr>>>,
+        range: &Interval<Arc<Expr>>,
         direction: &Direction,
         filter: &Option<Arc<Expr>>,
     ) -> Result<ExecutionOutput> {

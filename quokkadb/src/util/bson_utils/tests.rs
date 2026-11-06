@@ -416,6 +416,9 @@ mod bson_key {
 }
 
 mod bson_cmp {
+    use crate::io::byte_reader::ByteReader;
+    use crate::io::byte_writer::ByteWriter;
+    use crate::io::serializable::Serializable;
     use crate::util::bson_utils;
     use bson::{Binary, Bson, DateTime, Decimal128, doc, oid::ObjectId, spec::BinarySubtype};
     use std::cmp::Ordering::*;
@@ -429,6 +432,25 @@ mod bson_cmp {
             bson_utils::cmp_bson(&Bson::Int32(0), &Bson::String("x".into())),
             Less
         );
+    }
+
+    #[test]
+    fn bson_type_rank_serializes_its_stable_tag() {
+        for rank in [
+            bson_utils::BsonTypeRank::MinKey,
+            bson_utils::BsonTypeRank::Numeric,
+            bson_utils::BsonTypeRank::Boolean,
+            bson_utils::BsonTypeRank::MaxKey,
+        ] {
+            let mut writer = ByteWriter::new();
+            rank.write_to(&mut writer, 0);
+            let bytes = writer.take_buffer();
+            assert_eq!(bytes, vec![rank.tag()]);
+            assert_eq!(
+                bson_utils::BsonTypeRank::read_from(&ByteReader::new(bytes), 0).unwrap(),
+                rank
+            );
+        }
     }
 
     #[test]
@@ -475,6 +497,11 @@ mod bson_cmp {
         assert_eq!(bson_utils::cmp_bson(&nan, &neg_inf), Less);
         assert_eq!(bson_utils::cmp_bson(&neg_inf, &zero), Less);
         assert_eq!(bson_utils::cmp_bson(&zero, &pos_inf), Less);
+        assert!(bson_utils::bson_eq(&pos_inf, &Bson::Double(f64::INFINITY)));
+        assert!(bson_utils::bson_eq(
+            &neg_inf,
+            &Bson::Double(f64::NEG_INFINITY)
+        ));
     }
 
     #[test]

@@ -4,9 +4,7 @@ use crate::io::byte_writer::ByteWriter;
 use crate::io::serializable::Serializable;
 use crate::io::size_estimate::SizeEstimate;
 use crate::query::tree_node::TreeNode;
-use crate::query::{
-    BsonValue, ComparisonOperator, ParameterKind, PathComponent, QueryEndpoint, format_path,
-};
+use crate::query::{BsonValue, ComparisonOperator, ParameterKind, PathComponent, format_path};
 use crate::util::interval::Interval;
 use bson::Bson;
 use std::collections::BTreeMap;
@@ -39,7 +37,7 @@ pub enum Expr {
         value: Arc<Expr>,             // The literal value
     },
     /// Represents an interval for range queries
-    Interval(Interval<QueryEndpoint<Arc<Expr>>>),
+    Interval(Interval<Arc<Expr>>),
     And(Vec<Arc<Expr>>),
     Or(Vec<Arc<Expr>>),
     Not(Arc<Expr>),
@@ -111,10 +109,10 @@ impl TreeNode for Expr {
             Expr::Interval(interval) => {
                 let mut children = Vec::new();
                 if let Some(child) = interval.start_bound_value() {
-                    children.push(child.value().clone());
+                    children.push(child.clone());
                 }
                 if let Some(child) = interval.end_bound_value() {
-                    children.push(child.value().clone());
+                    children.push(child.clone());
                 }
                 children
             }
@@ -148,7 +146,9 @@ impl TreeNode for Expr {
             Expr::Interval(interval) => {
                 let old_children = [interval.start_bound(), interval.end_bound()];
                 let old_children = old_children.iter().filter_map(|bound| match bound {
-                    Bound::Included(endpoint) | Bound::Excluded(endpoint) => Some(endpoint.value()),
+                    Bound::Included(endpoint) | Bound::Excluded(endpoint) => {
+                        Some((*endpoint).clone())
+                    }
                     Bound::Unbounded => None,
                 });
                 assert_eq!(
@@ -158,18 +158,14 @@ impl TreeNode for Expr {
                 );
                 if old_children
                     .zip(&children)
-                    .all(|(old, new)| Arc::ptr_eq(old, new))
+                    .all(|(old, new)| Arc::ptr_eq(&old, new))
                 {
                     return self;
                 }
                 let mut iter = children.into_iter();
-                let mut replace = |bound| match bound {
-                    Bound::Included(_) => {
-                        Bound::Included(QueryEndpoint::Value(iter.next().unwrap()))
-                    }
-                    Bound::Excluded(_) => {
-                        Bound::Excluded(QueryEndpoint::Value(iter.next().unwrap()))
-                    }
+                let mut replace = |bound: Bound<&Arc<Expr>>| match bound {
+                    Bound::Included(_) => Bound::Included(iter.next().unwrap()),
+                    Bound::Excluded(_) => Bound::Excluded(iter.next().unwrap()),
                     Bound::Unbounded => Bound::Unbounded,
                 };
                 let start = replace(interval.start_bound());
@@ -369,7 +365,7 @@ impl Serializable for Expr {
                 Ok(Expr::ElemMatch(predicates))
             }
             flags::INTERVAL => {
-                let interval = Interval::<QueryEndpoint<Arc<Expr>>>::read_from(reader, version)?;
+                let interval = Interval::<Arc<Expr>>::read_from(reader, version)?;
                 Ok(Expr::Interval(interval))
             }
             _ => panic!("Unknown Expr tag: {}", tag),

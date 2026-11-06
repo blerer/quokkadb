@@ -1,4 +1,3 @@
-use crate::query::QueryEndpoint;
 use crate::query::{
     BsonValue, ComparisonOperator, Expr, ParameterKind, PathComponent, Projection, ProjectionExpr,
     SortField,
@@ -146,31 +145,28 @@ pub fn not(predicate: Arc<Expr>) -> Arc<Expr> {
     Arc::new(Expr::Not(predicate))
 }
 
-pub fn interval(interval: Interval<QueryEndpoint<Arc<Expr>>>) -> Arc<Expr> {
+pub fn interval(interval: Interval<Arc<Expr>>) -> Arc<Expr> {
     Arc::new(Expr::Interval(interval))
 }
 
-pub fn point(point: &Arc<Expr>) -> Interval<QueryEndpoint<Arc<Expr>>> {
-    Interval::closed(
-        QueryEndpoint::Value(point.clone()),
-        QueryEndpoint::Value(point.clone()),
-    )
+pub fn point(point: &Arc<Expr>) -> Interval<Arc<Expr>> {
+    Interval::closed(point.clone(), point.clone())
 }
 
-pub fn greater_than(bound: &Arc<Expr>) -> Interval<QueryEndpoint<Arc<Expr>>> {
-    Interval::greater_than(QueryEndpoint::Value(bound.clone()))
+pub fn greater_than(bound: &Arc<Expr>) -> Interval<Arc<Expr>> {
+    Interval::greater_than(bound.clone())
 }
 
-pub fn at_least(bound: &Arc<Expr>) -> Interval<QueryEndpoint<Arc<Expr>>> {
-    Interval::at_least(QueryEndpoint::Value(bound.clone()))
+pub fn at_least(bound: &Arc<Expr>) -> Interval<Arc<Expr>> {
+    Interval::at_least(bound.clone())
 }
 
-pub fn less_than(bound: &Arc<Expr>) -> Interval<QueryEndpoint<Arc<Expr>>> {
-    Interval::less_than(QueryEndpoint::Value(bound.clone()))
+pub fn less_than(bound: &Arc<Expr>) -> Interval<Arc<Expr>> {
+    Interval::less_than(bound.clone())
 }
 
-pub fn at_most(bound: &Arc<Expr>) -> Interval<QueryEndpoint<Arc<Expr>>> {
-    Interval::at_most(QueryEndpoint::Value(bound.clone()))
+pub fn at_most(bound: &Arc<Expr>) -> Interval<Arc<Expr>> {
+    Interval::at_most(bound.clone())
 }
 
 pub fn proj_field() -> Arc<ProjectionExpr> {
