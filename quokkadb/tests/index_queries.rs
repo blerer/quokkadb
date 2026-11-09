@@ -64,6 +64,72 @@ fn assert_index_scan(
     );
 }
 
+fn assert_indexed_and_collection_scan_ids(
+    collection: &quokkadb::Collection,
+    index_name: &str,
+    filter: Document,
+    expected_ids: &[i32],
+) {
+    let indexed = collection
+        .find(filter.clone())
+        .hint(index_name.to_owned())
+        .sort(doc! { "_id": 1 })
+        .execute_collect()
+        .unwrap();
+    let scanned = collection
+        .find(filter.clone())
+        .hint_collection_scan()
+        .sort(doc! { "_id": 1 })
+        .execute_collect()
+        .unwrap();
+    let automatic = collection
+        .find(filter.clone())
+        .sort(doc! { "_id": 1 })
+        .execute_collect()
+        .unwrap();
+
+    let ids = |documents: &[Document]| {
+        documents
+            .iter()
+            .map(|document| document.get_i32("_id").unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&indexed), expected_ids, "indexed result for {filter:?}");
+    assert_eq!(ids(&scanned), expected_ids, "scan result for {filter:?}");
+    assert_eq!(
+        indexed, scanned,
+        "indexed and scanned results differ for {filter:?}"
+    );
+    assert_eq!(
+        automatic, scanned,
+        "automatic and scanned results differ for {filter:?}"
+    );
+}
+
+fn setup_type_bracketing_collection() -> (TempDir, quokkadb::Collection, String) {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("type_bracketing").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "group": 1, "value": 1 },
+            doc! { "_id": 2, "group": 1, "value": 5_i64 },
+            doc! { "_id": 3, "group": 1, "value": "alpha" },
+            doc! { "_id": 4, "group": 1, "value": "zeta" },
+            doc! { "_id": 5, "group": 1, "value": { "x": 1 } },
+            doc! { "_id": 6, "group": 1, "value": { "x": 2 } },
+            doc! { "_id": 7, "group": 1, "value": [100] },
+            doc! { "_id": 8, "group": 1, "value": null },
+            doc! { "_id": 9, "group": 1 },
+            doc! { "_id": 10, "group": 2, "value": 5 },
+        ])
+        .unwrap();
+    let index_name = collection
+        .create_index(doc! { "group": 1, "value": 1 })
+        .unwrap();
+    (directory, collection, index_name)
+}
+
 #[test]
 fn create_index_backfills_before_return_and_maintains_writes_after_publication() {
     let directory = TempDir::new().unwrap();
@@ -242,6 +308,154 @@ fn document_lower_bound_uses_bounded_index_range() {
             .map(|document| document.get_i32("_id").unwrap())
             .collect();
         assert_eq!(indexed_ids, expected_ids);
+    }
+}
+
+#[test]
+fn type_bracketed_two_sided_ranges_match_collection_scans() {
+    let (_directory, collection, index_name) = setup_type_bracketing_collection();
+
+    for (filter, expected_ids) in [
+        (
+            doc! { "group": 1, "value": { "$gte": 0, "$lt": 10 } },
+            vec![1, 2],
+        ),
+        (
+            doc! { "group": 1, "value": { "$gte": "alpha", "$lt": "zeta" } },
+            vec![3],
+        ),
+        (
+            doc! {
+                "group": 1,
+                "value": { "$gte": { "x": 1 }, "$lt": { "x": 3 } }
+            },
+            vec![5, 6],
+        ),
+        (
+            doc! { "group": 1, "value": { "$gte": 0, "$lt": "zeta" } },
+            vec![],
+        ),
+    ] {
+        assert_indexed_and_collection_scan_ids(&collection, &index_name, filter, &expected_ids);
+    }
+
+    assert_index_scan(
+        &collection,
+        doc! { "group": 1, "value": { "$gte": { "x": 1 } } },
+        None,
+        &index_name,
+        ExplainDirection::Forward,
+        1,
+        true,
+    );
+}
+
+#[test]
+fn negated_type_bracketed_ranges_match_collection_scans() {
+    let (_directory, collection, index_name) = setup_type_bracketing_collection();
+
+    for (filter, expected_ids) in [
+        (
+            doc! { "group": 1, "value": { "$not": { "$gte": 5 } } },
+            vec![1, 3, 4, 5, 6, 8, 9],
+        ),
+        (
+            doc! {
+                "group": 1,
+                "$nor": [{ "value": { "$gte": 5 } }]
+            },
+            vec![1, 3, 4, 5, 6, 8, 9],
+        ),
+    ] {
+        assert_indexed_and_collection_scan_ids(&collection, &index_name, filter, &expected_ids);
+    }
+}
+
+#[test]
+fn strict_null_ranges_exclude_missing_fields_through_an_index() {
+    let (_directory, collection, index_name) = setup_type_bracketing_collection();
+
+    for (operator, expected_ids) in [
+        ("$gt", vec![]),
+        ("$gte", vec![8]),
+        ("$lt", vec![]),
+        ("$lte", vec![8]),
+    ] {
+        let filter = doc! {
+            "group": 1,
+            "value": { (operator): bson::Bson::Null }
+        };
+        assert_indexed_and_collection_scan_ids(&collection, &index_name, filter, &expected_ids);
+    }
+}
+
+#[test]
+fn mixed_type_primary_key_ranges_match_collection_scans() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("mixed_ids").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "name": "number-one" },
+            doc! { "_id": 5_i64, "name": "number-five" },
+            doc! { "_id": "alpha", "name": "string-alpha" },
+            doc! { "_id": "zeta", "name": "string-zeta" },
+            doc! { "_id": { "x": 1 }, "name": "document-one" },
+            doc! { "_id": { "x": 2 }, "name": "document-two" },
+        ])
+        .unwrap();
+    for (filter, expected_names) in [
+        (
+            doc! { "_id": { "$gte": 0, "$lt": 10 } },
+            vec!["number-one", "number-five"],
+        ),
+        (
+            doc! { "_id": { "$gte": "alpha", "$lt": "zeta" } },
+            vec!["string-alpha"],
+        ),
+        (
+            doc! { "_id": { "$gte": { "x": 1 }, "$lt": { "x": 3 } } },
+            vec!["document-one", "document-two"],
+        ),
+        (doc! { "_id": { "$gte": 0, "$lt": "zeta" } }, vec![]),
+    ] {
+        let automatic = collection
+            .find(filter.clone())
+            .sort(doc! { "_id": 1 })
+            .execute_collect()
+            .unwrap();
+        let scanned = collection
+            .find(filter.clone())
+            .hint_collection_scan()
+            .sort(doc! { "_id": 1 })
+            .execute_collect()
+            .unwrap();
+        assert_eq!(
+            automatic
+                .iter()
+                .map(|document| document.get_str("name").unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            expected_names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+            "automatic result for {filter:?}"
+        );
+        assert_eq!(
+            scanned
+                .iter()
+                .map(|document| document.get_str("name").unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            expected_names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+            "scan result for {filter:?}"
+        );
+        assert_eq!(
+            automatic, scanned,
+            "automatic and scanned results differ for {filter:?}"
+        );
     }
 }
 
