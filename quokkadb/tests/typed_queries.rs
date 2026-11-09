@@ -973,6 +973,171 @@ fn typed_find_filters_collections_through_typed_array_and_map_accessors() {
 }
 
 #[test]
+fn typed_multikey_indexes_cover_scalar_and_embedded_arrays() {
+    let (_dir, db) = setup();
+    let collection = db
+        .typed_collection::<NestedUser>("nested_users")
+        .create_if_missing();
+    collection
+        .insert_many([
+            NestedUser {
+                id: 1,
+                address: Address {
+                    city: "Zurich".to_string(),
+                    postal_code: "8001".to_string(),
+                },
+                orders: vec![
+                    Order {
+                        total: 125,
+                        shipping: Address {
+                            city: "Bern".to_string(),
+                            postal_code: "3000".to_string(),
+                        },
+                    },
+                    Order {
+                        total: 75,
+                        shipping: Address {
+                            city: "Basel".to_string(),
+                            postal_code: "4000".to_string(),
+                        },
+                    },
+                ],
+                tags: vec!["rust".to_string(), "database".to_string()],
+                settings: BTreeMap::new(),
+            },
+            NestedUser {
+                id: 2,
+                address: Address {
+                    city: "Bern".to_string(),
+                    postal_code: "3000".to_string(),
+                },
+                orders: vec![Order {
+                    total: 90,
+                    shipping: Address {
+                        city: "Bern".to_string(),
+                        postal_code: "3000".to_string(),
+                    },
+                }],
+                tags: vec!["rust".to_string()],
+                settings: BTreeMap::new(),
+            },
+            NestedUser {
+                id: 3,
+                address: Address {
+                    city: "Basel".to_string(),
+                    postal_code: "4000".to_string(),
+                },
+                orders: vec![],
+                tags: vec!["database".to_string()],
+                settings: BTreeMap::new(),
+            },
+        ])
+        .unwrap();
+
+    let tags_index = collection
+        .create_index(|user| user.tags.index_asc())
+        .unwrap();
+    let order_total_index = collection
+        .create_index(|user| {
+            user.id
+                .index_asc()
+                .then(user.orders.each(|order| order.total.index_asc()))
+        })
+        .unwrap();
+
+    let indexes = collection.list_indexes().unwrap();
+    let tags = indexes
+        .iter()
+        .find(|index| index.name == tags_index)
+        .unwrap();
+    assert_eq!(tags.fields.len(), 1);
+    assert_eq!(tags.fields[0].path, "tags");
+    let order_total = indexes
+        .iter()
+        .find(|index| index.name == order_total_index)
+        .unwrap();
+    assert_eq!(
+        order_total
+            .fields
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["_id", "orders.total"]
+    );
+
+    let tagged_ids: Vec<u64> = collection
+        .find(|user| user.tags.any_eq("rust"))
+        .select(|user| user.id)
+        .execute_collect()
+        .unwrap();
+    assert_eq!(tagged_ids, vec![1, 2]);
+
+    let high_value_order_ids: Vec<u64> = collection
+        .find(|user| user.orders.any(|order| order.total.gte(100)))
+        .select(|user| user.id)
+        .execute_collect()
+        .unwrap();
+    assert_eq!(high_value_order_ids, vec![1]);
+}
+
+#[test]
+fn typed_multikey_indexes_reject_fixed_array_positions() {
+    let (_dir, db) = setup();
+    let collection = db
+        .typed_collection::<NestedUser>("nested_users")
+        .create_if_missing();
+
+    let error = collection
+        .create_index(|user| user.orders.at(0).total.index_asc())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidRequest(message) if message == "Indexed path 'orders.0.total' cannot contain array elements"
+    ));
+}
+
+#[test]
+fn typed_multikey_compound_indexes_reject_parallel_arrays() {
+    let (_dir, db) = setup();
+    let collection = db
+        .typed_collection::<NestedUser>("nested_users")
+        .create_if_missing();
+    collection
+        .insert_one(NestedUser {
+            id: 1,
+            address: Address {
+                city: "Zurich".to_string(),
+                postal_code: "8001".to_string(),
+            },
+            orders: vec![Order {
+                total: 125,
+                shipping: Address {
+                    city: "Bern".to_string(),
+                    postal_code: "3000".to_string(),
+                },
+            }],
+            tags: vec!["rust".to_string()],
+            settings: BTreeMap::new(),
+        })
+        .unwrap();
+
+    let error = collection
+        .create_index(|user| {
+            user.tags
+                .index_asc()
+                .then(user.orders.each(|order| order.total.index_asc()))
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Io(error)
+            if error.kind() == std::io::ErrorKind::InvalidInput
+                && error.to_string()
+                    == "Cannot index parallel arrays for paths 'tags' and 'orders.total'"
+    ));
+}
+
+#[test]
 fn typed_find_filters_arrays_by_all_values_and_length() {
     let (_dir, db) = setup();
     let collection = db

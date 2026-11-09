@@ -88,6 +88,8 @@ The document API expresses the same ideas with BSON filter, projection, and sort
 
 An index stores ordered values for one field or an ordered sequence of fields. Create one for filters and sorts that are frequent in your application. Indexes can reduce query work, but every insert, update, and delete must also maintain them. Compound index field order matters: an index on `needs_water` followed by `name` is designed for queries and sorts that begin with `needs_water`.
 
+Indexes may traverse arrays. A scalar array produces one index entry per member, and an array of embedded models can index a nested field such as `orders.total`. Fixed numeric array positions are not indexable, and a compound index cannot expand two independent array paths in the same document.
+
 See [Indexes](guides/indexes.md) for index creation and management.
 
 ## Concurrent access and atomic writes

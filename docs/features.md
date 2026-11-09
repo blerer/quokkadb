@@ -57,8 +57,9 @@ See [Update data](guides/update-data.md) for common update patterns and the [API
 | --- | --- | --- | --- |
 | Ordered single-field indexes | Supported | Supported | Ascending and descending regular indexes are available. |
 | Ordered compound indexes | Supported | Supported | Field order matters for filters and sorts; an index can satisfy a compatible leading prefix. |
-| Index-backed filters and sorts | Partial | Partial | The optimizer can use compatible equality/range filters and sort order, but not every query shape is indexable. |
-| Multikey or array-path indexes | Not supported | Not supported | An indexed path cannot contain an array element. QuokkaDB does not create multikey indexes. |
+| Index-backed filters and sorts | Partial | Partial | The optimizer can use compatible equality/range filters and sort order, but not every query shape is indexable. A multikey field cannot provide document sort order for a requested sort prefix that includes the field. |
+| Multikey indexes | Supported | Supported | Indexes can target scalar arrays or fields traversing arrays. Each array member creates an index entry; matching documents are deduplicated during reads. Documents that expand two independent array paths cannot satisfy one compound index. |
+| Fixed numeric array-position index paths | Not supported | Not supported | Paths such as `items.0` or `orders.0.total` are not valid index definitions. Use a multikey path such as `orders.total` to index every array element. |
 | Unique, sparse, partial, text, geospatial, wildcard, and TTL indexes | Not supported | Not supported | Regular ordered indexes are the only public index type. |
 
 See [Indexes](guides/indexes.md) for creation and lifecycle operations.

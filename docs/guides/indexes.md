@@ -94,7 +94,7 @@ A query that filters only `height_cm` does not have the leading `needs_water` co
 
 ## Match sort order
 
-An index can provide a sort when the requested fields match a leading prefix of the index, either in index order or with every direction reversed. Other sort shapes still work, but QuokkaDB sorts the matching results itself.
+An index can provide a sort when the requested fields match a leading prefix of the index, either in index order or with every direction reversed. A multikey field cannot provide document sort order for a requested prefix that includes that field. Other sort shapes still work, but QuokkaDB sorts the matching results itself.
 
 For example, an index on `needs_water` ascending and `name` ascending can provide that same two-field order or both fields descending. It does not provide an order by `name` alone.
 
@@ -111,15 +111,54 @@ let spill_bytes = executor.external_merge_spill_bytes();
 
 Compare those values with the filters and sorts your application runs. See [Operations](../operations.md#read-metrics-in-the-application) for the available metrics and how to interpret them.
 
+## Index array values
+
+Assuming the model has `tags: Vec<String>` and `orders: Vec<Order>` fields, typed
+scalar arrays can be indexed directly. QuokkaDB creates one index entry for each
+array member.
+
+```rust
+let tag_index = plants.create_index(|plant| plant.tags.index_asc())?;
+```
+
+For an array of embedded models, use `each` to index a field across all elements:
+
+```rust
+let order_index = shops.create_index(|shop| {
+    shop.orders.each(|order| order.total.index_asc())
+})?;
+```
+
+The embedded-array example indexes `orders.total`. Query the array with the existing typed `any` predicate:
+
+```rust
+let high_value_orders = shops
+    .find(|shop| shop.orders.any(|order| order.total.gte(100)))
+    .execute_collect()?;
+```
+
+An array-valued path produces one index entry for each array member. A query still returns a document only once, even when several members match; deduplication happens before `skip` and `limit` are applied.
+
+For an embedded array, `any` keeps predicates correlated to one array element. Separate predicates on dotted paths can match different elements, so use `any` when all conditions must hold for the same element. The document API uses `$elemMatch` for the same purpose.
+
+The document API uses the same multikey behavior with BSON key specifications:
+
+```rust
+let tag_index = documents.create_index(doc! { "tags": 1 })?;
+let order_total_index = documents.create_index(doc! { "orders.total": 1 })?;
+```
+
+In a compound index, scalar fields can precede or follow a multikey field. Without correlation evidence, QuokkaDB does not use a second multikey field as an independent index bound; its predicate remains available for document filtering. A compound index also cannot expand two independent array paths for the same document. For example, indexing both `tags` and `orders.total` fails when a document contains both arrays.
+
+Use `at(index)` for a fixed array position in a filter or projection, not in an index definition. Numeric positions such as `orders.0.total` are not valid index paths.
+
 ## When not to add an index
 
 Every index adds write work and occupies storage. Do not index every field. Add an index when an observed filter or sort is important to the application, then keep it only while that query pattern remains useful.
 
 ## Current limits
 
-QuokkaDB supports ordered ascending, descending, and compound indexes. An indexed path cannot include an array element, so multikey and array-path indexes are not available.
-
-Unique, sparse, partial, text, geospatial, wildcard, and TTL indexes are not available. Read [Features](../features.md#indexes) for the complete support matrix.
+QuokkaDB supports ordered ascending, descending, compound, and multikey indexes. Fixed numeric array positions are not valid index paths. Unique, sparse, partial, text, geospatial, wildcard, and TTL indexes are not available. Read [Features](../features.md#indexes) for the complete support matrix.
 
 ## Next
 

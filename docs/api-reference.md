@@ -87,6 +87,23 @@ let index_name = plants.create_index(|plant| {
 })?;
 ```
 
+Assuming the model has `tags: Vec<String>` and `orders: Vec<Order>` fields, scalar
+array fields can be indexed directly. For an array of embedded `QuokkaType` values,
+use `each` to build a path through every element rather than selecting a fixed
+position:
+
+```rust
+let tag_index = plants.create_index(|plant| plant.tags.index_asc())?;
+let order_index = shops.create_index(|shop| {
+    shop.orders.each(|order| order.total.index_asc())
+})?;
+```
+
+The first example creates one index entry for each `tags` member. The second
+creates a multikey index on `orders.total`. `at(index)` remains available for
+fixed-position reads and filters, but paths containing a numeric array position
+cannot be indexed.
+
 ### Reads and result shaping
 
 | Method | Returns | Purpose |
@@ -160,7 +177,7 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 | BSON date or timestamp | All applicable scalar methods | `current_date` for `bson::DateTime`; `current_timestamp` for `bson::Timestamp` |
 | Optional `Option<V>` | The inner field's operations plus `exists` | `unset` plus the inner field's supported updates |
 | Embedded `QuokkaType` | Its generated nested fields; object equality methods | Whole-object scalar-style updates where applicable |
-| Array `Vec<T>` | `at(index)`, `len_eq`, `any_eq`, `any_where(predicate)`, `all`; embedded models also provide `any(predicate)` | Array-level `set` and ordering methods; `add_to_set`, `add_to_set_each`, `push`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, `pull`, `pull_all`; embedded models also provide `pull_where` |
+| Array `Vec<T>` | `at(index)`, `len_eq`, `any_eq`, `any_where(predicate)`, `all`; embedded models also provide `any(predicate)` | `index_asc`, `index_desc`, array-level `set` and ordering methods, `add_to_set`, `add_to_set_each`, `push`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, `pull`, `pull_all`; embedded models also provide `each(|element| index_fields)` and `pull_where` |
 | Map `BTreeMap<String, V>` | `key(name)` to access a value field | Map-level scalar-style updates and ordering methods |
 
 `PushOptions::new()` configures `push_each`: use `position`, `slice`, `sort_ascending`, or `sort_descending`. For arrays of embedded `QuokkaType` values, `sort_by` accepts a typed sort closure.
@@ -199,6 +216,11 @@ let index_name = plants.create_index(doc! {
     "name": 1,
 })?;
 ```
+
+Key specifications can target array-valued fields. A key such as `{"tags": 1}`
+indexes each scalar array member, while `{"orders.total": 1}` traverses every
+embedded array element. Numeric positional paths such as `{"orders.0.total": 1}`
+are rejected; use the multikey path when every element should be indexed.
 
 `IndexInfo` exposes an index `id`, `name`, and ordered `fields`. Each `IndexFieldInfo` has its BSON `path` and an `IndexDirection` of `Ascending` or `Descending`.
 

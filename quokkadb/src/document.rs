@@ -522,6 +522,15 @@ impl<D, T: QuokkaType> ArrayField<D, T> {
         array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
     }
 
+    /// Builds an index specification for a field of every embedded array element.
+    ///
+    /// The generated index path traverses the array without selecting a fixed
+    /// numeric position. For example, `orders.each(|order| order.total.index_asc())`
+    /// indexes the `orders.total` path as a multikey index.
+    pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
+        fields(T::fields(self.path.clone()))
+    }
+
     /// Creates a `$pull` update that removes embedded elements matching `predicate`.
     pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
         let criterion = predicate(&T::fields(TypedPath::empty())).into_expr();
