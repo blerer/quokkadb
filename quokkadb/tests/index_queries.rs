@@ -208,6 +208,56 @@ fn completed_index_build_survives_database_restart() {
 }
 
 #[test]
+fn multikey_index_queries_survive_database_restart() {
+    let directory = TempDir::new().unwrap();
+    let index_name = {
+        let db = common::open_db(directory.path());
+        let collection = db.collection("restart_arrays").create_if_missing();
+        collection
+            .insert_many([
+                doc! {
+                    "_id": 1,
+                    "group": 1,
+                    "items": [{"x": 1, "y": 0}, {"x": 0, "y": 2}],
+                },
+                doc! {
+                    "_id": 2,
+                    "group": 1,
+                    "items": [{"x": 1, "y": 2}],
+                },
+                doc! {
+                    "_id": 3,
+                    "group": 1,
+                    "items": [{"x": 1, "y": 3}],
+                },
+            ])
+            .unwrap();
+        collection
+            .create_index(doc! {"group": 1, "items.x": 1, "items.y": 1})
+            .unwrap()
+    };
+
+    let db = common::open_db(directory.path());
+    let collection = db.collection("restart_arrays");
+    let indexes = collection.list_indexes().unwrap();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].name, index_name);
+
+    assert_multikey_query_results(
+        &collection,
+        &index_name,
+        doc! {"group": 1, "items": {"$elemMatch": {"x": 1, "y": 2}}},
+        &[2],
+    );
+    assert_multikey_query_results(
+        &collection,
+        &index_name,
+        doc! {"group": 1, "items.x": 1, "items.y": 2},
+        &[1, 2],
+    );
+}
+
+#[test]
 fn equality_query_uses_single_field_index() {
     let (_directory, collection) = setup_index_query_collection();
     let index_name = collection.create_index(doc! { "status": 1 }).unwrap();
@@ -868,6 +918,38 @@ fn multikey_empty_missing_and_null_values_match_collection_scans() {
     }
 }
 
+#[test]
+fn multikey_index_entries_track_array_updates_replacements_and_deletes() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("array_index_writes").create_if_missing();
+    collection
+        .insert_many([
+            doc! {"_id": 1, "group": 1, "a": [1, 2]},
+            doc! {"_id": 2, "group": 1, "a": [2, 3]},
+            doc! {"_id": 3, "group": 1, "a": [3, 4]},
+        ])
+        .unwrap();
+    let index = collection.create_index(doc! {"group": 1, "a": 1}).unwrap();
+
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 2}, &[1, 2]);
+
+    collection
+        .update_one(doc! {"_id": 1}, doc! {"$set": {"a": 9}})
+        .unwrap();
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 2}, &[2]);
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 9}, &[1]);
+
+    collection
+        .replace_one(doc! {"_id": 2}, doc! {"_id": 2, "group": 1, "a": [5, 6]})
+        .unwrap();
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 3}, &[3]);
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 5}, &[2]);
+
+    collection.delete_one(doc! {"_id": 3}).unwrap();
+    assert_multikey_query_results(&collection, &index, doc! {"group": 1, "a": 4}, &[]);
+}
+
 // Exercise parsing, normalization, parameterization, planning, and execution through
 // the public API. Explicit IDs prevent two access paths sharing a bug from passing.
 fn assert_multikey_query_results(
@@ -945,6 +1027,26 @@ fn array_bounds_match_collection_scans_and_separate_cached_plans() {
     let compound = collection
         .create_index(doc! {"category": 1, "a": 1})
         .unwrap();
+
+    for (predicate, single_ids, compound_ids) in [
+        (doc! {"$eq": 1}, vec![1, 5, 6], vec![1, 6]),
+        (doc! {"$gt": 1}, vec![1, 2, 5, 7], vec![1, 2, 7]),
+        (doc! {"$gte": 1}, vec![1, 2, 5, 6, 7], vec![1, 2, 6, 7]),
+    ] {
+        assert_indexed_and_collection_scan_ids(
+            &collection,
+            &single,
+            doc! {"a": predicate.clone()},
+            &single_ids,
+        );
+        assert_indexed_and_collection_scan_ids(
+            &collection,
+            &compound,
+            doc! {"category": 1, "a": predicate},
+            &compound_ids,
+        );
+    }
+
     // No writes below: all parameter variants execute under the same schema version.
     for (index, prefix) in [(single, false), (compound, true)] {
         for operator in ["$eq", "$gt", "$gte", "$lt", "$lte"] {

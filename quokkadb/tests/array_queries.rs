@@ -278,3 +278,94 @@ fn all_predicates_can_match_different_dotted_path_branches() {
         );
     }
 }
+
+#[test]
+fn nested_elem_match_preserves_nested_element_correlation_across_scan_modes() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("nested_arrays").create_if_missing();
+    insert_fixture(
+        &collection,
+        [
+            doc! {
+                "_id": 1,
+                "surveys": [
+                    {"name": "preferred", "results": [{"score": 9}, {"score": 1}]},
+                    {"name": "other", "results": [{"score": 2}]},
+                ],
+            },
+            doc! {
+                "_id": 2,
+                "surveys": [
+                    {"name": "preferred", "results": [{"score": 2}]},
+                    {"name": "other", "results": [{"score": 9}]},
+                ],
+            },
+            doc! {
+                "_id": 3,
+                "surveys": [{"name": "preferred", "results": [{"score": 7}]}],
+            },
+            doc! {"_id": 4, "surveys": []},
+        ],
+    );
+    let compound = collection
+        .create_index(doc! {"test_group": 1, "surveys.results.score": 1})
+        .unwrap();
+
+    let query = doc! {
+        "surveys": {
+            "$elemMatch": {
+                "name": "preferred",
+                "results": {"$elemMatch": {"score": {"$gt": 7}}},
+            },
+        },
+    };
+    assert_scan_modes(
+        &collection,
+        query,
+        &[1],
+        std::slice::from_ref(&compound),
+        None,
+    );
+}
+
+#[test]
+fn array_size_and_type_match_explicit_values_across_scan_modes() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("array_types").create_if_missing();
+    insert_fixture(
+        &collection,
+        [
+            doc! {"_id": 1, "a": [1, 2]},
+            doc! {"_id": 2, "a": []},
+            doc! {"_id": 3, "a": [1]},
+            doc! {"_id": 4, "a": [[1]]},
+            doc! {"_id": 5, "a": 1},
+            doc! {"_id": 6, "a": "one"},
+            doc! {"_id": 7, "a": null},
+            doc! {"_id": 8},
+        ],
+    );
+    let compound = collection
+        .create_index(doc! {"test_group": 1, "a": 1})
+        .unwrap();
+
+    for (query, expected) in [
+        (doc! {"a": {"$size": 0}}, vec![2]),
+        (doc! {"a": {"$size": 1}}, vec![3, 4]),
+        (doc! {"a": {"$size": 2}}, vec![1]),
+        (doc! {"a": {"$type": "array"}}, vec![1, 2, 3, 4]),
+        (doc! {"a": {"$type": "int"}}, vec![5]),
+        (doc! {"a": {"$type": "string"}}, vec![6]),
+        (doc! {"a": {"$type": "null"}}, vec![7]),
+    ] {
+        assert_scan_modes(
+            &collection,
+            query,
+            &expected,
+            std::slice::from_ref(&compound),
+            None,
+        );
+    }
+}
