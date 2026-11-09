@@ -318,10 +318,7 @@ impl DbImpl {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("drop_collection", collection = %name).entered(),
         };
-        let result = self.storage_engine.drop_collection(name)?;
-        if let Some(id) = result {
-            self.query_cache.invalidate_collection(id);
-        }
+        self.storage_engine.drop_collection(name)?;
         Ok(())
     }
 
@@ -354,7 +351,6 @@ impl DbImpl {
             let key = IndexBuildKey::new(collection_id, created_index.id);
             self.index_builder.build_index(key, &build_snapshot)?;
         }
-        self.query_cache.invalidate_collection(collection_id);
         Ok(created_index.name)
     }
 
@@ -364,7 +360,6 @@ impl DbImpl {
             _operation: debug_span!("drop_index").entered(),
         };
         self.storage_engine.drop_index(collection_id, index_id)?;
-        self.query_cache.invalidate_collection(collection_id);
         Ok(())
     }
 

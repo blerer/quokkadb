@@ -8,7 +8,8 @@ use std::mem::size_of;
 use std::sync::Arc;
 use tracing::trace_span;
 
-/// A cache of optimized physical plans keyed by the hash of a parameterized logical plan.
+/// A cache of optimized physical plans keyed by collection, schema version, and
+/// the hash of a parameterized logical plan.
 pub struct QueryCache {
     metrics: Metrics,
     cache: Cache<(u32, u32, u64), Arc<CachedPhysicalPlan>>,
@@ -16,7 +17,6 @@ pub struct QueryCache {
 
 #[derive(Debug)]
 struct CachedPhysicalPlan {
-    collection: u32,
     plan: Arc<PhysicalPlan>,
     estimated_size: u32,
 }
@@ -77,27 +77,10 @@ impl QueryCache {
 
         let plan = build()?;
         let cached_plan = Arc::new(CachedPhysicalPlan {
-            collection,
             estimated_size: estimate_cached_plan_size(plan.as_ref()),
             plan,
         });
         Ok(self.cache.get_with(key, || cached_plan).plan.clone())
-    }
-
-    /// Invalidates all cached plans for the given collection.
-    pub fn invalidate_collection(&self, collection: u32) {
-        let keys_to_invalidate: Vec<(u32, u32, u64)> = self
-            .cache
-            .iter()
-            .filter_map(|(key, cached)| (cached.collection == collection).then_some(*key))
-            .collect();
-
-        for key in keys_to_invalidate {
-            self.cache.invalidate(&key);
-        }
-        self.cache.run_pending_tasks();
-
-        tracing::trace!(collection, "query cache invalidate collection");
     }
 }
 
@@ -297,43 +280,30 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_collection_only_removes_matching_entries() {
+    fn schema_versions_use_distinct_cache_entries() {
         let (cache, metric_registry) = new_cache();
-        let collection_one_plan = Arc::new(LogicalPlanBuilder::scan(1, None).build());
-        let collection_two_plan = Arc::new(LogicalPlanBuilder::scan(2, None).build());
+        let logical_plan = Arc::new(LogicalPlanBuilder::scan(1, None).build());
+        let build_count = AtomicUsize::new(0);
+        let build_plan = || {
+            build_count.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(PhysicalPlan::NoOp))
+        };
 
         cache
-            .get_or_insert_with(1, 1, collection_one_plan.clone(), || {
-                Ok(Arc::new(PhysicalPlan::NoOp))
-            })
+            .get_or_insert_with(1, 1, logical_plan.clone(), build_plan)
             .unwrap();
         cache
-            .get_or_insert_with(2, 1, collection_two_plan.clone(), || {
-                Ok(Arc::new(PhysicalPlan::NoOp))
-            })
+            .get_or_insert_with(1, 1, logical_plan.clone(), build_plan)
             .unwrap();
-
-        let size_before_invalidation = get_cached_size(&metric_registry);
-        assert!(size_before_invalidation > 0);
-
-        cache.invalidate_collection(1);
-
-        let size_after_invalidation = get_cached_size(&metric_registry);
-        assert!(size_after_invalidation < size_before_invalidation);
 
         cache
-            .get_or_insert_with(1, 1, collection_one_plan, || {
-                Ok(Arc::new(PhysicalPlan::NoOp))
-            })
-            .unwrap();
-        cache
-            .get_or_insert_with(2, 1, collection_two_plan, || {
-                Ok(Arc::new(PhysicalPlan::NoOp))
-            })
+            .get_or_insert_with(1, 2, logical_plan, build_plan)
             .unwrap();
 
+        assert_eq!(build_count.load(Ordering::Relaxed), 2);
         assert_hits(&metric_registry, 1);
-        assert_misses(&metric_registry, 3);
+        assert_misses(&metric_registry, 2);
+        assert!(get_cached_size(&metric_registry) > 0);
     }
 
     #[test]

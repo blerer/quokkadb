@@ -490,6 +490,9 @@ pub struct CollectionMetadata {
     /// Timestamp when the collection was created.
     pub created_at: u64,
     /// Monotonically increasing version for collection metadata changes.
+    ///
+    /// Planner-relevant metadata changes must advance this version so query
+    /// cache entries are isolated by schema generation.
     pub version: u32,
     /// Timestamp when the collection was dropped (if applicable).
     pub dropped_at: Option<u64>,
