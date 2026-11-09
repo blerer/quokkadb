@@ -120,10 +120,7 @@ mod optimizer_tests {
     const COLLECTION: u32 = 10;
 
     fn bracketed_greater_than(index: u32) -> Interval<Arc<Expr>> {
-        Interval::new(
-            std::ops::Bound::Excluded(placeholder(index)),
-            std::ops::Bound::Included(placeholder(index + 1)),
-        )
+        Interval::open_closed(placeholder(index), placeholder(index + 1))
     }
 
     #[test]
@@ -170,26 +167,52 @@ mod optimizer_tests {
             index: 2,
             range: IndexScanRangeExpr {
                 equal_prefix: vec![placeholder(0)],
-                tail: Some(Interval::new(
-                    std::ops::Bound::Included(placeholder(3)),
-                    std::ops::Bound::Included(placeholder(4)),
-                )),
+                tail: Some(Interval::closed(placeholder(3), placeholder(4))),
             },
             direction: Direction::Forward,
             filter: Some(and([
                 field_filters(field(["a"]), [interval(bracketed_greater_than(1))]),
                 field_filters(
                     field(["b"]),
-                    [interval(Interval::new(
-                        std::ops::Bound::Included(placeholder(5)),
-                        std::ops::Bound::Included(placeholder(6)),
-                    ))],
+                    [interval(Interval::closed(placeholder(5), placeholder(6)))],
                 ),
             ])),
             projection: None,
         };
 
         check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
+    }
+
+    #[test]
+    fn test_null_range_keeps_residual_filter_for_index_scan() {
+        for (filter, range) in [
+            (
+                field_filters(field(["a"]), vec![gte(lit(Bson::Null))]),
+                Interval::closed_open(placeholder(0), placeholder(1)),
+            ),
+            (
+                field_filters(field(["a"]), vec![lte(lit(Bson::Null))]),
+                Interval::open_closed(placeholder(0), placeholder(1)),
+            ),
+        ] {
+            let input = LogicalPlanBuilder::scan(COLLECTION, None)
+                .filter(filter)
+                .build_arc();
+
+            let output = PhysicalPlan::IndexScan {
+                collection: COLLECTION,
+                index: 1,
+                range: IndexScanRangeExpr {
+                    equal_prefix: vec![],
+                    tail: Some(range.clone()),
+                },
+                direction: Direction::Forward,
+                filter: Some(field_filters(field(["a"]), [exists(true)])),
+                projection: None,
+            };
+
+            check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
+        }
     }
 
     #[test]

@@ -522,6 +522,15 @@ impl CoalesceFieldPredicates {
                 .cloned()
                 .map(canonicalize_set_predicate)
                 .collect();
+            // Secondary indexes encode missing fields as null. Keep an explicit
+            // presence predicate alongside a range that includes null so an
+            // index scan can recheck the fetched document for missing fields.
+            let null_range_requires_presence = filters.iter().any(|filter| {
+                matches!(
+                    filter.as_ref(),
+                    Expr::Interval(interval) if interval_includes_null(interval)
+                )
+            });
             if filters
                 .iter()
                 .any(|filter| predicate_requires_value(filter))
@@ -532,7 +541,16 @@ impl CoalesceFieldPredicates {
                 {
                     return Arc::new(Expr::AlwaysFalse);
                 }
-                filters.retain(|filter| !matches!(filter.as_ref(), Expr::Exists(true)));
+                if !null_range_requires_presence {
+                    filters.retain(|filter| !matches!(filter.as_ref(), Expr::Exists(true)));
+                }
+            }
+            if null_range_requires_presence
+                && !filters
+                    .iter()
+                    .any(|filter| matches!(filter.as_ref(), Expr::Exists(true)))
+            {
+                filters.push(Arc::new(Expr::Exists(true)));
             }
             filters.sort();
             filters.dedup();
@@ -896,6 +914,22 @@ fn predicate_requires_value(expr: &Expr) -> bool {
             Expr::Literal(BsonValue(Bson::Array(values))) if !values.iter().any(|value| matches!(value, Bson::Null))),
         _ => false,
     }
+}
+
+fn interval_includes_null(interval: &Interval<Arc<Expr>>) -> bool {
+    if interval.is_point() {
+        return false;
+    }
+
+    [interval.start_bound(), interval.end_bound()]
+        .into_iter()
+        .any(|bound| {
+            matches!(
+                bound,
+                Bound::Included(value)
+                    if matches!(value.as_ref(), Expr::Literal(BsonValue(Bson::Null)))
+            )
+        })
 }
 
 fn interval_has_numeric_bounds(interval: &Interval<Arc<Expr>>) -> bool {

@@ -340,6 +340,43 @@ fn bson_type_equality_does_not_match_a_different_type() {
     assert_eq!(names(&number_match), ["number_int32"]);
 }
 
+#[test]
+fn null_ranges_do_not_match_missing_fields_through_an_index() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("null_ranges").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "value": Bson::Null, "name": "explicit_null" },
+            doc! { "_id": 2, "name": "missing" },
+            doc! { "_id": 3, "value": 1, "name": "number" },
+        ])
+        .unwrap();
+    let index_name = collection.create_index(doc! { "value": 1 }).unwrap();
+
+    for operator in ["$gte", "$lte"] {
+        let indexed_names = names(
+            &collection
+                .find(comparison_filter("value", operator, &Bson::Null))
+                .hint(index_name.clone())
+                .sort(doc! { "name": 1 })
+                .execute_collect()
+                .unwrap(),
+        );
+        let scanned_names = names(
+            &collection
+                .find(comparison_filter("value", operator, &Bson::Null))
+                .hint_collection_scan()
+                .sort(doc! { "name": 1 })
+                .execute_collect()
+                .unwrap(),
+        );
+
+        assert_eq!(indexed_names, ["explicit_null"]);
+        assert_eq!(indexed_names, scanned_names);
+    }
+}
+
 fn assert_numeric_predicate_results(
     collection: &quokkadb::Collection,
     index_name: &str,
