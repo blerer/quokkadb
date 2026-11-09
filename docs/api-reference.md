@@ -182,7 +182,7 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 
 `PushOptions::new()` configures `push_each`: use `position`, `slice`, `sort_ascending`, or `sort_descending`. For arrays of embedded `QuokkaType` values, `sort_by` accepts a typed sort closure.
 
-Typed filters and updates follow BSON comparison behavior. See [Find queries](guides/find-queries.md) and [Update data](guides/update-data.md) for task-oriented examples.
+Typed filters and updates follow BSON comparison behavior. Range filters use BSON type bracketing, while equivalent numeric representations compare together. See [Find queries — comparison types](guides/find-queries.md#comparison-types-and-type-bracketing) and [Update data](guides/update-data.md) for task-oriented examples.
 
 `Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 

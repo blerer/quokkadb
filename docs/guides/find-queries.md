@@ -33,6 +33,29 @@ let selected = plants
     .execute()?;
 ```
 
+## Comparison types and type bracketing
+
+Range filters use BSON type bracketing: they match values in the same BSON type family as the comparison bound. All numeric BSON types share one numeric family, so a numeric range can match equivalent `int32`, `int64`, `double`, and `decimal128` values. The example assumes `documents` is a document collection.
+
+```rust
+use bson::doc;
+
+documents.insert_many([
+    doc! { "_id": 1, "value": 5_i32 },
+    doc! { "_id": 2, "value": 5_i64 },
+    doc! { "_id": 3, "value": 5.5_f64 },
+    doc! { "_id": 4, "value": "5" },
+])?;
+
+let matches = documents
+    .find(doc! { "value": { "$gte": 5, "$lt": 6 } })
+    .sort(doc! { "_id": 1 })
+    .execute_collect()?;
+// The numeric values match; the string value does not.
+```
+
+Strings, documents, arrays, and other BSON types are bracketed separately. A range with bounds from different type families does not create one interval across the canonical BSON sort order. Equality is slightly different: equivalent numeric representations compare equal, but a numeric value does not equal a string containing the same text. Sorting still uses canonical BSON ordering across type families.
+
 Combine typed filters with `and`, `or`, and `nor`. Import `not` when a whole filter should be negated.
 
 ```rust

@@ -4,22 +4,6 @@ QuokkaDB runs in your Rust application's process. This page explains how applica
 
 ## Documents and typed models
 
-A document is a BSON value with named fields. Documents can contain nested documents, arrays, and the BSON value types supported by the `bson` crate.
-
-The document API works directly with dynamic BSON documents. It is useful when the shape of the data is only known at runtime.
-
-```rust
-use bson::doc;
-
-let plants = db.collection("plants").create_if_missing();
-
-plants.insert_one(doc! {
-    "_id": 1,
-    "name": "Monstera",
-    "needs_water": true,
-})?;
-```
-
 Most applications should use the typed API. A typed collection serializes a Rust model with Serde and gives its fields typed query, update, sort, and index expressions.
 
 ```rust
@@ -38,6 +22,22 @@ let plants = db
 let plant = plants.find_one(|plant| plant.needs_water.eq(true))?;
 ```
 
+A model is stored as a BSON document: a collection of named fields. Documents can contain nested documents, arrays, and the BSON value types supported by the `bson` crate.
+
+The document API works directly with dynamic BSON documents. It is useful when the shape of the data is only known at runtime.
+
+```rust
+use bson::doc;
+
+let plant_documents = db.collection("plants").create_if_missing();
+
+plant_documents.insert_one(doc! {
+    "_id": 1,
+    "name": "Monstera",
+    "needs_water": true,
+})?;
+```
+
 The Rust type describes how the application reads and writes documents; it does not add a database-wide schema constraint. Code using the document API can write a document with a different shape to the same collection. A typed read of an incompatible document returns a deserialization error. Keep one document shape per typed collection, or use the document API when the shape is intentionally flexible.
 
 For changes to a model or its existing documents, see [Schema evolution & migrations](guides/schema-evolution-and-migrations.md).
@@ -49,7 +49,9 @@ A collection is a named group of documents. A collection handle does not create 
 Call `create_if_missing` when a collection may be created by its first write. Reads through that handle return no documents until it exists.
 
 ```rust
-let plants = db.collection("plants").create_if_missing();
+let plants = db
+    .typed_collection::<Plant>("plants")
+    .create_if_missing();
 ```
 
 Create a collection explicitly when its setup is part of application initialization, or when you need to choose an ID strategy. Collections can be listed, renamed, and dropped. See [Manage collections](guides/manage-collections.md) for those operations.
@@ -57,6 +59,8 @@ Create a collection explicitly when its setup is part of application initializat
 ## IDs
 
 Every stored document has an `_id` field. It identifies the document within its collection and must be unique.
+
+Typed models always supply their own ID. A `QuokkaDocument` model has exactly one non-optional field whose effective Serde name is `_id`, usually configured with `#[serde(rename = "_id")]`.
 
 For a document collection, each collection has one of three ID-creation strategies:
 
@@ -66,13 +70,13 @@ For a document collection, each collection has one of three ID-creation strategi
 | `Manual` | Require the application to supply `_id`. |
 | `Generated` | Generate every `_id` and reject documents that supply one. |
 
-Typed models always supply their own ID. A `QuokkaDocument` model has exactly one non-optional field whose effective Serde name is `_id`, usually configured with `#[serde(rename = "_id")]`.
-
 When an application needs to create IDs before insertion, `QuokkaId::new()` produces a globally ordered Sonyflake ID. It serializes as a BSON `Int64`, so it can be used with the document API. It is not currently available as a typed model ID.
 
 ## Queries, updates, and indexes
 
-Use filters to select documents, then optionally project fields, sort, skip, and limit the result. `find_one` returns at most one document; `find` returns an iterator that produces matching documents as it is consumed.
+Use filters to select matching models or documents, then optionally project fields, sort, skip, and limit the result. In both APIs, `find` returns a query builder; calling `execute()` returns an iterator that produces results as it is consumed. By default, typed queries return Rust models, while document queries return BSON documents.
+
+`find_one` returns `Result<Option<T>>` for a typed collection and `Result<Option<Document>>` for a document collection. A successful query returns `None` when nothing matches.
 
 The typed API expresses paths through model fields:
 
@@ -84,7 +88,9 @@ let thirsty = plants
     .execute()?;
 ```
 
-The document API expresses the same ideas with BSON filter, projection, and sort documents. See [Find queries](guides/find-queries.md) for examples of both APIs.
+The document API expresses the same ideas with BSON filter, projection, and sort documents.
+
+In both APIs, range filters use BSON type bracketing, so they compare values within the bound's BSON type family; numeric BSON types share one family. See [Find queries — comparison types](guides/find-queries.md#comparison-types-and-type-bracketing) for the practical rules and examples.
 
 An index stores ordered values for one field or an ordered sequence of fields. Create one for filters and sorts that are frequent in your application. Indexes can reduce query work, but every insert, update, and delete must also maintain them. Compound index field order matters: an index on `needs_water` followed by `name` is designed for queries and sorts that begin with `needs_water`.
 
