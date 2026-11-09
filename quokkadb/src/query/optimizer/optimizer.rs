@@ -1131,10 +1131,38 @@ fn index_has_array_bound_filter(
 
 fn interval_has_array_bound(interval: &Interval<Arc<Expr>>) -> bool {
     use std::ops::{Bound, RangeBounds};
-    [interval.start_bound(), interval.end_bound()].into_iter().any(|bound| {
-        matches!(bound, Bound::Included(value) | Bound::Excluded(value)
-            if matches!(value.as_ref(), Expr::Placeholder { kind: crate::query::ParameterKind::Array, .. }))
-    })
+    let has_array_bound = [interval.start_bound(), interval.end_bound()]
+        .into_iter()
+        .any(|bound| {
+            matches!(bound, Bound::Included(value) | Bound::Excluded(value)
+                if matches!(value.as_ref(), Expr::Placeholder { kind: crate::query::ParameterKind::Array, .. }))
+        });
+
+    // Documents have no finite maximum in BSON order. Type bracketing therefore
+    // closes a document lower-bound interval with the empty-array boundary. That
+    // array is synthetic, not an array value from the query, and is safe to use
+    // as the upper edge of the index range.
+    let has_synthetic_document_upper_bound = matches!(
+        (interval.start_bound(), interval.end_bound()),
+        (
+            Bound::Included(start) | Bound::Excluded(start),
+            Bound::Excluded(end),
+        ) if matches!(
+            start.as_ref(),
+            Expr::Placeholder {
+                kind: crate::query::ParameterKind::NonArray,
+                ..
+            }
+        ) && matches!(
+            end.as_ref(),
+            Expr::Placeholder {
+                kind: crate::query::ParameterKind::Array,
+                ..
+            }
+        )
+    );
+
+    has_array_bound && !has_synthetic_document_upper_bound
 }
 
 /// Builds the tightest safe range for the leading fields of a compound index.

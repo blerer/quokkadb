@@ -114,7 +114,7 @@ mod optimizer_tests {
     use crate::query::logical_plan::LogicalPlanBuilder;
     use crate::storage::catalog::{CollectionBuilder, IndexBuilder};
     use crate::storage::count_stats::{CountStats, CountStatsKey};
-    use bson::Bson;
+    use bson::{Bson, doc};
     use std::collections::BTreeMap;
 
     const COLLECTION: u32 = 10;
@@ -208,6 +208,38 @@ mod optimizer_tests {
                 },
                 direction: Direction::Forward,
                 filter: Some(field_filters(field(["a"]), [exists(true)])),
+                projection: None,
+            };
+
+            check_optimization_with_metadata(input, &test_metadata_with_indexes(), output);
+        }
+    }
+
+    #[test]
+    fn test_document_lower_bound_uses_index_range() {
+        for (filter, range) in [
+            (
+                gt(lit(Bson::Document(doc! { "x": 1 }))),
+                Interval::open(placeholder(0), array_placeholder(1)),
+            ),
+            (
+                gte(lit(Bson::Document(doc! { "x": 1 }))),
+                Interval::closed_open(placeholder(0), array_placeholder(1)),
+            ),
+        ] {
+            let input = LogicalPlanBuilder::scan(COLLECTION, None)
+                .filter(field_filters(field(["a"]), vec![filter]))
+                .build_arc();
+
+            let output = PhysicalPlan::IndexScan {
+                collection: COLLECTION,
+                index: 1,
+                range: IndexScanRangeExpr {
+                    equal_prefix: vec![],
+                    tail: Some(range),
+                },
+                direction: Direction::Forward,
+                filter: None,
                 projection: None,
             };
 

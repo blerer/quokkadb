@@ -192,6 +192,60 @@ fn range_query_uses_single_field_index() {
 }
 
 #[test]
+fn document_lower_bound_uses_bounded_index_range() {
+    let directory = TempDir::new().unwrap();
+    let db = common::open_db(directory.path());
+    let collection = db.collection("documents").create_if_missing();
+    collection
+        .insert_many([
+            doc! { "_id": 1, "value": { "x": 1 } },
+            doc! { "_id": 2, "value": { "x": 2 } },
+            doc! { "_id": 3, "value": { "x": 3 } },
+            doc! { "_id": 4, "value": "not a document" },
+        ])
+        .unwrap();
+    let index_name = collection.create_index(doc! { "value": 1 }).unwrap();
+
+    for (operator, expected_ids) in [("$gt", vec![2, 3]), ("$gte", vec![1, 2, 3])] {
+        let filter = doc! {
+            "value": {
+                (operator): { "x": 1 }
+            }
+        };
+        let explain = collection
+            .find(filter.clone())
+            .hint(index_name.clone())
+            .explain()
+            .unwrap();
+        assert_eq!(
+            explain_index_scan(&explain.root),
+            Some((index_name.as_str(), ExplainDirection::Forward, 0, true)),
+            "unexpected explain plan for {operator}: {explain:?}"
+        );
+
+        let indexed = collection
+            .find(filter.clone())
+            .hint(index_name.clone())
+            .sort(doc! { "_id": 1 })
+            .execute_collect()
+            .unwrap();
+        let scanned = collection
+            .find(filter)
+            .hint_collection_scan()
+            .sort(doc! { "_id": 1 })
+            .execute_collect()
+            .unwrap();
+
+        assert_eq!(indexed, scanned);
+        let indexed_ids: Vec<_> = indexed
+            .iter()
+            .map(|document| document.get_i32("_id").unwrap())
+            .collect();
+        assert_eq!(indexed_ids, expected_ids);
+    }
+}
+
+#[test]
 fn compound_index_uses_equality_prefix() {
     let (_directory, collection) = setup_index_query_collection();
     let index_name = collection
