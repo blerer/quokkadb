@@ -1,5 +1,5 @@
 use super::*;
-use crate::collection::{DeleteResult, IndexInfo, QueryOutput, UpdateResult};
+use crate::collection::{DeleteResult, IndexInfo, QueryOutput};
 use crate::collection_state::{CollectionState, Hint};
 use crate::document::ReturnDocument;
 use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
@@ -516,21 +516,6 @@ struct FindOneAndModifyOptions {
     hint: Option<Hint>,
 }
 
-fn update_result_from_write_result(result: WriteResult) -> UpdateResult {
-    match result {
-        WriteResult::Update {
-            matched_count,
-            modified_count,
-            upserted_id,
-        } => UpdateResult {
-            matched_count,
-            modified_count,
-            upserted_id,
-        },
-        other => panic!("expected Update write result, got {other:?}"),
-    }
-}
-
 /// Builds an update operation for one typed document.
 pub struct TypedUpdateOne<'a, T: QuokkaDocument> {
     state: &'a CollectionState,
@@ -580,7 +565,7 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
     }
 
     /// Executes the update operation.
-    pub fn execute(self) -> Result<UpdateResult> {
+    pub fn execute(self) -> Result<TypedUpdateResult<T>> {
         let TypedUpdateOne {
             state,
             filter,
@@ -597,11 +582,11 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
                 .build())
         };
 
-        Ok(update_result_from_write_result(state.execute_write(
+        TypedUpdateResult::from_write_result(state.execute_write(
             options.hint.as_ref(),
             build_plan,
             options.sync,
-        )?))
+        )?)
     }
 }
 
@@ -648,7 +633,7 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
     }
 
     /// Executes the update operation.
-    pub fn execute(self) -> Result<UpdateResult> {
+    pub fn execute(self) -> Result<TypedUpdateResult<T>> {
         let TypedUpdateMany {
             state,
             filter,
@@ -664,11 +649,11 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
                 .build())
         };
 
-        Ok(update_result_from_write_result(state.execute_write(
+        TypedUpdateResult::from_write_result(state.execute_write(
             options.hint.as_ref(),
             build_plan,
             options.sync,
-        )?))
+        )?)
     }
 }
 
@@ -930,7 +915,7 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
     }
 
     /// Executes the replacement operation.
-    pub fn execute(self) -> Result<UpdateResult> {
+    pub fn execute(self) -> Result<TypedUpdateResult<T>> {
         let TypedReplaceOne {
             state,
             filter,
@@ -945,11 +930,11 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
                 .build())
         };
 
-        Ok(update_result_from_write_result(state.execute_write(
+        TypedUpdateResult::from_write_result(state.execute_write(
             options.hint.as_ref(),
             build_plan,
             options.sync,
-        )?))
+        )?)
     }
 }
 
@@ -1324,7 +1309,7 @@ impl<T: QuokkaDocument> TypedCollection<T> {
         &self,
         filter: impl FnOnce(&T::Fields<T>) -> Filter<T>,
         update: impl FnOnce(&T::Fields<T>) -> Update<T>,
-    ) -> Result<UpdateResult> {
+    ) -> Result<TypedUpdateResult<T>> {
         self.update_one_with(filter, update).execute()
     }
 
@@ -1346,7 +1331,7 @@ impl<T: QuokkaDocument> TypedCollection<T> {
         &self,
         filter: impl FnOnce(&T::Fields<T>) -> Filter<T>,
         update: impl FnOnce(&T::Fields<T>) -> Update<T>,
-    ) -> Result<UpdateResult> {
+    ) -> Result<TypedUpdateResult<T>> {
         self.update_many_with(filter, update).execute()
     }
 
@@ -1390,7 +1375,7 @@ impl<T: QuokkaDocument> TypedCollection<T> {
         &self,
         filter: impl FnOnce(&T::Fields<T>) -> Filter<T>,
         replacement: T,
-    ) -> Result<UpdateResult> {
+    ) -> Result<TypedUpdateResult<T>> {
         self.replace_one_with(filter, replacement)?.execute()
     }
 
@@ -1555,6 +1540,31 @@ impl<T: QuokkaDocument> TypedCollection<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedInsertOneResult<T: QuokkaDocument> {
     pub inserted_id: T::Id,
+}
+
+/// The result of updating or replacing typed documents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedUpdateResult<T: QuokkaDocument> {
+    pub matched_count: u64,
+    pub modified_count: u64,
+    pub upserted_id: Option<T::Id>,
+}
+
+impl<T: QuokkaDocument> TypedUpdateResult<T> {
+    fn from_write_result(result: WriteResult) -> Result<Self> {
+        match result {
+            WriteResult::Update {
+                matched_count,
+                modified_count,
+                upserted_id,
+            } => Ok(Self {
+                matched_count,
+                modified_count,
+                upserted_id: upserted_id.map(bson::deserialize_from_bson).transpose()?,
+            }),
+            other => panic!("expected Update write result, got {other:?}"),
+        }
+    }
 }
 
 impl<T: QuokkaDocument> TypedInsertOneResult<T> {

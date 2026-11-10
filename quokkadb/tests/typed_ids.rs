@@ -118,6 +118,41 @@ fn quokka_id_values_in_non_id_fields_remain_updatable() {
 }
 
 #[test]
+fn typed_upsert_results_preserve_quokka_id_for_follow_up_reads() {
+    let (_directory, db) = setup();
+    let collection = db
+        .typed_collection::<Document>("documents")
+        .create_if_missing();
+    let document_id = id(1);
+
+    let result = collection
+        .update_one_with(
+            |document| document.id.eq(document_id),
+            |document| {
+                document
+                    .related_id
+                    .set(document_id)
+                    .and(document.name.set("upserted"))
+            },
+        )
+        .upsert(true)
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.upserted_id, Some(document_id));
+    assert_eq!(
+        collection
+            .find_one_by_id(result.upserted_id.unwrap())
+            .unwrap(),
+        Some(Document {
+            id: document_id,
+            related_id: document_id,
+            name: "upserted".to_string(),
+        })
+    );
+}
+
+#[test]
 fn typed_quokka_id_updates_are_rejected_at_execution() {
     let (_directory, db) = setup();
     let collection = db

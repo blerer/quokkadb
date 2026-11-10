@@ -87,6 +87,15 @@ let result = plants
     .execute()?;
 ```
 
+When an upsert inserts a model, `result.upserted_id` contains the model's typed ID. You can use it directly for a follow-up read:
+
+```rust
+if let Some(id) = result.upserted_id {
+    let inserted = plants.find_one_by_id(id)?.expect("upserted model");
+    assert_eq!(inserted.id, id);
+}
+```
+
 Operation builders also accept access-path hints. Use a named index when the write must use that index, or use `hint_collection_scan()` to force the collection path. See [Indexes — Use hints only when needed](indexes.md#use-hints-only-when-needed) before overriding the optimizer. Hints are strict and return an error when a named index is missing, unavailable, or cannot serve the operation.
 
 ```rust

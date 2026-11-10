@@ -168,16 +168,16 @@ The direct methods execute immediately. The `_with` variants return builders for
 | --- | --- | --- | --- |
 | Insert one | `insert_one(document)` | `insert_one_with(document).sync()` | `TypedInsertOneResult<T>` with `inserted_id: T::Id` |
 | Insert many | `insert_many(documents)` | `insert_many_with(documents).sync()` | `TypedInsertManyResult<T>` with `inserted_ids: Vec<T::Id>` |
-| Update one | `update_one(filter, update)` | `update_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `UpdateResult` |
-| Update many | `update_many(filter, update)` | `update_many_with(...).hint(name)`, `.hint_collection_scan()`, `.upsert(bool).sync()` | `UpdateResult` |
-| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `UpdateResult` |
+| Update one | `update_one(filter, update)` | `update_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `TypedUpdateResult<T>` |
+| Update many | `update_many(filter, update)` | `update_many_with(...).hint(name)`, `.hint_collection_scan()`, `.upsert(bool).sync()` | `TypedUpdateResult<T>` |
+| Replace one | `replace_one(filter, replacement)` | `replace_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).sync()` | `TypedUpdateResult<T>` |
 | Delete one | `delete_one(filter)` | `delete_one_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).sync()` | `DeleteResult` |
 | Delete many | `delete_many(filter)` | `delete_many_with(...).hint(name)`, `.hint_collection_scan()`, `.sync()` | `DeleteResult` |
 | Find and update | `find_one_and_update(filter, update)` | `find_one_and_update_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
 | Find and replace | `find_one_and_replace(filter, replacement)` | `find_one_and_replace_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).upsert(bool).return_document(...).sync()` | `Result<Option<T>>` |
 | Find and delete | `find_one_and_delete(filter)` | `find_one_and_delete_with(...).hint(name)`, `.hint_collection_scan()`, `.sort(...).sync()` | `Result<Option<T>>` |
 
-`UpdateResult` exposes `matched_count`, `modified_count`, and `upserted_id`. `DeleteResult` exposes `deleted_count`. `ReturnDocument::Before` is the default for find-and-update and find-and-replace; pass `ReturnDocument::After` to return the changed model.
+`TypedUpdateResult<T>` exposes `matched_count`, `modified_count`, and `upserted_id: Option<T::Id>`. `DeleteResult` exposes `deleted_count`. `ReturnDocument::Before` is the default for find-and-update and find-and-replace; pass `ReturnDocument::After` to return the changed model.
 
 ```rust
 let result = plants

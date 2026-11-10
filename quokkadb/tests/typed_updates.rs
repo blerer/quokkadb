@@ -140,7 +140,12 @@ fn typed_update_many_and_upsert_report_write_results() {
         .unwrap();
     assert_eq!(result.matched_count, 0);
     assert_eq!(result.modified_count, 0);
-    assert_eq!(result.upserted_id, Some(4_i64.into()));
+    assert_eq!(result.upserted_id, Some(4));
+    let upserted_id = result.upserted_id.unwrap();
+    assert_eq!(
+        collection.find_one_by_id(upserted_id).unwrap().unwrap().id,
+        4
+    );
     assert_eq!(
         collection
             .find_one(|user| user.id.eq(4_u64))
@@ -271,6 +276,30 @@ fn typed_replacements_return_and_persist_typed_documents() {
         .execute()
         .unwrap();
     assert_eq!(result.matched_count, 1);
+
+    let upsert = collection
+        .replace_one_with(
+            |user| user.id.eq(4_u64),
+            User {
+                id: 4,
+                name: "Dora".to_string(),
+                age: 25,
+                active: true,
+            },
+        )
+        .unwrap()
+        .upsert(true)
+        .execute()
+        .unwrap();
+    assert_eq!(upsert.upserted_id, Some(4));
+    assert_eq!(
+        collection
+            .find_one_by_id(upsert.upserted_id.unwrap())
+            .unwrap()
+            .unwrap()
+            .name,
+        "Dora"
+    );
 
     let previous = collection
         .find_one_and_replace(
@@ -531,7 +560,7 @@ fn typed_updates_cover_conditional_optional_and_upsert_edge_cases() {
         .execute()
         .unwrap();
     assert_eq!(upsert.matched_count, 0);
-    assert_eq!(upsert.upserted_id, Some(2_i64.into()));
+    assert_eq!(upsert.upserted_id, Some(2));
     assert_eq!(
         collection
             .find_one(|feature| feature.id.eq(2_u64))
