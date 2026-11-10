@@ -279,7 +279,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
         let planned = self
             .state
             .plan_query(self.options.hint.as_ref(), |collection_id, hint_id| {
-                Ok(self.build_logical_plan(collection_id, hint_id))
+                self.build_logical_plan(collection_id, hint_id)
             })?;
 
         Ok(match planned {
@@ -296,7 +296,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
         let query_output = self
             .state
             .execute_query(self.options.hint.as_ref(), |collection_id, hint_id| {
-                Ok(self.build_logical_plan(collection_id, hint_id))
+                self.build_logical_plan(collection_id, hint_id)
             })?;
         Ok(deserialize_query_output_with(query_output, self.decoder))
     }
@@ -309,13 +309,17 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
         self.execute()?.collect()
     }
 
-    fn build_logical_plan(&self, collection_id: u32, hint_id: Option<u32>) -> Arc<LogicalPlan> {
-        LogicalPlanBuilder::scan(collection_id, hint_id)
-            .filter(self.filter.as_expr())
+    fn build_logical_plan(
+        &self,
+        collection_id: u32,
+        hint_id: Option<u32>,
+    ) -> Result<Arc<LogicalPlan>> {
+        Ok(LogicalPlanBuilder::scan(collection_id, hint_id)
+            .filter(self.filter.as_expr()?)
             .project(self.options.projection.clone())
             .sort(self.options.sort.clone())
             .limit(self.options.skip, self.options.limit)
-            .build_arc()
+            .build_arc())
     }
 }
 
@@ -477,7 +481,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOne<'a, T, R, Projectio
         } = self;
         let build_plan = |collection, hint_id| {
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .project(options.projection)
                 .sort(options.sort)
                 .limit(None, Some(1))
@@ -583,10 +587,10 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
             options,
         } = self;
         let build_plan = |collection, hint_id| {
-            let update = update.into_update_expr();
+            let update = update.into_update_expr()?;
             update.validate_id_modifications(options.upsert)?;
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .sort(options.sort)
                 .update_one(update, options.upsert)
                 .build())
@@ -651,10 +655,10 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
             options,
         } = self;
         let build_plan = |collection, hint_id| {
-            let update = update.into_update_expr();
+            let update = update.into_update_expr()?;
             update.validate_id_modifications(options.upsert)?;
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .update_many(update, options.upsert)
                 .build())
         };
@@ -841,11 +845,11 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndModify<'a, T, R, 
         } = self;
         let build_plan = |collection, hint_id| {
             let builder = LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .sort(options.sort);
             Ok(match operation {
                 TypedFindOneAndModifyOperation::Update(update) => {
-                    let update = update.into_update_expr();
+                    let update = update.into_update_expr()?;
                     update.validate_id_modifications(options.upsert)?;
                     builder
                         .find_one_and_update(
@@ -934,7 +938,7 @@ impl<'a, T: QuokkaDocument> TypedReplaceOne<'a, T> {
         } = self;
         let build_plan = |collection, hint_id| {
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .sort(options.sort)
                 .replace_one(replacement, options.upsert)
                 .build())
@@ -1012,7 +1016,7 @@ impl<'a, T: QuokkaDocument> TypedDeleteOne<'a, T> {
         } = self;
         let build_plan = |collection, hint_id| {
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .sort(options.sort)
                 .delete_one()
                 .build())
@@ -1070,7 +1074,7 @@ impl<'a, T: QuokkaDocument> TypedDeleteMany<'a, T> {
         } = self;
         let build_plan = |collection, hint_id| {
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .delete_many()
                 .build())
         };
@@ -1260,7 +1264,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndDelete<'a, T, R, 
         } = self;
         let build_plan = |collection, hint_id| {
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
-                .filter(filter.into_expr())
+                .filter(filter.into_expr()?)
                 .sort(options.sort)
                 .find_one_and_delete(options.projection)
                 .build())

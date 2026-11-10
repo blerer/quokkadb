@@ -208,6 +208,8 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 
 Typed filters and updates follow BSON comparison behavior. Range filters use BSON type bracketing, while equivalent numeric representations compare together. See [Find queries — comparison types](guides/find-queries.md#comparison-types-and-type-bracketing) and [Update data](guides/update-data.md) for task-oriented examples.
 
+Typed filter and update values are converted to BSON when the operation is planned or executed. Values that Serde cannot represent in BSON return the existing `Error::BsonError` result; they do not panic during fluent builder construction.
+
 `Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 
 The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; unit enums can derive it directly. The `QuokkaScalar` derive only implements QuokkaDB's marker trait—Serde still supplies `Serialize` and `Deserialize`. Add `NumericValue` when a scalar supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.

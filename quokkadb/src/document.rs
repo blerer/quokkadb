@@ -12,11 +12,73 @@ use bson::{Document, serialize_to_bson};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 
 pub use crate::query::ReturnDocument;
+
+#[derive(Clone)]
+struct Deferred<T> {
+    build: Arc<dyn Fn() -> Result<T>>,
+}
+
+impl<T> Deferred<T> {
+    fn new(build: impl Fn() -> Result<T> + 'static) -> Self {
+        Self {
+            build: Arc::new(build),
+        }
+    }
+
+    fn resolve(&self) -> Result<T> {
+        (self.build)()
+    }
+
+    fn map<U: 'static>(self, map: impl Fn(T) -> Result<U> + 'static) -> Deferred<U>
+    where
+        T: 'static,
+    {
+        let build = self.build;
+        Deferred::new(move || map(build()?))
+    }
+
+    fn combine<U: 'static, V: 'static>(
+        self,
+        other: Deferred<U>,
+        combine: impl Fn(T, U) -> Result<V> + 'static,
+    ) -> Deferred<V>
+    where
+        T: 'static,
+    {
+        let left = self.build;
+        let right = other.build;
+        Deferred::new(move || combine(left()?, right()?))
+    }
+}
+
+impl<T: Clone + 'static> Deferred<T> {
+    fn ready(value: T) -> Self {
+        Self::new(move || Ok(value.clone()))
+    }
+}
+
+impl<T> fmt::Debug for Deferred<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Deferred(..)")
+    }
+}
+
+fn deferred_eq<T: PartialEq>(left: &Deferred<T>, right: &Deferred<T>) -> bool {
+    match (left.resolve(), right.resolve()) {
+        (Ok(left), Ok(right)) => left == right,
+        (Err(left), Err(right)) => left.to_string() == right.to_string(),
+        _ => false,
+    }
+}
+
+type DeferredExpr = Deferred<Arc<Expr>>;
+type DeferredUpdate = Deferred<UpdateExpr>;
 
 /// A Serde value whose named fields or payload variants can be described by the typed query API.
 ///
@@ -403,7 +465,7 @@ impl<D, T> ArrayField<D, T> {
     }
 }
 
-impl<D, T: Serialize> ArrayField<D, T> {
+impl<D, T: Serialize + 'static> ArrayField<D, T> {
     pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
         array_any_eq_filter(self.path.clone(), value.into())
     }
@@ -472,15 +534,18 @@ impl<D, T: Serialize> ArrayField<D, T> {
         I: IntoIterator<Item = U>,
         U: Into<T>,
     {
+        let position = options.position;
+        let slice = options.slice;
+        let sort = options.sort;
         array_values_update(
             self.path.clone(),
             move |path, values| UpdateOp::Push {
                 path,
                 spec: PushSpec {
                     values: EachOrSingle::Each(values),
-                    position: options.position,
-                    slice: options.slice,
-                    sort: options.sort,
+                    position,
+                    slice,
+                    sort: sort.clone(),
                 },
             },
             values.into_iter().map(Into::into),
@@ -519,9 +584,8 @@ impl<D, T: Serialize> ArrayField<D, T> {
     /// Creates a `$pull` update that removes every element equal to `value`.
     pub fn pull(&self, value: impl Into<T>) -> Update<D> {
         let value = literal_expr(value.into());
-        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
-            path,
-            criterion: PullCriterion::Equals(value),
+        pull_update(self.path.clone(), value, |value| {
+            PullCriterion::Equals(value)
         })
     }
 
@@ -563,15 +627,15 @@ impl<D, T: QuokkaType> ArrayField<D, T> {
 
     /// Creates a `$pull` update that removes embedded elements matching `predicate`.
     pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
-        let criterion = predicate(&T::fields(TypedPath::empty())).into_expr();
-        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
-            path,
-            criterion: PullCriterion::Matches(criterion),
+        let criterion = predicate(&T::fields(TypedPath::empty())).expr;
+        pull_update(self.path.clone(), criterion, |value| {
+            PullCriterion::Matches(value)
         })
     }
 }
 
 /// Configures `$push` modifiers for a typed array update.
+#[derive(Clone)]
 pub struct PushOptions<D, T> {
     position: Option<i32>,
     slice: Option<i32>,
@@ -667,7 +731,7 @@ impl<D, V> MapField<D, V> {
     }
 }
 
-impl<D, V: Serialize> MapField<D, V> {
+impl<D, V: Serialize + 'static> MapField<D, V> {
     value_operations!(BTreeMap<String, V>);
 }
 
@@ -760,7 +824,7 @@ impl<D, T> PartialArrayField<D, T> {
     }
 }
 
-impl<D, T: Serialize> PartialArrayField<D, T> {
+impl<D, T: Serialize + 'static> PartialArrayField<D, T> {
     pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
         array_any_eq_filter(self.path.clone(), value.into())
     }
@@ -825,15 +889,18 @@ impl<D, T: Serialize> PartialArrayField<D, T> {
         I: IntoIterator<Item = U>,
         U: Into<T>,
     {
+        let position = options.position;
+        let slice = options.slice;
+        let sort = options.sort;
         array_values_update(
             self.path.clone(),
             move |path, values| UpdateOp::Push {
                 path,
                 spec: PushSpec {
                     values: EachOrSingle::Each(values),
-                    position: options.position,
-                    slice: options.slice,
-                    sort: options.sort,
+                    position,
+                    slice,
+                    sort: sort.clone(),
                 },
             },
             values.into_iter().map(Into::into),
@@ -868,9 +935,8 @@ impl<D, T: Serialize> PartialArrayField<D, T> {
 
     pub fn pull(&self, value: impl Into<T>) -> Update<D> {
         let value = literal_expr(value.into());
-        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
-            path,
-            criterion: PullCriterion::Equals(value),
+        pull_update(self.path.clone(), value, |value| {
+            PullCriterion::Equals(value)
         })
     }
 
@@ -904,10 +970,9 @@ impl<D, T: QuokkaType> PartialArrayField<D, T> {
     }
 
     pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
-        let criterion = predicate(&T::fields(TypedPath::empty())).into_expr();
-        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
-            path,
-            criterion: PullCriterion::Matches(criterion),
+        let criterion = predicate(&T::fields(TypedPath::empty())).expr;
+        pull_update(self.path.clone(), criterion, |value| {
+            PullCriterion::Matches(value)
         })
     }
 }
@@ -937,7 +1002,7 @@ impl<D, V> PartialMapField<D, V> {
     }
 }
 
-impl<D, V: Serialize> PartialMapField<D, V> {
+impl<D, V: Serialize + 'static> PartialMapField<D, V> {
     value_operations!(BTreeMap<String, V>);
 }
 
@@ -1258,29 +1323,40 @@ fn path_index<D>(path: TypedPath, order: crate::query::SortOrder) -> Index<D> {
 fn comparison_filter<D>(
     path: TypedPath,
     operator: ComparisonOperator,
-    value: impl Serialize,
+    value: impl Serialize + 'static,
 ) -> Filter<D> {
-    let bson = serialize_to_bson(&value).expect("typed filter value must serialize into BSON");
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::Comparison {
-            operator,
-            value: Arc::new(Expr::Literal(BsonValue(bson))),
-        })],
+    Filter::from_deferred(Deferred::new(move || {
+        let bson = serialize_to_bson(&value)?;
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::Comparison {
+                operator,
+                value: Arc::new(Expr::Literal(BsonValue(bson))),
+            })],
+        }))
     }))
 }
 
 fn value_update<D>(
     path: TypedPath,
-    op: impl FnOnce(Vec<UpdatePathComponent>, Arc<Expr>) -> UpdateOp,
-    value: impl Serialize,
+    op: impl Fn(Vec<UpdatePathComponent>, Arc<Expr>) -> UpdateOp + 'static,
+    value: impl Serialize + 'static,
 ) -> Update<D> {
-    Update::from_op(op(path.into_update_path(), literal_expr(value)))
+    let path = path.into_update_path();
+    let value = literal_expr(value);
+    Update::from_deferred(Deferred::new(move || {
+        Ok(UpdateExpr {
+            ops: vec![op(path.clone(), value.resolve()?)],
+            array_filters: Default::default(),
+        })
+    }))
 }
 
-fn literal_expr(value: impl Serialize) -> Arc<Expr> {
-    let bson = serialize_to_bson(&value).expect("typed update value must serialize into BSON");
-    Arc::new(Expr::Literal(BsonValue(bson)))
+fn literal_expr(value: impl Serialize + 'static) -> DeferredExpr {
+    Deferred::new(move || {
+        let bson = serialize_to_bson(&value)?;
+        Ok(Arc::new(Expr::Literal(BsonValue(bson))))
+    })
 }
 
 fn current_date_update<D>(path: TypedPath, type_hint: CurrentDateType) -> Update<D> {
@@ -1292,48 +1368,86 @@ fn current_date_update<D>(path: TypedPath, type_hint: CurrentDateType) -> Update
 
 fn array_path_update<D>(
     path: TypedPath,
-    op: impl FnOnce(Vec<UpdatePathComponent>) -> UpdateOp,
+    op: impl Fn(Vec<UpdatePathComponent>) -> UpdateOp + 'static,
 ) -> Update<D> {
-    Update::from_op(op(path.into_update_path()))
+    let path = path.into_update_path();
+    Update::from_deferred(Deferred::new(move || {
+        Ok(UpdateExpr {
+            ops: vec![op(path.clone())],
+            array_filters: Default::default(),
+        })
+    }))
 }
 
-fn array_values_update<D, T: Serialize>(
+fn pull_update<D>(
     path: TypedPath,
-    op: impl FnOnce(Vec<UpdatePathComponent>, Vec<Arc<Expr>>) -> UpdateOp,
+    value: DeferredExpr,
+    criterion: impl Fn(Arc<Expr>) -> PullCriterion + 'static,
+) -> Update<D> {
+    let path = path.into_update_path();
+    Update::from_deferred(Deferred::new(move || {
+        Ok(UpdateExpr {
+            ops: vec![UpdateOp::Pull {
+                path: path.clone(),
+                criterion: criterion(value.resolve()?),
+            }],
+            array_filters: Default::default(),
+        })
+    }))
+}
+
+fn array_values_update<D, T: Serialize + 'static>(
+    path: TypedPath,
+    op: impl Fn(Vec<UpdatePathComponent>, Vec<Arc<Expr>>) -> UpdateOp + 'static,
     values: impl IntoIterator<Item = T>,
 ) -> Update<D> {
-    Update::from_op(op(
-        path.into_update_path(),
-        values.into_iter().map(literal_expr).collect(),
-    ))
+    let path = path.into_update_path();
+    let values = values.into_iter().map(literal_expr).collect::<Vec<_>>();
+    Update::from_deferred(Deferred::new(move || {
+        let values = values
+            .iter()
+            .map(Deferred::resolve)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(UpdateExpr {
+            ops: vec![op(path.clone(), values)],
+            array_filters: Default::default(),
+        })
+    }))
 }
 
-fn array_any_eq_filter<D>(path: TypedPath, value: impl Serialize) -> Filter<D> {
-    let bson = serialize_to_bson(&value).expect("typed filter value must serialize into BSON");
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::ElemMatch(vec![Arc::new(
-            Expr::Comparison {
-                operator: ComparisonOperator::Eq,
-                value: Arc::new(Expr::Literal(BsonValue(bson))),
-            },
-        )]))],
+fn array_any_eq_filter<D>(path: TypedPath, value: impl Serialize + 'static) -> Filter<D> {
+    Filter::from_deferred(Deferred::new(move || {
+        let bson = serialize_to_bson(&value)?;
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::ElemMatch(vec![Arc::new(
+                Expr::Comparison {
+                    operator: ComparisonOperator::Eq,
+                    value: Arc::new(Expr::Literal(BsonValue(bson))),
+                },
+            )]))],
+        }))
     }))
 }
 
 fn array_any_filter<D>(path: TypedPath, predicate: Filter<D>) -> Filter<D> {
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::ElemMatch(vec![predicate.into_expr()]))],
+    let predicate = predicate.expr;
+    Filter::from_deferred(Deferred::new(move || {
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::ElemMatch(vec![predicate.resolve()?]))],
+        }))
     }))
 }
 
 fn scalar_array_any_filter<D>(path: TypedPath, predicate: Filter<D>) -> Filter<D> {
-    let predicate = scalar_array_element_expr(predicate.into_expr());
-
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::ElemMatch(vec![predicate]))],
+    let predicate = predicate.expr;
+    Filter::from_deferred(Deferred::new(move || {
+        let predicate = scalar_array_element_expr(predicate.resolve()?);
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::ElemMatch(vec![predicate]))],
+        }))
     }))
 }
 
@@ -1374,24 +1488,30 @@ fn scalar_array_element_expr(expr: Arc<Expr>) -> Arc<Expr> {
     }
 }
 
-fn array_all_filter<D>(path: TypedPath, values: impl Serialize) -> Filter<D> {
-    let bson = serialize_to_bson(&values).expect("typed filter value must serialize into BSON");
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::All(Arc::new(Expr::Literal(BsonValue(
-            bson,
-        )))))],
+fn array_all_filter<D>(path: TypedPath, values: impl Serialize + 'static) -> Filter<D> {
+    Filter::from_deferred(Deferred::new(move || {
+        let bson = serialize_to_bson(&values)?;
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::All(Arc::new(Expr::Literal(BsonValue(
+                bson,
+            )))))],
+        }))
     }))
 }
 
 fn array_size_filter<D>(path: TypedPath, length: usize) -> Filter<D> {
-    let length = i64::try_from(length).expect("typed array length must fit BSON i64");
-    Filter::from_expr(Arc::new(Expr::FieldFilters {
-        field: Arc::new(Expr::Field(path.components)),
-        filters: vec![Arc::new(Expr::Size {
-            size: Arc::new(Expr::Literal(BsonValue(bson::Bson::Int64(length)))),
-            negated: false,
-        })],
+    Filter::from_deferred(Deferred::new(move || {
+        let length = i64::try_from(length).map_err(|_| {
+            Error::InvalidRequest("typed array length must fit BSON i64".to_string())
+        })?;
+        Ok(Arc::new(Expr::FieldFilters {
+            field: Arc::new(Expr::Field(path.components.clone())),
+            filters: vec![Arc::new(Expr::Size {
+                size: Arc::new(Expr::Literal(BsonValue(bson::Bson::Int64(length)))),
+                negated: false,
+            })],
+        }))
     }))
 }
 
@@ -1734,10 +1854,16 @@ impl_tuple_selection!(
     ),
 );
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Filter<D> {
-    expr: Arc<Expr>,
+    expr: DeferredExpr,
     _marker: PhantomData<fn() -> D>,
+}
+
+impl<D> PartialEq for Filter<D> {
+    fn eq(&self, other: &Self) -> bool {
+        deferred_eq(&self.expr, &other.expr)
+    }
 }
 
 impl<D> Filter<D> {
@@ -1747,13 +1873,14 @@ impl<D> Filter<D> {
     }
 
     pub fn raw(raw: Document) -> Result<Self> {
-        Ok(Self {
-            expr: parser::parse_conditions(&raw)?,
-            _marker: PhantomData,
-        })
+        Ok(Self::from_expr(parser::parse_conditions(&raw)?))
     }
 
     pub(crate) fn from_expr(expr: Arc<Expr>) -> Self {
+        Self::from_deferred(Deferred::ready(expr))
+    }
+
+    fn from_deferred(expr: DeferredExpr) -> Self {
         Self {
             expr,
             _marker: PhantomData,
@@ -1761,30 +1888,36 @@ impl<D> Filter<D> {
     }
 
     pub fn and(self, other: Self) -> Self {
-        Self::from_expr(Arc::new(Expr::And(vec![self.expr, other.expr])))
+        Self::from_deferred(self.expr.combine(other.expr, |left, right| {
+            Ok(Arc::new(Expr::And(vec![left, right])))
+        }))
     }
 
     pub fn or(self, other: Self) -> Self {
-        Self::from_expr(Arc::new(Expr::Or(vec![self.expr, other.expr])))
+        Self::from_deferred(self.expr.combine(other.expr, |left, right| {
+            Ok(Arc::new(Expr::Or(vec![left, right])))
+        }))
     }
 
     /// Builds a filter that excludes documents matching either condition.
     pub fn nor(self, other: Self) -> Self {
-        Self::from_expr(Arc::new(Expr::Nor(vec![self.expr, other.expr])))
+        Self::from_deferred(self.expr.combine(other.expr, |left, right| {
+            Ok(Arc::new(Expr::Nor(vec![left, right])))
+        }))
     }
 
-    pub(crate) fn into_expr(self) -> Arc<Expr> {
-        self.expr
+    pub(crate) fn into_expr(self) -> Result<Arc<Expr>> {
+        self.expr.resolve()
     }
 
-    pub(crate) fn as_expr(&self) -> Arc<Expr> {
-        self.expr.clone()
+    pub(crate) fn as_expr(&self) -> Result<Arc<Expr>> {
+        self.expr.resolve()
     }
 }
 
 /// Builds a filter that excludes documents matching `filter`.
 pub fn not<D>(filter: Filter<D>) -> Filter<D> {
-    Filter::from_expr(Arc::new(Expr::Not(filter.expr)))
+    Filter::from_deferred(filter.expr.map(|expr| Ok(Arc::new(Expr::Not(expr)))))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1841,32 +1974,44 @@ impl<D> Index<D> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Update<D> {
-    expr: UpdateExpr,
+    expr: DeferredUpdate,
     _marker: PhantomData<fn() -> D>,
+}
+
+impl<D> PartialEq for Update<D> {
+    fn eq(&self, other: &Self) -> bool {
+        deferred_eq(&self.expr, &other.expr)
+    }
 }
 
 impl<D> Update<D> {
     fn from_op(op: UpdateOp) -> Self {
+        Self::from_deferred(Deferred::ready(UpdateExpr {
+            ops: vec![op],
+            array_filters: Default::default(),
+        }))
+    }
+
+    fn from_deferred(expr: DeferredUpdate) -> Self {
         Self {
-            expr: UpdateExpr {
-                ops: vec![op],
-                array_filters: Default::default(),
-            },
+            expr,
             _marker: PhantomData,
         }
     }
 
-    pub(crate) fn into_update_expr(self) -> UpdateExpr {
-        self.expr
+    pub(crate) fn into_update_expr(self) -> Result<UpdateExpr> {
+        self.expr.resolve()
     }
 
     /// Combines this update with another update.
-    pub fn and(mut self, other: Self) -> Self {
-        self.expr.ops.extend(other.expr.ops);
-        self.expr.array_filters.extend(other.expr.array_filters);
-        self
+    pub fn and(self, other: Self) -> Self {
+        Self::from_deferred(self.expr.combine(other.expr, |mut left, right| {
+            left.ops.extend(right.ops);
+            left.array_filters.extend(right.array_filters);
+            Ok(left)
+        }))
     }
 }
 
@@ -1952,12 +2097,14 @@ mod tests {
     #[test]
     fn typed_filter_closure_builds_expected_expr_filters() {
         assert_eq!(
-            build_filter::<User>(|u| u.age.gt(18)).into_expr(),
+            build_filter::<User>(|u| u.age.gt(18)).into_expr().unwrap(),
             field_filters(field(["age"]), [gt(lit(18))]),
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.gt(18).and(u.active.eq(true))).into_expr(),
+            build_filter::<User>(|u| u.age.gt(18).and(u.active.eq(true)))
+                .into_expr()
+                .unwrap(),
             and([
                 field_filters(field(["age"]), [gt(lit(18))]),
                 field_filters(field(["active"]), [eq(lit(true))]),
@@ -1965,7 +2112,9 @@ mod tests {
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.lt(18).or(u.age.gt(65))).into_expr(),
+            build_filter::<User>(|u| u.age.lt(18).or(u.age.gt(65)))
+                .into_expr()
+                .unwrap(),
             or([
                 field_filters(field(["age"]), [lt(lit(18))]),
                 field_filters(field(["age"]), [gt(lit(65))]),
@@ -1973,12 +2122,16 @@ mod tests {
         );
 
         assert_eq!(
-            build_filter::<User>(|u| not(u.age.lt(18))).into_expr(),
+            build_filter::<User>(|u| not(u.age.lt(18)))
+                .into_expr()
+                .unwrap(),
             expr_not(field_filters(field(["age"]), [lt(lit(18))]))
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.lt(18).nor(u.age.gt(65))).into_expr(),
+            build_filter::<User>(|u| u.age.lt(18).nor(u.age.gt(65)))
+                .into_expr()
+                .unwrap(),
             nor([
                 field_filters(field(["age"]), [lt(lit(18))]),
                 field_filters(field(["age"]), [gt(lit(65))]),
@@ -1986,7 +2139,9 @@ mod tests {
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.in_values([18, 21, 65])).into_expr(),
+            build_filter::<User>(|u| u.age.in_values([18, 21, 65]))
+                .into_expr()
+                .unwrap(),
             field_filters(field(["age"]), [within(lit(vec![18, 21, 65]))]),
         );
 
@@ -1995,7 +2150,8 @@ mod tests {
                 u.tags
                     .any_where(|tag| tag.eq("database").or(tag.eq("storage")))
             })
-            .into_expr(),
+            .into_expr()
+            .unwrap(),
             field_filters(
                 field(["tags"]),
                 [elem_match([or([eq(lit("database")), eq(lit("storage"))])])],
@@ -2003,12 +2159,16 @@ mod tests {
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.age.nin([18, 21, 65])).into_expr(),
+            build_filter::<User>(|u| u.age.nin([18, 21, 65]))
+                .into_expr()
+                .unwrap(),
             field_filters(field(["age"]), [nin(lit(vec![18, 21, 65]))]),
         );
 
         assert_eq!(
-            build_filter::<User>(|u| u.email.exists()).into_expr(),
+            build_filter::<User>(|u| u.email.exists())
+                .into_expr()
+                .unwrap(),
             field_filters(field(["email"]), [exists(true)]),
         );
     }
@@ -2016,11 +2176,15 @@ mod tests {
     #[test]
     fn optional_fields_preserve_nullability_and_nested_traversal() {
         assert_eq!(
-            build_filter::<OptionalUser>(|user| user.email.exists()).into_expr(),
+            build_filter::<OptionalUser>(|user| user.email.exists())
+                .into_expr()
+                .unwrap(),
             field_filters(field(["email"]), [exists(true)]),
         );
         assert_eq!(
-            build_filter::<OptionalUser>(|user| user.address.city.eq("Zurich")).into_expr(),
+            build_filter::<OptionalUser>(|user| user.address.city.eq("Zurich"))
+                .into_expr()
+                .unwrap(),
             field_filters(field(["address", "city"]), [eq(lit("Zurich"))]),
         );
 
@@ -2063,7 +2227,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            city.eq("Zurich").into_expr(),
+            city.eq("Zurich").into_expr().unwrap(),
             field_filters(
                 field([
                     PathComponent::FieldName("addresses".to_string()),
@@ -2074,7 +2238,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            city.set("Bern").into_update_expr(),
+            city.set("Bern").into_update_expr().unwrap(),
             update_fn::update([set(
                 [
                     field_name("addresses"),
@@ -2113,7 +2277,8 @@ mod tests {
     #[test]
     fn quokka_document_update_closure_builds_expected_update_expr() {
         let update = User::update(|u| u.name.set("Bob").and(u.age.inc(1)).and(u.email.unset()))
-            .into_update_expr();
+            .into_update_expr()
+            .unwrap();
 
         assert_eq!(
             update,
@@ -2136,21 +2301,27 @@ mod tests {
         let metadata = BTreeMap::from([("tier".to_string(), "gold".to_string())]);
 
         assert_eq!(
-            build_filter::<CompoundUser>(|user| user.address.gt(address.clone())).into_expr(),
+            build_filter::<CompoundUser>(|user| user.address.gt(address.clone()))
+                .into_expr()
+                .unwrap(),
             field_filters(
                 field(["address"]),
                 [gt(lit(doc! { "city": "Zurich", "postal_code": "8001" }))],
             ),
         );
         assert_eq!(
-            build_filter::<CompoundUser>(|user| user.tags.lte(tags.clone())).into_expr(),
+            build_filter::<CompoundUser>(|user| user.tags.lte(tags.clone()))
+                .into_expr()
+                .unwrap(),
             field_filters(
                 field(["tags"]),
                 [crate::query::expr_fn::lte(lit(tags.clone()))]
             ),
         );
         assert_eq!(
-            build_filter::<CompoundUser>(|user| user.metadata.ne(metadata.clone())).into_expr(),
+            build_filter::<CompoundUser>(|user| user.metadata.ne(metadata.clone()))
+                .into_expr()
+                .unwrap(),
             field_filters(
                 field(["metadata"]),
                 [crate::query::expr_fn::ne(lit(doc! { "tier": "gold" }))],
@@ -2163,7 +2334,8 @@ mod tests {
                 .and(user.tags.max(tags))
                 .and(user.metadata.min(metadata))
         })
-        .into_update_expr();
+        .into_update_expr()
+        .unwrap();
         assert_eq!(
             update,
             update_fn::update([
@@ -2222,7 +2394,9 @@ mod tests {
 
     #[test]
     fn typed_update_uses_stored_field_names() {
-        let update = User::update(|u| u.id.set(7_u64)).into_update_expr();
+        let update = User::update(|u| u.id.set(7_u64))
+            .into_update_expr()
+            .unwrap();
 
         assert_eq!(update, update_fn::update([set([field_name("_id")], 7_i64)]));
     }

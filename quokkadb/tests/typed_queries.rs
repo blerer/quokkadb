@@ -3,7 +3,8 @@ mod common;
 use bson::doc;
 use quokkadb::error::Error;
 use quokkadb::{
-    ExplainDirection, ExplainNode, ExplainOperator, QuokkaDB, QuokkaDocument, QuokkaType, not,
+    ExplainDirection, ExplainNode, ExplainOperator, QuokkaDB, QuokkaDocument, QuokkaScalar,
+    QuokkaType, not,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -81,6 +82,29 @@ struct NestedUser {
     settings: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+struct FailingScalar;
+
+impl QuokkaScalar for FailingScalar {}
+
+impl Serialize for FailingScalar {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom(
+            "intentional scalar serialization failure",
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
+struct FailingUser {
+    #[serde(rename = "_id")]
+    id: u64,
+    value: FailingScalar,
+}
+
 fn setup() -> (TempDir, QuokkaDB) {
     let dir = TempDir::new().unwrap();
     let db = common::open_db(dir.path());
@@ -108,6 +132,41 @@ fn setup() -> (TempDir, QuokkaDB) {
         ])
         .unwrap();
     (dir, db)
+}
+
+#[test]
+fn typed_values_are_serialized_when_the_operation_is_resolved() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users");
+
+    let query = collection.find(|user| user.id.eq(u64::MAX).and(user.active.eq(true)));
+    assert!(matches!(query.explain(), Err(Error::BsonError(_))));
+
+    let query = collection.find(|user| user.id.eq(u64::MAX));
+    assert!(matches!(query.execute(), Err(Error::BsonError(_))));
+
+    let update = collection.update_one_with(
+        |user| user.active.eq(true),
+        |user| user.id.set(u64::MAX).and(user.active.set(false)),
+    );
+    assert!(matches!(update.execute(), Err(Error::BsonError(_))));
+}
+
+#[test]
+fn custom_scalar_serialization_errors_are_deferred() {
+    let dir = TempDir::new().unwrap();
+    let db = common::open_db(dir.path());
+    db.create_collection("failing_users").unwrap();
+    let collection = db.typed_collection::<FailingUser>("failing_users");
+
+    let query = collection.find(|user| user.value.eq(FailingScalar));
+    assert!(matches!(query.execute(), Err(Error::BsonError(_))));
+
+    let update = collection.update_one_with(
+        |user| user.id.eq(1_u64),
+        |user| user.value.set(FailingScalar),
+    );
+    assert!(matches!(update.execute(), Err(Error::BsonError(_))));
 }
 
 fn explain_index_scan(node: &ExplainNode) -> Option<(&str, ExplainDirection, usize, bool)> {
