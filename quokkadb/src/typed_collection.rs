@@ -583,10 +583,12 @@ impl<'a, T: QuokkaDocument> TypedUpdateOne<'a, T> {
             options,
         } = self;
         let build_plan = |collection, hint_id| {
+            let update = update.into_update_expr();
+            update.validate_id_modifications(options.upsert)?;
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
                 .sort(options.sort)
-                .update_one(update.into_update_expr(), options.upsert)
+                .update_one(update, options.upsert)
                 .build())
         };
 
@@ -649,9 +651,11 @@ impl<'a, T: QuokkaDocument> TypedUpdateMany<'a, T> {
             options,
         } = self;
         let build_plan = |collection, hint_id| {
+            let update = update.into_update_expr();
+            update.validate_id_modifications(options.upsert)?;
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(filter.into_expr())
-                .update_many(update.into_update_expr(), options.upsert)
+                .update_many(update, options.upsert)
                 .build())
         };
 
@@ -840,14 +844,18 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFindOneAndModify<'a, T, R, 
                 .filter(filter.into_expr())
                 .sort(options.sort);
             Ok(match operation {
-                TypedFindOneAndModifyOperation::Update(update) => builder
-                    .find_one_and_update(
-                        update.into_update_expr(),
-                        options.projection,
-                        options.upsert,
-                        options.return_document,
-                    )
-                    .build(),
+                TypedFindOneAndModifyOperation::Update(update) => {
+                    let update = update.into_update_expr();
+                    update.validate_id_modifications(options.upsert)?;
+                    builder
+                        .find_one_and_update(
+                            update,
+                            options.projection,
+                            options.upsert,
+                            options.return_document,
+                        )
+                        .build()
+                }
                 TypedFindOneAndModifyOperation::Replace(replacement) => builder
                     .find_one_and_replace(
                         replacement,

@@ -3,6 +3,7 @@ mod common;
 use bson::{Bson, Document, doc};
 use quokkadb::QuokkaDB;
 use quokkadb::collection::{Collection, ReturnDocument};
+use quokkadb::error::Error;
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
@@ -68,6 +69,68 @@ fn test_set_simple() {
         assert_eq!(doc.get_i32("qty").unwrap(), 30);
         assert_eq!(doc.get_str("item").unwrap(), "journal"); // Check other fields remain
     }
+}
+
+#[test]
+fn modifier_updates_reject_id_paths() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+    let updates = [
+        doc! { "$set": { "_id": 2 } },
+        doc! { "$set": { "_id.value": 2 } },
+        doc! { "$unset": { "_id": "" } },
+        doc! { "$inc": { "_id": 1 } },
+        doc! { "$mul": { "_id": 2 } },
+        doc! { "$min": { "_id": 0 } },
+        doc! { "$max": { "_id": 9 } },
+        doc! { "$currentDate": { "_id": true } },
+        doc! { "$push": { "_id": 2 } },
+        doc! { "$rename": { "item": "_id" } },
+    ];
+
+    for update in updates {
+        let error = collection
+            .update_one(doc! { "_id": 1 }, update)
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidRequest(_)));
+    }
+
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 })
+            .unwrap()
+            .get_str("item")
+            .unwrap(),
+        "journal"
+    );
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 2 })
+            .unwrap()
+            .get_str("item")
+            .unwrap(),
+        "notebook"
+    );
+}
+
+#[test]
+fn update_many_and_find_one_and_update_reject_id_paths() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    assert!(matches!(
+        collection.update_many(doc! {}, doc! { "$set": { "_id": 2 } }),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        collection.find_one_and_update(doc! { "_id": 1 }, doc! { "$set": { "_id": 2 } }),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert!(matches!(
+        collection.update_one(
+            doc! { "item": "does_not_exist" },
+            doc! { "$set": { "_id": 2 } }
+        ),
+        Err(Error::InvalidRequest(_))
+    ));
 }
 
 #[test]
@@ -2084,6 +2147,65 @@ fn test_upsert_insert_when_no_match() {
     assert_eq!(doc.get_i32("_id").unwrap(), 100);
     assert_eq!(doc.get_str("item").unwrap(), "new_item");
     assert_eq!(doc.get_i32("qty").unwrap(), 10);
+}
+
+#[test]
+fn test_upsert_can_initialize_id_but_rejects_conflicting_ids() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let result = collection
+        .update_one_with(
+            doc! { "item": "explicit_id" },
+            doc! { "$set": { "_id": 1000, "qty": 10 } },
+        )
+        .upsert(true)
+        .execute()
+        .unwrap();
+    assert_eq!(result.upserted_id, Some(1000.into()));
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1000 })
+            .unwrap()
+            .get_i32("qty")
+            .unwrap(),
+        10
+    );
+
+    let error = collection
+        .update_one_with(doc! { "_id": 1001 }, doc! { "$set": { "_id": 1002 } })
+        .upsert(true)
+        .execute()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidRequest(message)
+            if message == "The upsert update cannot change the _id specified by its query"
+    ));
+    assert!(find_one(&collection, doc! { "_id": 1001 }).is_none());
+    assert!(find_one(&collection, doc! { "_id": 1002 }).is_none());
+}
+
+#[test]
+fn test_replacement_upsert_rejects_conflicting_ids() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("test");
+
+    let error = collection
+        .replace_one_with(
+            doc! { "_id": 1003 },
+            doc! { "_id": 1004, "item": "conflict" },
+        )
+        .upsert(true)
+        .execute()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::InvalidRequest(message)
+            if message == "The upsert replacement cannot change the _id specified by its query"
+    ));
+    assert!(find_one(&collection, doc! { "_id": 1003 }).is_none());
+    assert!(find_one(&collection, doc! { "_id": 1004 }).is_none());
 }
 
 #[test]

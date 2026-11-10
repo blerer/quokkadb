@@ -570,6 +570,7 @@ impl<'a> UpdateOne<'a> {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let update = parser::parse_update(&self.update, self.options.array_filters)?;
+            update.validate_id_modifications(self.options.upsert)?;
 
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
                 .filter(conditions)
@@ -641,6 +642,7 @@ impl<'a> UpdateMany<'a> {
     pub fn execute(self) -> Result<UpdateResult> {
         let build_plan = |collection, hint_id| {
             let update = parser::parse_update(&self.update, self.options.array_filters)?;
+            update.validate_id_modifications(self.options.upsert)?;
             let conditions = parser::parse_conditions(&self.filter)?;
 
             Ok(LogicalPlanBuilder::scan(collection, hint_id)
@@ -980,6 +982,7 @@ impl<'a> FindOneAndUpdate<'a> {
             let conditions = parser::parse_conditions(&self.filter)?;
             let sort = parser::parse_optional_sort(self.options.sort.as_ref())?;
             let update = parser::parse_update(&self.update, None)?;
+            update.validate_id_modifications(self.options.upsert)?;
             let projection = parser::parse_optional_projection(self.options.projection)?;
 
             Ok(LogicalPlanBuilder::scan(col, hint_id)

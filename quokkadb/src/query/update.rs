@@ -437,6 +437,68 @@ impl UpdateExpr {
 
         Ok(())
     }
+
+    /// Rejects modifier updates that target the immutable document ID.
+    ///
+    /// During an upsert insert, an exact `_id` `$set` or `$setOnInsert` is
+    /// allowed to initialize the new document's ID; all other ID paths remain
+    /// invalid.
+    pub(crate) fn validate_id_modifications(&self, insert: bool) -> Result<(), Error> {
+        for op in &self.ops {
+            match op {
+                UpdateOp::Set { path, .. } => {
+                    if path_targets_id(path) && !(insert && path_is_id(path)) {
+                        return Err(id_modification_error());
+                    }
+                }
+                // `$setOnInsert` is ignored for an existing document, so it
+                // does not attempt to modify `_id` in that case. On an upsert
+                // insert, only the exact field can initialize the document ID.
+                UpdateOp::SetOnInsert { path, .. } => {
+                    if insert && path_targets_id(path) && !path_is_id(path) {
+                        return Err(id_modification_error());
+                    }
+                }
+                UpdateOp::Rename { from, to } => {
+                    if path_targets_id(from) || path_targets_id(to) {
+                        return Err(id_modification_error());
+                    }
+                }
+                UpdateOp::Unset { path }
+                | UpdateOp::Inc { path, .. }
+                | UpdateOp::Mul { path, .. }
+                | UpdateOp::Min { path, .. }
+                | UpdateOp::Max { path, .. }
+                | UpdateOp::CurrentDate { path, .. }
+                | UpdateOp::AddToSet { path, .. }
+                | UpdateOp::Push { path, .. }
+                | UpdateOp::Pop { path, .. }
+                | UpdateOp::Pull { path, .. }
+                | UpdateOp::PullAll { path, .. }
+                | UpdateOp::Bit { path, .. } => {
+                    if path_targets_id(path) {
+                        return Err(id_modification_error());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn path_targets_id(path: &UpdatePath) -> bool {
+    matches!(
+        path.first(),
+        Some(UpdatePathComponent::FieldName(name)) if name == "_id"
+    )
+}
+
+fn path_is_id(path: &UpdatePath) -> bool {
+    path.len() == 1 && path_targets_id(path)
+}
+
+pub(crate) fn id_modification_error() -> Error {
+    Error::InvalidRequest("The _id field cannot be changed".to_string())
 }
 
 /// Validates a MongoDB field name.

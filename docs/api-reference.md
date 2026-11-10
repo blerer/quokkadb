@@ -305,7 +305,7 @@ Read [Options](guides/options.md) before changing storage or compaction settings
 
 Operations return `quokkadb::error::Result<T>`, an alias for `Result<T, Error>`. `Error` distinguishes I/O, BSON and deserialization failures, invalid requests or options, version conflicts, collection and index lookup failures, and recovery errors. Handle errors at the operation boundary; callers can inspect an `Error` variant when different application responses are needed.
 
-`QuokkaId::new()` creates a Sonyflake ID for an application-generated document `_id`; `QuokkaId::default()` creates one too. It serializes as BSON `Int64`. `as_u64()` returns its numeric value, and `TryFrom<u64>` rejects values that do not fit BSON `Int64`.
+`QuokkaId::new()` creates a Sonyflake ID for an application-generated document `_id`; `QuokkaId::default()` creates one too. It serializes as BSON `Int64` and can be used as a typed model ID. Typed fields support searching, sorting, indexing, and selecting `QuokkaId` values. The `_id` field is immutable after insertion. `as_u64()` returns its numeric value, and `TryFrom<u64>` rejects values that do not fit BSON `Int64`.
 
 `db.metrics()` returns grouped runtime counters and gauges:
 

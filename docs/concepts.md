@@ -70,7 +70,7 @@ For a document collection, each collection has one of three ID-creation strategi
 | `Manual` | Require the application to supply `_id`. |
 | `Generated` | Generate every `_id` and reject documents that supply one. |
 
-When an application needs to create IDs before insertion, `QuokkaId::new()` produces a globally ordered Sonyflake ID. It serializes as a BSON `Int64`, so it can be used with the document API. It is not currently available as a typed model ID.
+When an application needs to create IDs before insertion, `QuokkaId::new()` produces a globally ordered Sonyflake ID. It serializes as a BSON `Int64` and can be used as a typed model ID or with the document API. Typed queries can search, sort, index, and select `QuokkaId` values. The `_id` field is immutable after insertion.
 
 ## Queries, updates, and indexes
 

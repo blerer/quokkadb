@@ -1,3 +1,4 @@
+use crate::document::QuokkaScalar;
 use serde::de::{Deserialize, Deserializer, Error as _};
 use serde::ser::{Serialize, Serializer};
 use sonyflake::Sonyflake;
@@ -82,6 +83,8 @@ impl<'de> Deserialize<'de> for QuokkaId {
         Ok(Self(value))
     }
 }
+
+impl QuokkaScalar for QuokkaId {}
 
 #[cfg(test)]
 mod tests {

@@ -19,6 +19,7 @@ pub fn to_updater(
     update: &UpdateExpr,
     insert: bool,
 ) -> Result<Box<dyn Fn(Document) -> Result<Document> + Send + Sync>> {
+    update.validate_id_modifications(insert)?;
     let array_filters = Arc::new(to_value_filters(&update.array_filters));
 
     let mut operations: Vec<Box<dyn Fn(&mut Document) -> Result<()> + Send + Sync>> = vec![];

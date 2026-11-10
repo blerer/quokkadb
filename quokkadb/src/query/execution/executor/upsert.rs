@@ -1,6 +1,6 @@
 use super::bind;
 use super::write::WriteExecutor;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::query::execution::{set_path_value, updates};
 use crate::query::expr::Expr;
 use crate::query::physical_plan::PhysicalPlan;
@@ -18,7 +18,16 @@ impl WriteExecutor {
     ) -> Result<(Document, Bson)> {
         let updater = updates::to_updater(update, true)?;
         let mut new_doc = self.create_base_document_from_query(query, parameters)?;
+        let query_id = new_doc.get("_id").cloned();
         new_doc = updater(new_doc)?;
+
+        if let Some(query_id) = query_id {
+            if new_doc.get("_id") != Some(&query_id) {
+                return Err(Error::InvalidRequest(
+                    "The upsert update cannot change the _id specified by its query".to_string(),
+                ));
+            }
+        }
 
         let id = if new_doc.contains_key("_id") {
             new_doc.get("_id").unwrap().clone()
@@ -37,10 +46,18 @@ impl WriteExecutor {
         replacement: &Document,
         parameters: &Parameters,
     ) -> Result<(Document, Bson)> {
-        let id = replacement
-            .get("_id")
-            .cloned()
-            .or_else(|| self.extract_upsert_id_from_query(query, parameters))
+        let replacement_id = replacement.get("_id").cloned();
+        let query_id = self.extract_upsert_id_from_query(query, parameters);
+        if let (Some(query_id), Some(replacement_id)) = (&query_id, &replacement_id) {
+            if query_id != replacement_id {
+                return Err(Error::InvalidRequest(
+                    "The upsert replacement cannot change the _id specified by its query"
+                        .to_string(),
+                ));
+            }
+        }
+        let id = replacement_id
+            .or(query_id)
             .unwrap_or_else(|| self.generate_id());
 
         let new_doc = if replacement.contains_key("_id") {

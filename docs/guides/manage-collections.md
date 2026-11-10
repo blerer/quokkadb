@@ -51,7 +51,7 @@ documents.insert_one(PlantDocument {
 })?;
 ```
 
-Use `QuokkaId` when the application must choose an ID before insertion. It is not currently available as a typed model ID. See [Concepts](../concepts.md#ids) for the complete ID model.
+Use `QuokkaId` when the application must choose an ID before insertion, including for typed models. It can be searched, sorted, indexed, and selected through the typed API, but `_id` cannot be changed after insertion. See [Concepts](../concepts.md#ids) for the complete ID model.
 
 ## Inspect and change collections
 
