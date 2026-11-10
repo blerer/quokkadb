@@ -47,20 +47,19 @@ Add QuokkaDB and the dependencies used by the examples to your `Cargo.toml`:
 ```toml
 [dependencies]
 quokkadb = { git = "https://github.com/blerer/quokkadb" }
-bson = "3"
 serde = { version = "1", features = ["derive"] }
 ```
 
 ```rust
 use quokkadb::error::Result;
-use quokkadb::{QuokkaDB, QuokkaDocument};
+use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: QuokkaId,
     name: String,
     needs_water: bool,
 }
@@ -72,7 +71,7 @@ fn main() -> Result<()> {
         .create_if_missing();
 
     plants.insert_one(Plant {
-        id: 1,
+        id: QuokkaId::new(),
         name: "Monstera".into(),
         needs_water: true,
     })?;
@@ -88,35 +87,8 @@ fn main() -> Result<()> {
 
 `QuokkaDB` implements `Clone`. Clones share the same database instance, so you can pass a clone to another thread when your application needs it.
 
-For dynamic data or lower-level access, QuokkaDB also provides a BSON document API.
+For dynamic data or lower-level access, QuokkaDB also exposes a BSON document API.
 
-```rust
-use bson::doc;
-use quokkadb::error::Result;
-use quokkadb::QuokkaDB;
-use std::path::Path;
-
-fn main() -> Result<()> {
-    let db = QuokkaDB::open(Path::new("./data"))?;
-    let plants = db.collection("plants").create_if_missing();
-
-    plants.insert_one(doc! {
-        "_id": 1,
-        "name": "Monstera",
-        "needs_water": true,
-    })?;
-
-    let plant = plants
-        .find_one(doc! { "needs_water": true })?
-        .expect("inserted plant must exist");
-
-    assert_eq!(
-        plant.get_str("name").expect("name must be a string"),
-        "Monstera"
-    );
-    Ok(())
-}
-```
 ## Documentation
 
 [Read the QuokkaDB documentation.](docs/README.md)
