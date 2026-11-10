@@ -61,7 +61,25 @@ let plants = db
     .create_if_missing();
 ```
 
-Use `QuokkaType` for an embedded Serde type that should expose typed nested fields but is not a collection document. The derive macro supplies the `Fields<T>` type used by closures passed to `find`, `update_one`, `sort`, and `create_index`.
+Use `QuokkaType` for an embedded Serde type that should expose typed nested fields but is not a collection document. The derive macro supplies the `Fields<T>` type used by closures passed to `find`, `update_one`, `sort`, and `create_index`. Externally tagged enums can expose payload variants as additional path components; unit variants do not expose subfields.
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaType)]
+enum Shape {
+    Pending,
+    Circle { radius: f64 },
+    Rectangle { width: f64, height: f64 },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaScalar)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    Active,
+    Disabled,
+}
+```
+
+Use `shape.circle.radius` to query the `shape.Circle.radius` path under the default Serde representation. Use `status.eq(Status::Active)` for unit enums. Serde remains responsible for enum serialization and supports its normal `rename` and `rename_all` attributes. QuokkaType enum support is limited to externally tagged struct and single-field newtype variants. When `select` crosses a variant path, its result is `Option<T>` and documents using another variant produce `None`; nested variant boundaries are flattened into one `Option<T>`.
 
 ### Collection lifecycle and indexes
 
@@ -126,6 +144,12 @@ cannot be indexed.
 | `exclude(fields)` | Deserializes the remaining fields into a chosen `NewResult` type. |
 | `select(fields)` | Returns one selected value or a tuple of selected values. |
 
+Selections through enum payload paths are optional because the selected field is
+not present for every variant. For example, selecting
+`page.shape.circle.radius` has type `Option<f64>`. Nested enum paths still use a
+single `Option<T>`; this avoids exposing an `Option<Option<T>>` chain for each
+variant boundary.
+
 For example, use `select` when a view needs only names:
 
 ```rust
@@ -186,7 +210,7 @@ Typed filters and updates follow BSON comparison behavior. Range filters use BSO
 
 `Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 
-The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; add `NumericValue` when it supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
+The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; unit enums can derive it directly. The `QuokkaScalar` derive only implements QuokkaDB's marker trait—Serde still supplies `Serialize` and `Deserialize`. Add `NumericValue` when a scalar supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
 
 ## Document collections
 

@@ -22,14 +22,16 @@ mod util;
 
 pub use crate::document::{
     ArrayField, BitwiseValue, Field, Filter, Index, MapField, NumericValue, ObjectField,
-    OptionalField, PushOptions, QueryFieldType, QuokkaDocument, QuokkaScalar, QuokkaType, Sort,
-    TypedPath, TypedQueryField, TypedSelection, Update, not,
+    OptionalField, PartialArrayField, PartialField, PartialMapField, PartialObjectField,
+    PartialOptionalField, PartialPresence, PartialQueryFieldType, PushOptions, QueryFieldType,
+    QuokkaDocument, QuokkaScalar, QuokkaType, RequiredPresence, Sort, TypedPath, TypedQueryField,
+    TypedSelection, Update, not,
 };
 pub use crate::explain::{
     ExplainDirection, ExplainNode, ExplainOperator, ExplainOperatorKind, ExplainPlan,
 };
 pub use crate::id::QuokkaId;
-pub use quokkadb_derive::{QuokkaDocument, QuokkaType};
+pub use quokkadb_derive::{QuokkaDocument, QuokkaScalar, QuokkaType};
 
 pub use crate::collection::Collection;
 use crate::error::Error;

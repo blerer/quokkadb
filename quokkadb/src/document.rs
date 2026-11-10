@@ -18,14 +18,19 @@ use std::sync::Arc;
 
 pub use crate::query::ReturnDocument;
 
-/// A Serde value whose named fields can be described by the typed query API.
+/// A Serde value whose named fields or payload variants can be described by the typed query API.
 ///
 /// Unlike [`QuokkaDocument`], an embedded type has no collection identity and
 /// therefore does not require an `_id` field.
 pub trait QuokkaType: Serialize + DeserializeOwned + Send + Sync + 'static {
     type Fields<D>;
+    #[doc(hidden)]
+    type PartialFields<D>;
 
     fn fields<D>(path: TypedPath) -> Self::Fields<D>;
+
+    #[doc(hidden)]
+    fn partial_fields<D>(path: TypedPath) -> Self::PartialFields<D>;
 }
 
 /// Maps a Rust value type to its typed-query field proxy.
@@ -36,10 +41,23 @@ pub trait QueryFieldType {
     fn field<D>(path: TypedPath) -> Self::Field<D>;
 }
 
+/// Maps a value type to a typed-query field proxy whose path may be absent
+/// because it passes through an enum variant.
+#[doc(hidden)]
+pub trait PartialQueryFieldType {
+    type Field<D>;
+
+    #[doc(hidden)]
+    fn partial_field<D>(path: TypedPath) -> Self::Field<D>;
+}
+
 /// A BSON leaf value supported by the typed query API.
 ///
-/// Implement this trait for a custom Serde value to expose it as a typed field.
-/// A type must not implement both `QuokkaScalar` and [`QuokkaType`].
+/// Implement this marker trait for a custom Serde value to expose it as a typed
+/// field. Unit enums can use the `QuokkaScalar` derive alongside their normal
+/// Serde derives. The derive does not implement serialization; Serde remains
+/// responsible for the BSON representation. A type must not implement both
+/// `QuokkaScalar` and [`QuokkaType`].
 pub trait QuokkaScalar: Serialize + DeserializeOwned + Send + Sync + 'static {}
 
 /// A scalar value that supports `$inc` updates.
@@ -222,12 +240,20 @@ impl TypedPath {
 /// A typed scalar field backed by a BSON path.
 #[allow(dead_code)] // Exposed through nested and collection proxies in the next layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field<D, V: QuokkaScalar> {
+pub struct Field<D, V: QuokkaScalar, P = RequiredPresence> {
     path: TypedPath,
-    _marker: PhantomData<fn() -> (D, V)>,
+    _marker: PhantomData<fn() -> (D, V, P)>,
 }
 
-impl<D, V: QuokkaScalar> Field<D, V> {
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequiredPresence;
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartialPresence;
+
+impl<D, V: QuokkaScalar, P> Field<D, V, P> {
     pub fn new(path: TypedPath) -> Self {
         Self {
             path,
@@ -236,7 +262,7 @@ impl<D, V: QuokkaScalar> Field<D, V> {
     }
 }
 
-impl<D, V: QuokkaScalar> Field<D, V> {
+impl<D, V: QuokkaScalar, P> Field<D, V, P> {
     value_operations!(V);
 
     /// Builds a filter that matches fields equal to any supplied value.
@@ -264,7 +290,7 @@ impl<D, V: QuokkaScalar> Field<D, V> {
     }
 }
 
-impl<D, V: NumericValue> Field<D, V> {
+impl<D, V: NumericValue, P> Field<D, V, P> {
     /// Creates a `$inc` update that adds `amount` to this field.
     pub fn inc(&self, amount: impl Into<V>) -> Update<D> {
         value_update(
@@ -284,7 +310,7 @@ impl<D, V: NumericValue> Field<D, V> {
     }
 }
 
-impl<D, V: BitwiseValue> Field<D, V> {
+impl<D, V: BitwiseValue, P> Field<D, V, P> {
     /// Creates a `$bit` update using any combination of AND, OR, and XOR masks.
     pub fn bit(&self, and: Option<i64>, or: Option<i64>, xor: Option<i64>) -> Update<D> {
         Update::from_op(UpdateOp::Bit {
@@ -296,19 +322,23 @@ impl<D, V: BitwiseValue> Field<D, V> {
     }
 }
 
-impl<D> Field<D, bson::DateTime> {
+impl<D, P> Field<D, bson::DateTime, P> {
     /// Creates a `$currentDate` update that sets this field to the current BSON date.
     pub fn current_date(&self) -> Update<D> {
         current_date_update(self.path.clone(), CurrentDateType::Date)
     }
 }
 
-impl<D> Field<D, bson::Timestamp> {
+impl<D, P> Field<D, bson::Timestamp, P> {
     /// Creates a `$currentDate` update that sets this field to the current BSON timestamp.
     pub fn current_timestamp(&self) -> Update<D> {
         current_date_update(self.path.clone(), CurrentDateType::Timestamp)
     }
 }
+
+/// A scalar field whose path may be absent because it passes through an enum variant.
+#[doc(hidden)]
+pub type PartialField<D, V> = Field<D, V, PartialPresence>;
 
 /// A nullable typed field that preserves `Option` in selections while exposing
 /// the query API of its contained value.
@@ -667,6 +697,278 @@ impl<D, V: QuokkaType> Deref for ObjectField<D, V> {
     }
 }
 
+/// A nullable typed field whose path may be absent because it passes through
+/// an enum variant.
+#[doc(hidden)]
+pub struct PartialOptionalField<D, V: PartialQueryFieldType> {
+    path: TypedPath,
+    inner: V::Field<D>,
+}
+
+impl<D, V: PartialQueryFieldType> PartialOptionalField<D, V> {
+    #[doc(hidden)]
+    pub fn new(path: TypedPath) -> Self {
+        Self {
+            path: path.clone(),
+            inner: V::partial_field(path),
+        }
+    }
+
+    pub fn exists(&self) -> Filter<D> {
+        path_exists(self.path.clone())
+    }
+
+    pub fn unset(&self) -> Update<D> {
+        path_unset(self.path.clone())
+    }
+}
+
+impl<D, V: PartialQueryFieldType> Deref for PartialOptionalField<D, V> {
+    type Target = V::Field<D>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/// An array field whose path may be absent because it passes through an enum variant.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialArrayField<D, T> {
+    path: TypedPath,
+    _marker: PhantomData<fn() -> (D, T)>,
+}
+
+impl<D, T> PartialArrayField<D, T> {
+    #[doc(hidden)]
+    pub fn new(path: TypedPath) -> Self {
+        Self {
+            path,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn at(&self, index: usize) -> T::Field<D>
+    where
+        T: PartialQueryFieldType,
+    {
+        T::partial_field(self.path.clone().array_element(index))
+    }
+
+    pub fn len_eq(&self, length: usize) -> Filter<D> {
+        array_size_filter(self.path.clone(), length)
+    }
+}
+
+impl<D, T: Serialize> PartialArrayField<D, T> {
+    pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
+        array_any_eq_filter(self.path.clone(), value.into())
+    }
+
+    pub fn all<I, U>(&self, values: I) -> Filter<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<T>,
+    {
+        array_all_filter(
+            self.path.clone(),
+            values.into_iter().map(Into::into).collect::<Vec<T>>(),
+        )
+    }
+
+    value_operations!(Vec<T>);
+
+    pub fn add_to_set(&self, value: impl Into<T>) -> Update<D> {
+        array_values_update(
+            self.path.clone(),
+            |path, values| UpdateOp::AddToSet {
+                path,
+                values: EachOrSingle::Single(values.into_iter().next().unwrap()),
+            },
+            [value.into()],
+        )
+    }
+
+    pub fn add_to_set_each<I, U>(&self, values: I) -> Update<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<T>,
+    {
+        array_values_update(
+            self.path.clone(),
+            |path, values| UpdateOp::AddToSet {
+                path,
+                values: EachOrSingle::Each(values),
+            },
+            values.into_iter().map(Into::into),
+        )
+    }
+
+    pub fn push(&self, value: impl Into<T>) -> Update<D> {
+        array_values_update(
+            self.path.clone(),
+            |path, values| UpdateOp::Push {
+                path,
+                spec: PushSpec {
+                    values: EachOrSingle::Single(values.into_iter().next().unwrap()),
+                    position: None,
+                    slice: None,
+                    sort: None,
+                },
+            },
+            [value.into()],
+        )
+    }
+
+    pub fn push_each<I, U>(&self, values: I, options: PushOptions<D, T>) -> Update<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<T>,
+    {
+        array_values_update(
+            self.path.clone(),
+            move |path, values| UpdateOp::Push {
+                path,
+                spec: PushSpec {
+                    values: EachOrSingle::Each(values),
+                    position: options.position,
+                    slice: options.slice,
+                    sort: options.sort,
+                },
+            },
+            values.into_iter().map(Into::into),
+        )
+    }
+
+    pub fn push_each_with<I, U>(
+        &self,
+        values: I,
+        configure: impl FnOnce(PushOptions<D, T>) -> PushOptions<D, T>,
+    ) -> Update<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<T>,
+    {
+        self.push_each(values, configure(PushOptions::new()))
+    }
+
+    pub fn pop_first(&self) -> Update<D> {
+        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
+            path,
+            from: PopFrom::First,
+        })
+    }
+
+    pub fn pop_last(&self) -> Update<D> {
+        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
+            path,
+            from: PopFrom::Last,
+        })
+    }
+
+    pub fn pull(&self, value: impl Into<T>) -> Update<D> {
+        let value = literal_expr(value.into());
+        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
+            path,
+            criterion: PullCriterion::Equals(value),
+        })
+    }
+
+    pub fn pull_all<I, U>(&self, values: I) -> Update<D>
+    where
+        I: IntoIterator<Item = U>,
+        U: Into<T>,
+    {
+        array_values_update(
+            self.path.clone(),
+            |path, values| UpdateOp::PullAll { path, values },
+            values.into_iter().map(Into::into),
+        )
+    }
+}
+
+impl<D, T: QuokkaScalar> PartialArrayField<D, T> {
+    pub fn any_where(&self, predicate: impl FnOnce(&Field<D, T>) -> Filter<D>) -> Filter<D> {
+        let element = Field::new(TypedPath::empty());
+        scalar_array_any_filter(self.path.clone(), predicate(&element))
+    }
+}
+
+impl<D, T: QuokkaType> PartialArrayField<D, T> {
+    pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
+        array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
+    }
+
+    pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
+        fields(T::fields(self.path.clone()))
+    }
+
+    pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
+        let criterion = predicate(&T::fields(TypedPath::empty())).into_expr();
+        array_path_update(self.path.clone(), |path| UpdateOp::Pull {
+            path,
+            criterion: PullCriterion::Matches(criterion),
+        })
+    }
+}
+
+/// A map field whose path may be absent because it passes through an enum variant.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialMapField<D, V> {
+    path: TypedPath,
+    _marker: PhantomData<fn() -> (D, V)>,
+}
+
+impl<D, V> PartialMapField<D, V> {
+    #[doc(hidden)]
+    pub fn new(path: TypedPath) -> Self {
+        Self {
+            path,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn key(&self, key: &str) -> V::Field<D>
+    where
+        V: PartialQueryFieldType,
+    {
+        V::partial_field(self.path.clone().field(key))
+    }
+}
+
+impl<D, V: Serialize> PartialMapField<D, V> {
+    value_operations!(BTreeMap<String, V>);
+}
+
+/// An embedded object field whose path may be absent because it passes through
+/// an enum variant.
+#[doc(hidden)]
+pub struct PartialObjectField<D, V: QuokkaType> {
+    path: TypedPath,
+    fields: V::PartialFields<D>,
+}
+
+impl<D, V: QuokkaType> PartialObjectField<D, V> {
+    #[doc(hidden)]
+    pub fn from_path(path: TypedPath) -> Self {
+        Self {
+            path: path.clone(),
+            fields: V::partial_fields(path),
+        }
+    }
+
+    value_operations!(V);
+}
+
+impl<D, V: QuokkaType> Deref for PartialObjectField<D, V> {
+    type Target = V::PartialFields<D>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
 macro_rules! impl_scalar {
     ($($type:ty),+ $(,)?) => {$(
         impl QuokkaScalar for $type {
@@ -725,11 +1027,27 @@ impl<T: QuokkaScalar> QueryFieldType for T {
     }
 }
 
+impl<T: QuokkaScalar> PartialQueryFieldType for T {
+    type Field<D> = PartialField<D, Self>;
+
+    fn partial_field<D>(path: TypedPath) -> Self::Field<D> {
+        Field::new(path)
+    }
+}
+
 impl<T: QueryFieldType> QueryFieldType for Option<T> {
     type Field<D> = OptionalField<D, T>;
 
     fn field<D>(path: TypedPath) -> Self::Field<D> {
         OptionalField::new(path)
+    }
+}
+
+impl<T: PartialQueryFieldType> PartialQueryFieldType for Option<T> {
+    type Field<D> = PartialOptionalField<D, T>;
+
+    fn partial_field<D>(path: TypedPath) -> Self::Field<D> {
+        PartialOptionalField::new(path)
     }
 }
 
@@ -740,6 +1058,14 @@ impl<T: QueryFieldType> QueryFieldType for Vec<T> {
     }
 }
 
+impl<T: PartialQueryFieldType> PartialQueryFieldType for Vec<T> {
+    type Field<D> = PartialArrayField<D, T>;
+
+    fn partial_field<D>(path: TypedPath) -> Self::Field<D> {
+        PartialArrayField::new(path)
+    }
+}
+
 impl<T: QueryFieldType> QueryFieldType for BTreeMap<String, T> {
     type Field<D> = MapField<D, T>;
     fn field<D>(path: TypedPath) -> Self::Field<D> {
@@ -747,7 +1073,15 @@ impl<T: QueryFieldType> QueryFieldType for BTreeMap<String, T> {
     }
 }
 
-impl<D, V: QuokkaScalar> TypedQueryField<D> for &Field<D, V> {
+impl<T: PartialQueryFieldType> PartialQueryFieldType for BTreeMap<String, T> {
+    type Field<D> = PartialMapField<D, T>;
+
+    fn partial_field<D>(path: TypedPath) -> Self::Field<D> {
+        PartialMapField::new(path)
+    }
+}
+
+impl<D, V: QuokkaScalar, P> TypedQueryField<D> for &Field<D, V, P> {
     type Value = V;
 
     fn query_path(&self) -> TypedPath {
@@ -755,7 +1089,7 @@ impl<D, V: QuokkaScalar> TypedQueryField<D> for &Field<D, V> {
     }
 }
 
-impl<D, V: QuokkaScalar> TypedQueryField<D> for Field<D, V> {
+impl<D, V: QuokkaScalar, P> TypedQueryField<D> for Field<D, V, P> {
     type Value = V;
 
     fn query_path(&self) -> TypedPath {
@@ -779,6 +1113,22 @@ impl<D, T> TypedQueryField<D> for ArrayField<D, T> {
     }
 }
 
+impl<D, T> TypedQueryField<D> for &PartialArrayField<D, T> {
+    type Value = Vec<T>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, T> TypedQueryField<D> for PartialArrayField<D, T> {
+    type Value = Vec<T>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
 impl<D, V> TypedQueryField<D> for &MapField<D, V> {
     type Value = BTreeMap<String, V>;
 
@@ -788,6 +1138,22 @@ impl<D, V> TypedQueryField<D> for &MapField<D, V> {
 }
 
 impl<D, V> TypedQueryField<D> for MapField<D, V> {
+    type Value = BTreeMap<String, V>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, V> TypedQueryField<D> for &PartialMapField<D, V> {
+    type Value = BTreeMap<String, V>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, V> TypedQueryField<D> for PartialMapField<D, V> {
     type Value = BTreeMap<String, V>;
 
     fn query_path(&self) -> TypedPath {
@@ -811,6 +1177,22 @@ impl<D, V: QueryFieldType> TypedQueryField<D> for OptionalField<D, V> {
     }
 }
 
+impl<D, V: PartialQueryFieldType> TypedQueryField<D> for &PartialOptionalField<D, V> {
+    type Value = Option<V>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, V: PartialQueryFieldType> TypedQueryField<D> for PartialOptionalField<D, V> {
+    type Value = Option<V>;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
 impl<D, V: QuokkaType> TypedQueryField<D> for &ObjectField<D, V> {
     type Value = V;
 
@@ -820,6 +1202,22 @@ impl<D, V: QuokkaType> TypedQueryField<D> for &ObjectField<D, V> {
 }
 
 impl<D, V: QuokkaType> TypedQueryField<D> for ObjectField<D, V> {
+    type Value = V;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, V: QuokkaType> TypedQueryField<D> for &PartialObjectField<D, V> {
+    type Value = V;
+
+    fn query_path(&self) -> TypedPath {
+        self.path.clone()
+    }
+}
+
+impl<D, V: QuokkaType> TypedQueryField<D> for PartialObjectField<D, V> {
     type Value = V;
 
     fn query_path(&self) -> TypedPath {
@@ -1082,6 +1480,22 @@ impl<D: 'static, V: QuokkaScalar> TypedSelection<D> for Field<D, V> {
     }
 }
 
+impl<D: 'static, V: QuokkaScalar> TypedSelection<D> for Field<D, V, PartialPresence> {
+    type Output = Option<V>;
+
+    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![self.path.components.clone()]
+    }
+
+    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![selection_projection_path(&self.path.components)]
+    }
+
+    fn decode(&self, document: &Document) -> Result<Self::Output> {
+        decode_partial_selection(document, &self.path)
+    }
+}
+
 impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for ArrayField<D, T> {
     type Output = Vec<T>;
 
@@ -1098,6 +1512,22 @@ impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for ArrayField
     }
 }
 
+impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for PartialArrayField<D, T> {
+    type Output = Option<Vec<T>>;
+
+    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![self.path.components.clone()]
+    }
+
+    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![selection_projection_path(&self.path.components)]
+    }
+
+    fn decode(&self, document: &Document) -> Result<Self::Output> {
+        decode_partial_selection(document, &self.path)
+    }
+}
+
 impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for MapField<D, V> {
     type Output = BTreeMap<String, V>;
 
@@ -1111,6 +1541,22 @@ impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for MapField<D
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_required_selection(document, &self.path)
+    }
+}
+
+impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for PartialMapField<D, V> {
+    type Output = Option<BTreeMap<String, V>>;
+
+    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![self.path.components.clone()]
+    }
+
+    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![selection_projection_path(&self.path.components)]
+    }
+
+    fn decode(&self, document: &Document) -> Result<Self::Output> {
+        decode_partial_selection(document, &self.path)
     }
 }
 
@@ -1135,6 +1581,29 @@ impl<D: 'static, V: QueryFieldType + DeserializeOwned + 'static> TypedSelection<
     }
 }
 
+impl<D: 'static, V: PartialQueryFieldType + DeserializeOwned + 'static> TypedSelection<D>
+    for PartialOptionalField<D, V>
+{
+    type Output = Option<V>;
+
+    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![self.path.components.clone()]
+    }
+
+    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![selection_projection_path(&self.path.components)]
+    }
+
+    fn decode(&self, document: &Document) -> Result<Self::Output> {
+        let Some(value) = crate::query::get_path_value(document, &self.path.components)
+            .map(|value| value.0.clone())
+        else {
+            return Ok(None);
+        };
+        Ok(bson::deserialize_from_bson(value)?)
+    }
+}
+
 impl<D: 'static, V: QuokkaType> TypedSelection<D> for ObjectField<D, V> {
     type Output = V;
 
@@ -1148,6 +1617,22 @@ impl<D: 'static, V: QuokkaType> TypedSelection<D> for ObjectField<D, V> {
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_required_selection(document, &self.path)
+    }
+}
+
+impl<D: 'static, V: QuokkaType> TypedSelection<D> for PartialObjectField<D, V> {
+    type Output = Option<V>;
+
+    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![self.path.components.clone()]
+    }
+
+    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+        vec![selection_projection_path(&self.path.components)]
+    }
+
+    fn decode(&self, document: &Document) -> Result<Self::Output> {
+        decode_partial_selection(document, &self.path)
     }
 }
 
@@ -1168,6 +1653,18 @@ fn decode_required_selection<T: DeserializeOwned>(
             ))
         })?;
     Ok(bson::deserialize_from_bson(value)?)
+}
+
+fn decode_partial_selection<T: DeserializeOwned>(
+    document: &Document,
+    path: &TypedPath,
+) -> Result<Option<T>> {
+    let Some(value) =
+        crate::query::get_path_value(document, &path.components).map(|value| value.0.clone())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(bson::deserialize_from_bson(value)?))
 }
 
 fn selection_projection_path(path: &[PathComponent]) -> Vec<PathComponent> {

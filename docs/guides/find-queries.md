@@ -33,6 +33,22 @@ let selected = plants
     .execute()?;
 ```
 
+## Query enum variants
+
+Unit enums behave like scalar fields, while payload-carrying enums expose the variant payload through the normal typed path API.
+
+```rust
+let large_circles = pages
+    .find(|page| page.shape.circle.radius.gt(5.0))
+    .execute_collect()?;
+
+let active_pages = pages
+    .find(|page| page.status.eq(Status::Active))
+    .execute_collect()?;
+```
+
+The first query follows the externally tagged BSON path `shape.Circle.radius` by default. Documents using another variant simply have no value at that path and do not match. Use `QuokkaScalar` for unit enums and `QuokkaType` for externally tagged enums with struct or single-field newtype variants; Serde `rename` and `rename_all` determine the stored names.
+
 ## Comparison types and type bracketing
 
 Range filters use BSON type bracketing: they match values in the same BSON type family as the comparison bound. All numeric BSON types share one numeric family, so a numeric range can match equivalent `int32`, `int64`, `double`, and `decimal128` values. The example assumes `documents` is a document collection.
@@ -126,6 +142,13 @@ let names: Vec<String> = plants
     .select(|plant| plant.name)
     .execute_collect()?;
 ```
+
+When a selected path crosses an externally tagged enum variant, its result is
+`Option<T>`. Documents using another variant return `None` instead of causing
+selection decoding to fail. This also applies to nested enum paths: the
+generated API flattens all variant boundaries into one `Option<T>` rather than
+requiring a chain of nested `Option`s. Ordinary optional fields keep their
+usual typed behavior.
 
 ## Sort and paginate
 
