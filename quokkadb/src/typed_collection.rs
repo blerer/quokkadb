@@ -8,6 +8,7 @@ use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::{Projection, SortField};
 use bson::{Document, serialize_to_document, serialize_to_vec};
 use serde::de::DeserializeOwned;
+use std::borrow::Borrow;
 use std::marker::PhantomData;
 
 /// Represents a collection in the database.
@@ -1293,19 +1294,19 @@ impl<T: QuokkaDocument> TypedCollection<T> {
     }
 
     /// Inserts a typed document into the collection.
-    pub fn insert_one(&self, document: T) -> Result<TypedInsertOneResult<T>> {
+    pub fn insert_one(&self, document: impl Borrow<T>) -> Result<TypedInsertOneResult<T>> {
         self.insert_one_with(document)?.execute()
     }
 
     /// Creates an insert operation builder for a typed document.
-    pub fn insert_one_with(&self, document: T) -> Result<TypedInsertOne<'_, T>> {
+    pub fn insert_one_with(&self, document: impl Borrow<T>) -> Result<TypedInsertOne<'_, T>> {
         TypedInsertOne::new(&self.state, document)
     }
 
     /// Inserts multiple typed documents into the collection.
     pub fn insert_many(
         &self,
-        documents: impl IntoIterator<Item = T>,
+        documents: impl IntoIterator<Item = impl Borrow<T>>,
     ) -> Result<TypedInsertManyResult<T>> {
         self.insert_many_with(documents)?.execute()
     }
@@ -1313,7 +1314,7 @@ impl<T: QuokkaDocument> TypedCollection<T> {
     /// Creates an insert operation builder for multiple typed documents.
     pub fn insert_many_with(
         &self,
-        documents: impl IntoIterator<Item = T>,
+        documents: impl IntoIterator<Item = impl Borrow<T>>,
     ) -> Result<TypedInsertMany<'_, T>> {
         TypedInsertMany::new(&self.state, documents)
     }
@@ -1585,10 +1586,10 @@ pub struct TypedInsertOne<'a, T: QuokkaDocument> {
 }
 
 impl<'a, T: QuokkaDocument> TypedInsertOne<'a, T> {
-    fn new(state: &'a CollectionState, document: T) -> Result<Self> {
+    fn new(state: &'a CollectionState, document: impl Borrow<T>) -> Result<Self> {
         Ok(Self {
             state,
-            document: serialize_to_vec(&document)?,
+            document: serialize_to_vec(document.borrow())?,
             sync: false,
             _marker: PhantomData,
         })
@@ -1624,10 +1625,13 @@ pub struct TypedInsertMany<'a, T: QuokkaDocument> {
 }
 
 impl<'a, T: QuokkaDocument> TypedInsertMany<'a, T> {
-    fn new(state: &'a CollectionState, documents: impl IntoIterator<Item = T>) -> Result<Self> {
+    fn new(
+        state: &'a CollectionState,
+        documents: impl IntoIterator<Item = impl Borrow<T>>,
+    ) -> Result<Self> {
         let mut serialized = Vec::new();
         for document in documents {
-            serialized.push(serialize_to_vec(&document)?);
+            serialized.push(serialize_to_vec(document.borrow())?);
         }
 
         Ok(Self {

@@ -60,6 +60,18 @@ fn typed_insert_one_returns_the_document_id_and_serializes_the_document() {
 }
 
 #[test]
+fn typed_insert_one_accepts_a_borrowed_document_without_consuming_it() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users").create_if_missing();
+    let user = user(1, "Alice", 30);
+
+    let result = collection.insert_one(&user).unwrap();
+
+    assert_eq!(result.inserted_id, user.id);
+    assert_eq!(user.name, "Alice");
+}
+
+#[test]
 fn typed_insert_many_returns_typed_ids_in_input_order() {
     let (_dir, db) = setup();
     let collection = db.typed_collection::<User>("users").create_if_missing();
@@ -76,6 +88,23 @@ fn typed_insert_many_returns_typed_ids_in_input_order() {
         .unwrap();
 
     assert_eq!(result.inserted_ids, vec![1, 2, 3]);
+    assert_eq!(collection.estimated_document_count().unwrap(), 3);
+}
+
+#[test]
+fn typed_insert_many_accepts_borrowed_documents_in_input_order() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<User>("users").create_if_missing();
+    let users = vec![
+        user(1, "Alice", 30),
+        user(2, "Bob", 40),
+        user(3, "Cara", 20),
+    ];
+
+    let result = collection.insert_many(users.iter()).unwrap();
+
+    assert_eq!(result.inserted_ids, vec![1, 2, 3]);
+    assert_eq!(users[0].name, "Alice");
     assert_eq!(collection.estimated_document_count().unwrap(), 3);
 }
 
