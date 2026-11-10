@@ -16,6 +16,13 @@ let plant = plants
     .expect("a tall thirsty plant exists");
 ```
 
+When the model ID is already available, use `find_one_by_id` instead of building an `_id` filter.
+It returns `None` when no model has that ID.
+
+```rust
+let plant = plants.find_one_by_id(plant_id)?;
+```
+
 Use `find_all` when every model in the collection is needed. It returns the usual query builder, so you can still sort, project, and paginate the scan.
 
 ```rust

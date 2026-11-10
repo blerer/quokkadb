@@ -129,6 +129,7 @@ cannot be indexed.
 | `find(filter)` | `TypedFind<T>` | Builds a query for all matching models. Use `hint(name)` or `hint_collection_scan()` to control the access path. |
 | `find_all()` | `TypedFind<T>` | Builds a collection scan over every model. |
 | `find_one(filter)` | `Result<Option<T>>` | Returns at most one matching model. |
+| `find_one_by_id(id)` | `Result<Option<T>>` | Finds a model by its typed `_id` value. |
 | `find_one_with(filter)` | `TypedFindOne<T>` | Builds a one-model query with options. |
 
 `TypedFind` and `TypedFindOne` support `hint`, `hint_collection_scan`, `sort`, `skip`, `limit`, `explain`, `execute`, and `execute_collect`. `hint(index_name)` strictly requires the named index and returns an error when it is missing, unavailable, or unusable for the query. `hint_collection_scan()` forces the collection path while still allowing primary-key lookups and ranges. See [Indexes — Use hints only when needed](guides/indexes.md#use-hints-only-when-needed) before overriding the optimizer. `explain()` returns an `ExplainPlan` without executing the query. Its structured operators help inspect choices such as index use; optimizer choices may change over time. `execute()` returns `TypedQueryOutput<R>`, an iterator of `Result<R>` values for streaming reads. `execute_collect()` returns `Result<Vec<R>>` when the application needs every result.

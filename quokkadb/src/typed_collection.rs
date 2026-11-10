@@ -6,8 +6,8 @@ use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::{Projection, SortField};
-use bson::{Document, serialize_to_document, serialize_to_vec};
-use serde::de::DeserializeOwned;
+use bson::{Document, doc, serialize_to_bson, serialize_to_document, serialize_to_vec};
+use serde::{Serialize, de::DeserializeOwned};
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 
@@ -1487,6 +1487,17 @@ impl<T: QuokkaDocument> TypedCollection<T> {
     /// Finds one typed document matching the filter closure.
     pub fn find_one(&self, filter: impl FnOnce(&T::Fields<T>) -> Filter<T>) -> Result<Option<T>> {
         self.find_one_with(filter).execute()
+    }
+
+    /// Finds one typed document by its `_id` field.
+    pub fn find_one_by_id(&self, id: T::Id) -> Result<Option<T>>
+    where
+        T::Id: Serialize,
+    {
+        let filter = Filter::<T>::raw(doc! {
+            "_id": serialize_to_bson(&id)?,
+        })?;
+        self.find_one_with(|_| filter).execute()
     }
 
     /// Creates a find-one operation builder for a typed document matching the filter closure.

@@ -62,6 +62,27 @@ fn quokka_id_is_searchable_sortable_indexable_and_selectable() {
 }
 
 #[test]
+fn typed_find_one_by_id_returns_matching_document_or_none() {
+    let (_directory, db) = setup();
+    let collection = db
+        .typed_collection::<Document>("documents")
+        .create_if_missing();
+    let document = Document {
+        id: id(1),
+        related_id: id(2),
+        name: "document".to_string(),
+    };
+
+    collection.insert_one(&document).unwrap();
+
+    assert_eq!(
+        collection.find_one_by_id(document.id).unwrap(),
+        Some(document)
+    );
+    assert_eq!(collection.find_one_by_id(id(2)).unwrap(), None);
+}
+
+#[test]
 fn quokka_id_values_in_non_id_fields_remain_updatable() {
     let (_directory, db) = setup();
     let collection = db
