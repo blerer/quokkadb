@@ -46,6 +46,20 @@ For broad or structural changes, describe the design before implementation. Incl
 
 The [API Reference](api-reference.md) maps the public API, while the [Guides](guides.md) explain common tasks.
 
+### AI-Assisted Contributions
+
+AI tools are welcome when contributing to QuokkaDB. However, **contributors are responsible for the code they submit**, regardless of how it was produced.
+
+If you use AI assistance, please ensure that:
+
+- **You understand your changes.** You should be able to explain the implementation and the reasoning behind it.
+- **You review and validate the code.** Do not submit AI-generated patches without carefully reviewing them.
+- **You test your changes.** Include appropriate tests and verify that existing tests pass.
+- **You respect project standards.** Contributions must follow QuokkaDB's coding conventions, architecture, and correctness requirements.
+- **You can maintain your contribution.** Be prepared to address review feedback and fix issues introduced by your changes.
+
+AI assistance does not lower the standards for correctness, reliability, or code quality.
+
 ## Report and discuss work
 
 Use the [GitHub issue tracker](https://github.com/blerer/quokkadb/issues) to report a bug. Include the QuokkaDB revision, Rust version, operating system, a minimal reproduction, the expected behavior, the actual behavior, and any relevant error or tracing output.

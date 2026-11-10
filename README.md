@@ -145,6 +145,12 @@ If you try it, I’d love to hear what works, what feels awkward, and which work
 
 Read the [Project page](docs/project.md) for stability expectations and contribution guidance.
 
+***Thanks for helping QuokkaDB grow!*** &#x1F331;
+
 ## License
 
 Apache License 2.0.
+
+<p style="text-align: left;">
+  <img src="assets/footer.png" alt="QuokkaDB footer" width="800"/>
+</p>
