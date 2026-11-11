@@ -46,7 +46,7 @@ Add QuokkaDB and the dependencies used by the examples to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-quokkadb = { git = "https://github.com/blerer/quokkadb" }
+quokkadb = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 ```
 
