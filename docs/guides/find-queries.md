@@ -17,7 +17,7 @@ let plant = plants
 ```
 
 When the model ID is already available, use `find_one_by_id` instead of building an `_id` filter.
-It returns `None` when no model has that ID.
+Here, `plant_id` is a `QuokkaId` retained from insertion or read from a retrieved model's `id` field. The method returns `None` when no model has that ID.
 
 ```rust
 let plant = plants.find_one_by_id(plant_id)?;
@@ -34,9 +34,11 @@ let plants = plants
 
 Scalar fields provide `eq`, `ne`, `gt`, `gte`, `lt`, and `lte`. Use `in_values` and `nin` when a value must match or exclude a set.
 
+In this example, `plant_ids` is a `Vec<quokkadb::QuokkaId>` containing IDs retained from previously inserted or retrieved plants.
+
 ```rust
 let selected = plants
-    .find(|plant| plant.id.in_values([1_u64, 4, 9]).and(plant.name.nin(["Cactus"])))
+    .find(|plant| plant.id.in_values(plant_ids).and(plant.name.nin(["Cactus"])))
     .execute()?;
 ```
 

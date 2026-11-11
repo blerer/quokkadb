@@ -4,6 +4,8 @@ Use an update when you want to change selected fields without replacing the rest
 
 The examples extend `Plant` with `height_cm: i32`, `last_watered: Option<bson::DateTime>`, and `tags: Vec<String>`.
 
+For updates to an existing plant, `plant_id` is its `QuokkaId`, retained from insertion or read from the retrieved model's `id` field.
+
 Related: [Find queries](find-queries.md) · [Features — Update operators](../features.md#update-operators).
 
 ## Make normal typed updates
@@ -12,7 +14,7 @@ Pass one closure to choose models and another to describe the change. Update exp
 
 ```rust
 let result = plants.update_one(
-    |plant| plant.id.eq(1_u64),
+    |plant| plant.id.eq(plant_id),
     |plant| {
         plant
             .needs_water
@@ -54,7 +56,7 @@ Array methods use the same names you will see in the API: `add_to_set` adds a va
 
 ```rust
 plants.update_one(
-    |plant| plant.id.eq(1_u64),
+    |plant| plant.id.eq(plant_id),
     |plant| {
         plant
             .tags
@@ -71,16 +73,20 @@ Use `add_to_set_each`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, a
 
 Use an operation builder for options such as upsert. `set_on_insert` changes a field only when the upsert creates a document; set every required field for the model in that case.
 
+Generate an ID once for this new plant and reuse it if the operation is retried.
+
 ```rust
+let new_plant_id = quokkadb::QuokkaId::new();
 let result = plants
     .update_one_with(
-        |plant| plant.id.eq(2_u64),
+        |plant| plant.id.eq(new_plant_id),
         |plant| {
             plant
                 .name
                 .set_on_insert("Pothos")
                 .and(plant.needs_water.set_on_insert(true))
                 .and(plant.height_cm.set_on_insert(20))
+                .and(plant.tags.set_on_insert(Vec::<String>::new()))
         },
     )
     .upsert(true)
@@ -117,7 +123,7 @@ use quokkadb::document::ReturnDocument;
 
 let updated = plants
     .find_one_and_update_with(
-        |plant| plant.id.eq(1_u64),
+        |plant| plant.id.eq(plant_id),
         |plant| plant.needs_water.set(false),
     )
     .return_document(ReturnDocument::After)

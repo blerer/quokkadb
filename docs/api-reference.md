@@ -47,13 +47,13 @@ Both opening methods accept any value that implements `AsRef<Path>`, including `
 `TypedCollection<T>` stores a Serde-serializable Rust model and produces typed field expressions from it. Derive `QuokkaDocument` for the root collection model. Give exactly one concrete, non-optional field the effective Serde name `_id`, usually with `#[serde(rename = "_id")]`.
 
 ```rust
-use quokkadb::QuokkaDocument;
+use quokkadb::{QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: QuokkaId,
     name: String,
     needs_water: bool,
 }
@@ -181,11 +181,18 @@ The direct methods execute immediately. The `_with` variants return builders for
 
 `TypedUpdateResult<T>` exposes `matched_count`, `modified_count`, and `upserted_id: Option<T::Id>`. `DeleteResult` exposes `deleted_count`. `ReturnDocument::Before` is the default for find-and-update and find-and-replace; pass `ReturnDocument::After` to return the changed model.
 
+Here, `plant_id` is a `QuokkaId` retained from an inserted or retrieved plant. If that plant no longer exists, the upsert recreates it with the required fields:
+
 ```rust
 let result = plants
     .update_one_with(
-        |plant| plant.id.eq(1_u64),
-        |plant| plant.needs_water.set(false),
+        |plant| plant.id.eq(plant_id),
+        |plant| {
+            plant
+                .needs_water
+                .set(false)
+                .and(plant.name.set_on_insert("Monstera"))
+        },
     )
     .upsert(true)
     .execute()?;

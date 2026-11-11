@@ -13,7 +13,7 @@ Use the operation builder, call `sync`, then execute it.
 ```rust
 plants
     .insert_one_with(Plant {
-        id: 1,
+        id: quokkadb::QuokkaId::new(),
         name: "Monstera".into(),
         needs_water: true,
     })?

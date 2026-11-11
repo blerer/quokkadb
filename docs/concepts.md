@@ -10,7 +10,7 @@ Most applications should use the typed API. A typed collection serializes a Rust
 #[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: quokkadb::QuokkaId,
     name: String,
     needs_water: bool,
 }
@@ -61,6 +61,8 @@ Create a collection explicitly when its setup is part of application initializat
 Every stored document has an `_id` field. It identifies the document within its collection and must be unique.
 
 Typed models always supply their own ID. A `QuokkaDocument` model has exactly one non-optional field whose effective Serde name is `_id`, usually configured with `#[serde(rename = "_id")]`.
+
+Typed examples in this documentation use `QuokkaId`. Applications can also use other supported ID types, such as integers or strings.
 
 For a document collection, each collection has one of three ID-creation strategies:
 
@@ -125,7 +127,7 @@ When the database uses `ProcessSafe` or `Buffered`, call `sync()` on an individu
 ```rust
 plants
     .insert_one_with(Plant {
-        id: 1,
+        id: quokkadb::QuokkaId::new(),
         name: "Monstera".into(),
         needs_water: true,
     })?

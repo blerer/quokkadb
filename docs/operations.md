@@ -83,7 +83,7 @@ When the database uses `ProcessSafe` or `Buffered`, call `sync()` on a write bui
 ```rust
 plants
     .insert_one_with(Plant {
-        id: 1,
+        id: quokkadb::QuokkaId::new(),
         name: "Monstera".into(),
         needs_water: true,
     })?

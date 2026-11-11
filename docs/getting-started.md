@@ -20,13 +20,13 @@ This complete program opens a database in `./data`, stores a `Plant`, and finds 
 
 ```rust
 use quokkadb::error::Result;
-use quokkadb::{QuokkaDB, QuokkaDocument};
+use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: QuokkaId,
     name: String,
     needs_water: bool,
 }
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         .create_if_missing();
 
     plants.insert_one(Plant {
-        id: 1,
+        id: QuokkaId::new(),
         name: "Monstera".into(),
         needs_water: true,
     })?;

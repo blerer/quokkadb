@@ -12,7 +12,7 @@ Suppose the first version of an application stored only an ID and a name:
 #[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: quokkadb::QuokkaId,
     name: String,
 }
 ```
@@ -23,7 +23,7 @@ The application can later add fields without rewriting every old document:
 #[derive(serde::Serialize, serde::Deserialize, quokkadb::QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
-    id: u64,
+    id: quokkadb::QuokkaId,
     name: String,
     #[serde(default)]
     needs_water: bool,
