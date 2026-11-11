@@ -22,9 +22,8 @@ This complete program opens a database in `./data`, stores a `Plant`, and finds 
 use quokkadb::error::Result;
 use quokkadb::{QuokkaDB, QuokkaDocument};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
+#[derive(Serialize, Deserialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
     id: u64,
@@ -33,7 +32,7 @@ struct Plant {
 }
 
 fn main() -> Result<()> {
-    let db = QuokkaDB::open(Path::new("./data"))?;
+    let db = QuokkaDB::open("./data")?;
     let plants = db
         .typed_collection::<Plant>("plants")
         .create_if_missing();

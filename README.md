@@ -54,9 +54,8 @@ serde = { version = "1", features = ["derive"] }
 use quokkadb::error::Result;
 use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize, QuokkaDocument)]
+#[derive(Serialize, Deserialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
     id: QuokkaId,
@@ -65,7 +64,7 @@ struct Plant {
 }
 
 fn main() -> Result<()> {
-    let db = QuokkaDB::open(Path::new("./data"))?;
+    let db = QuokkaDB::open("./data")?;
     let plants = db
         .typed_collection::<Plant>("plants")
         .create_if_missing();

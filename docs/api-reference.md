@@ -11,12 +11,14 @@ The [Guides](guides.md) explain complete workflows. This reference describes the
 ```rust
 use quokkadb::error::Result;
 use quokkadb::QuokkaDB;
-use std::path::Path;
 
 fn open_database() -> Result<QuokkaDB> {
-    QuokkaDB::open(Path::new("./data"))
+    QuokkaDB::open("./data")
 }
 ```
+
+Both opening methods accept any value that implements `AsRef<Path>`, including `&str`,
+`String`, `&Path`, and `PathBuf`.
 
 | Method | Returns | Purpose |
 | --- | --- | --- |
@@ -48,7 +50,7 @@ fn open_database() -> Result<QuokkaDB> {
 use quokkadb::QuokkaDocument;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, QuokkaDocument)]
+#[derive(Deserialize, Serialize, QuokkaDocument)]
 struct Plant {
     #[serde(rename = "_id")]
     id: u64,

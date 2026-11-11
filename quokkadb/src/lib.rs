@@ -76,12 +76,13 @@ pub struct CollectionInfo {
 }
 
 impl QuokkaDB {
-    pub fn open(path: &Path) -> error::Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> error::Result<Self> {
         Self::open_with_options(path, Options::default())
     }
 
-    pub fn open_with_options(path: &Path, options: Options) -> error::Result<Self> {
+    pub fn open_with_options(path: impl AsRef<Path>, options: Options) -> error::Result<Self> {
         options.validate()?;
+        let path = path.as_ref();
 
         let options = Arc::new(options);
         let observability = Observability::new(path);
