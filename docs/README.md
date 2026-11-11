@@ -1,3 +1,7 @@
+<p align="right">
+  <img src="../assets/quokka_laptop.png" alt="Quokka using its laptop" width="300"/>
+</p>
+
 # QuokkaDB documentation
 
 QuokkaDB is an embedded application database for Rust. It stores application models directly in a directory owned by your application, without a separate database server.
@@ -18,3 +22,8 @@ Start with the typed API when your data has a Rust type. Use the document API wh
 - [API Reference](api-reference.md) — navigate the public Rust API.
 - [Operations](operations.md) — run, configure, and observe a database.
 - [Project](project.md) — contribute to QuokkaDB and understand its current stability expectations.
+
+
+<p align="center">
+  <img src="../assets/footer.png" alt="QuokkaDB footer" width="100%"/>
+</p>

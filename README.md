@@ -9,7 +9,7 @@
 QuokkaDB is an embedded application database for **Rust**, with Python and Node.js/TypeScript support planned. It lets you persist your application models directly, without running or managing a database server.
 
 <p style="text-align: left;">
-  <img src="assets/quokkadb_overview.png" alt="QuokkaDB overview: an embedded application database that persists application models directly, with querying and indexing and no database server or ORM." width="800"/>
+  <img src="assets/quokkadb_overview.png" alt="QuokkaDB overview: an embedded application database that persists application models directly, with querying and indexing and no database server or ORM." width="100%"/>
 </p>
 
 
@@ -123,6 +123,6 @@ Read the [Project page](docs/project.md) for stability expectations and contribu
 
 Apache License 2.0.
 
-<p style="text-align: left;">
-  <img src="assets/footer.png" alt="QuokkaDB footer" width="800"/>
+<p align="center">
+  <img src="assets/footer.png" alt="QuokkaDB footer" width="100%"/>
 </p>
