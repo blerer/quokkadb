@@ -1,3 +1,25 @@
+#![deny(missing_docs)]
+#![doc = r#"
+Derive macros for the typed QuokkaDB application database API.
+
+Most applications should depend on `quokkadb` and use the re-exported macros:
+
+```rust,ignore
+use quokkadb::{QuokkaDocument, QuokkaId};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize, QuokkaDocument)]
+struct User {
+    #[serde(rename = "_id")]
+    id: QuokkaId,
+    name: String,
+}
+```
+
+This crate exists as the proc-macro implementation dependency. See the main
+[`quokkadb` crate](https://docs.rs/quokkadb) for the generated typed API.
+"#]
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote, ToTokens};
@@ -8,6 +30,13 @@ use syn::{
 };
 
 #[proc_macro_derive(QuokkaDocument)]
+/// Derives the typed collection-document implementation for a Serde struct.
+///
+/// The input must be a non-generic struct with named fields and exactly one
+/// concrete field whose effective Serde name is `_id`. Serde field attributes
+/// such as `rename`, `rename_all`, `skip`, and `flatten` are interpreted when
+/// generating typed paths. The macro generates field and partial-field helper
+/// structs and implements the `quokkadb::QuokkaDocument` trait.
 pub fn derive_quokka_document(input: TokenStream) -> TokenStream {
     match derive_quokka_document_impl(parse_macro_input!(input as DeriveInput)) {
         Ok(tokens) => tokens.into(),
@@ -16,6 +45,12 @@ pub fn derive_quokka_document(input: TokenStream) -> TokenStream {
 }
 
 /// Derives typed field metadata for an embedded Serde struct or externally tagged enum.
+///
+/// Structs must have named fields and may not be generic. Enums use their
+/// Serde representation: unit variants expose no nested fields, while the
+/// supported externally tagged payload variants expose typed paths. The macro
+/// implements the `quokkadb::QuokkaType` trait and the field traits used by filters,
+/// updates, projections, sorting, and indexes.
 #[proc_macro_derive(QuokkaType)]
 pub fn derive_quokka_type(input: TokenStream) -> TokenStream {
     match derive_quokka_type_impl(parse_macro_input!(input as DeriveInput)) {
@@ -25,6 +60,11 @@ pub fn derive_quokka_type(input: TokenStream) -> TokenStream {
 }
 
 /// Derives the marker trait used by typed scalar fields.
+///
+/// The input must be a non-generic enum with unit variants. This macro does
+/// not implement Serde; derive or implement `Serialize` and `Deserialize`
+/// separately. The resulting type can be used as a typed leaf value in
+/// QuokkaDB filters and updates.
 #[proc_macro_derive(QuokkaScalar)]
 pub fn derive_quokka_scalar(input: TokenStream) -> TokenStream {
     match derive_quokka_scalar_impl(parse_macro_input!(input as DeriveInput)) {
@@ -141,28 +181,28 @@ fn derive_quokka_document_impl(input: DeriveInput) -> Result<proc_macro2::TokenS
             #( #generated_partial_fields, )*
         }
 
-        impl ::quokkadb::QuokkaType for #struct_name {
+        impl ::quokkadb::__private::QuokkaType for #struct_name {
             type Fields<D> = #fields_name<D>;
             type PartialFields<D> = #partial_fields_name<D>;
 
-            fn fields<D>(path: ::quokkadb::TypedPath) -> Self::Fields<D> {
+            fn fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::Fields<D> {
                 #fields_name { #( #field_initializers, )* }
             }
 
-            fn partial_fields<D>(path: ::quokkadb::TypedPath) -> Self::PartialFields<D> {
+            fn partial_fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::PartialFields<D> {
                 #partial_fields_name { #( #partial_field_initializers, )* }
             }
         }
 
-        impl ::quokkadb::PartialQueryFieldType for #struct_name {
-            type Field<D> = ::quokkadb::PartialObjectField<D, Self>;
+        impl ::quokkadb::__private::PartialQueryFieldType for #struct_name {
+            type Field<D> = ::quokkadb::__private::PartialObjectField<D, Self>;
 
-            fn partial_field<D>(path: ::quokkadb::TypedPath) -> Self::Field<D> {
-                ::quokkadb::PartialObjectField::from_path(path)
+            fn partial_field<D>(path: ::quokkadb::__private::TypedPath) -> Self::Field<D> {
+                ::quokkadb::__private::PartialObjectField::from_path(path)
             }
         }
 
-        impl ::quokkadb::QuokkaDocument for #struct_name {
+        impl ::quokkadb::__private::QuokkaDocument for #struct_name {
             type Id = #id_ty;
 
             fn id(&self) -> &Self::Id {
@@ -209,7 +249,7 @@ fn derive_quokka_scalar_impl(input: DeriveInput) -> Result<proc_macro2::TokenStr
     }
 
     Ok(quote! {
-        impl ::quokkadb::QuokkaScalar for #enum_name {}
+        impl ::quokkadb::__private::QuokkaScalar for #enum_name {}
     })
 }
 
@@ -276,31 +316,31 @@ fn derive_quokka_type_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                     #( #generated_partial_fields, )*
                 }
 
-                impl ::quokkadb::QuokkaType for #type_name {
+                impl ::quokkadb::__private::QuokkaType for #type_name {
                     type Fields<D> = #fields_name<D>;
                     type PartialFields<D> = #partial_fields_name<D>;
 
-                    fn fields<D>(path: ::quokkadb::TypedPath) -> Self::Fields<D> {
+                    fn fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::Fields<D> {
                         #fields_name { #( #field_initializers, )* }
                     }
 
-                    fn partial_fields<D>(path: ::quokkadb::TypedPath) -> Self::PartialFields<D> {
+                    fn partial_fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::PartialFields<D> {
                         #partial_fields_name { #( #partial_field_initializers, )* }
                     }
                 }
 
-                impl ::quokkadb::PartialQueryFieldType for #type_name {
-                    type Field<D> = ::quokkadb::PartialObjectField<D, Self>;
+                impl ::quokkadb::__private::PartialQueryFieldType for #type_name {
+                    type Field<D> = ::quokkadb::__private::PartialObjectField<D, Self>;
 
-                    fn partial_field<D>(path: ::quokkadb::TypedPath) -> Self::Field<D> {
-                        ::quokkadb::PartialObjectField::from_path(path)
+                    fn partial_field<D>(path: ::quokkadb::__private::TypedPath) -> Self::Field<D> {
+                        ::quokkadb::__private::PartialObjectField::from_path(path)
                     }
                 }
 
-                impl ::quokkadb::QueryFieldType for #type_name {
-                    type Field<D> = ::quokkadb::ObjectField<D, Self>;
-                    fn field<D>(path: ::quokkadb::TypedPath) -> Self::Field<D> {
-                        ::quokkadb::ObjectField::from_path(path)
+                impl ::quokkadb::__private::QueryFieldType for #type_name {
+                    type Field<D> = ::quokkadb::__private::ObjectField<D, Self>;
+                    fn field<D>(path: ::quokkadb::__private::TypedPath) -> Self::Field<D> {
+                        ::quokkadb::__private::ObjectField::from_path(path)
                     }
                 }
             })
@@ -400,10 +440,10 @@ fn derive_quokka_type_enum(
                 let field_ty = field.ty.clone();
                 has_payload_variant = true;
                 generated_fields.push(quote! {
-                    pub #variant_accessor: <#field_ty as ::quokkadb::PartialQueryFieldType>::Field<D>
+                    pub #variant_accessor: <#field_ty as ::quokkadb::__private::PartialQueryFieldType>::Field<D>
                 });
                 field_initializers.push(quote! {
-                    #variant_accessor: <#field_ty as ::quokkadb::PartialQueryFieldType>::partial_field(
+                    #variant_accessor: <#field_ty as ::quokkadb::__private::PartialQueryFieldType>::partial_field(
                         path.clone().field(#variant_name)
                     )
                 });
@@ -425,31 +465,31 @@ fn derive_quokka_type_enum(
             #( #generated_fields, )*
         }
 
-        impl ::quokkadb::QuokkaType for #type_name {
+        impl ::quokkadb::__private::QuokkaType for #type_name {
             type Fields<D> = #fields_name<D>;
             type PartialFields<D> = #fields_name<D>;
 
-            fn fields<D>(path: ::quokkadb::TypedPath) -> Self::Fields<D> {
+            fn fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::Fields<D> {
                 #fields_name { #( #field_initializers, )* }
             }
 
-            fn partial_fields<D>(path: ::quokkadb::TypedPath) -> Self::PartialFields<D> {
+            fn partial_fields<D>(path: ::quokkadb::__private::TypedPath) -> Self::PartialFields<D> {
                 #fields_name { #( #field_initializers, )* }
             }
         }
 
-        impl ::quokkadb::PartialQueryFieldType for #type_name {
-            type Field<D> = ::quokkadb::PartialObjectField<D, Self>;
+        impl ::quokkadb::__private::PartialQueryFieldType for #type_name {
+            type Field<D> = ::quokkadb::__private::PartialObjectField<D, Self>;
 
-            fn partial_field<D>(path: ::quokkadb::TypedPath) -> Self::Field<D> {
-                ::quokkadb::PartialObjectField::from_path(path)
+            fn partial_field<D>(path: ::quokkadb::__private::TypedPath) -> Self::Field<D> {
+                ::quokkadb::__private::PartialObjectField::from_path(path)
             }
         }
 
-        impl ::quokkadb::QueryFieldType for #type_name {
-            type Field<D> = ::quokkadb::ObjectField<D, Self>;
-            fn field<D>(path: ::quokkadb::TypedPath) -> Self::Field<D> {
-                ::quokkadb::ObjectField::from_path(path)
+        impl ::quokkadb::__private::QueryFieldType for #type_name {
+            type Field<D> = ::quokkadb::__private::ObjectField<D, Self>;
+            fn field<D>(path: ::quokkadb::__private::TypedPath) -> Self::Field<D> {
+                ::quokkadb::__private::ObjectField::from_path(path)
             }
         }
     })
@@ -583,10 +623,10 @@ fn generate_field_tokens(
 
     (
         quote! {
-            pub #field_ident: <#field_ty as ::quokkadb::QueryFieldType>::Field<D>
+            pub #field_ident: <#field_ty as ::quokkadb::__private::QueryFieldType>::Field<D>
         },
         quote! {
-            #field_ident: <#field_ty as ::quokkadb::QueryFieldType>::field(#field_path)
+            #field_ident: <#field_ty as ::quokkadb::__private::QueryFieldType>::field(#field_path)
         },
     )
 }
@@ -602,10 +642,10 @@ fn generate_partial_field_tokens(
 
     (
         quote! {
-            pub #field_ident: <#field_ty as ::quokkadb::PartialQueryFieldType>::Field<D>
+            pub #field_ident: <#field_ty as ::quokkadb::__private::PartialQueryFieldType>::Field<D>
         },
         quote! {
-            #field_ident: <#field_ty as ::quokkadb::PartialQueryFieldType>::partial_field(#field_path)
+            #field_ident: <#field_ty as ::quokkadb::__private::PartialQueryFieldType>::partial_field(#field_path)
         },
     )
 }
@@ -958,7 +998,7 @@ mod tests {
             }
         });
 
-        assert!(expanded.contains("impl :: quokkadb :: QuokkaScalar for Status"));
+        assert!(expanded.contains("impl :: quokkadb :: __private :: QuokkaScalar for Status"));
         assert!(!expanded.contains("Serialize"));
         assert!(!expanded.contains("Deserialize"));
     }

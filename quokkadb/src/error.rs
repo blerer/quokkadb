@@ -2,34 +2,63 @@ use crate::storage::storage_engine::StorageError;
 use std::fmt;
 use std::io;
 
+/// Errors returned by QuokkaDB operations.
+///
+/// User-input problems are reported as [`InvalidRequest`](Self::InvalidRequest)
+/// or [`BsonError`](Self::BsonError). Storage and operating-system failures are
+/// preserved in the corresponding variants so applications can log or match
+/// them separately.
 #[derive(Debug)]
 pub enum Error {
+    /// An operating-system or filesystem error.
     Io(io::Error),
+    /// A stored document could not be deserialized into the requested Rust type.
     DeserializationError(String),
+    /// A query, update, projection, or other user request is invalid.
     InvalidRequest(String),
+    /// BSON serialization or deserialization failed.
     BsonError(bson::error::Error),
+    /// An operation is incompatible with the current database mode.
     ErrorMode(String),
+    /// An internal operation failed without a more specific public category.
     UnexpectedError(String),
+    /// A concurrent catalog or schema version changed during the operation.
     VersionConflict(String),
+    /// A write-ahead log record failed framing or checksum validation.
     LogCorruption {
+        /// Byte offset of the corrupt record in the log.
         record_offset: u64,
+        /// Description of the corruption detected.
         reason: String,
     },
+    /// A collection with the requested name already exists.
     CollectionAlreadyExists(String),
+    /// The requested collection does not exist.
     CollectionNotFound {
+        /// Collection name used by the request.
         name: String,
+        /// Catalog ID, when one was available while reporting the error.
         id: Option<u32>,
     },
+    /// The requested index does not exist.
     IndexNotFound {
+        /// Collection containing the requested index.
         collection_name: String,
+        /// Requested index name.
         index_name: String,
+        /// Catalog ID, when one was available while reporting the error.
         id: Option<u32>,
     },
+    /// An existing index was requested with incompatible options.
     IndexOptionsConflict {
+        /// Collection containing the conflicting index.
         collection_name: String,
+        /// Conflicting index name.
         index_name: String,
+        /// Explanation of the incompatible options.
         reason: String,
     },
+    /// Database options failed validation.
     InvalidOptions(String),
 }
 
@@ -159,14 +188,16 @@ impl From<StorageError> for Error {
     }
 }
 
-pub fn collection_not_found_error(name: &str) -> Error {
+/// Constructs a collection-not-found error for a collection name.
+pub(crate) fn collection_not_found_error(name: &str) -> Error {
     Error::CollectionNotFound {
         name: name.to_string(),
         id: None,
     }
 }
 
-pub fn index_not_found_error(collection: &str, index: &str) -> Error {
+/// Constructs an index-not-found error for a collection and index name.
+pub(crate) fn index_not_found_error(collection: &str, index: &str) -> Error {
     Error::IndexNotFound {
         collection_name: collection.to_string(),
         index_name: index.to_string(),
@@ -174,4 +205,5 @@ pub fn index_not_found_error(collection: &str, index: &str) -> Error {
     }
 }
 
+/// Result type used throughout the public QuokkaDB API.
 pub type Result<T> = std::result::Result<T, Error>;

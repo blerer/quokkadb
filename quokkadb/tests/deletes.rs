@@ -2,7 +2,7 @@ mod common;
 
 use bson::{Document, doc};
 use quokkadb::QuokkaDB;
-use quokkadb::error::Result;
+use quokkadb::Result;
 use tempfile::TempDir;
 
 fn get_sample_data() -> Vec<Document> {

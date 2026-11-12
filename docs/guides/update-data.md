@@ -119,7 +119,7 @@ The same options are available on update-many, replace, delete, and find-and-mod
 Find-and-modify operations return the affected model. They return the value from before the change by default; choose `ReturnDocument::After` when the caller needs the changed value.
 
 ```rust
-use quokkadb::document::ReturnDocument;
+use quokkadb::ReturnDocument;
 
 let updated = plants
     .find_one_and_update_with(

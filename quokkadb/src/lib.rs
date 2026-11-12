@@ -1,45 +1,86 @@
+#![deny(missing_docs)]
+#![doc = r#"
+QuokkaDB is an embedded application database for Rust applications.
+
+Use [`QuokkaDB`] to open a database directory, then choose the typed API when
+documents have a Rust model or the [`Collection`] API when the document shape
+is dynamic. The typed API is usually the best starting point:
+
+```rust,no_run
+use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize, QuokkaDocument)]
+struct User {
+    #[serde(rename = "_id")]
+    id: QuokkaId,
+    name: String,
+}
+
+# fn main() -> quokkadb::Result<()> {
+let db = QuokkaDB::open("./my-app-data")?;
+let users = db.typed_collection::<User>("users").create_if_missing();
+users.insert_one(User {
+    id: QuokkaId::new(),
+    name: "Ada".to_owned(),
+})?;
+let ada = users.find_one(|user| user.name.eq("Ada"))?;
+assert!(ada.is_some());
+# Ok(())
+# }
+```
+
+The database is persistent and does not require a separate server. See the
+[getting started guide](https://github.com/blerer/quokkadb/blob/main/docs/getting-started.md)
+for a complete application workflow, and the
+[API reference](https://github.com/blerer/quokkadb/blob/main/docs/api-reference.md)
+for the document and typed APIs.
+"#]
+
 extern crate core;
 extern crate self as quokkadb;
 
+/// BSON document collections and the document-oriented CRUD API.
 pub mod collection;
 mod collection_state;
-pub mod document;
-pub mod error;
+/// Typed field expressions, filters, updates, and model traits.
+mod document;
+/// Errors returned by database, collection, and query operations.
+mod error;
 pub mod explain;
 mod id;
 mod index_builder;
 mod io;
 pub mod metrics;
-pub mod obs;
+/// Observability support used by the database and its metrics facade.
+mod obs;
+/// Database durability, memory, and storage configuration.
 pub mod options;
 mod query;
 mod storage;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
-pub mod testing;
-pub mod typed_collection;
+mod testing;
+/// Typed model fields, expressions, and collection operations.
+pub mod typed;
+/// Typed collection handles and query/write builders.
+mod typed_collection;
 mod util;
 
 pub use crate::document::{
-    ArrayField, BitwiseValue, Field, Filter, Index, MapField, NumericValue, ObjectField,
-    OptionalField, PartialArrayField, PartialField, PartialMapField, PartialObjectField,
-    PartialOptionalField, PartialPresence, PartialQueryFieldType, PushOptions, QueryFieldType,
-    QuokkaDocument, QuokkaScalar, QuokkaType, RequiredPresence, Sort, TypedPath, TypedQueryField,
-    TypedSelection, Update, not,
+    Filter, Index, QuokkaDocument, QuokkaScalar, QuokkaType, Sort, Update, not,
 };
-pub use crate::explain::{
-    ExplainDirection, ExplainNode, ExplainOperator, ExplainOperatorKind, ExplainPlan,
-};
+pub use crate::error::{Error, Result};
 pub use crate::id::QuokkaId;
+pub use crate::options::{CompressorType, Options, StorageQuantity, StorageUnit, WalDurability};
+pub use crate::query::ReturnDocument;
 pub use quokkadb_derive::{QuokkaDocument, QuokkaScalar, QuokkaType};
 
 pub use crate::collection::Collection;
-use crate::error::Error;
 use crate::index_builder::IndexBuilder;
 use crate::metrics::Metrics;
 use crate::obs::metrics::MetricRegistry;
 use crate::obs::observability::Observability;
-use crate::options::options::Options;
 use crate::query::execution::WriteResult;
 use crate::query::optimizer::optimizer::Optimizer;
 use crate::query::physical_plan::PhysicalPlan;
@@ -53,7 +94,19 @@ use crate::storage::catalog::{
 use crate::storage::count_stats::CountStatsKey;
 use crate::storage::index_build_state::IndexBuildKey;
 use crate::storage::storage_engine::{IndexBuildSnapshot, StorageEngine};
-use crate::typed_collection::TypedCollection;
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub use crate::testing::TestControl;
+pub use crate::typed::TypedCollection;
+
+/// Support paths used by the derive macros.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::document::{
+        ObjectField, PartialObjectField, PartialQueryFieldType, QueryFieldType, TypedPath,
+    };
+    pub use crate::document::{QuokkaDocument, QuokkaScalar, QuokkaType};
+}
 use query::execution::QueryExecutor;
 use query::logical_plan::LogicalPlan;
 use std::path::Path;
@@ -62,25 +115,44 @@ use tracing::debug_span;
 use tracing::span::EnteredSpan;
 
 #[derive(Clone)]
+/// A handle to an opened QuokkaDB database.
+///
+/// Opening a path creates the database directory when necessary. Cloning a
+/// handle is cheap; clones refer to the same database instance and may be used
+/// by application threads.
 pub struct QuokkaDB {
     options: Arc<Options>,
     db_impl: Arc<DbImpl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Metadata describing a collection registered in a database.
 pub struct CollectionInfo {
+    /// Stable identifier assigned to the collection.
     pub id: u32,
+    /// Collection name.
     pub name: String,
+    /// Creation timestamp stored by the catalog.
     pub created_at: u64,
+    /// Policy used when inserted documents do or do not provide `_id`.
     pub id_creation_strategy: IdCreationStrategy,
 }
 
 impl QuokkaDB {
-    pub fn open(path: impl AsRef<Path>) -> error::Result<Self> {
+    /// Opens a database with [`Options::default`].
+    ///
+    /// The path identifies the directory owned by the application. Existing
+    /// data is reopened; a missing directory is created.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(path, Options::default())
     }
 
-    pub fn open_with_options(path: impl AsRef<Path>, options: Options) -> error::Result<Self> {
+    /// Opens a database with explicitly configured options.
+    ///
+    /// Options are validated before any database work begins. Use
+    /// [`Options`] presets when only broad resource or
+    /// durability choices are needed.
+    pub fn open_with_options(path: impl AsRef<Path>, options: Options) -> Result<Self> {
         options.validate()?;
         let path = path.as_ref();
 
@@ -121,7 +193,7 @@ impl QuokkaDB {
     fn resume_pending_index_builds(
         db_impl: &Arc<DbImpl>,
         pending_builds: Vec<IndexBuildSnapshot>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         for build in pending_builds {
             db_impl
                 .index_builder
@@ -130,18 +202,28 @@ impl QuokkaDB {
         Ok(())
     }
 
+    /// Returns the options selected when this database was opened.
     pub fn options(&self) -> &Options {
         &self.options
     }
 
+    /// Returns a handle for a BSON document collection.
+    ///
+    /// The handle is lazy. Use [`Collection::create_if_missing`] when writes
+    /// should create a missing collection automatically.
     pub fn collection(&self, name: &str) -> Collection {
         Collection::new(self.db_impl.clone(), name.to_string())
     }
 
+    /// Returns a handle for a collection storing values of the typed model `T`.
+    ///
+    /// `T` must implement [`QuokkaDocument`], normally through the derive macro
+    /// re-exported by this crate.
     pub fn typed_collection<T: QuokkaDocument>(&self, name: &str) -> TypedCollection<T> {
         TypedCollection::new(self.db_impl.clone(), name.to_string())
     }
 
+    /// Returns read-only counters and histograms for this database instance.
     pub fn metrics(&self) -> Metrics<'_> {
         Metrics {
             registry: &self.db_impl.metrics,
@@ -150,7 +232,7 @@ impl QuokkaDB {
 
     /// Creates a new collection with the given name and default options.
     /// Returns an error if a collection with the same name already exists.
-    pub fn create_collection(&self, name: &str) -> error::Result<()> {
+    pub fn create_collection(&self, name: &str) -> Result<()> {
         self.create_collection_with(name).execute()
     }
 
@@ -174,6 +256,7 @@ impl QuokkaDB {
     }
 }
 
+/// Builder for creating a collection with collection-level options.
 pub struct CreateCollection<'a> {
     db: &'a QuokkaDB,
     name: String,
@@ -196,7 +279,7 @@ impl<'a> CreateCollection<'a> {
     }
 
     /// Executes the collection creation operation.
-    pub fn execute(self) -> error::Result<()> {
+    pub fn execute(self) -> Result<()> {
         self.db
             .db_impl
             .create_collection_with_options(&self.name, self.options)?;
@@ -207,11 +290,11 @@ impl<'a> CreateCollection<'a> {
 /// Strategy for generating document `_id` fields in a collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IdCreationStrategy {
-    /// IDs are auto-generated by the system.
+    /// IDs are auto-generated by the system and supplied IDs are rejected.
     Generated,
-    /// IDs must be provided manually by the user.
+    /// Every inserted document must provide an `_id` value.
     Manual,
-    /// A mix of auto-generated and manual IDs (default).
+    /// Accept supplied IDs and generate missing IDs (the default).
     #[default]
     Mixed,
 }
@@ -289,7 +372,7 @@ impl DbImpl {
         self: &Arc<Self>,
         name: &str,
         if_not_exists: bool,
-    ) -> error::Result<Arc<CollectionMetadata>> {
+    ) -> Result<Arc<CollectionMetadata>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_collection", collection = %name, if_not_exists)
@@ -302,7 +385,7 @@ impl DbImpl {
         self: &Arc<Self>,
         name: &str,
         options: CreateCollectionOptions,
-    ) -> error::Result<Arc<CollectionMetadata>> {
+    ) -> Result<Arc<CollectionMetadata>> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_collection", collection = %name).entered(),
@@ -316,7 +399,7 @@ impl DbImpl {
         Some(self.storage_engine.catalog().get_collection_by_name(name)?)
     }
 
-    pub fn drop_collection(self: &Arc<Self>, name: &str) -> error::Result<()> {
+    pub fn drop_collection(self: &Arc<Self>, name: &str) -> Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("drop_collection", collection = %name).entered(),
@@ -325,11 +408,7 @@ impl DbImpl {
         Ok(())
     }
 
-    pub fn rename_collection(
-        self: &Arc<Self>,
-        old_name: &str,
-        new_name: &str,
-    ) -> error::Result<()> {
+    pub fn rename_collection(self: &Arc<Self>, old_name: &str, new_name: &str) -> Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("rename_collection", collection = %old_name).entered(),
@@ -342,7 +421,7 @@ impl DbImpl {
         collection_id: u32,
         spec: IndexKeySpec,
         options: CreateIndexOptions,
-    ) -> error::Result<String> {
+    ) -> Result<String> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("create_index").entered(),
@@ -357,7 +436,7 @@ impl DbImpl {
         Ok(created_index.name)
     }
 
-    pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> error::Result<()> {
+    pub fn drop_index(self: &Arc<Self>, collection_id: u32, index_id: u32) -> Result<()> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("drop_index").entered(),
@@ -366,7 +445,7 @@ impl DbImpl {
         Ok(())
     }
 
-    pub fn estimated_document_count(&self, collection_id: u32) -> error::Result<u64> {
+    pub fn estimated_document_count(&self, collection_id: u32) -> Result<u64> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("estimated_document_count").entered(),
@@ -384,7 +463,7 @@ impl DbImpl {
         metadata: &CollectionMetadata,
         logical_plan: LogicalPlan,
         sync: bool,
-    ) -> error::Result<WriteResult> {
+    ) -> Result<WriteResult> {
         let _spans = OperationSpans {
             _instance: self.observability.instance_span().clone().entered(),
             _operation: debug_span!("execute_write", collection = %metadata.id).entered(),
@@ -543,7 +622,7 @@ impl DbImpl {
         &self,
         metadata: &CollectionMetadata,
         logical_plan: Arc<LogicalPlan>,
-    ) -> error::Result<(Parameters, Arc<PhysicalPlan>)> {
+    ) -> Result<(Parameters, Arc<PhysicalPlan>)> {
         let normalized_plan = self.optimizer.normalize(logical_plan);
         // Then, parametrize the plan to collect parameters
         let (logical_plan, parameters) = self.optimizer.parametrize(normalized_plan);

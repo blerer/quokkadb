@@ -6,6 +6,8 @@ rust-version = "1.95"
 description = "Embedded application database"
 license = "Apache-2.0"
 repository = "https://github.com/blerer/quokkadb"
+readme = "README.md"
+documentation = "https://docs.rs/quokkadb"
 
 [features]
 internal-testing = []

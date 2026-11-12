@@ -1,7 +1,8 @@
 mod common;
 
-use quokkadb::collection::ReturnDocument;
-use quokkadb::{Filter, PushOptions, QuokkaDB, QuokkaDocument, QuokkaType};
+use quokkadb::ReturnDocument;
+use quokkadb::typed::{NumericValue, PushOptions};
+use quokkadb::{Filter, QuokkaDB, QuokkaDocument, QuokkaType};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
@@ -573,7 +574,7 @@ fn typed_updates_cover_conditional_optional_and_upsert_edge_cases() {
 
 #[test]
 fn typed_updates_cover_nested_map_indexed_and_numeric_paths() {
-    fn assert_numeric<T: quokkadb::NumericValue>() {}
+    fn assert_numeric<T: NumericValue>() {}
     assert_numeric::<bson::Decimal128>();
 
     let dir = TempDir::new().unwrap();

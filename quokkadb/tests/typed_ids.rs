@@ -1,7 +1,6 @@
 mod common;
 
-use quokkadb::error::Error;
-use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
+use quokkadb::{Error, QuokkaDB, QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 

@@ -2,7 +2,7 @@ mod common;
 
 use bson::{Bson, doc};
 use quokkadb::IdCreationStrategy;
-use quokkadb::{QuokkaDB, error::Error};
+use quokkadb::{Error, QuokkaDB};
 use tempfile::tempdir;
 
 fn setup() -> (tempfile::TempDir, QuokkaDB) {

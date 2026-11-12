@@ -4,12 +4,23 @@ This page maps QuokkaDB's public Rust API to common application tasks. Use a [`T
 
 The [Guides](guides.md) explain complete workflows. This reference describes the types, methods, return values, and builder options available for those workflows.
 
+The common handles and operation choices are re-exported at the crate root. Detailed document builders live under `quokkadb::collection`, typed field and builder support under `quokkadb::typed`, diagnostics under `quokkadb::explain`, metrics under `quokkadb::metrics`, and configuration under `quokkadb::options`.
+
+The detailed type paths are intentionally namespaced. Update explicit imports when moving from the earlier root-level API:
+
+| Earlier path | Current path |
+| --- | --- |
+| `quokkadb::Find` | `quokkadb::collection::Find` |
+| `quokkadb::PushOptions` | `quokkadb::typed::PushOptions` |
+| `quokkadb::Metrics` | `quokkadb::metrics::Metrics` |
+| `quokkadb::ExplainPlan` | `quokkadb::explain::ExplainPlan` |
+
 ## Database and collections
 
 `QuokkaDB` owns an opened database directory. It implements `Clone`; clones share the same database instance and can be used from application threads.
 
 ```rust
-use quokkadb::error::Result;
+use quokkadb::Result;
 use quokkadb::QuokkaDB;
 
 fn open_database() -> Result<QuokkaDB> {
@@ -214,15 +225,15 @@ Typed field methods build `Filter<T>`, `Update<T>`, `Sort<T>`, `Index<T>`, and s
 | Array `Vec<T>` | `at(index)`, `len_eq`, `any_eq`, `any_where(predicate)`, `all`; embedded models also provide `any(predicate)` | `index_asc`, `index_desc`, array-level `set` and ordering methods, `add_to_set`, `add_to_set_each`, `push`, `push_each`, `push_each_with`, `pop_first`, `pop_last`, `pull`, `pull_all`; embedded models also provide `each(|element| index_fields)` and `pull_where` |
 | Map `BTreeMap<String, V>` | `key(name)` to access a value field | Map-level scalar-style updates and ordering methods |
 
-`PushOptions::new()` configures `push_each`: use `position`, `slice`, `sort_ascending`, or `sort_descending`. For arrays of embedded `QuokkaType` values, `sort_by` accepts a typed sort closure.
+`typed::PushOptions::new()` configures `push_each`: use `position`, `slice`, `sort_ascending`, or `sort_descending`. For arrays of embedded `QuokkaType` values, `sort_by` accepts a typed sort closure.
 
 Typed filters and updates follow BSON comparison behavior. Range filters use BSON type bracketing, while equivalent numeric representations compare together. See [Find queries — comparison types](guides/find-queries.md#comparison-types-and-type-bracketing) and [Update data](guides/update-data.md) for task-oriented examples.
 
 Typed filter and update values are converted to BSON when the operation is planned or executed. Values that Serde cannot represent in BSON return the existing `Error::BsonError` result; they do not panic during fluent builder construction.
 
-`Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
+`Filter<T>` combines conditions with `and`, `or`, `not(filter)`, and `nor`. Use `Filter::all()` when a filter-taking operation should match every model. `Update<T>`, `Sort<T>`, and `Index<T>` combine compatible expressions with `then`. `typed::TypedSelection<T>` is the trait implemented by a field or tuple of fields accepted by `include`, `exclude`, and `select`.
 
-The derive macros implement `QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; unit enums can derive it directly. The `QuokkaScalar` derive only implements QuokkaDB's marker trait—Serde still supplies `Serialize` and `Deserialize`. Add `NumericValue` when a scalar supports `inc` and `mul`, or `BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `TypedPath` and `TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
+The derive macros implement `typed::QueryFieldType` for the model shapes they generate. For a custom BSON leaf type, implement `QuokkaScalar`; unit enums can derive it directly. The `QuokkaScalar` derive only implements QuokkaDB's marker trait—Serde still supplies `Serialize` and `Deserialize`. Add `typed::NumericValue` when a scalar supports `inc` and `mul`, or `typed::BitwiseValue` when it supports `bit`. A type must not implement both `QuokkaScalar` and `QuokkaType`. `typed::TypedPath` and `typed::TypedQueryField` are public building blocks used by the generated field API; application code normally uses derived fields instead of constructing them directly.
 
 ## Document collections
 
@@ -286,8 +297,7 @@ are rejected; use the multikey path when every element should be indexed.
 Import options from their public modules:
 
 ```rust
-use quokkadb::options::options::{CompressorType, Options, WalDurability};
-use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
+use quokkadb::options::{CompressorType, Options, StorageQuantity, StorageUnit, WalDurability};
 ```
 
 `Options::default()`, `Options::lightweight()`, `Options::optimized()`, and `Options::high_query_load()` create profiles. Each `with_*` method consumes and returns `Options`, so settings can be chained before `QuokkaDB::open_with_options`.
@@ -315,7 +325,7 @@ Read [Options](guides/options.md) before changing storage or compaction settings
 
 ## Results, errors, IDs, and metrics
 
-Operations return `quokkadb::error::Result<T>`, an alias for `Result<T, Error>`. `Error` distinguishes I/O, BSON and deserialization failures, invalid requests or options, version conflicts, collection and index lookup failures, and recovery errors. Handle errors at the operation boundary; callers can inspect an `Error` variant when different application responses are needed.
+Operations return `quokkadb::Result<T>`, an alias for `Result<T, Error>`. `Error` distinguishes I/O, BSON and deserialization failures, invalid requests or options, version conflicts, collection and index lookup failures, and recovery errors. Handle errors at the operation boundary; callers can inspect an `Error` variant when different application responses are needed.
 
 `QuokkaId::new()` creates a Sonyflake ID for an application-generated document `_id`; `QuokkaId::default()` creates one too. It serializes as BSON `Int64` and can be used as a typed model ID. Typed fields support searching, sorting, indexing, and selecting `QuokkaId` values. The `_id` field is immutable after insertion. `as_u64()` returns its numeric value, and `TryFrom<u64>` rejects values that do not fit BSON `Int64`.
 

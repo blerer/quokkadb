@@ -1,8 +1,7 @@
 mod common;
 
 use bson::doc;
-use quokkadb::error::Error;
-use quokkadb::{QuokkaDB, QuokkaDocument};
+use quokkadb::{Error, QuokkaDB, QuokkaDocument};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 

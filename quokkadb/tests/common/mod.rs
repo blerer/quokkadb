@@ -1,6 +1,5 @@
 use quokkadb::QuokkaDB;
-use quokkadb::options::options::Options;
-use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
+use quokkadb::{Options, StorageQuantity, StorageUnit};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::OnceLock;

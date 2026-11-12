@@ -42,8 +42,7 @@ There is no public `shutdown` method. Keep database and collection handles alive
 Select `Options` before opening the database. The configuration cannot change while the database is running, so restart the application to apply a new value.
 
 ```rust
-use quokkadb::options::options::{Options, WalDurability};
-use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
+use quokkadb::options::{Options, StorageQuantity, StorageUnit, WalDurability};
 use quokkadb::QuokkaDB;
 use std::path::Path;
 

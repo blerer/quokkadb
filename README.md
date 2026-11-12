@@ -51,8 +51,7 @@ serde = { version = "1", features = ["derive"] }
 ```
 
 ```rust
-use quokkadb::error::Result;
-use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
+use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, QuokkaDocument)]

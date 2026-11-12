@@ -2,8 +2,7 @@ mod common;
 
 use bson::doc;
 use quokkadb::collection::IndexDirection;
-use quokkadb::error::Error;
-use quokkadb::{CollectionInfo, IdCreationStrategy, QuokkaDocument};
+use quokkadb::{CollectionInfo, Error, IdCreationStrategy, QuokkaDocument};
 use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
 

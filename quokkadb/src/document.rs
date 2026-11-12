@@ -1,3 +1,10 @@
+//! Typed model metadata, field proxies, filters, updates, projections, sorting,
+//! and index expressions.
+//!
+//! Most applications use the root re-exports and derive macros. The complete
+//! typed API is available through [`crate::typed`] for explicit type
+//! annotations and advanced integrations.
+
 use crate::error::Error;
 use crate::query::expr::{Expr, ProjectionExpr};
 use crate::query::update::{
@@ -17,7 +24,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 
-pub use crate::query::ReturnDocument;
+use crate::Result;
 
 #[derive(Clone)]
 struct Deferred<T> {
@@ -85,10 +92,12 @@ type DeferredUpdate = Deferred<UpdateExpr>;
 /// Unlike [`QuokkaDocument`], an embedded type has no collection identity and
 /// therefore does not require an `_id` field.
 pub trait QuokkaType: Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// Generated field proxy type for this value.
     type Fields<D>;
     #[doc(hidden)]
     type PartialFields<D>;
 
+    /// Returns field proxies rooted at `path`.
     fn fields<D>(path: TypedPath) -> Self::Fields<D>;
 
     #[doc(hidden)]
@@ -97,6 +106,7 @@ pub trait QuokkaType: Serialize + DeserializeOwned + Send + Sync + 'static {
 
 /// Maps a Rust value type to its typed-query field proxy.
 pub trait QueryFieldType {
+    /// Field proxy used to address this value at a typed path.
     type Field<D>;
 
     #[doc(hidden)]
@@ -224,9 +234,16 @@ macro_rules! value_operations {
     };
 }
 
+/// A root model that can be stored in a typed collection.
+///
+/// Implement this trait through the `QuokkaDocument` derive macro re-exported
+/// by this crate. The model must expose exactly one concrete field serialized as
+/// `_id`; use [`QuokkaType`] for embedded values without collection identity.
 pub trait QuokkaDocument: QuokkaType {
+    /// The Rust type stored in the document's `_id` field.
     type Id: DeserializeOwned + 'static;
 
+    /// Returns this document's `_id` value.
     fn id(&self) -> &Self::Id;
 
     /// Returns field proxies rooted at this document's top level.
@@ -237,6 +254,7 @@ pub trait QuokkaDocument: QuokkaType {
         Self::fields(TypedPath::empty())
     }
 
+    /// Builds an update rooted at this document's fields.
     fn update(f: impl FnOnce(&Self::Fields<Self>) -> Update<Self>) -> Update<Self>
     where
         Self: Sized,
@@ -264,16 +282,19 @@ pub struct TypedPath {
 
 #[allow(dead_code)] // Used by the nested and collection proxies built on this path layer.
 impl TypedPath {
+    /// Creates an empty path at the document root.
     pub fn empty() -> Self {
         Self { components: vec![] }
     }
 
+    /// Creates a path containing one top-level field name.
     pub fn root(name: impl Into<String>) -> Self {
         Self {
             components: vec![PathComponent::FieldName(name.into())],
         }
     }
 
+    /// Appends a named field component to this path.
     pub fn field(mut self, name: impl Into<String>) -> Self {
         self.components.push(PathComponent::FieldName(name.into()));
         self
@@ -316,6 +337,7 @@ pub struct RequiredPresence;
 pub struct PartialPresence;
 
 impl<D, V: QuokkaScalar, P> Field<D, V, P> {
+    /// Creates a field proxy for an existing typed path.
     pub fn new(path: TypedPath) -> Self {
         Self {
             path,
@@ -453,6 +475,7 @@ impl<D, T> ArrayField<D, T> {
         }
     }
 
+    /// Returns a field proxy for a fixed array position.
     pub fn at(&self, index: usize) -> T::Field<D>
     where
         T: QueryFieldType,
@@ -460,16 +483,19 @@ impl<D, T> ArrayField<D, T> {
         T::field(self.path.clone().array_element(index))
     }
 
+    /// Builds a filter that matches arrays with exactly `length` elements.
     pub fn len_eq(&self, length: usize) -> Filter<D> {
         array_size_filter(self.path.clone(), length)
     }
 }
 
 impl<D, T: Serialize + 'static> ArrayField<D, T> {
+    /// Builds a filter that matches arrays containing `value`.
     pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
         array_any_eq_filter(self.path.clone(), value.into())
     }
 
+    /// Builds a filter that matches arrays containing every value in `values`.
     pub fn all<I, U>(&self, values: I) -> Filter<D>
     where
         I: IntoIterator<Item = U>,
@@ -612,6 +638,7 @@ impl<D, T: QuokkaScalar> ArrayField<D, T> {
 }
 
 impl<D, T: QuokkaType> ArrayField<D, T> {
+    /// Builds an `$elemMatch` filter for embedded array elements.
     pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
         array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
     }
@@ -723,6 +750,7 @@ impl<D, V> MapField<D, V> {
         }
     }
 
+    /// Returns a field proxy for the map entry with the supplied key.
     pub fn key(&self, key: &str) -> V::Field<D>
     where
         V: QueryFieldType,
@@ -1557,6 +1585,7 @@ impl Projection {
 
 /// A source-typed selection that determines a query result type.
 pub trait TypedSelection<D>: 'static {
+    /// Rust type produced when the selection is decoded.
     type Output: DeserializeOwned + 'static;
 
     #[doc(hidden)]
@@ -1855,6 +1884,7 @@ impl_tuple_selection!(
 );
 
 #[derive(Debug, Clone)]
+/// A typed filter expression for documents of type `D`.
 pub struct Filter<D> {
     expr: DeferredExpr,
     _marker: PhantomData<fn() -> D>,
@@ -1872,6 +1902,7 @@ impl<D> Filter<D> {
         Self::from_expr(Arc::new(Expr::AlwaysTrue))
     }
 
+    /// Parses a BSON query document into a typed filter.
     pub fn raw(raw: Document) -> Result<Self> {
         Ok(Self::from_expr(parser::parse_conditions(&raw)?))
     }
@@ -1887,12 +1918,14 @@ impl<D> Filter<D> {
         }
     }
 
+    /// Combines two filters with logical AND.
     pub fn and(self, other: Self) -> Self {
         Self::from_deferred(self.expr.combine(other.expr, |left, right| {
             Ok(Arc::new(Expr::And(vec![left, right])))
         }))
     }
 
+    /// Combines two filters with logical OR.
     pub fn or(self, other: Self) -> Self {
         Self::from_deferred(self.expr.combine(other.expr, |left, right| {
             Ok(Arc::new(Expr::Or(vec![left, right])))
@@ -1921,12 +1954,14 @@ pub fn not<D>(filter: Filter<D>) -> Filter<D> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A typed ordering specification for query results.
 pub struct Sort<D> {
     fields: Vec<SortField>,
     _marker: PhantomData<fn() -> D>,
 }
 
 impl<D> Sort<D> {
+    /// Parses a BSON sort document into a typed sort specification.
     pub fn raw(raw: Document) -> Result<Self> {
         Ok(Self::from_fields(parser::parse_sort(&raw)?))
     }
@@ -1938,6 +1973,7 @@ impl<D> Sort<D> {
         }
     }
 
+    /// Appends another sort specification after this one.
     pub fn then(mut self, other: Self) -> Self {
         self.fields.extend(other.fields);
         self
@@ -1949,6 +1985,7 @@ impl<D> Sort<D> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A typed secondary-index specification.
 pub struct Index<D> {
     fields: Vec<IndexKeyField>,
     _marker: PhantomData<fn() -> D>,
@@ -1962,6 +1999,7 @@ impl<D> Index<D> {
         }
     }
 
+    /// Appends another indexed field after this one.
     pub fn then(mut self, other: Self) -> Self {
         self.fields.extend(other.fields);
         self
@@ -1975,6 +2013,7 @@ impl<D> Index<D> {
 }
 
 #[derive(Debug, Clone)]
+/// A typed update expression for documents of type `D`.
 pub struct Update<D> {
     expr: DeferredUpdate,
     _marker: PhantomData<fn() -> D>,
@@ -2014,8 +2053,6 @@ impl<D> Update<D> {
         }))
     }
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {

@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 This complete program opens a database in `./data`, stores a `Plant`, and finds plants that need water.
 
 ```rust
-use quokkadb::error::Result;
+use quokkadb::Result;
 use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaId};
 use serde::{Deserialize, Serialize};
 

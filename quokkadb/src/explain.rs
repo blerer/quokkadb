@@ -153,7 +153,10 @@ pub enum ExplainOperator {
     /// The query is known to produce no results.
     NoOp,
     /// Reads documents by scanning the collection's primary-key range.
-    CollectionScan { direction: ExplainDirection },
+    CollectionScan {
+        /// Direction in which the primary-key range is traversed.
+        direction: ExplainDirection,
+    },
     /// Reads one document by its primary key.
     PointSearch,
     /// Reads documents through a secondary index.
@@ -168,7 +171,10 @@ pub enum ExplainOperator {
         has_range: bool,
     },
     /// Reads multiple documents by their primary keys.
-    MultiPointSearch { direction: ExplainDirection },
+    MultiPointSearch {
+        /// Direction in which primary keys are traversed.
+        direction: ExplainDirection,
+    },
     /// Applies a predicate to the input documents.
     Filter,
     /// Selects or reshapes fields from the input documents.

@@ -32,9 +32,12 @@ pub(crate) mod update;
 pub(crate) mod update_fn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Selects which version of a changed document a find-and-modify operation returns.
 pub enum ReturnDocument {
     #[default]
+    /// Return the document as it existed before the operation.
     Before,
+    /// Return the document after the operation has been applied.
     After,
 }
 
@@ -676,6 +679,7 @@ impl From<BsonValueRef<'_>> for Bson {
 }
 
 #[macro_export]
+/// Creates the local BSON value wrapper from the standard `bson!` syntax.
 macro_rules! bson_value {
     ( $($tokens:tt)* ) => {
         BsonValue(bson::bson!($($tokens)*))

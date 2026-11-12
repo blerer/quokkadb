@@ -1,8 +1,8 @@
 mod common;
 
 use bson::{Document, doc};
-use quokkadb::error::Error;
-use quokkadb::{ExplainDirection, ExplainNode, ExplainOperator, ExplainOperatorKind};
+use quokkadb::Error;
+use quokkadb::explain::{ExplainDirection, ExplainNode, ExplainOperator, ExplainOperatorKind};
 use tempfile::TempDir;
 
 fn explain_index_scan(node: &ExplainNode) -> Option<(&str, ExplainDirection, usize, bool)> {

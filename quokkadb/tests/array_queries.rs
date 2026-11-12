@@ -1,7 +1,8 @@
 mod common;
 
 use bson::{Document, doc};
-use quokkadb::{Collection, ExplainNode, ExplainOperator, ExplainOperatorKind};
+use quokkadb::Collection;
+use quokkadb::explain::{ExplainNode, ExplainOperator, ExplainOperatorKind};
 use tempfile::TempDir;
 
 fn insert_fixture(collection: &Collection, documents: impl IntoIterator<Item = Document>) {

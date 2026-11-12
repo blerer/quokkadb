@@ -1,8 +1,8 @@
-error[E0599]: the method `inc` exists for struct `quokkadb::Field<User, String>`, but its trait bounds were not satisfied
+error[E0599]: the method `inc` exists for struct `quokkadb::typed::Field<User, String>`, but its trait bounds were not satisfied
   --> tests/ui/typed_api/string_increment.rs:12:35
    |
 12 |     User::update(|user| user.name.inc(1));
-   |                                   ^^^ method cannot be called on `quokkadb::Field<User, String>` due to unsatisfied trait bounds
+   |                                   ^^^ method cannot be called on `quokkadb::typed::Field<User, String>` due to unsatisfied trait bounds
    |
   ::: $RUST/alloc/src/string.rs
    |

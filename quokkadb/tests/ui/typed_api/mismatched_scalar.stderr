@@ -14,7 +14,7 @@ help: the trait `Into<Age>` is not implemented for `&str`
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `quokkadb::storage::catalog::IndexPath`, found `Age`
    = note: required for `&str` to implement `Into<Age>`
-note: required by a bound in `quokkadb::Field::<D, V, P>::eq`
+note: required by a bound in `quokkadb::typed::Field::<D, V, P>::eq`
   --> src/document.rs
    |
    |         pub fn eq(&self, value: impl Into<$value>) -> Filter<D> {

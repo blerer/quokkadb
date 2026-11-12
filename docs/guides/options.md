@@ -9,8 +9,7 @@ Related: [Operations](../operations.md) Â· [Durable writes](durable-writes.md) Â
 Use `open_with_options` to choose a profile and override a focused setting.
 
 ```rust
-use quokkadb::options::options::{Options, WalDurability};
-use quokkadb::options::storage_quantity::{StorageQuantity, StorageUnit};
+use quokkadb::options::{Options, StorageQuantity, StorageUnit, WalDurability};
 use quokkadb::QuokkaDB;
 use std::path::Path;
 

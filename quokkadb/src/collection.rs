@@ -1,19 +1,120 @@
+//! BSON document collections and their CRUD/query builders.
+//!
+//! [`Collection`] provides direct access to BSON documents for applications
+//! requiring dynamic schemas, compatibility with existing BSON integrations,
+//! or queries that cannot be expressed through the typed API.
+//!
+//! For applications using Rust structs, prefer [`crate::typed::TypedCollection`],
+//! which provides compile-time checked field expressions and a more ergonomic
+//! interface.
+//!
+//! Most applications use the builder methods without naming the builder types
+//! directly. The public builder and result types are available here for
+//! callers that need explicit type annotations or advanced composition.
+//!
+//! ## Where to look
+//!
+//! - Use [`Collection::insert_one`] or [`Collection::insert_many`] to store
+//!   serializable values, including BSON documents.
+//! - Use [`Collection::find`] and [`crate::collection::Find`] for filtering,
+//!   projections, sorts, limits, skips, hints, and query plans.
+//! - Use [`Collection::update_one`], [`Collection::update_many`], or the
+//!   corresponding builders for BSON update documents.
+//! - Use [`Collection::create_index`] or [`crate::collection::CreateIndex`] for
+//!   BSON-key indexes.
+//! - Inspect operation metadata through [`crate::collection::InsertOneResult`],
+//!   [`crate::collection::InsertManyResult`],
+//!   [`crate::collection::UpdateResult`], and [`crate::collection::DeleteResult`].
+//!
+//! ## Query dynamic documents
+//!
+//! BSON documents can be inserted and queried directly. The query result is a
+//! `Vec<bson::Document>` when collected, so callers can deserialize it into an
+//! application type, pass it to another BSON-aware component, or inspect fields
+//! dynamically.
+//!
+//! ```rust,no_run
+//! use bson::doc;
+//! use quokkadb::QuokkaDB;
+//!
+//! # fn main() -> quokkadb::Result<()> {
+//! let db = QuokkaDB::open("./my-app-data")?;
+//! let users = db.collection("users").create_if_missing();
+//!
+//! users.insert_one(doc! {
+//!     "email": "ada@example.com",
+//!     "name": "Ada",
+//!     "active": true,
+//! })?;
+//!
+//! let active_users = users
+//!     .find(doc! { "active": true })
+//!     .sort(doc! { "name": 1 })
+//!     .limit(20)
+//!     .execute_collect()?;
+//! # let _ = active_users;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Compose writes, indexes, and projections
+//!
+//! Builder methods are useful when an operation needs options such as a named
+//! index, an upsert, durability synchronization, or a projection. The BSON
+//! shape stays explicit at each step:
+//!
+//! ```rust,no_run
+//! use bson::doc;
+//! use quokkadb::QuokkaDB;
+//!
+//! # fn main() -> quokkadb::Result<()> {
+//! let db = QuokkaDB::open("./my-app-data")?;
+//! let users = db.collection("users").create_if_missing();
+//!
+//! let index_name = users
+//!     .create_index_with(doc! { "email": 1 })
+//!     .name("users_by_email")
+//!     .execute()?;
+//!
+//! let update = users
+//!     .update_one_with(
+//!         doc! { "email": "ada@example.com" },
+//!         doc! { "$set": { "active": true } },
+//!     )
+//!     .upsert(true)
+//!     .sync()
+//!     .execute()?;
+//!
+//! let ada = users
+//!     .find_one_with(doc! { "email": "ada@example.com" })
+//!     .projection(doc! { "_id": 0, "email": 1, "active": 1 })
+//!     .execute()?;
+//! # let _ = (index_name, update, ada);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the [document API reference](https://github.com/blerer/quokkadb/blob/main/docs/api-reference.md)
+//! and the [find](https://github.com/blerer/quokkadb/blob/main/docs/guides/find-queries.md)
+//! and [update](https://github.com/blerer/quokkadb/blob/main/docs/guides/update-data.md)
+//! guides for the complete option set and behavior details.
+
 use crate::collection_state::{CollectionState, Hint};
-use crate::error::Error;
 use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
-pub use crate::query::ReturnDocument;
+use crate::query::ReturnDocument;
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::parser;
 use crate::storage::catalog::{
     IndexDefinition, IndexDirection as InternalIndexDirection, OrderedIndexField,
 };
-use crate::{CreateIndexOptions, DbImpl};
+use crate::{CreateIndexOptions, DbImpl, Result};
 use bson::{Bson, Document, serialize_to_vec};
 use serde::Serialize;
 use std::sync::Arc;
 
-pub type QueryOutput = Box<dyn Iterator<Item = crate::error::Result<Document>>>;
+/// A lazy stream of BSON documents returned by a collection query.
+pub type QueryOutput = Box<dyn Iterator<Item = Result<Document>>>;
 
 /// Represents a collection in the database.
 /// Provides methods to perform CRUD operations on the collection.
@@ -22,8 +123,11 @@ pub struct Collection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Direction in which an index is traversed.
 pub enum IndexDirection {
+    /// Traverses keys from the smallest value to the largest.
     Ascending,
+    /// Traverses keys from the largest value to the smallest.
     Descending,
 }
 
@@ -37,8 +141,11 @@ impl From<InternalIndexDirection> for IndexDirection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One field in an index definition.
 pub struct IndexFieldInfo {
+    /// Dot-separated BSON path indexed by this field.
     pub path: String,
+    /// Ordering used for this field.
     pub direction: IndexDirection,
 }
 
@@ -52,9 +159,13 @@ impl From<&OrderedIndexField> for IndexFieldInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Metadata describing an active collection index.
 pub struct IndexInfo {
+    /// Stable identifier assigned to the index.
     pub id: u32,
+    /// Index name accepted by query hints and index-management methods.
     pub name: String,
+    /// Ordered fields that make up the index key.
     pub fields: Vec<IndexFieldInfo>,
 }
 
@@ -69,7 +180,9 @@ impl IndexInfo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Acknowledgement returned after inserting one BSON document.
 pub struct InsertOneResult {
+    /// The `_id` stored for the inserted document.
     pub inserted_id: Bson,
 }
 
@@ -83,7 +196,9 @@ impl InsertOneResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Acknowledgement returned after inserting multiple BSON documents.
 pub struct InsertManyResult {
+    /// The stored `_id` for each inserted document, in input order.
     pub inserted_ids: Vec<Bson>,
 }
 
@@ -97,9 +212,13 @@ impl InsertManyResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Counts returned by an update or replacement operation.
 pub struct UpdateResult {
+    /// Number of documents selected by the filter.
     pub matched_count: u64,
+    /// Number of selected documents whose contents changed.
     pub modified_count: u64,
+    /// ID of the newly inserted document when an upsert occurred.
     pub upserted_id: Option<Bson>,
 }
 
@@ -121,7 +240,9 @@ impl UpdateResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Count returned by a delete operation.
 pub struct DeleteResult {
+    /// Number of documents removed.
     pub deleted_count: u64,
 }
 
@@ -421,6 +542,7 @@ struct FindOptions {
     hint: Option<Hint>,
 }
 
+/// Builder for inserting one serialized document.
 pub struct InsertOne<'a> {
     state: &'a CollectionState,
     document: Vec<u8>,
@@ -460,6 +582,7 @@ impl<'a> InsertOne<'a> {
     }
 }
 
+/// Builder for inserting multiple serialized documents.
 pub struct InsertMany<'a> {
     state: &'a CollectionState,
     documents: Vec<Vec<u8>>,
@@ -507,6 +630,7 @@ impl<'a> InsertMany<'a> {
     }
 }
 
+/// Builder for updating the first matching document.
 pub struct UpdateOne<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -587,6 +711,7 @@ impl<'a> UpdateOne<'a> {
     }
 }
 
+/// Builder for updating every matching document.
 pub struct UpdateMany<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -659,6 +784,7 @@ impl<'a> UpdateMany<'a> {
     }
 }
 
+/// Builder for deleting the first matching document.
 pub struct DeleteOne<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -723,6 +849,7 @@ impl<'a> DeleteOne<'a> {
     }
 }
 
+/// Builder for deleting every matching document.
 pub struct DeleteMany<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -779,6 +906,7 @@ impl<'a> DeleteMany<'a> {
     }
 }
 
+/// Builder for finding and deleting one matching document.
 pub struct FindOneAndDelete<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -850,6 +978,7 @@ impl<'a> FindOneAndDelete<'a> {
     }
 }
 
+/// Builder for finding at most one matching BSON document.
 pub struct FindOne<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -914,6 +1043,7 @@ impl<'a> FindOne<'a> {
     }
 }
 
+/// Builder for finding and updating one matching document.
 pub struct FindOneAndUpdate<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -1005,6 +1135,7 @@ impl<'a> FindOneAndUpdate<'a> {
     }
 }
 
+/// Builder for replacing the first matching document.
 pub struct ReplaceOne<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -1077,6 +1208,7 @@ impl<'a> ReplaceOne<'a> {
     }
 }
 
+/// Builder for finding and replacing one matching document.
 pub struct FindOneAndReplace<'a> {
     state: &'a CollectionState,
     filter: Document,
@@ -1169,6 +1301,7 @@ impl<'a> FindOneAndReplace<'a> {
 
 /// Represents a query on a collection.
 /// Provides methods to set query parameters and execute the query.
+/// Builder for querying multiple BSON documents.
 pub struct Find<'a> {
     state: &'a CollectionState,
     filter: Document, // Unified filter representation using Expr
@@ -1262,7 +1395,7 @@ impl<'a> Find<'a> {
     ///
     /// The operators are a diagnostic view of the current plan; optimizer
     /// choices may change as the optimizer evolves. For typed queries, see
-    /// [`TypedFind::explain`](crate::typed_collection::TypedFind::explain).
+    /// [`TypedFind::explain`](crate::typed::TypedFind::explain).
     pub fn explain(&self) -> Result<ExplainPlan> {
         let planned = self
             .state
@@ -1282,6 +1415,7 @@ impl<'a> Find<'a> {
     }
 }
 
+/// Builder for creating a BSON-key index with optional naming.
 pub struct CreateIndex<'a> {
     state: &'a CollectionState,
     keys: Document,
@@ -1316,5 +1450,3 @@ fn document_from_write_result(result: WriteResult) -> Option<Document> {
         other => panic!("expected SingleDocument write result, got {other:?}"),
     }
 }
-
-pub type Result<T> = std::result::Result<T, Error>;

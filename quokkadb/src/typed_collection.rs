@@ -1,8 +1,15 @@
+//! Typed collection handles and query/write builders.
+//!
+//! Most applications start with [`crate::QuokkaDB::typed_collection`] and
+//! work through inferred builder types. These types are re-exported from
+//! [`crate::typed`] for explicit annotations and advanced integrations.
+
 use super::*;
 use crate::collection::{DeleteResult, IndexInfo, QueryOutput};
 use crate::collection_state::{CollectionState, Hint};
-use crate::document::ReturnDocument;
+use crate::document::TypedSelection;
 use crate::explain::{ExplainNode, ExplainOperator, ExplainPlan};
+use crate::query::ReturnDocument;
 use crate::query::execution::WriteResult;
 use crate::query::logical_plan::{LogicalPlan, LogicalPlanBuilder};
 use crate::query::{Projection, SortField};
@@ -254,7 +261,8 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
     /// # Example
     ///
     /// ```no_run
-    /// use quokkadb::{ExplainOperatorKind, QuokkaDB, QuokkaDocument};
+    /// use quokkadb::explain::ExplainOperatorKind;
+    /// use quokkadb::{QuokkaDB, QuokkaDocument};
     /// use serde::{Deserialize, Serialize};
     /// use std::path::Path;
     ///
@@ -265,7 +273,7 @@ impl<'a, T: QuokkaDocument, R, ProjectionState> TypedFind<'a, T, R, ProjectionSt
     ///     email: String,
     /// }
     ///
-    /// # fn main() -> quokkadb::error::Result<()> {
+    /// # fn main() -> quokkadb::Result<()> {
     /// let db = QuokkaDB::open(Path::new("my-app-db"))?;
     /// let users = db.typed_collection::<User>("users");
     /// users.create_index(|user| user.email.index_asc())?;
@@ -1273,6 +1281,9 @@ impl<T: QuokkaDocument> TypedCollection<T> {
         }
     }
 
+    /// Returns a handle that creates the collection on its first write.
+    ///
+    /// Reads against a missing collection return an empty result set.
     pub fn create_if_missing(mut self) -> Self {
         self.state.create_if_missing();
         self
@@ -1539,14 +1550,18 @@ impl<T: QuokkaDocument> TypedCollection<T> {
 /// The result of inserting one typed document.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedInsertOneResult<T: QuokkaDocument> {
+    /// The `_id` stored for the inserted document.
     pub inserted_id: T::Id,
 }
 
 /// The result of updating or replacing typed documents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedUpdateResult<T: QuokkaDocument> {
+    /// Number of documents selected by the filter.
     pub matched_count: u64,
+    /// Number of selected documents whose contents changed.
     pub modified_count: u64,
+    /// ID of the newly inserted document when an upsert occurred.
     pub upserted_id: Option<T::Id>,
 }
 
@@ -1581,6 +1596,7 @@ impl<T: QuokkaDocument> TypedInsertOneResult<T> {
 /// The result of inserting multiple typed documents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedInsertManyResult<T: QuokkaDocument> {
+    /// The stored IDs, in input order.
     pub inserted_ids: Vec<T::Id>,
 }
 
@@ -1713,12 +1729,11 @@ impl<'a, T: QuokkaDocument> TypedCreateIndex<'a, T> {
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::QuokkaDB;
+    use crate::explain::ExplainOperatorKind;
     use bson::doc;
     use serde::{Deserialize, Serialize};
     use tempfile::tempdir;

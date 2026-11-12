@@ -1,6 +1,15 @@
+#![deny(missing_docs)]
+#![doc = r#"
+Command-line import and export tools for QuokkaDB.
+
+The `quokka import` and `quokka export` commands work with JSONL and CSV
+files, using `-` for standard input or output. See the
+[import/export guide](https://github.com/blerer/quokkadb/blob/main/docs/guides/import-export.md)
+for examples and format limitations.
+"#]
+
 use clap::{Parser, Subcommand, ValueEnum};
-use quokkadb::collection::Collection;
-use quokkadb::{QuokkaDB, error};
+use quokkadb::{Collection, Error as QuokkaError, QuokkaDB};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
@@ -672,7 +681,7 @@ fn open_input(path: &Path) -> CliResult<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(input)))
 }
 
-fn quokkadb_error(error: error::Error) -> CliError {
+fn quokkadb_error(error: QuokkaError) -> CliError {
     CliError::new(error.to_string())
 }
 

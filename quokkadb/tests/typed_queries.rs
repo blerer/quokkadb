@@ -1,11 +1,8 @@
 mod common;
 
 use bson::doc;
-use quokkadb::error::Error;
-use quokkadb::{
-    ExplainDirection, ExplainNode, ExplainOperator, QuokkaDB, QuokkaDocument, QuokkaScalar,
-    QuokkaType, not,
-};
+use quokkadb::explain::{ExplainDirection, ExplainNode, ExplainOperator};
+use quokkadb::{Error, QuokkaDB, QuokkaDocument, QuokkaScalar, QuokkaType, not};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tempfile::TempDir;

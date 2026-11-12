@@ -259,58 +259,72 @@ impl Options {
 
 // Accessors
 impl Options {
+    /// Returns the target size of the in-memory file-write buffer.
     pub fn file_write_buffer_size(&self) -> StorageQuantity {
         self.file_write_buffer_size
     }
 
+    /// Returns the maximum number of database files kept open at once.
     pub fn max_open_files(&self) -> u32 {
         self.max_open_files
     }
 
+    /// Returns the approximate block-cache memory budget.
     pub fn block_cache_size(&self) -> StorageQuantity {
         self.block_cache_size
     }
 
+    /// Returns the approximate query-plan cache memory budget.
     pub fn query_cache_size(&self) -> StorageQuantity {
         self.query_cache_size
     }
 
+    /// Returns the approximate memory budget used when choosing sort strategies.
     pub fn sort_memory_limit(&self) -> StorageQuantity {
         self.sort_memory_limit
     }
 
+    /// Returns the target payload size used by index-build batches.
     pub fn index_build_batch_size(&self) -> StorageQuantity {
         self.index_build_batch_size
     }
 
+    /// Returns the durability policy applied to acknowledged writes.
     pub fn wal_durability(&self) -> WalDurability {
         self.wal_durability
     }
 
+    /// Returns the WAL byte threshold that triggers a periodic sync.
     pub fn wal_bytes_per_sync(&self) -> StorageQuantity {
         self.wal_bytes_per_sync
     }
 
+    /// Returns the manifest size at which a rewrite is triggered.
     pub fn max_manifest_file_size(&self) -> StorageQuantity {
         self.max_manifest_file_size
     }
 
+    /// Returns the maximum number of storage levels.
     pub fn max_levels(&self) -> usize {
         self.max_levels
     }
 
+    /// Returns the number of level-0 files that triggers compaction.
     pub fn level0_file_num_compaction_trigger(&self) -> usize {
         self.level0_file_num_compaction_trigger
     }
 
+    /// Returns the target size of the first non-level-0 storage level.
     pub fn max_bytes_for_level_base(&self) -> StorageQuantity {
         self.max_bytes_for_level_base
     }
 
+    /// Returns the multiplier used to grow target level sizes.
     pub fn max_bytes_for_level_multiplier(&self) -> f64 {
         self.max_bytes_for_level_multiplier
     }
 
+    /// Returns the upper bound for compacted table file sizes.
     pub fn max_target_file_size(&self) -> StorageQuantity {
         self.max_target_file_size
     }
@@ -377,22 +391,27 @@ impl Options {
         target.min(self.max_target_file_size.to_bytes() as u64)
     }
 
+    /// Returns the number of background compaction threads.
     pub fn compaction_threads(&self) -> usize {
         self.compaction_threads
     }
 
+    /// Returns the configured storage block size.
     pub fn block_size(&self) -> StorageQuantity {
         self.block_size
     }
 
+    /// Returns the number of keys between block restart points.
     pub fn restart_interval(&self) -> usize {
         self.restart_interval
     }
 
+    /// Returns the target Bloom-filter false-positive rate.
     pub fn bloom_filter_false_positive(&self) -> f64 {
         self.bloom_filter_false_positive
     }
 
+    /// Returns the compressor used for stored table blocks.
     pub fn compressor_type(&self) -> CompressorType {
         self.compressor_type
     }

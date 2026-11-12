@@ -1,9 +1,9 @@
 mod common;
 
 use bson::{Bson, Document, doc};
+use quokkadb::Error;
 use quokkadb::QuokkaDB;
-use quokkadb::collection::{Collection, ReturnDocument};
-use quokkadb::error::Error;
+use quokkadb::{Collection, ReturnDocument};
 use std::collections::BTreeSet;
 use tempfile::TempDir;
 
