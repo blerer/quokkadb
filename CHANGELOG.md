@@ -8,6 +8,8 @@ change before the first stable release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - Added the public `quokkadb::typed` module as the main entry point for typed
@@ -40,4 +42,5 @@ change before the first stable release.
 - Improved public API documentation and examples throughout the README files
   and user guides.
 
-[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/blerer/quokkadb/compare/v0.1.0...v0.2.0
