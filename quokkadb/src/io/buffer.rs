@@ -32,17 +32,6 @@ impl Buffer {
         }
     }
 
-    /// Writes a single byte to the buffer.
-    ///
-    /// # Panics
-    /// Panics if the buffer is full.
-    pub fn write_u8(&mut self, byte: u8) -> &mut Self {
-        assert!(self.writable_bytes() >= 1, "Buffer overflow in write_u8");
-        self.data[self.write_index] = byte;
-        self.write_index += 1;
-        self
-    }
-
     /// Writes a slice of bytes to the buffer.
     ///
     /// # Panics
@@ -61,17 +50,6 @@ impl Buffer {
         }
         self.write_index += slice.len();
         self
-    }
-
-    /// Reads a single byte from the buffer.
-    ///
-    /// # Panics
-    /// Panics if there are no bytes remaining to read.
-    pub fn read_u8(&mut self) -> u8 {
-        assert!(self.readable_bytes() >= 1, "Buffer underflow in read_u8");
-        let byte = self.data[self.read_index];
-        self.read_index += 1;
-        byte
     }
 
     /// Reads a slice of bytes from the buffer.
@@ -177,41 +155,10 @@ mod tests {
     }
 
     #[test]
-    fn test_write_u8() {
-        let mut buffer = Buffer::with_capacity(5);
-        buffer.write_u8(42);
-        assert_eq!(buffer.as_slice(), &[42]);
-    }
-
-    #[test]
-    #[should_panic(expected = "Buffer overflow in write_u8")]
-    fn test_write_u8_overflow() {
-        let mut buffer = Buffer::with_capacity(1);
-        buffer.write_u8(42);
-        buffer.write_u8(43);
-    }
-
-    #[test]
     fn test_write_slice() {
         let mut buffer = Buffer::with_capacity(5);
         buffer.write_slice(&[1, 2, 3]);
         assert_eq!(buffer.as_slice(), &[1, 2, 3]);
-    }
-
-    #[test]
-    fn test_read_u8() {
-        let mut buffer = Buffer::with_capacity(5);
-        buffer.write_u8(10);
-        buffer.write_u8(20);
-        assert_eq!(buffer.read_u8(), 10);
-        assert_eq!(buffer.read_u8(), 20);
-    }
-
-    #[test]
-    #[should_panic(expected = "Buffer underflow in read_u8")]
-    fn test_read_u8_underflow() {
-        let mut buffer = Buffer::with_capacity(5);
-        buffer.read_u8();
     }
 
     #[test]
@@ -233,7 +180,7 @@ mod tests {
     #[test]
     fn test_pad() {
         let mut buffer = Buffer::with_capacity(5);
-        buffer.write_u8(1).pad();
+        buffer.write_slice(&[1]).pad();
         assert_eq!(buffer.as_slice(), &[1, 0, 0, 0, 0]);
     }
 
