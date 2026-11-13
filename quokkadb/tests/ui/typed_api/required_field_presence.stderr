@@ -2,7 +2,7 @@ error[E0599]: no method named `exists` found for struct `quokkadb::typed::Field<
   --> tests/ui/typed_api/required_field_presence.rs:12:30
    |
 12 |     User::root_fields().name.exists();
-   |                              ^^^^^^ method not found in `quokkadb::typed::Field<User, String>`
+   |                              ^^^^^^ method not found in `quokkadb::typed::Field<User, std::string::String>`
 
 error[E0599]: no method named `unset` found for struct `quokkadb::typed::Field<D, V, P>` in the current scope
   --> tests/ui/typed_api/required_field_presence.rs:13:35

@@ -62,7 +62,7 @@ error[E0599]: no method named `exclude` found for struct `TypedFind<'_, User, _,
    = note: the method was found for
            - `TypedFind<'a, T, R>`
 
-error[E0599]: no method named `include` found for struct `TypedFind<'_, User, String, quokkadb::typed::InclusionProjection>` in the current scope
+error[E0599]: no method named `include` found for struct `TypedFind<'_, User, std::string::String, quokkadb::typed::InclusionProjection>` in the current scope
   --> tests/ui/typed_api/mixed_projection_modes.rs:49:10
    |
 45 |       let _ = db
@@ -71,7 +71,7 @@ error[E0599]: no method named `include` found for struct `TypedFind<'_, User, St
 47 | |         .find(|user| user.active.eq(true))
 48 | |         .select(|user| user.name)
 49 | |         .include(|user| user.name);
-   | |         -^^^^^^^ method not found in `TypedFind<'_, User, String, quokkadb::typed::InclusionProjection>`
+   | |         -^^^^^^^ method not found in `TypedFind<'_, User, std::string::String, quokkadb::typed::InclusionProjection>`
    | |_________|
    |
    |

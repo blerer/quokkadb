@@ -1,4 +1,5 @@
 use crate::document::QuokkaScalar;
+use bson::Bson;
 use serde::de::{Deserialize, Deserializer, Error as _};
 use serde::ser::{Serialize, Serializer};
 use sonyflake::Sonyflake;
@@ -61,6 +62,12 @@ impl From<QuokkaId> for u64 {
     }
 }
 
+impl From<QuokkaId> for Bson {
+    fn from(value: QuokkaId) -> Self {
+        Bson::Int64(i64::try_from(value.0).expect("QuokkaId values must fit into a BSON Int64"))
+    }
+}
+
 impl Serialize for QuokkaId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -113,6 +120,13 @@ mod tests {
 
         let deserialized: DocumentWithId = bson::deserialize_from_document(serialized).unwrap();
         assert_eq!(deserialized.id, document.id);
+    }
+
+    #[test]
+    fn converts_to_bson_int64() {
+        let id = QuokkaId::try_from(42).unwrap();
+
+        assert_eq!(Bson::from(id), Bson::Int64(42));
     }
 
     #[test]
