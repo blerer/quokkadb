@@ -98,6 +98,7 @@ use crate::storage::storage_engine::{IndexBuildSnapshot, StorageEngine};
 #[doc(hidden)]
 pub use crate::testing::TestControl;
 pub use crate::typed::TypedCollection;
+pub use bson::{Bson, Document, doc};
 
 /// Support paths used by the derive macros.
 #[doc(hidden)]
