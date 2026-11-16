@@ -1144,6 +1144,45 @@ fn test_first_positional_operator_rejected() {
 // ============================================================================
 
 #[test]
+fn test_filtered_positional_updates_matching_elements() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("raw_projects").create_if_missing();
+    collection
+        .insert_one(doc! {
+            "_id": 1,
+            "tasks": [
+                { "id": 2, "done": false },
+                { "id": 2, "done": false },
+                { "id": 3, "done": false },
+            ],
+        })
+        .unwrap();
+
+    let result = collection
+        .update_one_with(
+            doc! { "_id": 1, "tasks": { "$elemMatch": { "id": 2 } } },
+            doc! { "$set": { "tasks.$[task].done": true } },
+        )
+        .array_filters(vec![doc! { "task.id": 2 }])
+        .execute()
+        .unwrap();
+
+    assert_eq!(result.matched_count, 1);
+    assert_eq!(result.modified_count, 1);
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 }).unwrap(),
+        doc! {
+            "_id": 1,
+            "tasks": [
+                { "id": 2, "done": true },
+                { "id": 2, "done": true },
+                { "id": 3, "done": false },
+            ],
+        }
+    );
+}
+
+#[test]
 fn test_filtered_positional_set_field() {
     let (_dir, db) = setup_db_with_data();
     let collection = db.collection("test");
@@ -2820,4 +2859,43 @@ fn update_metrics_are_exposed_via_public_api() {
     assert_eq!(metrics.documents_written(), 9);
     assert_eq!(metrics.point_searches(), 1);
     assert_eq!(metrics.write_query_duration().count(), 2);
+}
+
+#[test]
+fn test_filtered_positional_requires_all_filter_fields() {
+    let (_dir, db) = setup_db_with_data();
+    let collection = db.collection("compound_array_filters").create_if_missing();
+    collection
+        .insert_one(doc! {
+            "_id": 1,
+            "tasks": [
+                { "id": 2, "done": false },
+                { "id": 2, "done": true },
+                { "id": 3, "done": false },
+                { "id": 2 },
+            ],
+        })
+        .unwrap();
+
+    collection
+        .update_one_with(
+            doc! { "_id": 1 },
+            doc! { "$set": { "tasks.$[task].selected": true } },
+        )
+        .array_filters(vec![doc! { "task.id": 2, "task.done": false }])
+        .execute()
+        .unwrap();
+
+    assert_eq!(
+        find_one(&collection, doc! { "_id": 1 }).unwrap(),
+        doc! {
+            "_id": 1,
+            "tasks": [
+                { "id": 2, "done": false, "selected": true },
+                { "id": 2, "done": true },
+                { "id": 3, "done": false },
+                { "id": 2 },
+            ],
+        }
+    );
 }

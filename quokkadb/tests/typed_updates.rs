@@ -821,3 +821,285 @@ fn typed_updates_support_array_operators_and_push_modifiers() {
         vec!["c", "b", "a"]
     );
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaType)]
+struct Task {
+    id: u64,
+    #[serde(rename = "done")]
+    completed: bool,
+    children: Vec<Task>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
+struct Project {
+    #[serde(rename = "_id")]
+    id: u64,
+    tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaType)]
+enum ProjectShape {
+    WithTasks {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tasks: Option<Vec<Task>>,
+    },
+    Empty,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, QuokkaDocument)]
+struct VariantProject {
+    #[serde(rename = "_id")]
+    id: u64,
+    shape: ProjectShape,
+}
+
+#[test]
+fn typed_filtered_array_updates_work_through_partial_paths() {
+    let (_dir, db) = setup();
+    let collection = db
+        .typed_collection::<VariantProject>("variant_projects")
+        .create_if_missing();
+    collection
+        .insert_many([
+            VariantProject {
+                id: 1,
+                shape: ProjectShape::WithTasks {
+                    tasks: Some(vec![
+                        Task {
+                            id: 2,
+                            completed: false,
+                            children: vec![],
+                        },
+                        Task {
+                            id: 3,
+                            completed: false,
+                            children: vec![],
+                        },
+                    ]),
+                },
+            },
+            VariantProject {
+                id: 2,
+                shape: ProjectShape::WithTasks { tasks: None },
+            },
+        ])
+        .unwrap();
+
+    collection
+        .update_one(
+            |project| project.id.eq(1_u64),
+            |project| {
+                project
+                    .shape
+                    .with_tasks
+                    .tasks
+                    .update_where(|task| task.id.eq(2_u64), |task| task.completed.set(true))
+            },
+        )
+        .unwrap();
+    let updated = collection.find_one(|project| project.id.eq(1_u64)).unwrap();
+    assert_eq!(
+        updated,
+        Some(VariantProject {
+            id: 1,
+            shape: ProjectShape::WithTasks {
+                tasks: Some(vec![
+                    Task {
+                        id: 2,
+                        completed: true,
+                        children: vec![],
+                    },
+                    Task {
+                        id: 3,
+                        completed: false,
+                        children: vec![],
+                    },
+                ]),
+            },
+        })
+    );
+
+    collection
+        .update_one(
+            |project| project.id.eq(2_u64),
+            |project| {
+                project
+                    .shape
+                    .with_tasks
+                    .tasks
+                    .update_where(|task| task.id.eq(2_u64), |task| task.completed.set(true))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        collection.find_one(|project| project.id.eq(2_u64)).unwrap(),
+        Some(VariantProject {
+            id: 2,
+            shape: ProjectShape::WithTasks { tasks: None },
+        })
+    );
+}
+
+#[test]
+fn typed_filtered_array_updates_and_compose() {
+    let (_dir, db) = setup();
+    let typed = db
+        .typed_collection::<Project>("projects")
+        .create_if_missing();
+    let task = |id| Task {
+        id,
+        completed: false,
+        children: vec![],
+    };
+    let project = Project {
+        id: 1,
+        tasks: vec![task(2), task(2), task(3)],
+    };
+    typed.insert_one(&project).unwrap();
+    typed
+        .update_one(
+            |p| p.id.eq(1_u64).and(p.tasks.any(|t| t.id.eq(2_u64))),
+            |p| {
+                p.tasks
+                    .update_where(|t| t.id.eq(2_u64), |t| t.completed.set(true))
+            },
+        )
+        .unwrap();
+    let updated = typed.find_one(|p| p.id.eq(1_u64)).unwrap().unwrap();
+    assert!(updated.tasks[0].completed && updated.tasks[1].completed);
+    assert!(!updated.tasks[2].completed);
+    for outer_match in [false, true] {
+        let result = typed
+            .update_one(
+                |p| {
+                    if outer_match {
+                        p.tasks.any(|t| t.id.eq(99_u64))
+                    } else {
+                        p.id.eq(1_u64)
+                    }
+                },
+                |p| {
+                    p.tasks
+                        .update_where(|t| t.id.eq(99_u64), |t| t.completed.set(true))
+                },
+            )
+            .unwrap();
+        assert_eq!(result.matched_count, u64::from(!outer_match));
+        // Existing update semantics count a matched document even for a no-op.
+        assert_eq!(result.modified_count, u64::from(!outer_match));
+    }
+    typed
+        .update_one(
+            |p| p.id.eq(1_u64),
+            |p| {
+                p.tasks
+                    .update_where(
+                        |t| t.id.eq(2_u64),
+                        |t| t.completed.set(false).and(t.id.set(4_u64)),
+                    )
+                    .and(
+                        p.tasks
+                            .update_where(|t| t.id.eq(3_u64), |t| t.completed.set(true)),
+                    )
+            },
+        )
+        .unwrap();
+    let updated = typed.find_one(|p| p.id.eq(1_u64)).unwrap().unwrap();
+    assert_eq!(
+        updated
+            .tasks
+            .iter()
+            .map(|t| (t.id, t.completed))
+            .collect::<Vec<_>>(),
+        vec![(4, false), (4, false), (3, true)]
+    );
+}
+
+#[test]
+fn nested_filtered_updates_and_clones() {
+    let (_dir, db) = setup();
+    let collection = db.typed_collection::<Project>("nested").create_if_missing();
+    collection
+        .insert_one(Project {
+            id: 1,
+            tasks: vec![Task {
+                id: 2,
+                completed: false,
+                children: vec![Task {
+                    id: 3,
+                    completed: false,
+                    children: vec![],
+                }],
+            }],
+        })
+        .unwrap();
+    let update = Project::update(|p| {
+        p.tasks.update_where(
+            |t| t.id.eq(2_u64),
+            |t| {
+                t.completed.set(true).and(
+                    t.children
+                        .update_where(|c| c.id.eq(3_u64), |c| c.completed.set(true)),
+                )
+            },
+        )
+    });
+    let first = collection
+        .update_one(|p| p.id.eq(1_u64), |_| update.clone())
+        .unwrap();
+    let second = collection
+        .update_one(|p| p.id.eq(1_u64), |_| update.clone())
+        .unwrap();
+    assert_eq!(first.modified_count, 1);
+    assert_eq!(second.modified_count, 1);
+    let project = collection.find_one(|p| p.id.eq(1_u64)).unwrap().unwrap();
+    assert!(project.tasks[0].completed);
+    assert!(project.tasks[0].children[0].completed);
+}
+
+#[test]
+fn nested_update_where_preserves_nonmatching_parents_and_children() {
+    let (_dir, db) = setup();
+    let collection = db
+        .typed_collection::<Project>("nested_selection")
+        .create_if_missing();
+    let child = |id| Task {
+        id,
+        completed: false,
+        children: vec![],
+    };
+    let parent = |id| Task {
+        id,
+        completed: false,
+        children: vec![child(3), child(4), child(3)],
+    };
+    let mut expected = Project {
+        id: 1,
+        tasks: vec![parent(2), parent(5), parent(2)],
+    };
+    collection.insert_one(&expected).unwrap();
+
+    collection
+        .update_one(
+            |p| p.id.eq(1_u64),
+            |p| {
+                p.tasks.update_where(
+                    |t| t.id.eq(2_u64).and(t.completed.eq(false)),
+                    |t| {
+                        t.children
+                            .update_where(|c| c.id.eq(3_u64), |c| c.completed.set(true))
+                    },
+                )
+            },
+        )
+        .unwrap();
+
+    for index in [0, 2] {
+        expected.tasks[index].children[0].completed = true;
+        expected.tasks[index].children[2].completed = true;
+    }
+    assert_eq!(
+        collection.find_one(|p| p.id.eq(1_u64)).unwrap(),
+        Some(expected)
+    );
+}

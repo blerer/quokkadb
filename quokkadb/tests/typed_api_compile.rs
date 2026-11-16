@@ -1,6 +1,7 @@
 #[test]
 fn typed_field_capabilities_reject_type_mismatches_and_non_numeric_increment() {
     let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/typed_api/filtered_array_update.rs");
     tests.compile_fail("tests/ui/typed_api/serde_alias_document.rs");
     tests.compile_fail("tests/ui/typed_api/serde_alias_type.rs");
     tests.compile_fail("tests/ui/typed_api/array_element.rs");

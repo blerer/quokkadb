@@ -46,7 +46,7 @@ See [Find queries](guides/find-queries.md) for typed and BSON examples.
 | Numeric, temporal, and bitwise changes | Supported | Supported | `$inc`, `$mul`, `$currentDate`, and `$bit` are available when the typed field type permits the operation. |
 | `$rename` | Not supported | Partial | The document API supports renaming document fields, but not paths through arrays or positional paths. |
 | Array add, append, remove, and deduplicate | Supported | Supported | `$addToSet`, `$push`, `$pop`, `$pull`, and `$pullAll` are available. `$push` supports `$each`, `$position`, `$slice`, and `$sort`. |
-| All and filtered array-element updates | Partial | Partial | Typed updates can target fixed array indexes. The document API also supports `$[]` and `$[identifier]` with `array_filters`; the first-match positional `$` operator is unavailable. |
+| All and filtered array-element updates | Partial | Partial | Typed updates can target fixed array indexes and matching embedded elements with `update_where`. The document API also supports `$[]` and `$[identifier]` with `array_filters`; the first-match positional `$` operator is unavailable. |
 | Update pipelines | Not supported | Not supported | Updates use modifier documents or typed update builders; aggregation-style update pipelines are unavailable. |
 
 See [Update data](guides/update-data.md) for common update patterns and the [API Reference](api-reference.md) for builder options.

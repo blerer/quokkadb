@@ -8,6 +8,11 @@ change before the first stable release.
 
 ## [Unreleased]
 
+### Added
+
+- Added typed `ArrayField::update_where` for updating matching embedded array
+  elements, including nested and composed filtered updates.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added

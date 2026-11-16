@@ -70,6 +70,47 @@ impl<T: Clone + 'static> Deferred<T> {
     }
 }
 
+#[derive(Clone)]
+struct DeferredUpdate {
+    build: Arc<dyn Fn(&mut usize) -> Result<UpdateExpr>>,
+}
+
+impl DeferredUpdate {
+    fn new(build: impl Fn(&mut usize) -> Result<UpdateExpr> + 'static) -> Self {
+        Self {
+            build: Arc::new(build),
+        }
+    }
+
+    fn resolve(&self, next_identifier: &mut usize) -> Result<UpdateExpr> {
+        (self.build)(next_identifier)
+    }
+
+    fn combine(self, other: Self) -> Self {
+        let left = self.build;
+        let right = other.build;
+        Self::new(move |next_identifier| {
+            let mut left = left(next_identifier)?;
+            let right = right(next_identifier)?;
+            left.ops.extend(right.ops);
+            left.array_filters.extend(right.array_filters);
+            Ok(left)
+        })
+    }
+}
+
+impl DeferredUpdate {
+    fn ready(value: UpdateExpr) -> Self {
+        Self::new(move |_| Ok(value.clone()))
+    }
+}
+
+impl fmt::Debug for DeferredUpdate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DeferredUpdate(..)")
+    }
+}
+
 impl<T> fmt::Debug for Deferred<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Deferred(..)")
@@ -85,7 +126,6 @@ fn deferred_eq<T: PartialEq>(left: &Deferred<T>, right: &Deferred<T>) -> bool {
 }
 
 type DeferredExpr = Deferred<Arc<Expr>>;
-type DeferredUpdate = Deferred<UpdateExpr>;
 
 /// A Serde value whose named fields or payload variants can be described by the typed query API.
 ///
@@ -214,22 +254,22 @@ macro_rules! value_operations {
 
         /// Creates an ascending sort specification for this field.
         pub fn asc(&self) -> Sort<D> {
-            path_sort(self.path.clone(), crate::query::SortOrder::Ascending)
+            path_sort(self.path.clone(), SortOrder::Ascending)
         }
 
         /// Creates a descending sort specification for this field.
         pub fn desc(&self) -> Sort<D> {
-            path_sort(self.path.clone(), crate::query::SortOrder::Descending)
+            path_sort(self.path.clone(), SortOrder::Descending)
         }
 
         /// Creates an ascending index specification for this field.
         pub fn index_asc(&self) -> Index<D> {
-            path_index(self.path.clone(), crate::query::SortOrder::Ascending)
+            path_index(self.path.clone(), SortOrder::Ascending)
         }
 
         /// Creates a descending index specification for this field.
         pub fn index_desc(&self) -> Index<D> {
-            path_index(self.path.clone(), crate::query::SortOrder::Descending)
+            path_index(self.path.clone(), SortOrder::Descending)
         }
     };
 }
@@ -643,6 +683,40 @@ impl<D, T: QuokkaType> ArrayField<D, T> {
         array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
     }
 
+    /// Updates every embedded array element matching `predicate`.
+    ///
+    /// Both closures receive fields relative to the array element. Combine
+    /// changes with `Update::and`; nested `update_where` calls are supported.
+    /// This selects elements to update, not documents: use `any` in the outer
+    /// document filter when documents without matching elements must be excluded.
+    ///
+    /// ```no_run
+    /// # use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType};
+    /// # use serde::{Serialize, Deserialize};
+    /// # #[derive(Serialize, Deserialize, QuokkaType)]
+    /// # struct Task { id: u64, completed: bool, title: String }
+    /// # #[derive(Serialize, Deserialize, QuokkaDocument)]
+    /// # struct Project { #[serde(rename = "_id")] id: u64, tasks: Vec<Task> }
+    /// # fn example(db: &QuokkaDB, project_id: u64, task_id: u64) -> quokkadb::Result<()> {
+    /// # let projects = db.typed_collection::<Project>("projects");
+    /// projects.update_one(
+    ///     |project| project.id.eq(project_id),
+    ///     |project| project.tasks.update_where(
+    ///         |task| task.id.eq(task_id),
+    ///         |task| task.completed.set(true).and(task.title.set("Finished")),
+    ///     ),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update_where(
+        &self,
+        predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
+        update: impl FnOnce(&T::Fields<D>) -> Update<D>,
+    ) -> Update<D> {
+        filtered_array_update::<D, T>(self.path.clone(), predicate, update)
+    }
+
     /// Builds an index specification for a field of every embedded array element.
     ///
     /// The generated index path traverses the array without selecting a fixed
@@ -993,6 +1067,17 @@ impl<D, T: QuokkaType> PartialArrayField<D, T> {
         array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
     }
 
+    /// Updates every embedded array element matching `predicate`.
+    ///
+    /// If the partial array path is absent, the update is a no-op.
+    pub fn update_where(
+        &self,
+        predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
+        update: impl FnOnce(&T::Fields<D>) -> Update<D>,
+    ) -> Update<D> {
+        filtered_array_update::<D, T>(self.path.clone(), predicate, update)
+    }
+
     pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
         fields(T::fields(self.path.clone()))
     }
@@ -1331,19 +1416,19 @@ fn path_unset<D>(path: TypedPath) -> Update<D> {
     })
 }
 
-fn path_sort<D>(path: TypedPath, order: crate::query::SortOrder) -> Sort<D> {
+fn path_sort<D>(path: TypedPath, order: SortOrder) -> Sort<D> {
     let field = Arc::new(Expr::Field(path.components));
     let field = match order {
-        crate::query::SortOrder::Ascending => SortField::asc(field),
-        crate::query::SortOrder::Descending => SortField::desc(field),
+        SortOrder::Ascending => SortField::asc(field),
+        SortOrder::Descending => SortField::desc(field),
     };
     Sort::from_fields(vec![field])
 }
 
-fn path_index<D>(path: TypedPath, order: crate::query::SortOrder) -> Index<D> {
+fn path_index<D>(path: TypedPath, order: SortOrder) -> Index<D> {
     let field = match order {
-        crate::query::SortOrder::Ascending => IndexKeyField::asc(path.components),
-        crate::query::SortOrder::Descending => IndexKeyField::desc(path.components),
+        SortOrder::Ascending => IndexKeyField::asc(path.components),
+        SortOrder::Descending => IndexKeyField::desc(path.components),
     };
     Index::from_fields(vec![field])
 }
@@ -1372,7 +1457,7 @@ fn value_update<D>(
 ) -> Update<D> {
     let path = path.into_update_path();
     let value = literal_expr(value);
-    Update::from_deferred(Deferred::new(move || {
+    Update::from_deferred(DeferredUpdate::new(move |_| {
         Ok(UpdateExpr {
             ops: vec![op(path.clone(), value.resolve()?)],
             array_filters: Default::default(),
@@ -1399,11 +1484,34 @@ fn array_path_update<D>(
     op: impl Fn(Vec<UpdatePathComponent>) -> UpdateOp + 'static,
 ) -> Update<D> {
     let path = path.into_update_path();
-    Update::from_deferred(Deferred::new(move || {
+    Update::from_deferred(DeferredUpdate::new(move |_| {
         Ok(UpdateExpr {
             ops: vec![op(path.clone())],
             array_filters: Default::default(),
         })
+    }))
+}
+
+fn filtered_array_update<D, T: QuokkaType>(
+    path: TypedPath,
+    predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
+    update: impl FnOnce(&T::Fields<D>) -> Update<D>,
+) -> Update<D> {
+    let fields = T::fields(TypedPath::empty());
+    let predicate = predicate(&fields).expr;
+    let update = update(&fields).expr;
+    let path = path.into_update_path();
+    Update::from_deferred(DeferredUpdate::new(move |next_identifier| {
+        let predicate = predicate.resolve()?;
+        let mut update = update.resolve(next_identifier)?;
+        let identifier = next_array_filter_identifier(next_identifier);
+        let mut prefix = path.clone();
+        prefix.push(UpdatePathComponent::Filtered(identifier.clone()));
+        for op in &mut update.ops {
+            map_update_paths(op, |path| prefix_update_path(&prefix, path));
+        }
+        update.array_filters.insert(identifier, predicate);
+        Ok(update)
     }))
 }
 
@@ -1413,7 +1521,7 @@ fn pull_update<D>(
     criterion: impl Fn(Arc<Expr>) -> PullCriterion + 'static,
 ) -> Update<D> {
     let path = path.into_update_path();
-    Update::from_deferred(Deferred::new(move || {
+    Update::from_deferred(DeferredUpdate::new(move |_| {
         Ok(UpdateExpr {
             ops: vec![UpdateOp::Pull {
                 path: path.clone(),
@@ -1431,7 +1539,7 @@ fn array_values_update<D, T: Serialize + 'static>(
 ) -> Update<D> {
     let path = path.into_update_path();
     let values = values.into_iter().map(literal_expr).collect::<Vec<_>>();
-    Update::from_deferred(Deferred::new(move || {
+    Update::from_deferred(DeferredUpdate::new(move |_| {
         let values = values
             .iter()
             .map(Deferred::resolve)
@@ -2012,6 +2120,41 @@ impl<D> Index<D> {
     }
 }
 
+fn next_array_filter_identifier(next_identifier: &mut usize) -> String {
+    let identifier = format!("a{}", *next_identifier);
+    *next_identifier += 1;
+    identifier
+}
+
+fn prefix_update_path(prefix: &[UpdatePathComponent], path: &mut Vec<UpdatePathComponent>) {
+    let mut prefixed = prefix.to_vec();
+    prefixed.append(path);
+    *path = prefixed;
+}
+
+fn map_update_paths(op: &mut UpdateOp, mut map: impl FnMut(&mut Vec<UpdatePathComponent>)) {
+    match op {
+        UpdateOp::Rename { from, to } => {
+            map(from);
+            map(to);
+        }
+        UpdateOp::Set { path, .. }
+        | UpdateOp::SetOnInsert { path, .. }
+        | UpdateOp::Unset { path }
+        | UpdateOp::Inc { path, .. }
+        | UpdateOp::Mul { path, .. }
+        | UpdateOp::Min { path, .. }
+        | UpdateOp::Max { path, .. }
+        | UpdateOp::CurrentDate { path, .. }
+        | UpdateOp::AddToSet { path, .. }
+        | UpdateOp::Push { path, .. }
+        | UpdateOp::Pop { path, .. }
+        | UpdateOp::Pull { path, .. }
+        | UpdateOp::PullAll { path, .. }
+        | UpdateOp::Bit { path, .. } => map(path),
+    }
+}
+
 #[derive(Debug, Clone)]
 /// A typed update expression for documents of type `D`.
 pub struct Update<D> {
@@ -2021,13 +2164,22 @@ pub struct Update<D> {
 
 impl<D> PartialEq for Update<D> {
     fn eq(&self, other: &Self) -> bool {
-        deferred_eq(&self.expr, &other.expr)
+        let mut left_next_identifier = 0;
+        let mut right_next_identifier = 0;
+        match (
+            self.expr.resolve(&mut left_next_identifier),
+            other.expr.resolve(&mut right_next_identifier),
+        ) {
+            (Ok(left), Ok(right)) => left == right,
+            (Err(left), Err(right)) => left.to_string() == right.to_string(),
+            _ => false,
+        }
     }
 }
 
 impl<D> Update<D> {
     fn from_op(op: UpdateOp) -> Self {
-        Self::from_deferred(Deferred::ready(UpdateExpr {
+        Self::from_deferred(DeferredUpdate::ready(UpdateExpr {
             ops: vec![op],
             array_filters: Default::default(),
         }))
@@ -2041,16 +2193,13 @@ impl<D> Update<D> {
     }
 
     pub(crate) fn into_update_expr(self) -> Result<UpdateExpr> {
-        self.expr.resolve()
+        let mut next_identifier = 0;
+        self.expr.resolve(&mut next_identifier)
     }
 
     /// Combines this update with another update.
     pub fn and(self, other: Self) -> Self {
-        Self::from_deferred(self.expr.combine(other.expr, |mut left, right| {
-            left.ops.extend(right.ops);
-            left.array_filters.extend(right.array_filters);
-            Ok(left)
-        }))
+        Self::from_deferred(self.expr.combine(other.expr))
     }
 }
 
@@ -2107,6 +2256,40 @@ mod tests {
 
     fn build_filter<D: QuokkaDocument>(f: impl FnOnce(&D::Fields<D>) -> Filter<D>) -> Filter<D> {
         f(&D::root_fields())
+    }
+
+    #[test]
+    fn filtered_updates_resolve_deterministically_and_preserve_errors() {
+        let array = ArrayField::<User, Address>::new(TypedPath::root("addresses"));
+        let make = |city: &'static str| {
+            array.update_where(|a| a.city.eq(city), |a| a.postal_code.set("new"))
+        };
+        let left = make("a").and(make("b")).and(make("c"));
+        let right = make("a").and(make("b").and(make("c")));
+        assert_eq!(left, right);
+        let resolved = left.clone().into_update_expr().unwrap();
+        assert_eq!(
+            resolved.array_filters.keys().cloned().collect::<Vec<_>>(),
+            vec!["a0", "a1", "a2"]
+        );
+        assert_eq!(resolved, left.into_update_expr().unwrap());
+        let failure = || Error::InvalidRequest("serialization failed".into());
+        let bad_predicate = array.update_where(
+            |_| Filter::from_deferred(Deferred::new(move || Err(failure()))),
+            |a| a.city.set("new"),
+        );
+        assert_eq!(
+            bad_predicate.into_update_expr().unwrap_err().to_string(),
+            failure().to_string()
+        );
+        let bad_update = array.update_where(
+            |a| a.city.eq("old"),
+            |_| Update::from_deferred(DeferredUpdate::new(move |_| Err(failure()))),
+        );
+        assert_eq!(
+            bad_update.into_update_expr().unwrap_err().to_string(),
+            failure().to_string()
+        );
     }
 
     #[test]
@@ -2289,7 +2472,7 @@ mod tests {
             city.asc().into_fields(),
             vec![crate::query::make_sort_field(
                 path.components.clone(),
-                crate::query::SortOrder::Ascending,
+                SortOrder::Ascending,
             )],
         );
         let indexed_city = Field::<User, String>::new(TypedPath::root("address").field("city"));

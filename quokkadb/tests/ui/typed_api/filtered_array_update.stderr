@@ -1,0 +1,55 @@
+error[E0277]: the trait bound `bool: From<&str>` is not satisfied
+  --> tests/ui/typed_api/filtered_array_update.rs:19:34
+   |
+19 |         |task| task.completed.eq("wrong"),
+   |                               -- ^^^^^^^ the trait `From<&str>` is not implemented for `bool`
+   |                               |
+   |                               required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `From<T>`:
+             `bool` implements `From<time::format_description::parse::format_item::HourBase>`
+             `bool` implements `From<time::format_description::parse::format_item::MonthCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::PeriodCase>`
+             `bool` implements `From<time::format_description::parse::format_item::PeriodCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::SignBehavior>`
+             `bool` implements `From<time::format_description::parse::format_item::WeekdayCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::WeekdayOneIndexed>`
+             `bool` implements `From<time::format_description::parse::format_item::YearBase>`
+   = note: required for `&str` to implement `Into<bool>`
+note: required by a bound in `quokkadb::typed::Field::<D, V, P>::eq`
+  --> src/document.rs
+   |
+   |         pub fn eq(&self, value: impl Into<$value>) -> Filter<D> {
+   |                                      ^^^^^^^^^^^^ required by this bound in `Field::<D, V, P>::eq`
+...
+   |     value_operations!(V);
+   |     -------------------- in this macro invocation
+   = note: this error originates in the macro `value_operations` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `bool: From<{integer}>` is not satisfied
+  --> tests/ui/typed_api/filtered_array_update.rs:20:35
+   |
+20 |         |task| task.completed.set(42),
+   |                               --- ^^ the trait `From<{integer}>` is not implemented for `bool`
+   |                               |
+   |                               required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `From<T>`:
+             `bool` implements `From<time::format_description::parse::format_item::HourBase>`
+             `bool` implements `From<time::format_description::parse::format_item::MonthCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::PeriodCase>`
+             `bool` implements `From<time::format_description::parse::format_item::PeriodCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::SignBehavior>`
+             `bool` implements `From<time::format_description::parse::format_item::WeekdayCaseSensitive>`
+             `bool` implements `From<time::format_description::parse::format_item::WeekdayOneIndexed>`
+             `bool` implements `From<time::format_description::parse::format_item::YearBase>`
+   = note: required for `{integer}` to implement `Into<bool>`
+note: required by a bound in `quokkadb::typed::Field::<D, V, P>::set`
+  --> src/document.rs
+   |
+   |         pub fn set(&self, value: impl Into<$value>) -> Update<D> {
+   |                                       ^^^^^^^^^^^^ required by this bound in `Field::<D, V, P>::set`
+...
+   |     value_operations!(V);
+   |     -------------------- in this macro invocation
+   = note: this error originates in the macro `value_operations` (in Nightly builds, run with -Z macro-backtrace for more info)
