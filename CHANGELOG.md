@@ -8,10 +8,18 @@ change before the first stable release.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-16
+
 ### Added
 
 - Added typed `ArrayField::update_where` for updating matching embedded array
   elements, including nested and composed filtered updates.
+- Added conversion from `QuokkaId` to BSON `Int64` values.
+- Re-exported `Bson`, `Document`, and `doc!` from the crate root.
+
+### Changed
+
+- Made `quokkadb::Error` implement `std::error::Error`.
 
 ## [0.2.0] - 2026-11-12
 
@@ -47,5 +55,6 @@ change before the first stable release.
 - Improved public API documentation and examples throughout the README files
   and user guides.
 
-[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/blerer/quokkadb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blerer/quokkadb/compare/v0.1.0...v0.2.0

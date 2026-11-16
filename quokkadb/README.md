@@ -15,7 +15,7 @@ Add QuokkaDB and Serde to your application:
 
 ```toml
 [dependencies]
-quokkadb = "0.2.0"
+quokkadb = "0.2.1"
 serde = { version = "1", features = ["derive"] }
 ```
 
