@@ -274,6 +274,231 @@ macro_rules! value_operations {
     };
 }
 
+macro_rules! array_value_operations {
+    ($field:ident) => {
+        impl<D, T: Serialize + 'static> $field<D, T> {
+            /// Builds a filter that matches arrays containing `value`.
+            pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
+                array_any_eq_filter(self.path.clone(), value.into())
+            }
+
+            /// Builds a filter that matches arrays containing every value in `values`.
+            pub fn all<I, U>(&self, values: I) -> Filter<D>
+            where
+                I: IntoIterator<Item = U>,
+                U: Into<T>,
+            {
+                array_all_filter(
+                    self.path.clone(),
+                    values.into_iter().map(Into::into).collect::<Vec<T>>(),
+                )
+            }
+
+            value_operations!(Vec<T>);
+
+            /// Creates an `$addToSet` update that adds `value` when it is not already present.
+            pub fn add_to_set(&self, value: impl Into<T>) -> Update<D> {
+                array_values_update(
+                    self.path.clone(),
+                    |path, values| UpdateOp::AddToSet {
+                        path,
+                        values: EachOrSingle::Single(values.into_iter().next().unwrap()),
+                    },
+                    [value.into()],
+                )
+            }
+
+            /// Creates an `$addToSet` update that adds every unique value from `values`.
+            pub fn add_to_set_each<I, U>(&self, values: I) -> Update<D>
+            where
+                I: IntoIterator<Item = U>,
+                U: Into<T>,
+            {
+                array_values_update(
+                    self.path.clone(),
+                    |path, values| UpdateOp::AddToSet {
+                        path,
+                        values: EachOrSingle::Each(values),
+                    },
+                    values.into_iter().map(Into::into),
+                )
+            }
+
+            /// Creates a `$push` update that appends `value` to this array.
+            pub fn push(&self, value: impl Into<T>) -> Update<D> {
+                array_values_update(
+                    self.path.clone(),
+                    |path, values| UpdateOp::Push {
+                        path,
+                        spec: PushSpec {
+                            values: EachOrSingle::Single(values.into_iter().next().unwrap()),
+                            position: None,
+                            slice: None,
+                            sort: None,
+                        },
+                    },
+                    [value.into()],
+                )
+            }
+
+            /// Creates a `$push` update with `$each` and the supplied modifiers.
+            pub fn push_each<I, U>(&self, values: I, options: PushOptions<D, T>) -> Update<D>
+            where
+                I: IntoIterator<Item = U>,
+                U: Into<T>,
+            {
+                let position = options.position;
+                let slice = options.slice;
+                let sort = options.sort;
+                array_values_update(
+                    self.path.clone(),
+                    move |path, values| UpdateOp::Push {
+                        path,
+                        spec: PushSpec {
+                            values: EachOrSingle::Each(values),
+                            position,
+                            slice,
+                            sort: sort.clone(),
+                        },
+                    },
+                    values.into_iter().map(Into::into),
+                )
+            }
+
+            /// Creates a `$push` update with `$each` and modifiers configured for this array's elements.
+            pub fn push_each_with<I, U>(
+                &self,
+                values: I,
+                configure: impl FnOnce(PushOptions<D, T>) -> PushOptions<D, T>,
+            ) -> Update<D>
+            where
+                I: IntoIterator<Item = U>,
+                U: Into<T>,
+            {
+                self.push_each(values, configure(PushOptions::new()))
+            }
+
+            /// Creates a `$pop` update that removes the first array element.
+            pub fn pop_first(&self) -> Update<D> {
+                array_path_update(self.path.clone(), |path| UpdateOp::Pop {
+                    path,
+                    from: PopFrom::First,
+                })
+            }
+
+            /// Creates a `$pop` update that removes the last array element.
+            pub fn pop_last(&self) -> Update<D> {
+                array_path_update(self.path.clone(), |path| UpdateOp::Pop {
+                    path,
+                    from: PopFrom::Last,
+                })
+            }
+
+            /// Creates a `$pull` update that removes every element equal to `value`.
+            pub fn pull(&self, value: impl Into<T>) -> Update<D> {
+                let value = literal_expr(value.into());
+                pull_update(self.path.clone(), value, |value| {
+                    PullCriterion::Equals(value)
+                })
+            }
+
+            /// Creates a `$pullAll` update that removes every element equal to any supplied value.
+            pub fn pull_all<I, U>(&self, values: I) -> Update<D>
+            where
+                I: IntoIterator<Item = U>,
+                U: Into<T>,
+            {
+                array_values_update(
+                    self.path.clone(),
+                    |path, values| UpdateOp::PullAll { path, values },
+                    values.into_iter().map(Into::into),
+                )
+            }
+        }
+    };
+}
+
+macro_rules! array_scalar_operations {
+    ($field:ident) => {
+        impl<D, T: QuokkaScalar> $field<D, T> {
+            /// Builds an `$elemMatch` filter for scalar array elements.
+            pub fn any_where(
+                &self,
+                predicate: impl FnOnce(&Field<D, T>) -> Filter<D>,
+            ) -> Filter<D> {
+                let element = Field::new(TypedPath::empty());
+                scalar_array_any_filter(self.path.clone(), predicate(&element))
+            }
+        }
+    };
+}
+
+macro_rules! array_embedded_operations {
+    ($field:ident) => {
+        impl<D, T: QuokkaType> $field<D, T> {
+            /// Builds an `$elemMatch` filter for embedded array elements.
+            pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
+                array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
+            }
+
+            /// Updates every embedded array element matching `predicate`.
+            ///
+            /// Both closures receive fields relative to the array element. Combine
+            /// changes with `Update::and`; nested `update_where` calls are supported.
+            /// This selects elements to update, not documents: use `any` in the outer
+            /// document filter when documents without matching elements must be excluded.
+            /// If the array path is absent, no elements are updated.
+            ///
+            /// ```no_run
+            /// # use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType};
+            /// # use serde::{Serialize, Deserialize};
+            /// # #[derive(Serialize, Deserialize, QuokkaType)]
+            /// # struct Task { id: u64, completed: bool, title: String }
+            /// # #[derive(Serialize, Deserialize, QuokkaDocument)]
+            /// # struct Project { #[serde(rename = "_id")] id: u64, tasks: Vec<Task> }
+            /// # fn example(db: &QuokkaDB, project_id: u64, task_id: u64) -> quokkadb::Result<()> {
+            /// # let projects = db.typed_collection::<Project>("projects");
+            /// projects.update_one(
+            ///     |project| project.id.eq(project_id),
+            ///     |project| project.tasks.update_where(
+            ///         |task| task.id.eq(task_id),
+            ///         |task| task.completed.set(true).and(task.title.set("Finished")),
+            ///     ),
+            /// )?;
+            /// # Ok(())
+            /// # }
+            /// ```
+            pub fn update_where(
+                &self,
+                predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
+                update: impl FnOnce(&T::Fields<D>) -> Update<D>,
+            ) -> Update<D> {
+                filtered_array_update::<D, T>(self.path.clone(), predicate, update)
+            }
+
+            /// Builds an index specification for a field of every embedded array element.
+            ///
+            /// The generated index path traverses the array without selecting a fixed
+            /// numeric position. For example, `orders.each(|order| order.total.index_asc())`
+            /// indexes the `orders.total` path as a multikey index.
+            pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
+                fields(T::fields(self.path.clone()))
+            }
+
+            /// Creates a `$pull` update that removes embedded elements matching `predicate`.
+            pub fn pull_where(
+                &self,
+                predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
+            ) -> Update<D> {
+                let criterion = predicate(&T::fields(TypedPath::empty())).expr;
+                pull_update(self.path.clone(), criterion, |value| {
+                    PullCriterion::Matches(value)
+                })
+            }
+        }
+    };
+}
+
 /// A root model that can be stored in a typed collection.
 ///
 /// Implement this trait through the `QuokkaDocument` derive macro re-exported
@@ -529,212 +754,9 @@ impl<D, T> ArrayField<D, T> {
     }
 }
 
-impl<D, T: Serialize + 'static> ArrayField<D, T> {
-    /// Builds a filter that matches arrays containing `value`.
-    pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
-        array_any_eq_filter(self.path.clone(), value.into())
-    }
-
-    /// Builds a filter that matches arrays containing every value in `values`.
-    pub fn all<I, U>(&self, values: I) -> Filter<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_all_filter(
-            self.path.clone(),
-            values.into_iter().map(Into::into).collect::<Vec<T>>(),
-        )
-    }
-
-    value_operations!(Vec<T>);
-
-    /// Creates an `$addToSet` update that adds `value` when it is not already present.
-    pub fn add_to_set(&self, value: impl Into<T>) -> Update<D> {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::AddToSet {
-                path,
-                values: EachOrSingle::Single(values.into_iter().next().unwrap()),
-            },
-            [value.into()],
-        )
-    }
-
-    /// Creates an `$addToSet` update that adds every unique value from `values`.
-    pub fn add_to_set_each<I, U>(&self, values: I) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::AddToSet {
-                path,
-                values: EachOrSingle::Each(values),
-            },
-            values.into_iter().map(Into::into),
-        )
-    }
-
-    /// Creates a `$push` update that appends `value` to this array.
-    pub fn push(&self, value: impl Into<T>) -> Update<D> {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::Push {
-                path,
-                spec: PushSpec {
-                    values: EachOrSingle::Single(values.into_iter().next().unwrap()),
-                    position: None,
-                    slice: None,
-                    sort: None,
-                },
-            },
-            [value.into()],
-        )
-    }
-
-    /// Creates a `$push` update with `$each` and the supplied modifiers.
-    pub fn push_each<I, U>(&self, values: I, options: PushOptions<D, T>) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        let position = options.position;
-        let slice = options.slice;
-        let sort = options.sort;
-        array_values_update(
-            self.path.clone(),
-            move |path, values| UpdateOp::Push {
-                path,
-                spec: PushSpec {
-                    values: EachOrSingle::Each(values),
-                    position,
-                    slice,
-                    sort: sort.clone(),
-                },
-            },
-            values.into_iter().map(Into::into),
-        )
-    }
-
-    /// Creates a `$push` update with `$each` and modifiers configured for this array's elements.
-    pub fn push_each_with<I, U>(
-        &self,
-        values: I,
-        configure: impl FnOnce(PushOptions<D, T>) -> PushOptions<D, T>,
-    ) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        self.push_each(values, configure(PushOptions::new()))
-    }
-
-    /// Creates a `$pop` update that removes the first array element.
-    pub fn pop_first(&self) -> Update<D> {
-        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
-            path,
-            from: PopFrom::First,
-        })
-    }
-
-    /// Creates a `$pop` update that removes the last array element.
-    pub fn pop_last(&self) -> Update<D> {
-        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
-            path,
-            from: PopFrom::Last,
-        })
-    }
-
-    /// Creates a `$pull` update that removes every element equal to `value`.
-    pub fn pull(&self, value: impl Into<T>) -> Update<D> {
-        let value = literal_expr(value.into());
-        pull_update(self.path.clone(), value, |value| {
-            PullCriterion::Equals(value)
-        })
-    }
-
-    /// Creates a `$pullAll` update that removes every element equal to any supplied value.
-    pub fn pull_all<I, U>(&self, values: I) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::PullAll { path, values },
-            values.into_iter().map(Into::into),
-        )
-    }
-}
-
-impl<D, T: QuokkaScalar> ArrayField<D, T> {
-    /// Builds an `$elemMatch` filter for scalar array elements.
-    pub fn any_where(&self, predicate: impl FnOnce(&Field<D, T>) -> Filter<D>) -> Filter<D> {
-        let element = Field::new(TypedPath::empty());
-        scalar_array_any_filter(self.path.clone(), predicate(&element))
-    }
-}
-
-impl<D, T: QuokkaType> ArrayField<D, T> {
-    /// Builds an `$elemMatch` filter for embedded array elements.
-    pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
-        array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
-    }
-
-    /// Updates every embedded array element matching `predicate`.
-    ///
-    /// Both closures receive fields relative to the array element. Combine
-    /// changes with `Update::and`; nested `update_where` calls are supported.
-    /// This selects elements to update, not documents: use `any` in the outer
-    /// document filter when documents without matching elements must be excluded.
-    ///
-    /// ```no_run
-    /// # use quokkadb::{QuokkaDB, QuokkaDocument, QuokkaType};
-    /// # use serde::{Serialize, Deserialize};
-    /// # #[derive(Serialize, Deserialize, QuokkaType)]
-    /// # struct Task { id: u64, completed: bool, title: String }
-    /// # #[derive(Serialize, Deserialize, QuokkaDocument)]
-    /// # struct Project { #[serde(rename = "_id")] id: u64, tasks: Vec<Task> }
-    /// # fn example(db: &QuokkaDB, project_id: u64, task_id: u64) -> quokkadb::Result<()> {
-    /// # let projects = db.typed_collection::<Project>("projects");
-    /// projects.update_one(
-    ///     |project| project.id.eq(project_id),
-    ///     |project| project.tasks.update_where(
-    ///         |task| task.id.eq(task_id),
-    ///         |task| task.completed.set(true).and(task.title.set("Finished")),
-    ///     ),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn update_where(
-        &self,
-        predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
-        update: impl FnOnce(&T::Fields<D>) -> Update<D>,
-    ) -> Update<D> {
-        filtered_array_update::<D, T>(self.path.clone(), predicate, update)
-    }
-
-    /// Builds an index specification for a field of every embedded array element.
-    ///
-    /// The generated index path traverses the array without selecting a fixed
-    /// numeric position. For example, `orders.each(|order| order.total.index_asc())`
-    /// indexes the `orders.total` path as a multikey index.
-    pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
-        fields(T::fields(self.path.clone()))
-    }
-
-    /// Creates a `$pull` update that removes embedded elements matching `predicate`.
-    pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
-        let criterion = predicate(&T::fields(TypedPath::empty())).expr;
-        pull_update(self.path.clone(), criterion, |value| {
-            PullCriterion::Matches(value)
-        })
-    }
-}
-
+array_value_operations!(ArrayField);
+array_scalar_operations!(ArrayField);
+array_embedded_operations!(ArrayField);
 /// Configures `$push` modifiers for a typed array update.
 #[derive(Clone)]
 pub struct PushOptions<D, T> {
@@ -926,170 +948,9 @@ impl<D, T> PartialArrayField<D, T> {
     }
 }
 
-impl<D, T: Serialize + 'static> PartialArrayField<D, T> {
-    pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
-        array_any_eq_filter(self.path.clone(), value.into())
-    }
-
-    pub fn all<I, U>(&self, values: I) -> Filter<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_all_filter(
-            self.path.clone(),
-            values.into_iter().map(Into::into).collect::<Vec<T>>(),
-        )
-    }
-
-    value_operations!(Vec<T>);
-
-    pub fn add_to_set(&self, value: impl Into<T>) -> Update<D> {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::AddToSet {
-                path,
-                values: EachOrSingle::Single(values.into_iter().next().unwrap()),
-            },
-            [value.into()],
-        )
-    }
-
-    pub fn add_to_set_each<I, U>(&self, values: I) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::AddToSet {
-                path,
-                values: EachOrSingle::Each(values),
-            },
-            values.into_iter().map(Into::into),
-        )
-    }
-
-    pub fn push(&self, value: impl Into<T>) -> Update<D> {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::Push {
-                path,
-                spec: PushSpec {
-                    values: EachOrSingle::Single(values.into_iter().next().unwrap()),
-                    position: None,
-                    slice: None,
-                    sort: None,
-                },
-            },
-            [value.into()],
-        )
-    }
-
-    pub fn push_each<I, U>(&self, values: I, options: PushOptions<D, T>) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        let position = options.position;
-        let slice = options.slice;
-        let sort = options.sort;
-        array_values_update(
-            self.path.clone(),
-            move |path, values| UpdateOp::Push {
-                path,
-                spec: PushSpec {
-                    values: EachOrSingle::Each(values),
-                    position,
-                    slice,
-                    sort: sort.clone(),
-                },
-            },
-            values.into_iter().map(Into::into),
-        )
-    }
-
-    pub fn push_each_with<I, U>(
-        &self,
-        values: I,
-        configure: impl FnOnce(PushOptions<D, T>) -> PushOptions<D, T>,
-    ) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        self.push_each(values, configure(PushOptions::new()))
-    }
-
-    pub fn pop_first(&self) -> Update<D> {
-        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
-            path,
-            from: PopFrom::First,
-        })
-    }
-
-    pub fn pop_last(&self) -> Update<D> {
-        array_path_update(self.path.clone(), |path| UpdateOp::Pop {
-            path,
-            from: PopFrom::Last,
-        })
-    }
-
-    pub fn pull(&self, value: impl Into<T>) -> Update<D> {
-        let value = literal_expr(value.into());
-        pull_update(self.path.clone(), value, |value| {
-            PullCriterion::Equals(value)
-        })
-    }
-
-    pub fn pull_all<I, U>(&self, values: I) -> Update<D>
-    where
-        I: IntoIterator<Item = U>,
-        U: Into<T>,
-    {
-        array_values_update(
-            self.path.clone(),
-            |path, values| UpdateOp::PullAll { path, values },
-            values.into_iter().map(Into::into),
-        )
-    }
-}
-
-impl<D, T: QuokkaScalar> PartialArrayField<D, T> {
-    pub fn any_where(&self, predicate: impl FnOnce(&Field<D, T>) -> Filter<D>) -> Filter<D> {
-        let element = Field::new(TypedPath::empty());
-        scalar_array_any_filter(self.path.clone(), predicate(&element))
-    }
-}
-
-impl<D, T: QuokkaType> PartialArrayField<D, T> {
-    pub fn any(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Filter<D> {
-        array_any_filter(self.path.clone(), predicate(&T::fields(TypedPath::empty())))
-    }
-
-    /// Updates every embedded array element matching `predicate`.
-    ///
-    /// If the partial array path is absent, the update is a no-op.
-    pub fn update_where(
-        &self,
-        predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>,
-        update: impl FnOnce(&T::Fields<D>) -> Update<D>,
-    ) -> Update<D> {
-        filtered_array_update::<D, T>(self.path.clone(), predicate, update)
-    }
-
-    pub fn each(&self, fields: impl FnOnce(T::Fields<D>) -> Index<D>) -> Index<D> {
-        fields(T::fields(self.path.clone()))
-    }
-
-    pub fn pull_where(&self, predicate: impl FnOnce(&T::Fields<D>) -> Filter<D>) -> Update<D> {
-        let criterion = predicate(&T::fields(TypedPath::empty())).expr;
-        pull_update(self.path.clone(), criterion, |value| {
-            PullCriterion::Matches(value)
-        })
-    }
-}
-
+array_value_operations!(PartialArrayField);
+array_scalar_operations!(PartialArrayField);
+array_embedded_operations!(PartialArrayField);
 /// A map field whose path may be absent because it passes through an enum variant.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1259,149 +1120,35 @@ impl<T: PartialQueryFieldType> PartialQueryFieldType for BTreeMap<String, T> {
     }
 }
 
-impl<D, V: QuokkaScalar, P> TypedQueryField<D> for &Field<D, V, P> {
-    type Value = V;
+macro_rules! impl_typed_query_field {
+    ([$($generics:tt)*] $field:ty => $value:ty) => {
+        impl<$($generics)*> TypedQueryField<D> for &$field {
+            type Value = $value;
 
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
+            fn query_path(&self) -> TypedPath {
+                self.path.clone()
+            }
+        }
+
+        impl<$($generics)*> TypedQueryField<D> for $field {
+            type Value = $value;
+
+            fn query_path(&self) -> TypedPath {
+                self.path.clone()
+            }
+        }
+    };
 }
 
-impl<D, V: QuokkaScalar, P> TypedQueryField<D> for Field<D, V, P> {
-    type Value = V;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, T> TypedQueryField<D> for &ArrayField<D, T> {
-    type Value = Vec<T>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, T> TypedQueryField<D> for ArrayField<D, T> {
-    type Value = Vec<T>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, T> TypedQueryField<D> for &PartialArrayField<D, T> {
-    type Value = Vec<T>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, T> TypedQueryField<D> for PartialArrayField<D, T> {
-    type Value = Vec<T>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V> TypedQueryField<D> for &MapField<D, V> {
-    type Value = BTreeMap<String, V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V> TypedQueryField<D> for MapField<D, V> {
-    type Value = BTreeMap<String, V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V> TypedQueryField<D> for &PartialMapField<D, V> {
-    type Value = BTreeMap<String, V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V> TypedQueryField<D> for PartialMapField<D, V> {
-    type Value = BTreeMap<String, V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QueryFieldType> TypedQueryField<D> for &OptionalField<D, V> {
-    type Value = Option<V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QueryFieldType> TypedQueryField<D> for OptionalField<D, V> {
-    type Value = Option<V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: PartialQueryFieldType> TypedQueryField<D> for &PartialOptionalField<D, V> {
-    type Value = Option<V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: PartialQueryFieldType> TypedQueryField<D> for PartialOptionalField<D, V> {
-    type Value = Option<V>;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QuokkaType> TypedQueryField<D> for &ObjectField<D, V> {
-    type Value = V;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QuokkaType> TypedQueryField<D> for ObjectField<D, V> {
-    type Value = V;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QuokkaType> TypedQueryField<D> for &PartialObjectField<D, V> {
-    type Value = V;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
-
-impl<D, V: QuokkaType> TypedQueryField<D> for PartialObjectField<D, V> {
-    type Value = V;
-
-    fn query_path(&self) -> TypedPath {
-        self.path.clone()
-    }
-}
+impl_typed_query_field!([D, V: QuokkaScalar, P] Field<D, V, P> => V);
+impl_typed_query_field!([D, T] ArrayField<D, T> => Vec<T>);
+impl_typed_query_field!([D, T] PartialArrayField<D, T> => Vec<T>);
+impl_typed_query_field!([D, V] MapField<D, V> => BTreeMap<String, V>);
+impl_typed_query_field!([D, V] PartialMapField<D, V> => BTreeMap<String, V>);
+impl_typed_query_field!([D, V: QueryFieldType] OptionalField<D, V> => Option<V>);
+impl_typed_query_field!([D, V: PartialQueryFieldType] PartialOptionalField<D, V> => Option<V>);
+impl_typed_query_field!([D, V: QuokkaType] ObjectField<D, V> => V);
+impl_typed_query_field!([D, V: QuokkaType] PartialObjectField<D, V> => V);
 
 fn path_exists<D>(path: TypedPath) -> Filter<D> {
     Filter::from_expr(Arc::new(Expr::FieldFilters {
@@ -1481,15 +1228,9 @@ fn current_date_update<D>(path: TypedPath, type_hint: CurrentDateType) -> Update
 
 fn array_path_update<D>(
     path: TypedPath,
-    op: impl Fn(Vec<UpdatePathComponent>) -> UpdateOp + 'static,
+    op: impl FnOnce(Vec<UpdatePathComponent>) -> UpdateOp,
 ) -> Update<D> {
-    let path = path.into_update_path();
-    Update::from_deferred(DeferredUpdate::new(move |_| {
-        Ok(UpdateExpr {
-            ops: vec![op(path.clone())],
-            array_filters: Default::default(),
-        })
-    }))
+    Update::from_op(op(path.into_update_path()))
 }
 
 fn filtered_array_update<D, T: QuokkaType>(
@@ -1708,45 +1449,32 @@ pub trait TypedSelection<D>: 'static {
     fn decode(&self, document: &Document) -> Result<Self::Output>;
 }
 
+macro_rules! single_path_selection_methods {
+    () => {
+        fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
+            vec![self.path.components.clone()]
+        }
+
+        fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
+            vec![selection_projection_path(&self.path.components)]
+        }
+    };
+}
+
 impl<D: 'static, V: QuokkaScalar> TypedSelection<D> for Field<D, V> {
     type Output = V;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
-        let value = crate::query::get_path_value(document, &self.path.components)
-            .map(|value| value.0.clone())
-            .ok_or_else(|| {
-                Error::DeserializationError(format!(
-                    "Selected field '{}' is missing",
-                    self.path
-                        .components
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(".")
-                ))
-            })?;
-        Ok(bson::deserialize_from_bson(value)?)
+        decode_required_selection(document, &self.path)
     }
 }
 
 impl<D: 'static, V: QuokkaScalar> TypedSelection<D> for Field<D, V, PartialPresence> {
     type Output = Option<V>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_partial_selection(document, &self.path)
@@ -1756,13 +1484,7 @@ impl<D: 'static, V: QuokkaScalar> TypedSelection<D> for Field<D, V, PartialPrese
 impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for ArrayField<D, T> {
     type Output = Vec<T>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_required_selection(document, &self.path)
@@ -1772,13 +1494,7 @@ impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for ArrayField
 impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for PartialArrayField<D, T> {
     type Output = Option<Vec<T>>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_partial_selection(document, &self.path)
@@ -1788,13 +1504,7 @@ impl<D: 'static, T: DeserializeOwned + 'static> TypedSelection<D> for PartialArr
 impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for MapField<D, V> {
     type Output = BTreeMap<String, V>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_required_selection(document, &self.path)
@@ -1804,13 +1514,7 @@ impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for MapField<D
 impl<D: 'static, V: DeserializeOwned + 'static> TypedSelection<D> for PartialMapField<D, V> {
     type Output = Option<BTreeMap<String, V>>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_partial_selection(document, &self.path)
@@ -1822,19 +1526,10 @@ impl<D: 'static, V: QueryFieldType + DeserializeOwned + 'static> TypedSelection<
 {
     type Output = Option<V>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
-        let value = crate::query::get_path_value(document, &self.path.components)
-            .map(|value| value.0.clone())
-            .unwrap_or(bson::Bson::Null);
-        Ok(bson::deserialize_from_bson(value)?)
+        decode_optional_selection(document, &self.path)
     }
 }
 
@@ -1843,34 +1538,17 @@ impl<D: 'static, V: PartialQueryFieldType + DeserializeOwned + 'static> TypedSel
 {
     type Output = Option<V>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
-        let Some(value) = crate::query::get_path_value(document, &self.path.components)
-            .map(|value| value.0.clone())
-        else {
-            return Ok(None);
-        };
-        Ok(bson::deserialize_from_bson(value)?)
+        decode_optional_selection(document, &self.path)
     }
 }
 
 impl<D: 'static, V: QuokkaType> TypedSelection<D> for ObjectField<D, V> {
     type Output = V;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_required_selection(document, &self.path)
@@ -1880,13 +1558,7 @@ impl<D: 'static, V: QuokkaType> TypedSelection<D> for ObjectField<D, V> {
 impl<D: 'static, V: QuokkaType> TypedSelection<D> for PartialObjectField<D, V> {
     type Output = Option<V>;
 
-    fn projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![self.path.components.clone()]
-    }
-
-    fn selection_projection_paths(&self) -> Vec<Vec<PathComponent>> {
-        vec![selection_projection_path(&self.path.components)]
-    }
+    single_path_selection_methods!();
 
     fn decode(&self, document: &Document) -> Result<Self::Output> {
         decode_partial_selection(document, &self.path)
@@ -1902,11 +1574,7 @@ fn decode_required_selection<T: DeserializeOwned>(
         .ok_or_else(|| {
             Error::DeserializationError(format!(
                 "Selected field '{}' is missing",
-                path.components
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(".")
+                format_path(&path.components)
             ))
         })?;
     Ok(bson::deserialize_from_bson(value)?)
@@ -1922,6 +1590,16 @@ fn decode_partial_selection<T: DeserializeOwned>(
         return Ok(None);
     };
     Ok(Some(bson::deserialize_from_bson(value)?))
+}
+
+fn decode_optional_selection<T: DeserializeOwned>(
+    document: &Document,
+    path: &TypedPath,
+) -> Result<Option<T>> {
+    let value = crate::query::get_path_value(document, &path.components)
+        .map(|value| value.0.clone())
+        .unwrap_or(bson::Bson::Null);
+    Ok(bson::deserialize_from_bson(value)?)
 }
 
 fn selection_projection_path(path: &[PathComponent]) -> Vec<PathComponent> {
@@ -2492,6 +2170,19 @@ mod tests {
             indexed_city.index_asc().into_key_spec().unwrap().fields,
             vec![IndexKeyField::asc(indexed_city.path.components)],
         );
+    }
+
+    #[test]
+    fn typed_query_fields_support_owned_and_borrowed_paths() {
+        fn query_path<D, F: TypedQueryField<D>>(field: F) -> TypedPath {
+            field.query_path()
+        }
+
+        let path = TypedPath::root("name");
+        let field = Field::<User, String>::new(path.clone());
+
+        assert_eq!(query_path::<User, _>(field.clone()), path);
+        assert_eq!(query_path::<User, _>(&field), path);
     }
 
     #[test]

@@ -19,5 +19,9 @@ error[E0277]: the trait bound `std::string::String: From<{integer}>` is not sati
 note: required by a bound in `ArrayField::<D, T>::any_eq`
   --> src/document.rs
    |
-   |     pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
-   |                                      ^^^^^^^ required by this bound in `ArrayField::<D, T>::any_eq`
+   |             pub fn any_eq(&self, value: impl Into<T>) -> Filter<D> {
+   |                                              ^^^^^^^ required by this bound in `ArrayField::<D, T>::any_eq`
+...
+   | array_value_operations!(ArrayField);
+   | ----------------------------------- in this macro invocation
+   = note: this error originates in the macro `array_value_operations` (in Nightly builds, run with -Z macro-backtrace for more info)
