@@ -49,7 +49,7 @@ flowchart TD
     storage --> sstables
 ```
 
-The public APIs translate collection operations into query and write plans. The query engine selects access paths and executes operations. The storage engine maintains versioned records, atomic write batches, and the files in the application's database directory.
+The public APIs translate collection operations into query and write plans. The query engine selects access paths and executes operations. The storage engine maintains versioned records, applies writes in atomic batches, and manages the files in the application's database directory. Atomicity applies to each storage batch; it is not automatically an all-or-nothing guarantee for every collection operation.
 
 The catalog tracks collection and index metadata used by planning and execution. It is metadata at the query/storage boundary, not a separate persistence engine.
 
@@ -59,7 +59,7 @@ Collections and secondary indexes occupy the same LSM tree. Document records and
 
 This decision has two important consequences.
 
-**Atomic index maintenance.** When a document changes, QuokkaDB prepares the corresponding index changes in the same write batch. A committed document change and its index maintenance therefore share the same atomic write boundary.
+**Atomic index maintenance.** When a document changes, QuokkaDB prepares the corresponding index changes in the same write batch. A committed document change and its index maintenance therefore share the same atomic write boundary, even when a multi-document operation commits its documents in separate batches.
 
 **Centralized resource management.** A common memtable and storage infrastructure avoids per-collection or per-index write-buffer allocations. Cache capacity, flush pressure, and background maintenance can be managed across the database rather than by a growing number of independent storage engines. Creating another collection or index does not require creating another LSM tree.
 
@@ -123,7 +123,7 @@ For supported query behavior, see [Concepts](concepts.md#queries-updates-and-ind
 
 ## How a write works
 
-Insert, update, replace, and delete operations are executed through a write path rather than through cached read iterators. `insert_one` and `insert_many` prepare one atomic batch for each operation; `insert_many` puts all of its documents and index changes in that single batch. Single-document updates, replacements, and deletes also use one batch per operation. `update_many` and `delete_many` locate matching documents under one consistent snapshot, compute their changes, and prepare **one atomic batch per document**. Each batch contains the document change and the corresponding index changes.
+Insert, update, replace, and delete operations are executed through a write path rather than through cached read iterators. `insert_one` and `insert_many` each prepare one atomic batch; `insert_many` puts all of its documents and index changes in that single batch. Single-document updates, replacements, and deletes also use one batch per operation. `update_many` and `delete_many` locate matching documents under one consistent snapshot, compute their changes, and prepare **one atomic batch per document**. Each batch contains the document change and the corresponding index changes.
 
 QuokkaDB uses optimistic concurrency for these read-modify-write operations. Writers can find documents and compute changes without holding an exclusive write lock for the entire operation. At commit, the storage engine coordinates writers and validates batch preconditions, including the versions of documents being modified.
 
@@ -131,7 +131,7 @@ If a document has changed since the operation read it, the precondition prevents
 
 For each accepted batch, the engine assigns a sequence number, appends its recovery record to the WAL, and applies it to the memtable. Once the required WAL work is completed, the engine advances the sequence visible to new snapshots.
 
-**Atomicity is per batch.** A batch commits as a whole or returns an error. `insert_many` uses one batch, so all of its document and index changes share one atomic boundary. `update_many` and `delete_many` submit separate batches for matching documents, so earlier documents may have committed before a later batch fails.
+**Atomicity is per batch, not per API operation in every case.** A batch commits as a whole or returns an error. `insert_many` uses one batch, so all of its document and index changes share one atomic boundary. `update_many` and `delete_many` submit separate batches for matching documents; they are not all-or-nothing operations, so earlier documents may have committed before a later batch fails.
 
 ### Visibility and durability
 
