@@ -89,6 +89,10 @@ fn main() -> Result<()> {
 
 For dynamic data or lower-level access, QuokkaDB also exposes a BSON document API.
 
+## Example application
+
+See [quokka-tasks](https://github.com/blerer/quokka-tasks), a small project tracker built with QuokkaDB. It demonstrates typed Rust models, embedded task arrays, targeted updates, filtering, and persistence across separate CLI invocations.
+
 ## Documentation
 
 [Read the QuokkaDB documentation.](docs/README.md)
