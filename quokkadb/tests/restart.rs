@@ -10,6 +10,37 @@ fn get_db(path: &Path) -> QuokkaDB {
 }
 
 #[test]
+fn test_restart_creates_missing_database_directory_and_parents() {
+    let root = tempdir().unwrap();
+    let database_path = root.path().join("application").join("data");
+
+    assert!(!database_path.exists());
+
+    {
+        let db = get_db(&database_path);
+        assert!(database_path.is_dir());
+        assert!(database_path.join("CURRENT").is_file());
+
+        db.collection("documents")
+            .create_if_missing()
+            .insert_one(doc! { "value": 42_i32 })
+            .unwrap();
+    }
+
+    let db = get_db(&database_path);
+    let documents = db
+        .collection("documents")
+        .find(doc! {})
+        .execute()
+        .unwrap()
+        .map(|document| document.unwrap())
+        .collect::<Vec<Document>>();
+
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].get_i32("value").unwrap(), 42);
+}
+
+#[test]
 fn test_restart_with_multiple_collections() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path();

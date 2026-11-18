@@ -156,6 +156,7 @@ impl QuokkaDB {
     pub fn open_with_options(path: impl AsRef<Path>, options: Options) -> Result<Self> {
         options.validate()?;
         let path = path.as_ref();
+        std::fs::create_dir_all(path)?;
 
         let options = Arc::new(options);
         let observability = Observability::new(path);
