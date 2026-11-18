@@ -8,7 +8,7 @@ QuokkaDB is pre-1.0. Its public API and on-disk format may change before the fir
 
 The current release supports document and typed Rust-model APIs, queries, updates, indexes, durable writes, concurrent access within an application, and in-process observability. Multi-operation transactions are not currently exposed. There is no supported backup, restore, upgrade, or downgrade procedure yet.
 
-Read [Features](features.md) for the supported surface and [Operations](operations.md) for durability, recovery, and current data-management limits.
+Read [Features](features.md) for the supported surface, [Operations](operations.md) for durability, recovery, and current data-management limits, and the [Roadmap](roadmap.md) for planned priorities.
 
 ## Set up a development checkout
 

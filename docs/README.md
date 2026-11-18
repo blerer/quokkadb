@@ -22,6 +22,7 @@ Start with the typed API when your data has a Rust type. Use the document API wh
 - [API Reference](api-reference.md) — navigate the public Rust API.
 - [Operations](operations.md) — run, configure, and observe a database.
 - [Project](project.md) — contribute to QuokkaDB and understand its current stability expectations.
+- [Roadmap](roadmap.md) — see the current direction and priorities for QuokkaDB.
 
 
 <p align="center">
