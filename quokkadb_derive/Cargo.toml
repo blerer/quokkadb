@@ -1,6 +1,6 @@
 [package]
 name = "quokkadb_derive"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Derive macros for QuokkaDB typed application models"
 license = "Apache-2.0"

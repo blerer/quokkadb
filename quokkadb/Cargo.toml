@@ -1,6 +1,6 @@
 [package]
 name = "quokkadb"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95"
 description = "Embedded application database"
@@ -26,7 +26,7 @@ arc-swap = "1.7.1"
 sonyflake = { version = "0.5.1", default-features = false }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-quokkadb_derive = { path = "../quokkadb_derive", version = "0.2.1" }
+quokkadb_derive = { path = "../quokkadb_derive", version = "0.2.2" }
 
 [dev-dependencies]
 trybuild = "1.0"

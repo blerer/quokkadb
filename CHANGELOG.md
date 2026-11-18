@@ -8,6 +8,13 @@ change before the first stable release.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-18
+
+### Fixed
+
+- Create missing database directories and their parents when opening a
+  database, allowing nested paths to be used on first open and after restart.
+
 ## [0.2.1] - 2026-11-16
 
 ### Added
@@ -55,6 +62,7 @@ change before the first stable release.
 - Improved public API documentation and examples throughout the README files
   and user guides.
 
-[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/blerer/quokkadb/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/blerer/quokkadb/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/blerer/quokkadb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blerer/quokkadb/compare/v0.1.0...v0.2.0
